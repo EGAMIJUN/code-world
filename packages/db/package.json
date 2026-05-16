@@ -17,6 +17,7 @@
     "db:push": "drizzle-kit push",
     "db:migrate": "drizzle-kit migrate",
     "db:studio": "drizzle-kit studio",
+    "seed": "bun src/seed.ts",
     "lint": "biome check ."
   },
   "dependencies": {

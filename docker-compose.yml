@@ -30,6 +30,71 @@ services:
       timeout: 5s
       retries: 5
 
+  judge0-server:
+    image: judge0/judge0-ce:1.13.1
+    container_name: codeworld-judge0
+    ports:
+      - "2358:2358"
+    volumes:
+      - ./judge0.conf:/judge0.conf:ro
+    environment:
+      - REDIS_URL=redis://judge0-redis:6379
+      - POSTGRES_HOST=judge0-db
+      - POSTGRES_USER=judge0
+      - POSTGRES_PASSWORD=judge0judge0
+      - POSTGRES_DB=judge0
+    depends_on:
+      judge0-db:
+        condition: service_healthy
+      judge0-redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  judge0-worker:
+    image: judge0/judge0-ce:1.13.1
+    container_name: codeworld-judge0-worker
+    command: ["./scripts/workers"]
+    privileged: true
+    volumes:
+      - ./judge0.conf:/judge0.conf:ro
+    environment:
+      - REDIS_URL=redis://judge0-redis:6379
+      - POSTGRES_HOST=judge0-db
+      - POSTGRES_USER=judge0
+      - POSTGRES_PASSWORD=judge0judge0
+      - POSTGRES_DB=judge0
+    depends_on:
+      - judge0-server
+    restart: unless-stopped
+
+  judge0-db:
+    image: postgres:13-alpine
+    container_name: codeworld-judge0-db
+    environment:
+      POSTGRES_USER: judge0
+      POSTGRES_PASSWORD: judge0judge0
+      POSTGRES_DB: judge0
+    volumes:
+      - judge0_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U judge0"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  judge0-redis:
+    image: redis:6-alpine
+    container_name: codeworld-judge0-redis
+    volumes:
+      - judge0_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
 volumes:
   postgres_data:
   redis_data:
+  judge0_db_data:
+  judge0_redis_data:

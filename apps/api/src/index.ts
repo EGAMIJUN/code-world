@@ -2,26 +2,42 @@ import { Hono } from "hono"
 import { cors } from "hono/cors"
 import { logger } from "hono/logger"
 import { prettyJSON } from "hono/pretty-json"
+import { auth } from "./lib/auth"
 import { healthRouter } from "./routes/health"
 import { problemsRouter } from "./routes/problems"
 import { submissionsRouter } from "./routes/submissions"
 
-const app = new Hono().basePath("/api")
+const app = new Hono()
 
 // ── Middleware ────────────────────────────────────────────────────────────────
 app.use(logger())
 app.use(prettyJSON())
 app.use(
   cors({
-    origin: process.env["NEXT_PUBLIC_WEB_URL"] ?? "http://localhost:3000",
+    origin: [
+      process.env["NEXT_PUBLIC_WEB_URL"] ?? "http://localhost:3000",
+      process.env["WEB_URL"] ?? "http://localhost:3000",
+    ],
     credentials: true,
   }),
 )
 
+// ── Auth routes (Better Auth handles /api/auth/*) ─────────────────────────────
+app.on(["POST", "GET"], "/api/auth/**", (c) => auth.handler(c.req.raw))
+
+// ── API me endpoint ───────────────────────────────────────────────────────────
+app.get("/api/me", async (c) => {
+  const session = await auth.api.getSession({ headers: c.req.raw.headers })
+  if (!session) {
+    return c.json({ error: "Unauthorized" }, 401)
+  }
+  return c.json({ data: { user: session.user } })
+})
+
 // ── Routes ────────────────────────────────────────────────────────────────────
-app.route("/health", healthRouter)
-app.route("/problems", problemsRouter)
-app.route("/submissions", submissionsRouter)
+app.route("/api/health", healthRouter)
+app.route("/api/problems", problemsRouter)
+app.route("/api/submissions", submissionsRouter)
 
 // ── Error handling ────────────────────────────────────────────────────────────
 app.onError((err, c) => {
