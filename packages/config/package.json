@@ -1,0 +1,12 @@
+{
+  "name": "@code-world/config",
+  "version": "0.0.0",
+  "private": true,
+  "exports": {
+    "./tsconfig/base.json": "./tsconfig.base.json",
+    "./tsconfig/nextjs.json": "./tsconfig.nextjs.json",
+    "./tsconfig/node.json": "./tsconfig.node.json",
+    "./biome.json": "./biome.json",
+    "./vitest": "./vitest.config.base.ts"
+  }
+}

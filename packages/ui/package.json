@@ -1,0 +1,38 @@
+{
+  "name": "@code-world/ui",
+  "version": "0.0.0",
+  "private": true,
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./button": {
+      "types": "./src/components/button.tsx",
+      "default": "./src/components/button.tsx"
+    },
+    "./utils": {
+      "types": "./src/lib/utils.ts",
+      "default": "./src/lib/utils.ts"
+    }
+  },
+  "scripts": {
+    "lint": "biome check ."
+  },
+  "dependencies": {
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.469.0",
+    "tailwind-merge": "^2.6.0"
+  },
+  "peerDependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@code-world/config": "workspace:*",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "typescript": "^5.7.3"
+  }
+}

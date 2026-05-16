@@ -1,0 +1,23 @@
+{
+  "name": "@code-world/types",
+  "version": "0.0.0",
+  "private": true,
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "lint": "biome check .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@code-world/config": "workspace:*",
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.8"
+  }
+}
