@@ -13,7 +13,9 @@
     "@code-world/db": "workspace:*",
     "@code-world/types": "workspace:*",
     "bullmq": "^5.34.6",
-    "ioredis": "^5.4.2"
+    "drizzle-orm": "^0.38.3",
+    "ioredis": "^5.4.2",
+    "postgres": "^3.4.5"
   },
   "devDependencies": {
     "@code-world/config": "workspace:*",
