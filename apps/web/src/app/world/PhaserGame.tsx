@@ -169,6 +169,8 @@ export default function PhaserGame() {
   const remotePosRef = useRef<Record<string, RemotePlayer>>({})
   const usernameRef = useRef<string>("Player")
   const wsRef = useRef<WebSocket | null>(null)
+  const tagItUsernameRef = useRef<string | null>(null)
+  const tagRunningRef = useRef(false)
 
   const [inventory, setInventory] = useState<InventoryItem[]>([])
   const [selectedBlock, setSelectedBlock] = useState<string | null>(null)
@@ -186,11 +188,19 @@ export default function PhaserGame() {
   const [isMobile, setIsMobile] = useState(false)
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
   const [chatInput, setChatInput] = useState("")
+  const [tagRunning, setTagRunning] = useState(false)
+  const [tagItUsername, setTagItUsername] = useState<string | null>(null)
+  const [tagRemainingMs, setTagRemainingMs] = useState(0)
   const chatEndRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     selectedBlockRef.current = selectedBlock
   }, [selectedBlock])
+
+  useEffect(() => {
+    tagItUsernameRef.current = tagItUsername
+    tagRunningRef.current = tagRunning
+  }, [tagItUsername, tagRunning])
 
   const showNotification = useCallback((msg: string) => {
     setNotification(msg)
@@ -249,6 +259,11 @@ export default function PhaserGame() {
     },
     [chatInput],
   )
+
+  const startTagGame = useCallback(() => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return
+    wsRef.current.send(JSON.stringify({ type: "tag_start" }))
+  }, [])
 
   const fetchInventory = useCallback(async () => {
     const res = await fetch(`${API_URL}/api/inventory`, { credentials: "include" })
@@ -680,7 +695,13 @@ export default function PhaserGame() {
         }
 
         // ── Player character drawing ─────────────────────────────────────────
-        drawPlayer(g: Phaser.GameObjects.Graphics, x: number, y: number, moving: boolean) {
+        drawPlayer(
+          g: Phaser.GameObjects.Graphics,
+          x: number,
+          y: number,
+          moving: boolean,
+          bodyColor = 0xffcc00,
+        ) {
           g.clear()
           const bob = moving ? Math.sin(this.walkCycle * 10) * 2 : 0
           const legSwing = moving ? Math.sin(this.walkCycle * 10) * 3 : 0
@@ -690,11 +711,15 @@ export default function PhaserGame() {
           g.fillEllipse(x, y + TILE_H / 2 - 2, 28, 10)
 
           // Body
-          g.fillStyle(0xffcc00)
+          g.fillStyle(bodyColor)
           g.fillEllipse(x, y - BLOCK_H + bob, 20, 22)
 
-          // Shirt stripe
-          g.fillStyle(0xdd9900)
+          // Shirt stripe (70% brightness of bodyColor)
+          const shirtColor =
+            (Math.round(((bodyColor >> 16) & 0xff) * 0.7) << 16) |
+            (Math.round(((bodyColor >> 8) & 0xff) * 0.7) << 8) |
+            Math.round((bodyColor & 0xff) * 0.7)
+          g.fillStyle(shirtColor)
           g.fillRect(x - 7, y - BLOCK_H + 2 + bob, 14, 5)
 
           // Legs
@@ -827,7 +852,14 @@ export default function PhaserGame() {
           // Player depth based on tile
           const { tx: ptx, ty: pty } = toTile(this.playerX, this.playerY)
           this.playerG.setDepth((ptx + pty) * 100 + 50)
-          this.drawPlayer(this.playerG, this.playerX, this.playerY, moving)
+          const isLocalIt =
+            tagRunningRef.current && usernameRef.current === tagItUsernameRef.current
+          const localBodyColor = tagRunningRef.current
+            ? isLocalIt
+              ? 0xff3030
+              : 0x30cc50
+            : 0xffcc00
+          this.drawPlayer(this.playerG, this.playerX, this.playerY, moving, localBodyColor)
 
           // ── Particles ──────────────────────────────────────────────────────
           this.particleG.clear()
@@ -881,20 +913,26 @@ export default function PhaserGame() {
           for (const [id, pos] of Object.entries(snapshot)) {
             const { tx: rtx, ty: rty } = toTile(pos.x, pos.y)
             const depth = (rtx + rty) * 100 + 45
+            const rIsIt = tagRunningRef.current && pos.username === tagItUsernameRef.current
+            const rBodyColor = tagRunningRef.current ? (rIsIt ? 0xff3030 : 0x30cc50) : 0xffcc00
+            const rLabelText = rIsIt ? `[鬼] ${pos.username}` : pos.username
+            const rLabelColor = tagRunningRef.current ? (rIsIt ? "#ff5555" : "#55ff70") : "#00ff88"
             const existing = this.remoteSprites.get(id)
             if (existing) {
               existing.g.clear()
-              this.drawPlayer(existing.g, pos.x, pos.y, false)
+              this.drawPlayer(existing.g, pos.x, pos.y, false, rBodyColor)
               existing.g.setDepth(depth)
+              existing.label.setText(rLabelText)
+              existing.label.setColor(rLabelColor)
               existing.label.setPosition(pos.x, pos.y - BLOCK_H - 22)
               existing.label.setDepth(depth + 1)
             } else {
               const g = this.add.graphics()
               g.setDepth(depth)
-              this.drawPlayer(g, pos.x, pos.y, false)
-              const label = this.add.text(pos.x, pos.y - BLOCK_H - 22, pos.username, {
+              this.drawPlayer(g, pos.x, pos.y, false, rBodyColor)
+              const label = this.add.text(pos.x, pos.y - BLOCK_H - 22, rLabelText, {
                 fontSize: "9px",
-                color: "#00ff88",
+                color: rLabelColor,
                 backgroundColor: "#000000aa",
                 padding: { x: 3, y: 1 },
               })
@@ -984,6 +1022,11 @@ export default function PhaserGame() {
           players?: Record<string, RemotePlayer>
           from?: string
           text?: string
+          running?: boolean
+          itUsername?: string
+          remainingMs?: number
+          scores?: { username: string; itMs: number }[]
+          winner?: string
         }
         if (msg.type === "sync" && msg.players) {
           remotePosRef.current = msg.players
@@ -994,6 +1037,23 @@ export default function PhaserGame() {
               ...prev,
               { id: ++msgIdRef.current, from: msg.from ?? "?", text: msg.text ?? "" },
             ]
+            return next.slice(-20)
+          })
+        } else if (msg.type === "tag_state") {
+          setTagRunning(msg.running ?? false)
+          setTagItUsername(msg.itUsername ?? null)
+          setTagRemainingMs(msg.remainingMs ?? 0)
+        } else if (msg.type === "tag_end") {
+          setTagRunning(false)
+          setTagItUsername(null)
+          setTagRemainingMs(0)
+          const winner = msg.winner ?? "?"
+          const scoreList = msg.scores ?? []
+          const resultText = `鬼ごっこ終了! 勝者: ${winner} | ${scoreList
+            .map((s) => `${s.username}: ${Math.round(s.itMs / 1000)}s`)
+            .join(", ")}`
+          setChatMessages((prev) => {
+            const next = [...prev, { id: ++msgIdRef.current, from: "SYSTEM", text: resultText }]
             return next.slice(-20)
           })
         }
@@ -1026,6 +1086,15 @@ export default function PhaserGame() {
       remotePosRef.current = {}
     }
   }, [isLoading])
+
+  // ── Tag countdown (local tick, synced by server on each tag_state) ───────────
+  useEffect(() => {
+    if (!tagRunning) return
+    const interval = setInterval(() => {
+      setTagRemainingMs((prev) => Math.max(0, prev - 100))
+    }, 100)
+    return () => clearInterval(interval)
+  }, [tagRunning])
 
   // ── HUD rendering ────────────────────────────────────────────────────────────
   const { level, xpInLevel, xpForNext } = computeXpProgress(playerStats.xp)
@@ -1131,6 +1200,45 @@ export default function PhaserGame() {
             {onlineCount} ONLINE
           </span>
         </div>
+
+        {/* Tag game */}
+        {!isLoading &&
+          !error &&
+          (tagRunning ? (
+            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexShrink: 0 }}>
+              <span style={{ color: "#ff4040", fontSize: "0.7rem", letterSpacing: "0.1em" }}>
+                [鬼] {tagItUsername}
+              </span>
+              <span
+                style={{
+                  color: "#00ff41",
+                  fontSize: "0.7rem",
+                  border: "1px solid #330000",
+                  padding: "0.1rem 0.4rem",
+                }}
+              >
+                {Math.ceil(tagRemainingMs / 1000)}s
+              </span>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={startTagGame}
+              style={{
+                color: "#ff4040",
+                border: "1px solid #660000",
+                padding: "0.2rem 0.75rem",
+                fontSize: "0.65rem",
+                letterSpacing: "0.1em",
+                background: "transparent",
+                fontFamily: "monospace",
+                cursor: "pointer",
+                flexShrink: 0,
+              }}
+            >
+              鬼ごっこ START
+            </button>
+          ))}
 
         {/* Notification */}
         {notification && (

@@ -16,16 +16,46 @@ import { profileRouter } from "./routes/profile"
 import { submissionsRouter } from "./routes/submissions"
 import { worldsRouter } from "./routes/worlds"
 
-// ── WebSocket position-sync room manager ──────────────────────────────────────
+// ── Isometric tile math (mirrors PhaserGame constants) ────────────────────────
+const TILE_W = 64
+const TILE_H = 32
+const MAP_SIZE = 32
+const ORIGIN_X = MAP_SIZE * (TILE_W / 2)
+const ORIGIN_Y = 140
+
+function toTile(x: number, y: number): { tx: number; ty: number } {
+  const relX = x - ORIGIN_X
+  const relY = y - ORIGIN_Y
+  const tx = Math.round((relX / (TILE_W / 2) + relY / (TILE_H / 2)) / 2)
+  const ty = Math.round((relY / (TILE_H / 2) - relX / (TILE_W / 2)) / 2)
+  return {
+    tx: Math.max(0, Math.min(MAP_SIZE - 1, tx)),
+    ty: Math.max(0, Math.min(MAP_SIZE - 1, ty)),
+  }
+}
+
+// ── WebSocket room state ───────────────────────────────────────────────────────
 interface PlayerState {
   username: string
   x: number
   y: number
 }
 
+// ── Tag-game state ─────────────────────────────────────────────────────────────
+interface TagGameState {
+  itSocketId: string
+  currentItStart: number
+  endsAt: number
+  itTotals: Map<string, number> // socketId → accumulated ms as "it"
+  lastTagAt: number
+  timer: ReturnType<typeof setTimeout> | null
+}
+
 const socketMeta = new Map<string, { worldId: string | null; ws: { send(d: string): void } }>()
 const worldRooms = new Map<string, Map<string, PlayerState>>()
+const tagGames = new Map<string, TagGameState>()
 
+// ── Broadcast helpers ─────────────────────────────────────────────────────────
 function broadcastRoom(worldId: string) {
   const room = worldRooms.get(worldId)
   if (!room) return
@@ -39,6 +69,121 @@ function broadcastRoom(worldId: string) {
       meta.ws.send(JSON.stringify({ type: "sync", players: others }))
     } catch {
       // ignore closed socket errors
+    }
+  }
+}
+
+function broadcastTagState(worldId: string) {
+  const game = tagGames.get(worldId)
+  const room = worldRooms.get(worldId)
+  if (!game || !room) return
+
+  const now = Date.now()
+  const itState = room.get(game.itSocketId)
+  const itUsername = itState?.username ?? "?"
+  const remainingMs = Math.max(0, game.endsAt - now)
+
+  const scores: { username: string; itMs: number }[] = []
+  for (const [sid, ms] of game.itTotals) {
+    const state = room.get(sid)
+    if (!state) continue
+    const extra = sid === game.itSocketId ? now - game.currentItStart : 0
+    scores.push({ username: state.username, itMs: ms + extra })
+  }
+
+  const packet = JSON.stringify({
+    type: "tag_state",
+    running: true,
+    itUsername,
+    remainingMs,
+    scores,
+  })
+  for (const [, m] of socketMeta) {
+    if (m.worldId !== worldId) continue
+    try {
+      m.ws.send(packet)
+    } catch {
+      // ignore
+    }
+  }
+}
+
+function endTagGame(worldId: string) {
+  const game = tagGames.get(worldId)
+  if (!game) return
+
+  if (game.timer) clearTimeout(game.timer)
+  tagGames.delete(worldId)
+
+  const room = worldRooms.get(worldId)
+  const now = Date.now()
+
+  // Finalise current "it" time
+  const extra = now - game.currentItStart
+  game.itTotals.set(game.itSocketId, (game.itTotals.get(game.itSocketId) ?? 0) + extra)
+
+  // Sorted scores: least time as "it" = winner
+  const scores: { username: string; itMs: number }[] = []
+  if (room) {
+    for (const [sid, ms] of game.itTotals) {
+      const state = room.get(sid)
+      scores.push({ username: state?.username ?? "?", itMs: ms })
+    }
+  }
+  scores.sort((a, b) => a.itMs - b.itMs)
+  const winner = scores[0]?.username ?? "?"
+
+  const packet = JSON.stringify({ type: "tag_end", running: false, winner, scores })
+  for (const [, m] of socketMeta) {
+    if (m.worldId !== worldId) continue
+    try {
+      m.ws.send(packet)
+    } catch {
+      // ignore
+    }
+  }
+}
+
+function doTag(worldId: string, game: TagGameState, newItSocketId: string, now: number) {
+  const elapsed = now - game.currentItStart
+  game.itTotals.set(game.itSocketId, (game.itTotals.get(game.itSocketId) ?? 0) + elapsed)
+  game.lastTagAt = now
+  game.itSocketId = newItSocketId
+  game.currentItStart = now
+  broadcastTagState(worldId)
+}
+
+function checkTag(worldId: string, movedSocketId: string) {
+  const game = tagGames.get(worldId)
+  if (!game) return
+
+  const room = worldRooms.get(worldId)
+  if (!room) return
+
+  const now = Date.now()
+  if (now - game.lastTagAt < 2000) return // 2 s grace period after tag
+
+  const itState = room.get(game.itSocketId)
+  if (!itState) return
+  const itTile = toTile(itState.x, itState.y)
+
+  if (movedSocketId === game.itSocketId) {
+    // "it" moved — check every other player
+    for (const [sid, state] of room) {
+      if (sid === game.itSocketId) continue
+      const t = toTile(state.x, state.y)
+      if (t.tx === itTile.tx && t.ty === itTile.ty) {
+        doTag(worldId, game, sid, now)
+        break
+      }
+    }
+  } else {
+    // Non-"it" moved — check against "it" only
+    const movedState = room.get(movedSocketId)
+    if (!movedState) return
+    const t = toTile(movedState.x, movedState.y)
+    if (t.tx === itTile.tx && t.ty === itTile.ty) {
+      doTag(worldId, game, movedSocketId, now)
     }
   }
 }
@@ -62,7 +207,7 @@ app.use(
   }),
 )
 
-// ── WebSocket — player position sync ─────────────────────────────────────────
+// ── WebSocket — position sync + tag game ──────────────────────────────────────
 app.get(
   "/ws",
   upgradeWebSocket(() => {
@@ -94,6 +239,13 @@ app.get(
           if (!worldRooms.has(worldId)) worldRooms.set(worldId, new Map())
           worldRooms.get(worldId)!.set(socketId, { username, x, y })
           broadcastRoom(worldId)
+
+          // Sync active tag game to newly joined player
+          const tagGame = tagGames.get(worldId)
+          if (tagGame) {
+            if (!tagGame.itTotals.has(socketId)) tagGame.itTotals.set(socketId, 0)
+            broadcastTagState(worldId)
+          }
         } else if (msg["type"] === "move") {
           const { worldId } = meta
           if (!worldId) return
@@ -103,6 +255,7 @@ app.get(
           state.x = Number(msg["x"] ?? state.x)
           state.y = Number(msg["y"] ?? state.y)
           broadcastRoom(worldId)
+          checkTag(worldId, socketId)
         } else if (msg["type"] === "chat") {
           const { worldId } = meta
           if (!worldId) return
@@ -120,17 +273,72 @@ app.get(
               // ignore closed socket
             }
           }
+        } else if (msg["type"] === "tag_start") {
+          const { worldId } = meta
+          if (!worldId) return
+          if (tagGames.has(worldId)) return // already running
+
+          const room = worldRooms.get(worldId)
+          if (!room) return
+
+          const GAME_MS = 3 * 60 * 1000
+          const now = Date.now()
+
+          const totals = new Map<string, number>()
+          for (const [sid] of room) totals.set(sid, 0)
+
+          const timer = setTimeout(() => endTagGame(worldId), GAME_MS)
+          tagGames.set(worldId, {
+            itSocketId: socketId,
+            currentItStart: now,
+            endsAt: now + GAME_MS,
+            itTotals: totals,
+            lastTagAt: 0,
+            timer,
+          })
+
+          broadcastTagState(worldId)
         }
       },
 
       onClose() {
         const meta = socketMeta.get(socketId)
-        if (meta?.worldId) {
-          worldRooms.get(meta.worldId)?.delete(socketId)
-          if (worldRooms.get(meta.worldId)?.size === 0) worldRooms.delete(meta.worldId)
-          broadcastRoom(meta.worldId)
-        }
         socketMeta.delete(socketId)
+
+        if (!meta?.worldId) return
+        const worldId = meta.worldId
+        const room = worldRooms.get(worldId)
+
+        // Handle tag game cleanup when a player disconnects
+        const tagGame = tagGames.get(worldId)
+        if (tagGame) {
+          if (tagGame.itSocketId === socketId) {
+            // Transfer "it" to another player
+            const now = Date.now()
+            const elapsed = now - tagGame.currentItStart
+            tagGame.itTotals.set(socketId, (tagGame.itTotals.get(socketId) ?? 0) + elapsed)
+            tagGame.itTotals.delete(socketId)
+
+            const candidates = room ? [...room.keys()].filter((s) => s !== socketId) : []
+            if (candidates.length > 0) {
+              const nextSid = candidates[0]!
+              if (!tagGame.itTotals.has(nextSid)) tagGame.itTotals.set(nextSid, 0)
+              tagGame.itSocketId = nextSid
+              tagGame.currentItStart = now
+            } else {
+              if (tagGame.timer) clearTimeout(tagGame.timer)
+              tagGames.delete(worldId)
+            }
+          } else {
+            tagGame.itTotals.delete(socketId)
+          }
+        }
+
+        room?.delete(socketId)
+        if (room?.size === 0) worldRooms.delete(worldId)
+
+        if (tagGames.has(worldId)) broadcastTagState(worldId)
+        broadcastRoom(worldId)
       },
     }
   }),
@@ -174,7 +382,6 @@ console.log(`🚀 API server running at http://localhost:${port}`)
 
 export default {
   port,
-  // Pass the Bun server instance to Hono env so upgradeWebSocket can access it
   fetch(req: Request, server: unknown) {
     return app.fetch(req, { server })
   },
