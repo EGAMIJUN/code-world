@@ -103,6 +103,21 @@ app.get(
           state.x = Number(msg["x"] ?? state.x)
           state.y = Number(msg["y"] ?? state.y)
           broadcastRoom(worldId)
+        } else if (msg["type"] === "chat") {
+          const { worldId } = meta
+          if (!worldId) return
+          const text = String(msg["text"] ?? "").slice(0, 200).trim()
+          if (!text) return
+          const from = String(msg["from"] ?? "Player")
+          const packet = JSON.stringify({ type: "chat", from, text })
+          for (const [, m] of socketMeta) {
+            if (m.worldId !== worldId) continue
+            try {
+              m.ws.send(packet)
+            } catch {
+              // ignore closed socket
+            }
+          }
         }
       },
 

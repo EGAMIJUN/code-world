@@ -121,6 +121,12 @@ interface RemotePlayer {
   y: number
 }
 
+interface ChatMessage {
+  id: number
+  from: string
+  text: string
+}
+
 interface Particle {
   x: number
   y: number
@@ -173,6 +179,15 @@ export default function PhaserGame() {
   const [onlineCount, setOnlineCount] = useState(1)
   const [timeOfDay, setTimeOfDay] = useState<"day" | "dusk" | "night" | "dawn">("day")
 
+  const joystickRef = useRef<{ vx: number; vy: number }>({ vx: 0, vy: 0 })
+  const joyBaseRef = useRef<{ x: number; y: number } | null>(null)
+  const joyThumbRef = useRef<HTMLDivElement>(null)
+  const msgIdRef = useRef(0)
+  const [isMobile, setIsMobile] = useState(false)
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
+  const [chatInput, setChatInput] = useState("")
+  const chatEndRef = useRef<HTMLDivElement>(null)
+
   useEffect(() => {
     selectedBlockRef.current = selectedBlock
   }, [selectedBlock])
@@ -182,6 +197,58 @@ export default function PhaserGame() {
     const t = setTimeout(() => setNotification(null), 2500)
     return () => clearTimeout(t)
   }, [])
+
+  useEffect(() => {
+    setIsMobile("ontouchstart" in window || navigator.maxTouchPoints > 0)
+  }, [])
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" })
+  }, [chatMessages])
+
+  const handleJoyStart = useCallback((e: React.TouchEvent) => {
+    e.preventDefault()
+    const t = e.touches[0]
+    if (!t) return
+    joyBaseRef.current = { x: t.clientX, y: t.clientY }
+  }, [])
+
+  const handleJoyMove = useCallback((e: React.TouchEvent) => {
+    e.preventDefault()
+    if (!joyBaseRef.current) return
+    const t = e.touches[0]
+    if (!t) return
+    const dx = t.clientX - joyBaseRef.current.x
+    const dy = t.clientY - joyBaseRef.current.y
+    const dist = Math.sqrt(dx * dx + dy * dy)
+    const maxDist = 40
+    const clamped = Math.min(dist, maxDist)
+    const nx = dist > 0 ? (dx / dist) * clamped : 0
+    const ny = dist > 0 ? (dy / dist) * clamped : 0
+    joystickRef.current = { vx: nx / maxDist, vy: ny / maxDist }
+    if (joyThumbRef.current) {
+      joyThumbRef.current.style.transform = `translate(${nx}px, ${ny}px)`
+    }
+  }, [])
+
+  const handleJoyEnd = useCallback(() => {
+    joyBaseRef.current = null
+    joystickRef.current = { vx: 0, vy: 0 }
+    if (joyThumbRef.current) {
+      joyThumbRef.current.style.transform = "translate(0px, 0px)"
+    }
+  }, [])
+
+  const sendChat = useCallback(
+    (e: React.FormEvent) => {
+      e.preventDefault()
+      const text = chatInput.trim()
+      if (!text || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return
+      wsRef.current.send(JSON.stringify({ type: "chat", from: usernameRef.current, text }))
+      setChatInput("")
+    },
+    [chatInput],
+  )
 
   const fetchInventory = useCallback(async () => {
     const res = await fetch(`${API_URL}/api/inventory`, { credentials: "include" })
@@ -724,6 +791,13 @@ export default function PhaserGame() {
             vy *= 0.707
           }
 
+          // Joystick (touch) input — overrides keyboard when active
+          const joy = joystickRef.current
+          if (joy.vx !== 0 || joy.vy !== 0) {
+            vx = joy.vx * speed
+            vy = joy.vy * speed
+          }
+
           this.playerX += vx * dt
           this.playerY += vy * dt
 
@@ -907,11 +981,21 @@ export default function PhaserGame() {
       try {
         const msg = JSON.parse(String(event.data)) as {
           type: string
-          players: Record<string, RemotePlayer>
+          players?: Record<string, RemotePlayer>
+          from?: string
+          text?: string
         }
-        if (msg.type === "sync") {
+        if (msg.type === "sync" && msg.players) {
           remotePosRef.current = msg.players
           setOnlineCount(Object.keys(msg.players).length + 1)
+        } else if (msg.type === "chat" && msg.text) {
+          setChatMessages((prev) => {
+            const next = [
+              ...prev,
+              { id: ++msgIdRef.current, from: msg.from ?? "?", text: msg.text ?? "" },
+            ]
+            return next.slice(-20)
+          })
         }
       } catch {
         // ignore
@@ -1161,6 +1245,126 @@ export default function PhaserGame() {
             >
               SOLVE PROBLEMS →
             </a>
+          </div>
+        )}
+
+        {/* ── Virtual joystick ─────────────────────────────────────────────── */}
+        {isMobile && !isLoading && !error && (
+          <div
+            style={{
+              position: "absolute",
+              bottom: "1rem",
+              left: "1rem",
+              width: "96px",
+              height: "96px",
+              borderRadius: "50%",
+              background: "rgba(0,255,65,0.08)",
+              border: "2px solid rgba(0,255,65,0.25)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              touchAction: "none",
+              zIndex: 20,
+              userSelect: "none",
+            }}
+            onTouchStart={handleJoyStart}
+            onTouchMove={handleJoyMove}
+            onTouchEnd={handleJoyEnd}
+          >
+            <div
+              ref={joyThumbRef}
+              style={{
+                width: "36px",
+                height: "36px",
+                borderRadius: "50%",
+                background: "rgba(0,255,65,0.35)",
+                border: "1px solid #00ff41",
+                boxShadow: "0 0 8px rgba(0,255,65,0.4)",
+                pointerEvents: "none",
+              }}
+            />
+          </div>
+        )}
+
+        {/* ── World chat ───────────────────────────────────────────────────── */}
+        {!isLoading && !error && (
+          <div
+            style={{
+              position: "absolute",
+              bottom: "1rem",
+              left: isMobile ? "7.5rem" : "1rem",
+              width: "220px",
+              zIndex: 20,
+              fontFamily: "monospace",
+              display: "flex",
+              flexDirection: "column",
+              gap: "4px",
+            }}
+          >
+            <div
+              style={{
+                maxHeight: "120px",
+                overflowY: "auto",
+                display: "flex",
+                flexDirection: "column",
+                gap: "2px",
+              }}
+            >
+              {chatMessages.map((m) => (
+                <div
+                  key={m.id}
+                  style={{
+                    fontSize: "0.68rem",
+                    color: "#00ff41",
+                    background: "rgba(0,0,0,0.75)",
+                    padding: "2px 6px",
+                    letterSpacing: "0.04em",
+                    wordBreak: "break-all",
+                    lineHeight: 1.4,
+                  }}
+                >
+                  <span style={{ color: "#005500" }}>{m.from}: </span>
+                  {m.text}
+                </div>
+              ))}
+              <div ref={chatEndRef} />
+            </div>
+            <form onSubmit={sendChat} style={{ display: "flex", gap: "4px" }}>
+              <input
+                value={chatInput}
+                onChange={(e) => setChatInput(e.target.value)}
+                placeholder="CHAT..."
+                maxLength={100}
+                style={{
+                  flex: 1,
+                  background: "rgba(0,0,0,0.8)",
+                  border: "1px solid #003300",
+                  color: "#00ff41",
+                  fontFamily: "monospace",
+                  fontSize: "0.68rem",
+                  padding: "3px 6px",
+                  outline: "none",
+                  letterSpacing: "0.05em",
+                  minWidth: 0,
+                }}
+              />
+              <button
+                type="submit"
+                style={{
+                  background: "transparent",
+                  border: "1px solid #003300",
+                  color: "#005500",
+                  fontFamily: "monospace",
+                  fontSize: "0.65rem",
+                  padding: "3px 8px",
+                  cursor: "pointer",
+                  letterSpacing: "0.1em",
+                  flexShrink: 0,
+                }}
+              >
+                ▶
+              </button>
+            </form>
           </div>
         )}
       </div>
