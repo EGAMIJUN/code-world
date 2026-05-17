@@ -11,7 +11,9 @@
     "check": "biome check --write .",
     "db:generate": "turbo run db:generate --filter=@code-world/db",
     "db:push": "turbo run db:push --filter=@code-world/db",
-    "db:migrate": "turbo run db:migrate --filter=@code-world/db"
+    "db:migrate": "turbo run db:migrate --filter=@code-world/db",
+    "db:seed": "bun run --filter @code-world/db seed",
+    "db:seed:world": "bun run --filter @code-world/db seed:world"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",

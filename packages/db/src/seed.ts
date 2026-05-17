@@ -1,5 +1,5 @@
 import { eq, inArray } from "drizzle-orm"
-import { db, dungeonRooms, dungeons, problems } from "./index"
+import { blocks, db, dungeonRooms, dungeons, problems, worlds } from "./index"
 
 interface ProblemBody {
   description: string
@@ -1551,8 +1551,147 @@ export async function seed() {
   process.exit(0)
 }
 
-// Run when called directly
-seed().catch((err) => {
-  console.error("[Seed] Error:", err)
-  process.exit(1)
+// ── Cyberpunk world initial block design ─────────────────────────────────────
+
+interface WorldBlock {
+  x: number
+  y: number
+  blockType: string
+}
+
+function fill(x0: number, y0: number, x1: number, y1: number, blockType: string): WorldBlock[] {
+  const out: WorldBlock[] = []
+  for (let x = x0; x <= x1; x++)
+    for (let y = y0; y <= y1; y++)
+      out.push({ x, y, blockType })
+  return out
+}
+
+const _blockSeen = new Set<string>()
+const CYBERPUNK_WORLD_BLOCKS: WorldBlock[] = [
+  // ── SQL District: ビル群 (stone_block, tx 0–9) ────────────────────────────
+  ...fill(0, 3, 2, 5, "stone_block"),   // ビルA
+  ...fill(5, 2, 7, 4, "stone_block"),   // ビルB
+  ...fill(0, 10, 2, 12, "stone_block"), // ビルC
+  ...fill(5, 9, 8, 11, "stone_block"),  // ビルD (4×3)
+  ...fill(0, 18, 3, 20, "stone_block"), // ビルE (4×3)
+  ...fill(6, 17, 8, 19, "stone_block"), // ビルF (tx上限=8、tx=9はForestと隣接)
+  ...fill(1, 26, 3, 28, "stone_block"), // ビルG
+  ...fill(6, 25, 8, 27, "stone_block"), // ビルH
+
+  // ── 中央広場: ダイヤブロック十字 (tx 10–13, ty 13–17) ────────────────────
+  { x: 11, y: 13, blockType: "diamond_block" },
+  { x: 10, y: 14, blockType: "diamond_block" },
+  { x: 11, y: 14, blockType: "diamond_block" },
+  { x: 12, y: 14, blockType: "diamond_block" },
+  { x: 10, y: 15, blockType: "diamond_block" },
+  { x: 11, y: 15, blockType: "diamond_block" },
+  { x: 12, y: 15, blockType: "diamond_block" },
+  { x: 13, y: 15, blockType: "diamond_block" },
+  { x: 11, y: 16, blockType: "diamond_block" },
+  { x: 12, y: 16, blockType: "diamond_block" },
+  { x: 11, y: 17, blockType: "diamond_block" },
+
+  // ── Algorithm Forest 境界: 木ブロック (tx 9–10, 20–21) ───────────────────
+  // 左境界 (tx=9, 3の倍数 ty)
+  ...[0, 3, 6, 9, 12, 15, 18, 21, 24, 27, 30].map((y) => ({ x: 9, y, blockType: "wood_block" })),
+  // 左内側 (tx=10, 3n+1 ty)
+  ...[1, 4, 7, 10, 13, 16, 19, 22, 25, 28].map((y) => ({ x: 10, y, blockType: "wood_block" })),
+  // 右内側 (tx=20, 3n+1 ty)
+  ...[1, 4, 7, 10, 13, 16, 19, 22, 25, 28].map((y) => ({ x: 20, y, blockType: "wood_block" })),
+  // 右境界 (tx=21, 3の倍数 ty)
+  ...[0, 3, 6, 9, 12, 15, 18, 21, 24, 27, 30].map((y) => ({ x: 21, y, blockType: "wood_block" })),
+  // 内部の木 (散在)
+  { x: 13, y: 5, blockType: "wood_block" },
+  { x: 15, y: 9, blockType: "wood_block" },
+  { x: 16, y: 14, blockType: "wood_block" },
+  { x: 14, y: 19, blockType: "wood_block" },
+  { x: 17, y: 24, blockType: "wood_block" },
+  { x: 12, y: 28, blockType: "wood_block" },
+
+  // ── System Design City: 幾何学格子 (diamond_block, tx 22–30) ─────────────
+  // 縦3列ノード (tx=22, 26, 30) × 6点
+  ...[2, 7, 12, 17, 22, 27].flatMap((y) => [
+    { x: 22, y, blockType: "diamond_block" },
+    { x: 26, y, blockType: "diamond_block" },
+    { x: 30, y, blockType: "diamond_block" },
+  ]),
+  // 横接続バー (ty=7, 17, 27) で列間を結ぶ
+  ...[23, 24, 25, 27, 28, 29].flatMap((x) => [
+    { x, y: 7, blockType: "diamond_block" },
+    { x, y: 17, blockType: "diamond_block" },
+    { x, y: 27, blockType: "diamond_block" },
+  ]),
+
+  // ── 道路沿いランプ: stone_block ───────────────────────────────────────────
+  // 北端 (ty=0): tx=21はForest境界と重複するため除外
+  ...[2, 5, 8, 14, 18, 22, 25, 28].map((x) => ({ x, y: 0, blockType: "stone_block" })),
+  // 南端 (ty=31)
+  ...[2, 5, 8, 14, 18, 22, 25, 28].map((x) => ({ x, y: 31, blockType: "stone_block" })),
+  // 西端 (tx=0)
+  ...[1, 6, 14, 22, 29].map((y) => ({ x: 0, y, blockType: "stone_block" })),
+  // 東端 (tx=31)
+  ...[1, 6, 14, 22, 29].map((y) => ({ x: 31, y, blockType: "stone_block" })),
+].filter((b) => {
+  const key = `${b.x},${b.y}`
+  if (_blockSeen.has(key)) return false
+  _blockSeen.add(key)
+  return true
 })
+
+export async function seedWorldBlocks() {
+  console.log(`[Seed] Cyberpunk world blocks: ${CYBERPUNK_WORLD_BLOCKS.length} positions defined.`)
+
+  const allWorlds = await db
+    .select({ id: worlds.id, ownerId: worlds.ownerId })
+    .from(worlds)
+
+  if (allWorlds.length === 0) {
+    console.log("[Seed] No worlds found. Create user accounts via the app first.")
+    process.exit(0)
+  }
+
+  let seeded = 0
+  for (const world of allWorlds) {
+    const existing = await db
+      .select({ id: blocks.id })
+      .from(blocks)
+      .where(eq(blocks.worldId, world.id))
+      .limit(1)
+
+    if (existing.length > 0) {
+      console.log(`[Seed] World ${world.id}: already has blocks, skipping.`)
+      continue
+    }
+
+    const rows = CYBERPUNK_WORLD_BLOCKS.map(({ x, y, blockType }) => ({
+      worldId: world.id,
+      placedBy: world.ownerId,
+      blockType,
+      positionX: x,
+      positionY: y,
+      positionZ: 0,
+    }))
+
+    await db.insert(blocks).values(rows).onConflictDoNothing()
+    console.log(`[Seed] World ${world.id}: inserted ${rows.length} blocks.`)
+    seeded++
+  }
+
+  console.log(`[Seed] Done. ${seeded}/${allWorlds.length} worlds seeded.`)
+  process.exit(0)
+}
+
+// ── Entry point ───────────────────────────────────────────────────────────────
+const cmd = process.argv[2]
+if (cmd === "world") {
+  seedWorldBlocks().catch((err) => {
+    console.error("[Seed] Error:", err)
+    process.exit(1)
+  })
+} else {
+  seed().catch((err) => {
+    console.error("[Seed] Error:", err)
+    process.exit(1)
+  })
+}
