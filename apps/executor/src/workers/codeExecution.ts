@@ -25,6 +25,7 @@ interface ProblemBody {
   description: string
   setup?: string
   expectedOutput?: unknown[][]
+  expectedStdout?: string
   hints?: Array<{ level: number; text: string }>
   explanation?: string
 }
@@ -171,6 +172,154 @@ async function updateLeaderboard(playerId: string, score: number): Promise<void>
   }
 }
 
+const JUDGE0_URL = process.env["JUDGE0_API_URL"] ?? ""
+const JUDGE0_KEY = process.env["JUDGE0_API_KEY"] ?? ""
+
+const LANGUAGE_IDS: Record<string, number> = {
+  python: 71,
+  javascript: 63,
+  csharp: 51,
+}
+
+function getExpectedStdout(body: ProblemBody): string | null {
+  if (body.expectedStdout) return body.expectedStdout
+  if (body.expectedOutput && body.expectedOutput.length > 0) {
+    return body.expectedOutput.flat().map(String).join("\n")
+  }
+  return null
+}
+
+async function executeWithJudge0(
+  code: string,
+  language: string,
+  expectedStdout: string | null,
+  timeoutMs: number,
+): Promise<CodeExecutionJobResult> {
+  const startMs = Date.now()
+
+  if (!JUDGE0_URL) {
+    return {
+      result: "runtime_error",
+      score: 0,
+      execTimeMs: 0,
+      feedback: { message: "Judge0 not configured (set JUDGE0_API_URL)" },
+    }
+  }
+
+  const languageId = LANGUAGE_IDS[language]
+  if (!languageId) {
+    return {
+      result: "runtime_error",
+      score: 0,
+      execTimeMs: 0,
+      feedback: { message: `Unsupported language: ${language}` },
+    }
+  }
+
+  const headers: Record<string, string> = { "Content-Type": "application/json" }
+  if (JUDGE0_KEY) {
+    headers["X-RapidAPI-Key"] = JUDGE0_KEY
+    headers["X-RapidAPI-Host"] = "judge0-ce.p.rapidapi.com"
+  }
+
+  let token: string
+  try {
+    const submitRes = await fetch(`${JUDGE0_URL}/submissions?base64_encoded=false&wait=false`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ source_code: code, language_id: languageId, stdin: "" }),
+    })
+    if (!submitRes.ok) {
+      return {
+        result: "runtime_error",
+        score: 0,
+        execTimeMs: Date.now() - startMs,
+        feedback: { message: `Judge0 submit failed: ${submitRes.status}` },
+      }
+    }
+    const submitData = (await submitRes.json()) as { token: string }
+    token = submitData.token
+  } catch (err) {
+    return {
+      result: "runtime_error",
+      score: 0,
+      execTimeMs: Date.now() - startMs,
+      feedback: { message: `Judge0 network error: ${String(err)}` },
+    }
+  }
+
+  const deadline = startMs + Math.min(timeoutMs, 30_000)
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 1000))
+    try {
+      const getHeaders: Record<string, string> = {}
+      if (JUDGE0_KEY) getHeaders["X-RapidAPI-Key"] = JUDGE0_KEY
+
+      const getRes = await fetch(
+        `${JUDGE0_URL}/submissions/${token}?base64_encoded=false&fields=status,stdout,stderr,compile_output,time`,
+        { headers: getHeaders },
+      )
+      if (!getRes.ok) continue
+
+      const data = (await getRes.json()) as {
+        status: { id: number; description: string }
+        stdout: string | null
+        stderr: string | null
+        compile_output: string | null
+        time: string | null
+      }
+
+      if (data.status.id <= 2) continue
+
+      const execTimeMs = Date.now() - startMs
+
+      if (data.status.id === 5) {
+        return {
+          result: "time_limit_exceeded",
+          score: 0,
+          execTimeMs,
+          feedback: { message: "Time limit exceeded" },
+        }
+      }
+
+      if (data.status.id !== 3) {
+        const msg = data.compile_output ?? data.stderr ?? data.status.description ?? "Runtime error"
+        return { result: "runtime_error", score: 0, execTimeMs, feedback: { message: msg } }
+      }
+
+      const stdout = (data.stdout ?? "").trimEnd()
+
+      if (expectedStdout === null) {
+        return {
+          result: "accepted",
+          score: 100,
+          execTimeMs,
+          feedback: { message: "Accepted (no expected output defined)" },
+        }
+      }
+
+      const isCorrect = stdout === expectedStdout.trimEnd()
+      return {
+        result: isCorrect ? "accepted" : "wrong_answer",
+        score: isCorrect ? 100 : 0,
+        execTimeMs,
+        feedback: isCorrect
+          ? { message: "Correct!" }
+          : { message: "Output does not match expected", actual: stdout, expected: expectedStdout },
+      }
+    } catch {
+      // ignore poll error, retry
+    }
+  }
+
+  return {
+    result: "time_limit_exceeded",
+    score: 0,
+    execTimeMs: Date.now() - startMs,
+    feedback: { message: "Execution timed out waiting for Judge0" },
+  }
+}
+
 async function executeSql(job: Job<CodeExecutionJobData>): Promise<CodeExecutionJobResult> {
   const { submissionId, problemId, code } = job.data
   const startMs = Date.now()
@@ -314,13 +463,21 @@ async function executeJob(job: Job<CodeExecutionJobData>): Promise<CodeExecution
         ),
       ),
     ])
+  } else if (language === "python" || language === "javascript" || language === "csharp") {
+    const problem = await db.query.problems.findFirst({
+      where: (p, { eq: eqFn }) => eqFn(p.id, problemId),
+    })
+    const body = problem ? normalizeProblemBody(problem.body) : { description: "" }
+    const expectedStdout = getExpectedStdout(body)
+    const timeoutMs = job.data.timeoutMs ?? 10_000
+    jobResult = await executeWithJudge0(code, language, expectedStdout, timeoutMs)
   } else {
     const execTimeMs = Date.now() - startMs
     jobResult = {
       result: "accepted",
       score: 100,
       execTimeMs,
-      feedback: { message: `${language} accepted` },
+      feedback: { message: `${language} accepted (stub)` },
     }
   }
 

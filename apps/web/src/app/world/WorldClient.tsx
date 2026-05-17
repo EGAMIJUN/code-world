@@ -2,7 +2,7 @@
 
 import dynamic from "next/dynamic"
 
-const PhaserGame = dynamic(() => import("./PhaserGame"), {
+const ThreeWorld = dynamic(() => import("./ThreeWorld"), {
   ssr: false,
   loading: () => (
     <div
@@ -18,11 +18,11 @@ const PhaserGame = dynamic(() => import("./PhaserGame"), {
         fontSize: "0.9rem",
       }}
     >
-      ⟳ LOADING WORLD DATA...
+      ⟳ LOADING 3D WORLD...
     </div>
   ),
 })
 
 export default function WorldClient() {
-  return <PhaserGame />
+  return <ThreeWorld />
 }

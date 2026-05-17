@@ -5,6 +5,8 @@ import { useCallback, useEffect, useRef, useState } from "react"
 
 const MonacoEditor = dynamic(() => import("@monaco-editor/react"), { ssr: false })
 
+const API_URL_DEFAULT = "http://localhost:3001"
+
 interface ProblemBody {
   description: string
   setup?: string
@@ -84,9 +86,9 @@ const BOSS_ASCII: Record<string, string[]> = {
 }
 
 function getBossArt(roomType: string): string[] {
-  if (roomType === "boss") return BOSS_ASCII.boss!
-  if (roomType === "miniboss") return BOSS_ASCII.miniboss!
-  return BOSS_ASCII.default!
+  if (roomType === "boss") return BOSS_ASCII.boss ?? []
+  if (roomType === "miniboss") return BOSS_ASCII.miniboss ?? []
+  return BOSS_ASCII.default ?? []
 }
 
 function HpBar({
@@ -136,6 +138,13 @@ function HpBar({
   )
 }
 
+interface CoopState {
+  runId: string | null
+  inviteToken: string | null
+  coPlayerHp: number | null
+  coPlayerMaxHp: number
+}
+
 export default function BattleClient({ dungeon }: { dungeon: DungeonWithRooms }) {
   const rooms = dungeon.rooms.sort((a, b) => a.roomOrder - b.roomOrder)
   const totalRooms = rooms.length
@@ -157,12 +166,26 @@ export default function BattleClient({ dungeon }: { dungeon: DungeonWithRooms })
   const [flashType, setFlashType] = useState<"green" | "red" | null>(null)
   const [shake, setShake] = useState(false)
   const [timerTick, setTimerTick] = useState(15)
+  const [isMobile, setIsMobile] = useState(false)
+  const [coop, setCoop] = useState<CoopState>({
+    runId: null,
+    inviteToken: null,
+    coPlayerHp: null,
+    coPlayerMaxHp: 200,
+  })
+  const [inviteCopied, setInviteCopied] = useState(false)
+  const coopWsRef = useRef<WebSocket | null>(null)
   const playerHpRef = useRef(playerHp)
   const bossHpRef = useRef(bossHp)
   const phaseRef = useRef(phase)
+  const runIdRef = useRef<string | null>(null)
 
   const playerMaxHp = 200
-  const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001"
+  const apiUrl = process.env["NEXT_PUBLIC_API_URL"] ?? API_URL_DEFAULT
+
+  useEffect(() => {
+    setIsMobile(navigator.maxTouchPoints > 0)
+  }, [])
 
   useEffect(() => {
     playerHpRef.current = playerHp
@@ -173,6 +196,107 @@ export default function BattleClient({ dungeon }: { dungeon: DungeonWithRooms })
   useEffect(() => {
     phaseRef.current = phase
   }, [phase])
+
+  // Start a dungeon run to get runId for co-op
+  useEffect(() => {
+    async function startRun() {
+      try {
+        const res = await fetch(`${apiUrl}/api/dungeons/runs`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({ dungeonId: dungeon.id }),
+        })
+        if (res.ok) {
+          const json = (await res.json()) as {
+            data: { id: string; coPlayerId?: string; coPlayerHp?: number }
+          }
+          runIdRef.current = json.data.id
+          setCoop((prev) => ({
+            ...prev,
+            runId: json.data.id,
+            coPlayerHp: json.data.coPlayerHp ?? null,
+          }))
+        }
+      } catch {
+        // ignore — co-op just won't work
+      }
+    }
+    startRun()
+    // biome-ignore lint/correctness/useExhaustiveDependencies: run once on mount
+  }, [])
+
+  // Co-op WebSocket connection
+  useEffect(() => {
+    if (!coop.runId) return
+
+    const WS_URL = apiUrl.replace(/^http/, "ws")
+    const ws = new WebSocket(`${WS_URL}/ws`)
+    coopWsRef.current = ws
+
+    ws.onopen = () => {
+      ws.send(
+        JSON.stringify({
+          type: "dungeon_join",
+          runId: coop.runId,
+          userId: "local",
+          bossHp: dungeon.bossHp,
+          playerHp: playerMaxHp,
+        }),
+      )
+    }
+
+    ws.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(String(event.data)) as {
+          type: string
+          bossHp?: number
+          players?: { socketId: string; hp: number }[]
+          status?: string
+        }
+        if (msg.type === "dungeon_state") {
+          if (msg.bossHp !== undefined) setBossHp(msg.bossHp)
+          if (msg.players && msg.players.length >= 2) {
+            const hps = msg.players.map((p) => p.hp)
+            setCoop((prev) => ({ ...prev, coPlayerHp: hps[1] ?? null }))
+          }
+          if (msg.status === "victory") setPhase("victory")
+          if (msg.status === "defeat") setPhase("defeat")
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    ws.onclose = () => {
+      coopWsRef.current = null
+    }
+
+    return () => {
+      ws.close()
+      coopWsRef.current = null
+    }
+    // biome-ignore lint/correctness/useExhaustiveDependencies: only re-run when runId changes
+  }, [coop.runId])
+
+  const generateInvite = useCallback(async () => {
+    if (!coop.runId) return
+    try {
+      const res = await fetch(`${apiUrl}/api/dungeons/runs/${coop.runId}/invite`, {
+        credentials: "include",
+      })
+      if (res.ok) {
+        const json = (await res.json()) as { data: { token: string } }
+        const url = `${window.location.origin}/dungeon/join/${json.data.token}`
+        setCoop((prev) => ({ ...prev, inviteToken: url }))
+        await navigator.clipboard.writeText(url)
+        setInviteCopied(true)
+        setTimeout(() => setInviteCopied(false), 3000)
+      }
+    } catch {
+      // ignore
+    }
+  }, [apiUrl, coop.runId])
 
   // Boss attack timer: every 15 seconds deal 5 damage
   // biome-ignore lint/correctness/useExhaustiveDependencies: roomIndex resets the countdown on room advance intentionally
@@ -289,11 +413,12 @@ export default function BattleClient({ dungeon }: { dungeon: DungeonWithRooms })
       setSubmitStatus("done")
 
       if (result === "accepted") {
-        // Deal damage to boss
-        const dmg = 50 // base damage (level system TBD)
+        const dmg = 50
         const newBossHp = Math.max(0, bossHpRef.current - dmg)
         setBossHp(newBossHp)
         triggerFlash("green")
+        // Broadcast hit to co-op partner
+        coopWsRef.current?.send(JSON.stringify({ type: "dungeon_hit", dmg }))
 
         if (newBossHp <= 0) {
           setPhase("victory")
@@ -313,13 +438,14 @@ export default function BattleClient({ dungeon }: { dungeon: DungeonWithRooms })
           }
         }
       } else {
-        // Wrong/error — player takes damage
         const newHp = Math.max(0, playerHpRef.current - 10)
         setPlayerHp(newHp)
         triggerFlash("red")
         setShake(true)
         setTimeout(() => setShake(false), 500)
         if (newHp <= 0) setPhase("defeat")
+        // Broadcast damage to co-op partner
+        coopWsRef.current?.send(JSON.stringify({ type: "dungeon_damage", dmg: 10 }))
         setTimeout(() => setSubmitStatus("idle"), 1500)
       }
     } catch {
@@ -327,6 +453,7 @@ export default function BattleClient({ dungeon }: { dungeon: DungeonWithRooms })
       setLastResult("runtime_error")
       setTimeout(() => setSubmitStatus("idle"), 1500)
     }
+    // biome-ignore lint/correctness/useExhaustiveDependencies: coopWsRef and initialCode are refs/constants
   }, [
     phase,
     submitStatus,
@@ -567,6 +694,14 @@ export default function BattleClient({ dungeon }: { dungeon: DungeonWithRooms })
         </div>
 
         <HpBar current={playerHp} max={playerMaxHp} color="#00ff41" label="PLAYER HP" />
+        {coop.coPlayerHp !== null && (
+          <HpBar
+            current={coop.coPlayerHp}
+            max={coop.coPlayerMaxHp}
+            color="#00aaff"
+            label="CO-OP HP"
+          />
+        )}
         <HpBar
           current={bossHp}
           max={dungeon.bossHp}
@@ -709,23 +844,48 @@ export default function BattleClient({ dungeon }: { dungeon: DungeonWithRooms })
             )}
           </div>
 
-          {/* Monaco Editor */}
-          <div style={{ flex: 1, overflow: "hidden", position: "relative" }}>
-            <MonacoEditor
-              height="100%"
-              language={dungeon.language === "csharp" ? "csharp" : dungeon.language}
-              theme="vs-dark"
-              value={code}
-              onChange={(v) => setCode(v ?? "")}
-              options={{
-                minimap: { enabled: false },
-                fontSize: 13,
-                lineNumbers: "on",
-                scrollBeyondLastLine: false,
-                automaticLayout: true,
-                fontFamily: "monospace",
-              }}
-            />
+          {/* Editor: textarea on mobile, Monaco on desktop */}
+          <div style={{ flex: 1, overflow: "hidden", position: "relative", minHeight: "200px" }}>
+            {isMobile ? (
+              <textarea
+                value={code}
+                onChange={(e) => setCode(e.target.value)}
+                spellCheck={false}
+                autoCorrect="off"
+                autoCapitalize="off"
+                style={{
+                  width: "100%",
+                  height: "100%",
+                  minHeight: "200px",
+                  background: "#001100",
+                  color: "#00ff41",
+                  fontFamily: "monospace",
+                  fontSize: "16px",
+                  lineHeight: 1.5,
+                  padding: "0.75rem",
+                  border: "none",
+                  outline: "none",
+                  resize: "none",
+                  boxSizing: "border-box",
+                }}
+              />
+            ) : (
+              <MonacoEditor
+                height="100%"
+                language={dungeon.language === "csharp" ? "csharp" : dungeon.language}
+                theme="vs-dark"
+                value={code}
+                onChange={(v) => setCode(v ?? "")}
+                options={{
+                  minimap: { enabled: false },
+                  fontSize: 13,
+                  lineNumbers: "on",
+                  scrollBeyondLastLine: false,
+                  automaticLayout: true,
+                  fontFamily: "monospace",
+                }}
+              />
+            )}
           </div>
 
           {/* Submit bar */}
@@ -775,8 +935,31 @@ export default function BattleClient({ dungeon }: { dungeon: DungeonWithRooms })
               </span>
             )}
 
-            <div style={{ marginLeft: "auto", fontSize: "0.7rem", color: "#005500" }}>
-              DMG/HIT: 50 | BOSS HP: {bossHp}/{dungeon.bossHp}
+            <div
+              style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: "0.75rem" }}
+            >
+              {coop.coPlayerHp === null && coop.runId && (
+                <button
+                  type="button"
+                  onClick={generateInvite}
+                  style={{
+                    background: "transparent",
+                    color: "#00aaff",
+                    border: "1px solid #00aaff",
+                    padding: "0.25rem 0.75rem",
+                    fontFamily: "monospace",
+                    fontSize: "0.7rem",
+                    letterSpacing: "0.1em",
+                    cursor: "pointer",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {inviteCopied ? "✓ COPIED" : "⚡ 協力招待"}
+                </button>
+              )}
+              <span style={{ fontSize: "0.7rem", color: "#005500" }}>
+                DMG/HIT: 50 | BOSS HP: {bossHp}/{dungeon.bossHp}
+              </span>
             </div>
           </div>
         </div>

@@ -1,4 +1,4 @@
-import { db, dungeonRooms, dungeonRuns, dungeons, problems, users } from "@code-world/db"
+import { db, dungeonRooms, dungeonRuns, dungeons, inventory, problems, users } from "@code-world/db"
 import { StartDungeonRunSchema, UpdateDungeonRunSchema } from "@code-world/types"
 import { zValidator } from "@hono/zod-validator"
 import { and, asc, eq, sql } from "drizzle-orm"
@@ -159,4 +159,107 @@ dungeonsRouter.patch("/runs/:runId", zValidator("json", UpdateDungeonRunSchema),
     .returning()
 
   return c.json({ data: updated })
+})
+
+// GET /dungeons/runs/:runId/invite — generate invite token for co-op
+dungeonsRouter.get("/runs/:runId/invite", async (c) => {
+  const session = await auth.api.getSession({ headers: c.req.raw.headers })
+  if (!session) return c.json({ error: "Unauthorized" }, 401)
+
+  const runId = c.req.param("runId")
+  const run = await db.query.dungeonRuns.findFirst({
+    where: (r, { eq: eqFn }) => eqFn(r.id, runId),
+  })
+  if (!run) return c.json({ error: "Not found" }, 404)
+
+  const user = await db.query.users.findFirst({
+    where: (u, { eq: eqFn }) => eqFn(u.email, session.user.email),
+  })
+  if (!user || run.userId !== user.id) return c.json({ error: "Forbidden" }, 403)
+
+  if (run.coPlayerId) return c.json({ error: "Co-player already joined" }, 400)
+
+  // Reuse existing token or generate new one
+  let token = run.inviteToken
+  if (!token) {
+    token = crypto.randomUUID().replace(/-/g, "").slice(0, 12)
+    await db.update(dungeonRuns).set({ inviteToken: token }).where(eq(dungeonRuns.id, runId))
+  }
+
+  return c.json({ data: { token, runId } })
+})
+
+// POST /dungeons/join/:token — join a dungeon run as co-player
+dungeonsRouter.post("/join/:token", async (c) => {
+  const session = await auth.api.getSession({ headers: c.req.raw.headers })
+  if (!session) return c.json({ error: "Unauthorized" }, 401)
+
+  const token = c.req.param("token")
+
+  const run = await db.query.dungeonRuns.findFirst({
+    where: (r, { eq: eqFn }) => eqFn(r.inviteToken, token),
+  })
+  if (!run) return c.json({ error: "Invalid invite token" }, 404)
+  if (run.status !== "in_progress") return c.json({ error: "Run already ended" }, 400)
+  if (run.coPlayerId) return c.json({ error: "Co-player slot already taken" }, 409)
+
+  const user = await db.query.users.findFirst({
+    where: (u, { eq: eqFn }) => eqFn(u.email, session.user.email),
+  })
+  if (!user) return c.json({ error: "User not found" }, 404)
+  if (run.userId === user.id) return c.json({ error: "Cannot join your own run" }, 400)
+
+  const dungeon = await db.query.dungeons.findFirst({
+    where: (d, { eq: eqFn }) => eqFn(d.id, run.dungeonId),
+  })
+  const coPlayerMaxHp = 100 + user.level * 20
+
+  const [updated] = await db
+    .update(dungeonRuns)
+    .set({
+      coPlayerId: user.id,
+      coPlayerHp: dungeon ? Math.min(coPlayerMaxHp, dungeon.bossHp) : coPlayerMaxHp,
+    })
+    .where(eq(dungeonRuns.id, run.id))
+    .returning()
+
+  return c.json({ data: updated })
+})
+
+// POST /dungeons/runs/:runId/reward — grant block rewards to both players
+dungeonsRouter.post("/runs/:runId/reward", async (c) => {
+  const session = await auth.api.getSession({ headers: c.req.raw.headers })
+  if (!session) return c.json({ error: "Unauthorized" }, 401)
+
+  const runId = c.req.param("runId")
+  const run = await db.query.dungeonRuns.findFirst({
+    where: (r, { eq: eqFn }) => eqFn(r.id, runId),
+  })
+  if (!run) return c.json({ error: "Not found" }, 404)
+  if (run.status !== "completed") return c.json({ error: "Run not completed" }, 400)
+
+  const dungeon = await db.query.dungeons.findFirst({
+    where: (d, { eq: eqFn }) => eqFn(d.id, run.dungeonId),
+  })
+  if (!dungeon) return c.json({ error: "Dungeon not found" }, 404)
+
+  const blockType =
+    dungeon.levelRequired >= 3
+      ? "diamond_block"
+      : dungeon.levelRequired >= 2
+        ? "stone_block"
+        : "wood_block"
+
+  const playerIds = [run.userId, run.coPlayerId].filter(Boolean) as string[]
+  for (const pid of playerIds) {
+    await db
+      .insert(inventory)
+      .values({ playerId: pid, blockType, quantity: 1 })
+      .onConflictDoUpdate({
+        target: [inventory.playerId, inventory.blockType],
+        set: { quantity: sql`${inventory.quantity} + 1`, updatedAt: new Date() },
+      })
+  }
+
+  return c.json({ data: { ok: true, blockType, playerIds } })
 })

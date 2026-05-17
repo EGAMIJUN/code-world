@@ -8,6 +8,7 @@ import { logger } from "hono/logger"
 import { prettyJSON } from "hono/pretty-json"
 import { auth } from "./lib/auth"
 import { dungeonsRouter } from "./routes/dungeons"
+import { friendsRouter } from "./routes/friends"
 import { healthRouter } from "./routes/health"
 import { inventoryRouter } from "./routes/inventory"
 import { leaderboardRouter } from "./routes/leaderboard"
@@ -15,6 +16,15 @@ import { problemsRouter } from "./routes/problems"
 import { profileRouter } from "./routes/profile"
 import { submissionsRouter } from "./routes/submissions"
 import { worldsRouter } from "./routes/worlds"
+
+// ── Rate limiting ─────────────────────────────────────────────────────────────
+const rateLimitStore = new Map<string, { count: number; resetAt: number }>()
+
+function getClientIp(req: Request): string {
+  const fwd = req.headers.get("x-forwarded-for")
+  if (fwd) return fwd.split(",")[0]!.trim()
+  return "unknown"
+}
 
 // ── Isometric tile math (mirrors PhaserGame constants) ────────────────────────
 const TILE_W = 64
@@ -31,6 +41,37 @@ function toTile(x: number, y: number): { tx: number; ty: number } {
   return {
     tx: Math.max(0, Math.min(MAP_SIZE - 1, tx)),
     ty: Math.max(0, Math.min(MAP_SIZE - 1, ty)),
+  }
+}
+
+// ── Dungeon co-op WS state ────────────────────────────────────────────────────
+interface DungeonCoopRoom {
+  runId: string
+  sockets: Map<string, { userId: string; hp: number }> // socketId → player state
+  bossHp: number
+  status: "fighting" | "victory" | "defeat"
+}
+const dungeonCoopRooms = new Map<string, DungeonCoopRoom>() // runId → room
+const socketDungeonRoom = new Map<string, string>() // socketId → runId
+
+function broadcastDungeonRoom(runId: string) {
+  const room = dungeonCoopRooms.get(runId)
+  if (!room) return
+  const players = [...room.sockets.entries()].map(([sid, p]) => ({ socketId: sid, hp: p.hp }))
+  const packet = JSON.stringify({
+    type: "dungeon_state",
+    bossHp: room.bossHp,
+    players,
+    status: room.status,
+  })
+  for (const [sid] of room.sockets) {
+    const meta = socketMeta.get(sid)
+    if (!meta) continue
+    try {
+      meta.ws.send(packet)
+    } catch {
+      // ignore
+    }
   }
 }
 
@@ -207,6 +248,25 @@ app.use(
   }),
 )
 
+// ── Rate limiting middleware ──────────────────────────────────────────────────
+app.use("*", async (c, next) => {
+  if (c.req.path.startsWith("/api/health") || c.req.path === "/ws") {
+    return next()
+  }
+  const ip = getClientIp(c.req.raw)
+  const now = Date.now()
+  const entry = rateLimitStore.get(ip)
+  if (!entry || entry.resetAt < now) {
+    rateLimitStore.set(ip, { count: 1, resetAt: now + 60_000 })
+  } else {
+    entry.count++
+    if (entry.count > 100) {
+      return c.json({ error: "Too many requests" }, 429)
+    }
+  }
+  return next()
+})
+
 // ── WebSocket — position sync + tag game ──────────────────────────────────────
 app.get(
   "/ws",
@@ -298,6 +358,48 @@ app.get(
           })
 
           broadcastTagState(worldId)
+        } else if (msg["type"] === "dungeon_join") {
+          const runId = String(msg["runId"] ?? "")
+          const userId = String(msg["userId"] ?? "")
+          const initialBossHp = Number(msg["bossHp"] ?? 250)
+          const initialPlayerHp = Number(msg["playerHp"] ?? 200)
+          if (!runId) return
+
+          socketDungeonRoom.set(socketId, runId)
+          if (!dungeonCoopRooms.has(runId)) {
+            dungeonCoopRooms.set(runId, {
+              runId,
+              sockets: new Map(),
+              bossHp: initialBossHp,
+              status: "fighting",
+            })
+          }
+          const dungeonRoom = dungeonCoopRooms.get(runId)!
+          dungeonRoom.sockets.set(socketId, { userId, hp: initialPlayerHp })
+          broadcastDungeonRoom(runId)
+        } else if (msg["type"] === "dungeon_hit") {
+          const runId = socketDungeonRoom.get(socketId)
+          if (!runId) return
+          const dungeonRoom = dungeonCoopRooms.get(runId)
+          if (!dungeonRoom || dungeonRoom.status !== "fighting") return
+          const dmg = Number(msg["dmg"] ?? 50)
+          dungeonRoom.bossHp = Math.max(0, dungeonRoom.bossHp - dmg)
+          if (dungeonRoom.bossHp <= 0) dungeonRoom.status = "victory"
+          broadcastDungeonRoom(runId)
+        } else if (msg["type"] === "dungeon_damage") {
+          const runId = socketDungeonRoom.get(socketId)
+          if (!runId) return
+          const dungeonRoom = dungeonCoopRooms.get(runId)
+          if (!dungeonRoom || dungeonRoom.status !== "fighting") return
+          const dmg = Number(msg["dmg"] ?? 10)
+          // Deal damage to ALL players in room
+          for (const [sid, player] of dungeonRoom.sockets) {
+            player.hp = Math.max(0, player.hp - dmg)
+            dungeonRoom.sockets.set(sid, player)
+          }
+          const allDead = [...dungeonRoom.sockets.values()].every((p) => p.hp <= 0)
+          if (allDead) dungeonRoom.status = "defeat"
+          broadcastDungeonRoom(runId)
         }
       },
 
@@ -339,6 +441,21 @@ app.get(
 
         if (tagGames.has(worldId)) broadcastTagState(worldId)
         broadcastRoom(worldId)
+
+        // Dungeon co-op cleanup
+        const runId = socketDungeonRoom.get(socketId)
+        socketDungeonRoom.delete(socketId)
+        if (runId) {
+          const dRoom = dungeonCoopRooms.get(runId)
+          if (dRoom) {
+            dRoom.sockets.delete(socketId)
+            if (dRoom.sockets.size === 0) {
+              dungeonCoopRooms.delete(runId)
+            } else {
+              broadcastDungeonRoom(runId)
+            }
+          }
+        }
       },
     }
   }),
@@ -366,6 +483,7 @@ app.route("/api/inventory", inventoryRouter)
 app.route("/api/leaderboard", leaderboardRouter)
 app.route("/api/profile", profileRouter)
 app.route("/api/dungeons", dungeonsRouter)
+app.route("/api/friends", friendsRouter)
 
 // ── Error handling ────────────────────────────────────────────────────────────
 app.onError((err, c) => {

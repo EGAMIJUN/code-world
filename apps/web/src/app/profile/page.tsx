@@ -37,6 +37,20 @@ interface ProfileData {
   achievements: { id: string; achievementType: AchievementType; unlockedAt: string }[]
 }
 
+interface FriendEntry {
+  friendId: string
+  username: string
+  displayName: string | null
+  avatarUrl: string | null
+  level: number
+}
+
+interface PendingEntry {
+  requesterId: string
+  username: string
+  displayName: string | null
+}
+
 function computeXpProgress(totalXp: number): {
   level: number
   xpInLevel: number
@@ -57,6 +71,8 @@ function computeXpProgress(totalXp: number): {
 export default function ProfilePage() {
   const router = useRouter()
   const [profile, setProfile] = useState<ProfileData | null>(null)
+  const [friends, setFriends] = useState<FriendEntry[]>([])
+  const [pending, setPending] = useState<PendingEntry[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -65,18 +81,44 @@ export default function ProfilePage() {
     router.push("/login")
   }
 
+  const acceptFriend = async (requesterId: string) => {
+    await fetch(`${API_URL}/api/friends/accept/${requesterId}`, {
+      method: "POST",
+      credentials: "include",
+    })
+    const [fRes, pRes] = await Promise.all([
+      fetch(`${API_URL}/api/friends`, { credentials: "include" }),
+      fetch(`${API_URL}/api/friends/pending`, { credentials: "include" }),
+    ])
+    if (fRes.ok) setFriends(((await fRes.json()) as { data: FriendEntry[] }).data)
+    if (pRes.ok) setPending(((await pRes.json()) as { data: PendingEntry[] }).data)
+  }
+
   useEffect(() => {
-    fetch(`${API_URL}/api/profile/me`, { credentials: "include" })
-      .then(async (res) => {
-        if (!res.ok) {
-          setError(res.status === 401 ? "LOGIN REQUIRED — ACCESS DENIED" : "PROFILE LOAD FAILED")
+    async function loadAll() {
+      try {
+        const [profileRes, friendsRes, pendingRes] = await Promise.all([
+          fetch(`${API_URL}/api/profile/me`, { credentials: "include" }),
+          fetch(`${API_URL}/api/friends`, { credentials: "include" }),
+          fetch(`${API_URL}/api/friends/pending`, { credentials: "include" }),
+        ])
+        if (!profileRes.ok) {
+          setError(
+            profileRes.status === 401 ? "LOGIN REQUIRED — ACCESS DENIED" : "PROFILE LOAD FAILED",
+          )
           return
         }
-        const json = (await res.json()) as { data: ProfileData }
+        const json = (await profileRes.json()) as { data: ProfileData }
         setProfile(json.data)
-      })
-      .catch(() => setError("CONNECTION ERROR"))
-      .finally(() => setLoading(false))
+        if (friendsRes.ok) setFriends(((await friendsRes.json()) as { data: FriendEntry[] }).data)
+        if (pendingRes.ok) setPending(((await pendingRes.json()) as { data: PendingEntry[] }).data)
+      } catch {
+        setError("CONNECTION ERROR")
+      } finally {
+        setLoading(false)
+      }
+    }
+    loadAll()
   }, [])
 
   if (loading) {
@@ -335,6 +377,132 @@ export default function ProfilePage() {
               )
             })}
           </div>
+        </div>
+
+        {/* Pending friend requests */}
+        {pending.length > 0 && (
+          <div>
+            <div
+              style={{
+                fontSize: "0.75rem",
+                letterSpacing: "0.2em",
+                color: "#00aa2a",
+                marginBottom: "0.75rem",
+              }}
+            >
+              ▓ フレンド申請 ({pending.length})
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+              {pending.map((p) => (
+                <div
+                  key={p.requesterId}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    border: "1px solid #003300",
+                    padding: "0.5rem 0.75rem",
+                    background: "rgba(0,10,0,0.6)",
+                  }}
+                >
+                  <span style={{ fontSize: "0.8rem" }}>
+                    {p.displayName ?? p.username}
+                    <span style={{ color: "#005500", marginLeft: "0.5rem" }}>@{p.username}</span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => acceptFriend(p.requesterId)}
+                    style={{
+                      color: "#00ff41",
+                      border: "1px solid #00ff41",
+                      padding: "0.2rem 0.75rem",
+                      fontSize: "0.7rem",
+                      background: "transparent",
+                      fontFamily: "monospace",
+                      cursor: "pointer",
+                      letterSpacing: "0.1em",
+                    }}
+                  >
+                    ✓ 承認
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Friend list */}
+        <div>
+          <div
+            style={{
+              fontSize: "0.75rem",
+              letterSpacing: "0.2em",
+              color: "#00aa2a",
+              marginBottom: "0.75rem",
+            }}
+          >
+            ▓ フレンド ({friends.length})
+          </div>
+          {friends.length === 0 ? (
+            <div style={{ fontSize: "0.75rem", color: "#003300", letterSpacing: "0.1em" }}>
+              まだフレンドがいません。プロフィールページで申請しましょう！
+            </div>
+          ) : (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: "0.5rem" }}>
+              {friends.map((f) => (
+                <a
+                  key={f.friendId}
+                  href={`/profile/${f.friendId}`}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "0.75rem",
+                    border: "1px solid #003300",
+                    padding: "0.5rem 0.75rem",
+                    background: "rgba(0,10,0,0.6)",
+                    textDecoration: "none",
+                    color: "#00ff41",
+                  }}
+                >
+                  <div
+                    style={{
+                      width: "32px",
+                      height: "32px",
+                      flexShrink: 0,
+                      border: "1px solid #003300",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      overflow: "hidden",
+                      fontSize: "0.9rem",
+                    }}
+                  >
+                    {f.avatarUrl ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        src={f.avatarUrl}
+                        alt=""
+                        style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                      />
+                    ) : (
+                      <span style={{ color: "#00ff41" }}>
+                        {(f.displayName ?? f.username).charAt(0).toUpperCase()}
+                      </span>
+                    )}
+                  </div>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: "0.75rem", fontWeight: "bold" }}>
+                      {f.displayName ?? f.username}
+                    </div>
+                    <div style={{ fontSize: "0.6rem", color: "#005500" }}>LV.{f.level}</div>
+                  </div>
+                  <div style={{ marginLeft: "auto", fontSize: "0.65rem", color: "#003300" }}>
+                    WORLD →
+                  </div>
+                </a>
+              ))}
+            </div>
+          )}
         </div>
 
         {/* Links */}

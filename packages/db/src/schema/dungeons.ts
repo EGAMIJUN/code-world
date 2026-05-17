@@ -48,8 +48,11 @@ export const dungeonRuns = pgTable("dungeon_runs", {
   dungeonId: uuid("dungeon_id")
     .notNull()
     .references(() => dungeons.id, { onDelete: "cascade" }),
+  coPlayerId: uuid("co_player_id").references(() => users.id, { onDelete: "set null" }),
+  inviteToken: text("invite_token").unique(),
   currentRoomOrder: integer("current_room_order").notNull().default(0),
   playerHp: integer("player_hp").notNull().default(100),
+  coPlayerHp: integer("co_player_hp"),
   bossHpRemaining: integer("boss_hp_remaining").notNull(),
   status: dungeonRunStatusEnum("status").notNull().default("in_progress"),
   startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
