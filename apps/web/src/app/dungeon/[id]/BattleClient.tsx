@@ -222,7 +222,7 @@ export default function BattleClient({ dungeon }: { dungeon: DungeonWithRooms })
       if (retries >= maxRetries) return { result: "runtime_error", message: "Execution timed out (executor may be down)" }
       await new Promise((resolve) => setTimeout(resolve, pollInterval))
       try {
-        const res = await fetch(`${apiUrl}/api/submissions/${submissionId}`)
+        const res = await fetch(`${apiUrl}/api/submissions/${submissionId}`, { credentials: "include" })
         if (!res.ok) return { result: "runtime_error", message: "Failed to fetch result" }
         const json = (await res.json()) as {
           data: { result: string; feedback?: { message?: string } }
