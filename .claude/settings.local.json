@@ -1,0 +1,36 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(bun run *)",
+      "Bash(DATABASE_URL=\"postgresql://postgres:postgres@localhost:5434/codeworld\" bun run *)",
+      "Bash(bun add *)",
+      "Bash(bun remove *)",
+      "Bash(bun turbo *)",
+      "Bash(python3 -c \"import sys; s=sys.stdin.read\\(\\); print\\(repr\\(s[:30]\\)\\)\")",
+      "Bash(python3 *)",
+      "Bash(curl -s http://localhost:3001/api/health)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:3000/world)",
+      "Bash(lsof -ti:3000)",
+      "Bash(lsof -ti:3001)",
+      "Bash(kill 96991)",
+      "Bash(bun --cwd apps/web dev)",
+      "Bash(curl -s http://localhost:3001/api/worlds/my)",
+      "Bash(curl -s http://localhost:3001/api/inventory)",
+      "Bash(curl -sv http://localhost:3001/api/worlds/my)",
+      "Bash(kill 95934)",
+      "Bash(bun --hot /Users/egamijun/code-world/apps/api/src/index.ts)",
+      "Bash(DATABASE_URL=\"postgresql://postgres:postgres@localhost:5434/codeworld\" bun *)",
+      "Bash(curl -sv -H \"Cookie: better-auth.session_token=d30ad9a1-5496-452a-a52c-9a3051106e6c\" http://localhost:3001/api/worlds/my)",
+      "Bash(curl -sv -H \"Cookie: session_token=d30ad9a1-5496-452a-a52c-9a3051106e6c\" http://localhost:3001/api/worlds/my)",
+      "Bash(curl -sv -H \"Authorization: Bearer d30ad9a1-5496-452a-a52c-9a3051106e6c\" http://localhost:3001/api/worlds/my)",
+      "Bash(node -e \"const path = require.resolve\\('better-auth'\\); console.log\\(path\\)\")",
+      "Bash(curl -s -X POST http://localhost:3001/api/auth/sign-up/email -H 'Content-Type: application/json' -d '{\"email\":\"test@codeworld.dev\",\"password\":\"test1234\",\"name\":\"Test Player\"}')",
+      "Bash(kill 1130)",
+      "Bash(DATABASE_URL=\"postgresql://postgres:postgres@localhost:5434/codeworld\" REDIS_URL=\"redis://localhost:6379\" BETTER_AUTH_SECRET=\"change-this-to-a-long-random-secret\" BETTER_AUTH_URL=\"http://localhost:3001\" bun --hot /Users/egamijun/code-world/apps/api/src/index.ts)",
+      "Bash(curl -sv -X POST http://localhost:3001/api/auth/sign-up/email -H 'Content-Type: application/json' -H 'Origin: http://localhost:3000' -d '{\"email\":\"test@codeworld.dev\",\"password\":\"test1234\",\"name\":\"Test Player\"}')",
+      "Bash(curl *)",
+      "Bash(kill 1917 1909)",
+      "Bash(xargs kill)"
+    ]
+  }
+}

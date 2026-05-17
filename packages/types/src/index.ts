@@ -11,5 +11,28 @@ export * from "./schemas/submission"
 export { WorldSchema, CreateWorldSchema } from "./schemas/world"
 export type { World, CreateWorld } from "./schemas/world"
 
-export { BlockSchema, PlaceBlockSchema } from "./schemas/block"
-export type { Block, PlaceBlock } from "./schemas/block"
+export {
+  BlockSchema,
+  BlockTypeSchema,
+  CityBlockTypeSchema,
+  GameBlockTypeSchema,
+  PlaceBlockSchema,
+  PlaceGameBlockSchema,
+} from "./schemas/block"
+export type {
+  Block,
+  BlockType,
+  CityBlockType,
+  GameBlockType,
+  PlaceBlock,
+  PlaceGameBlock,
+} from "./schemas/block"
+
+// Leaderboard
+export * from "./schemas/leaderboard"
+
+// Profile / Achievements
+export * from "./schemas/profile"
+
+// Dungeon
+export * from "./schemas/dungeon"

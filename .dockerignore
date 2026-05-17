@@ -1,0 +1,14 @@
+.git
+.github
+.claude
+node_modules
+**/node_modules
+**/.next
+**/dist
+*.md
+!CLAUDE.md
+.env
+.env.*
+!.env.production.example
+docker-compose.yml
+docker-compose.production.yml

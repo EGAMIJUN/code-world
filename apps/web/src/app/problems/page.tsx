@@ -1,3 +1,4 @@
+import { cookies } from "next/headers"
 import Link from "next/link"
 import { Suspense } from "react"
 import DifficultyFilter from "./DifficultyFilter"
@@ -8,20 +9,14 @@ interface ProblemRow {
   difficulty: number
   category: string
   solvedCount: number
+  solved: boolean
 }
 
-const DIFFICULTY_BADGE: Record<number, { label: string; className: string }> = {
-  0: { label: "Lv.0", className: "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200" },
-  1: { label: "Lv.1", className: "bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200" },
-  2: { label: "Lv.2", className: "bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200" },
-  3: { label: "Lv.3", className: "bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200" },
-}
-
-const CATEGORY_BADGE: Record<string, string> = {
-  sql: "bg-violet-100 text-violet-800 dark:bg-violet-900 dark:text-violet-200",
-  debug: "bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200",
-  design: "bg-cyan-100 text-cyan-800 dark:bg-cyan-900 dark:text-cyan-200",
-  review: "bg-pink-100 text-pink-800 dark:bg-pink-900 dark:text-pink-200",
+const DIFFICULTY_LABEL: Record<number, string> = {
+  0: "Lv.0",
+  1: "Lv.1",
+  2: "Lv.2",
+  3: "Lv.3",
 }
 
 async function fetchProblems(difficulty?: string): Promise<ProblemRow[]> {
@@ -31,7 +26,16 @@ async function fetchProblems(difficulty?: string): Promise<ProblemRow[]> {
   const url = `${apiUrl}/api/problems${params.size > 0 ? `?${params.toString()}` : ""}`
 
   try {
-    const res = await fetch(url, { cache: "no-store" })
+    const cookieStore = await cookies()
+    const cookieHeader = cookieStore
+      .getAll()
+      .map((c) => `${c.name}=${c.value}`)
+      .join("; ")
+
+    const res = await fetch(url, {
+      cache: "no-store",
+      headers: cookieHeader ? { cookie: cookieHeader } : {},
+    })
     if (!res.ok) return []
     const json = (await res.json()) as { data: ProblemRow[] }
     return json.data ?? []
@@ -47,60 +51,166 @@ interface ProblemsPageProps {
 export default async function ProblemsPage({ searchParams }: ProblemsPageProps) {
   const { difficulty } = await searchParams
   const problems = await fetchProblems(difficulty)
+  const solvedCount = problems.filter((p) => p.solved).length
 
   return (
-    <main className="min-h-screen p-8">
-      <div className="mx-auto max-w-5xl space-y-6">
-        <div>
-          <h1 className="text-3xl font-bold">
-            問題一覧
-          </h1>
-          <p className="mt-1 text-muted-foreground text-sm">SQLスキルを磨こう</p>
+    <div
+      style={{
+        minHeight: "100%",
+        padding: "2rem 1rem",
+        fontFamily: "monospace",
+        color: "#00ff41",
+      }}
+    >
+      <div style={{ margin: "0 auto", maxWidth: "1100px" }}>
+        {/* Header */}
+        <div
+          style={{
+            display: "flex",
+            alignItems: "flex-end",
+            justifyContent: "space-between",
+            gap: "1rem",
+            marginBottom: "1.5rem",
+          }}
+        >
+          <div>
+            <div
+              style={{
+                fontSize: "1.5rem",
+                fontWeight: "bold",
+                letterSpacing: "0.25em",
+                color: "#00ff41",
+                textShadow: "0 0 15px #00ff41",
+              }}
+            >
+              ▓ MISSION SELECT
+            </div>
+            <div
+              style={{
+                fontSize: "0.75rem",
+                color: "#00aa2a",
+                letterSpacing: "0.15em",
+                marginTop: "0.25rem",
+              }}
+            >
+              HACK THE DATABASE — CLAIM YOUR BLOCKS
+            </div>
+          </div>
+          {solvedCount > 0 && (
+            <div
+              style={{
+                border: "1px solid #003300",
+                padding: "0.25rem 0.75rem",
+                fontSize: "0.75rem",
+                color: "#00ff41",
+                letterSpacing: "0.1em",
+                background: "rgba(0,255,65,0.05)",
+                whiteSpace: "nowrap",
+              }}
+            >
+              ✓ {solvedCount} CLEARED
+            </div>
+          )}
         </div>
 
-        <Suspense fallback={null}>
-          <DifficultyFilter />
-        </Suspense>
+        {/* Filter */}
+        <div style={{ marginBottom: "1.5rem" }}>
+          <Suspense fallback={null}>
+            <DifficultyFilter />
+          </Suspense>
+        </div>
 
+        {/* Problem grid */}
         {problems.length === 0 ? (
-          <div className="rounded-xl border bg-card p-12 text-center text-muted-foreground">
-            問題が見つかりませんでした。
+          <div
+            style={{
+              border: "1px solid #003300",
+              padding: "3rem",
+              textAlign: "center",
+              color: "#005500",
+              letterSpacing: "0.2em",
+            }}
+          >
+            NO TARGETS FOUND
           </div>
         ) : (
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {problems.map((problem) => {
-              const diffBadge = DIFFICULTY_BADGE[problem.difficulty] ?? {
-                label: `Lv.${problem.difficulty}`,
-                className: "bg-gray-100 text-gray-800",
-              }
-              const catClass = CATEGORY_BADGE[problem.category] ?? "bg-gray-100 text-gray-800"
+          <div
+            style={{
+              display: "grid",
+              gap: "0.75rem",
+              gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))",
+            }}
+          >
+            {problems.map((problem) => (
+              <Link
+                key={problem.id}
+                href={`/problems/${problem.id}`}
+                style={{
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: "0.5rem",
+                  border: `1px solid ${problem.solved ? "#00ff41" : "#003300"}`,
+                  padding: "1rem",
+                  textDecoration: "none",
+                  color: "#00ff41",
+                  background: problem.solved ? "rgba(0,255,65,0.04)" : "rgba(0,10,0,0.6)",
+                  position: "relative",
+                  transition: "border-color 0.2s",
+                }}
+              >
+                {problem.solved && (
+                  <div
+                    style={{
+                      position: "absolute",
+                      top: "0.5rem",
+                      right: "0.75rem",
+                      fontSize: "0.65rem",
+                      color: "#00ff41",
+                      letterSpacing: "0.1em",
+                    }}
+                  >
+                    ✓ CLEARED
+                  </div>
+                )}
 
-              return (
-                <Link
-                  key={problem.id}
-                  href={`/problems/${problem.id}`}
-                  className="rounded-xl border bg-card p-5 shadow-sm transition-shadow hover:shadow-md flex flex-col gap-3"
+                <div
+                  style={{
+                    fontSize: "0.65rem",
+                    color: "#00aa2a",
+                    letterSpacing: "0.15em",
+                    marginBottom: "0.1rem",
+                  }}
                 >
-                  <div className="flex items-start justify-between gap-2">
-                    <h2 className="font-semibold leading-tight">{problem.title}</h2>
-                  </div>
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${diffBadge.className}`}>
-                      {diffBadge.label}
-                    </span>
-                    <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${catClass}`}>
-                      {problem.category.toUpperCase()}
-                    </span>
-                  </div>
-                  <div className="mt-auto text-xs text-muted-foreground">
-                    {problem.solvedCount} 人が解答済み
-                  </div>
-                </Link>
-              )
-            })}
+                  {DIFFICULTY_LABEL[problem.difficulty] ?? `Lv.${problem.difficulty}`} |{" "}
+                  {problem.category.toUpperCase()}
+                </div>
+
+                <div
+                  style={{
+                    fontSize: "0.9rem",
+                    fontWeight: "bold",
+                    letterSpacing: "0.05em",
+                    paddingRight: problem.solved ? "4.5rem" : "0",
+                  }}
+                >
+                  {problem.title}
+                </div>
+
+                <div
+                  style={{
+                    marginTop: "auto",
+                    fontSize: "0.65rem",
+                    color: "#005500",
+                    letterSpacing: "0.1em",
+                  }}
+                >
+                  {problem.solvedCount.toLocaleString()} AGENTS CLEARED
+                </div>
+              </Link>
+            ))}
           </div>
         )}
       </div>
-    </main>
+    </div>
   )
 }

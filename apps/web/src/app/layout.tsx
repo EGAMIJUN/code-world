@@ -1,16 +1,7 @@
 import type { Metadata } from "next"
-import { Geist, Geist_Mono } from "next/font/google"
+import MatrixRain from "../components/MatrixRain"
+import NavHeader from "../components/NavHeader"
 import "./globals.css"
-
-const geistSans = Geist({
-  variable: "--font-geist-sans",
-  subsets: ["latin"],
-})
-
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
-})
 
 export const metadata: Metadata = {
   title: "CODE WORLD",
@@ -24,7 +15,22 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="ja" suppressHydrationWarning>
-      <body className={`${geistSans.variable} ${geistMono.variable} antialiased`}>{children}</body>
+      <body
+        style={{
+          height: "100dvh",
+          overflow: "hidden",
+          display: "flex",
+          flexDirection: "column",
+          background: "#000000",
+          fontFamily: "monospace",
+        }}
+      >
+        <MatrixRain />
+        <NavHeader />
+        <main style={{ flex: 1, overflow: "auto", minHeight: 0, position: "relative", zIndex: 1 }}>
+          {children}
+        </main>
+      </body>
     </html>
   )
 }

@@ -23,6 +23,7 @@ export const SubmissionSchema = z.object({
 export const CreateSubmissionSchema = z.object({
   problemId: z.string().uuid(),
   code: z.string().min(1).max(50_000),
+  language: z.enum(["sql", "python", "javascript", "csharp"]).default("sql"),
 })
 
 export type SubmissionResult = z.infer<typeof SubmissionResultSchema>

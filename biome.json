@@ -34,14 +34,6 @@
     }
   },
   "files": {
-    "ignore": [
-      "node_modules",
-      ".next",
-      ".turbo",
-      "dist",
-      "drizzle",
-      "*.config.js",
-      "*.config.mjs"
-    ]
+    "ignore": ["node_modules", ".next", ".turbo", "dist", "drizzle", "*.config.js", "*.config.mjs"]
   }
 }

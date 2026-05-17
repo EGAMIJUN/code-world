@@ -1,0 +1,57 @@
+# Judge0 本番用 docker-compose
+# VPS (e.g. Hetzner CX21 / DigitalOcean Droplet) でのセルフホスト用
+# Railway は privileged コンテナ非対応のため VPS を推奨
+#
+# 使い方:
+#   cp judge0.conf.example judge0.conf   # 設定ファイルを作成・編集
+#   docker compose -f docker-compose.production.yml up -d
+
+services:
+  judge0-server:
+    image: judge0/judge0:1.13.1
+    volumes:
+      - ./judge0.conf:/judge0.conf:ro
+    ports:
+      - "2358:2358"
+    privileged: true
+    restart: unless-stopped
+    environment:
+      RAILS_ENV: production
+    depends_on:
+      - judge0-db
+      - judge0-redis
+    command: ["./scripts/server"]
+
+  judge0-worker:
+    image: judge0/judge0:1.13.1
+    volumes:
+      - ./judge0.conf:/judge0.conf:ro
+    privileged: true
+    restart: unless-stopped
+    environment:
+      RAILS_ENV: production
+    depends_on:
+      - judge0-db
+      - judge0-redis
+    command: ["./scripts/workers"]
+
+  judge0-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: judge0
+      POSTGRES_USER: judge0
+      POSTGRES_PASSWORD: ${JUDGE0_DB_PASSWORD:-changeme}
+    volumes:
+      - judge0_postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  judge0-redis:
+    image: redis:7-alpine
+    command: redis-server --requirepass ${JUDGE0_REDIS_PASSWORD:-changeme}
+    volumes:
+      - judge0_redis_data:/data
+    restart: unless-stopped
+
+volumes:
+  judge0_postgres_data:
+  judge0_redis_data:

@@ -1,10 +1,14 @@
-import { db, problems, submissions } from "@code-world/db"
+import { db, problems, submissions, users } from "@code-world/db"
 import { CreateProblemSchema } from "@code-world/types"
-import { and, count, eq } from "drizzle-orm"
-import { Hono } from "hono"
 import { zValidator } from "@hono/zod-validator"
+import { and, count, eq, inArray } from "drizzle-orm"
+import { Hono } from "hono"
+import { auth } from "../lib/auth"
 
 export const problemsRouter = new Hono()
+
+const VALID_CATEGORIES = ["sql", "debug", "design", "review", "algorithm"] as const
+type ValidCategory = (typeof VALID_CATEGORIES)[number]
 
 // GET /problems — list approved problems with solved_count
 problemsRouter.get("/", async (c) => {
@@ -12,8 +16,8 @@ problemsRouter.get("/", async (c) => {
   const difficulty = c.req.query("difficulty")
 
   const filters = [eq(problems.status, "approved")]
-  if (category) {
-    filters.push(eq(problems.category, category as "sql" | "debug" | "design" | "review"))
+  if (category && VALID_CATEGORIES.includes(category as ValidCategory)) {
+    filters.push(eq(problems.category, category as ValidCategory))
   }
   if (difficulty !== undefined && difficulty !== "") {
     filters.push(eq(problems.difficulty, Number(difficulty)))
@@ -44,7 +48,37 @@ problemsRouter.get("/", async (c) => {
     .orderBy(problems.difficulty, problems.createdAt)
     .limit(50)
 
-  return c.json({ data: rows })
+  // Check session to return per-user solved status
+  const session = await auth.api.getSession({ headers: c.req.raw.headers })
+  const sessionEmail = session?.user?.email ?? null
+
+  if (sessionEmail) {
+    const gameUser = await db.query.users.findFirst({
+      where: (u, { eq: eqFn }) => eqFn(u.email, sessionEmail),
+    })
+    const playerId = gameUser?.id ?? null
+
+    if (playerId) {
+      const problemIds = rows.map((r) => r.id)
+      const solvedRows =
+        problemIds.length > 0
+          ? await db
+              .selectDistinct({ problemId: submissions.problemId })
+              .from(submissions)
+              .where(
+                and(
+                  eq(submissions.playerId, playerId),
+                  eq(submissions.result, "accepted"),
+                  inArray(submissions.problemId, problemIds),
+                ),
+              )
+          : []
+      const solvedSet = new Set(solvedRows.map((r) => r.problemId))
+      return c.json({ data: rows.map((r) => ({ ...r, solved: solvedSet.has(r.id) })) })
+    }
+  }
+
+  return c.json({ data: rows.map((r) => ({ ...r, solved: false })) })
 })
 
 // GET /problems/:id — return full problem with solved_count
@@ -81,20 +115,16 @@ problemsRouter.get("/:id", async (c) => {
 })
 
 // POST /problems — create (requires auth)
-problemsRouter.post(
-  "/",
-  zValidator("json", CreateProblemSchema),
-  async (c) => {
-    const body = c.req.valid("json")
+problemsRouter.post("/", zValidator("json", CreateProblemSchema), async (c) => {
+  const body = c.req.valid("json")
 
-    const [row] = await db
-      .insert(problems)
-      .values({
-        ...body,
-        status: "pending",
-      })
-      .returning()
+  const [row] = await db
+    .insert(problems)
+    .values({
+      ...body,
+      status: "pending",
+    })
+    .returning()
 
-    return c.json({ data: row }, 201)
-  },
-)
+  return c.json({ data: row }, 201)
+})

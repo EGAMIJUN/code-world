@@ -1,4 +1,4 @@
-'use client'
+"use client"
 
 import dynamic from "next/dynamic"
 import { useCallback, useState } from "react"
@@ -35,41 +35,15 @@ interface SubmissionResult {
   }
 }
 
-const RESULT_CONFIG: Record<
-  NonNullable<JudgeResult>,
-  { icon: string; label: string; className: string }
-> = {
-  accepted: {
-    icon: "✅",
-    label: "Accepted — 正解！",
-    className: "bg-green-50 border-green-200 text-green-800 dark:bg-green-950 dark:border-green-800 dark:text-green-200",
-  },
-  wrong_answer: {
-    icon: "❌",
-    label: "Wrong Answer — 不正解",
-    className: "bg-red-50 border-red-200 text-red-800 dark:bg-red-950 dark:border-red-800 dark:text-red-200",
-  },
-  runtime_error: {
-    icon: "⚠️",
-    label: "Runtime Error — 実行エラー",
-    className: "bg-yellow-50 border-yellow-200 text-yellow-800 dark:bg-yellow-950 dark:border-yellow-800 dark:text-yellow-200",
-  },
-  time_limit_exceeded: {
-    icon: "⏱️",
-    label: "Time Limit Exceeded — 時間超過",
-    className: "bg-orange-50 border-orange-200 text-orange-800 dark:bg-orange-950 dark:border-orange-800 dark:text-orange-200",
-  },
-}
-
 const DIFFICULTY_LABELS: Record<number, string> = {
-  0: "Lv.0 入門",
-  1: "Lv.1 基礎",
-  2: "Lv.2 中級",
-  3: "Lv.3 上級",
+  0: "Lv.0 BASIC",
+  1: "Lv.1 NORMAL",
+  2: "Lv.2 HARD",
+  3: "Lv.3 EXPERT",
 }
 
 export default function ProblemEditor({ problem }: { problem: Problem }) {
-  const [code, setCode] = useState("-- ここにSQLを書いてください\nSELECT ")
+  const [code, setCode] = useState("-- HACK THE SYSTEM\nSELECT ")
   const [status, setStatus] = useState<SubmissionStatus>("idle")
   const [result, setResult] = useState<JudgeResultOrNull>(null)
   const [feedback, setFeedback] = useState<Record<string, unknown> | null>(null)
@@ -120,6 +94,7 @@ export default function ProblemEditor({ problem }: { problem: Problem }) {
       const res = await fetch(`${apiUrl}/api/submissions`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        credentials: "include",
         body: JSON.stringify({
           problemId: problem.id,
           code,
@@ -127,8 +102,17 @@ export default function ProblemEditor({ problem }: { problem: Problem }) {
         }),
       })
 
-      if (!res.ok) {
+      if (res.status === 401) {
         setStatus("done")
+        setFeedback({ message: "LOGIN REQUIRED — ACCESS DENIED" })
+        setResult("runtime_error")
+        return
+      }
+
+      if (!res.ok) {
+        const errJson = (await res.json().catch(() => ({}))) as { error?: string }
+        setStatus("done")
+        setFeedback({ message: errJson.error ?? "SUBMISSION FAILED" })
         setResult("runtime_error")
         return
       }
@@ -146,53 +130,116 @@ export default function ProblemEditor({ problem }: { problem: Problem }) {
   const diffLabel = DIFFICULTY_LABELS[problem.difficulty] ?? `Lv.${problem.difficulty}`
 
   return (
-    <div className="flex min-h-screen flex-col">
-      {/* Header */}
-      <header className="border-b bg-background px-6 py-4">
-        <div className="mx-auto max-w-7xl flex items-center justify-between">
-          <div>
-            <h1 className="text-xl font-bold">{problem.title}</h1>
-            <div className="mt-1 flex gap-2 text-xs">
-              <span className="rounded-full bg-primary/10 px-2 py-0.5 text-primary font-medium">
-                {diffLabel}
-              </span>
-              <span className="rounded-full bg-muted px-2 py-0.5 text-muted-foreground font-medium uppercase">
-                {problem.category}
-              </span>
-            </div>
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        minHeight: "100%",
+        background: "#000",
+        color: "#00ff41",
+        fontFamily: "monospace",
+      }}
+    >
+      {/* Sub-header */}
+      <div
+        style={{
+          flexShrink: 0,
+          borderBottom: "1px solid #003300",
+          background: "rgba(0,0,0,0.9)",
+          padding: "0.5rem 1rem",
+          display: "flex",
+          alignItems: "center",
+          gap: "1rem",
+        }}
+      >
+        <a
+          href="/problems"
+          style={{
+            color: "#00aa2a",
+            textDecoration: "none",
+            fontSize: "0.75rem",
+            letterSpacing: "0.15em",
+            whiteSpace: "nowrap",
+          }}
+        >
+          ← MISSIONS
+        </a>
+        <div style={{ width: "1px", height: "16px", background: "#003300", flexShrink: 0 }} />
+        <div style={{ minWidth: 0 }}>
+          <div
+            style={{
+              fontSize: "0.85rem",
+              fontWeight: "bold",
+              color: "#00ff41",
+              whiteSpace: "nowrap",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+            }}
+          >
+            {problem.title}
+          </div>
+          <div
+            style={{
+              fontSize: "0.65rem",
+              color: "#00aa2a",
+              letterSpacing: "0.15em",
+              marginTop: "0.1rem",
+            }}
+          >
+            {diffLabel} | {problem.category.toUpperCase()}
           </div>
         </div>
-      </header>
+      </div>
 
       {/* Main content */}
-      <div className="flex flex-1 overflow-hidden">
-        {/* Left pane — problem description */}
-        <div className="w-1/2 overflow-y-auto border-r p-6">
-          <div className="prose prose-sm dark:prose-invert max-w-none">
-            <div
-              className="whitespace-pre-wrap text-sm leading-relaxed"
-              dangerouslySetInnerHTML={{ __html: problem.body.description.replace(/\n/g, "<br/>") }}
-            />
-          </div>
+      <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
+        {/* Left pane - problem description */}
+        <div
+          style={{
+            width: "50%",
+            overflowY: "auto",
+            borderRight: "1px solid #003300",
+            padding: "1rem",
+            background: "rgba(0,5,0,0.9)",
+            fontSize: "0.8rem",
+            lineHeight: 1.7,
+            color: "#00cc33",
+          }}
+        >
+          <div
+            style={{ whiteSpace: "pre-wrap" }}
+            dangerouslySetInnerHTML={{ __html: problem.body.description.replace(/\n/g, "<br/>") }}
+          />
 
           {problem.body.hints && problem.body.hints.length > 0 && (
-            <div className="mt-6 space-y-2">
-              <h3 className="text-sm font-semibold">ヒント</h3>
+            <div style={{ marginTop: "1.5rem" }}>
               {problem.body.hints.map((hint) => (
-                <details key={hint.level} className="rounded-lg border p-3">
-                  <summary className="cursor-pointer text-sm font-medium">
-                    ヒント {hint.level}
+                <details
+                  key={hint.level}
+                  style={{ marginTop: "0.5rem", border: "1px solid #003300", padding: "0.5rem" }}
+                >
+                  <summary
+                    style={{
+                      cursor: "pointer",
+                      fontSize: "0.7rem",
+                      color: "#00aa2a",
+                      letterSpacing: "0.15em",
+                    }}
+                  >
+                    ▶ HINT {hint.level}
                   </summary>
-                  <p className="mt-2 text-sm text-muted-foreground">{hint.text}</p>
+                  <div style={{ paddingTop: "0.5rem", color: "#007700", fontSize: "0.75rem" }}>
+                    {hint.text}
+                  </div>
                 </details>
               ))}
             </div>
           )}
         </div>
 
-        {/* Right pane — Monaco Editor */}
-        <div className="flex w-1/2 flex-col">
-          <div className="flex-1">
+        {/* Right pane - editor */}
+        <div style={{ display: "flex", flexDirection: "column", width: "50%" }}>
+          <div style={{ flex: 1 }}>
             <MonacoEditor
               height="400px"
               language="sql"
@@ -201,38 +248,85 @@ export default function ProblemEditor({ problem }: { problem: Problem }) {
               onChange={(value) => setCode(value ?? "")}
               options={{
                 minimap: { enabled: false },
-                fontSize: 14,
+                fontSize: 13,
                 lineNumbers: "on",
                 scrollBeyondLastLine: false,
                 automaticLayout: true,
+                fontFamily: "monospace",
               }}
             />
           </div>
 
-          {/* Submit section */}
-          <div className="border-t bg-background p-4 space-y-3">
+          {/* Submit */}
+          <div
+            style={{
+              borderTop: "1px solid #003300",
+              background: "rgba(0,0,0,0.95)",
+              padding: "0.75rem 1rem",
+              display: "flex",
+              flexDirection: "column",
+              gap: "0.5rem",
+            }}
+          >
             <button
               type="button"
               onClick={handleSubmit}
               disabled={isLoading}
-              className="w-full rounded-lg bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+              style={{
+                background: isLoading ? "#001100" : "#003300",
+                color: "#00ff41",
+                border: "1px solid #00ff41",
+                padding: "0.6rem 1rem",
+                fontFamily: "monospace",
+                fontSize: "0.85rem",
+                letterSpacing: "0.2em",
+                cursor: isLoading ? "not-allowed" : "pointer",
+                opacity: isLoading ? 0.6 : 1,
+                textShadow: isLoading ? "none" : "0 0 8px #00ff41",
+                width: "100%",
+              }}
             >
-              {isLoading ? (
-                <span className="flex items-center justify-center gap-2">
-                  <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
-                  採点中...
-                </span>
-              ) : (
-                "実行"
-              )}
+              {isLoading
+                ? status === "submitting"
+                  ? "⟳ UPLOADING PAYLOAD..."
+                  : "⟳ EXECUTING..."
+                : "▶ EXECUTE PAYLOAD"}
             </button>
 
             {status === "done" && result !== null && result !== undefined && (
-              <div className={`rounded-lg border p-3 text-sm font-medium ${RESULT_CONFIG[result].className}`}>
-                <span className="mr-2">{RESULT_CONFIG[result].icon}</span>
-                {RESULT_CONFIG[result].label}
+              <div
+                style={{
+                  padding: "0.5rem 0.75rem",
+                  border: `1px solid ${
+                    result === "accepted"
+                      ? "#00ff41"
+                      : result === "wrong_answer"
+                        ? "#ff0040"
+                        : "#ff9900"
+                  }`,
+                  fontSize: "0.8rem",
+                  color:
+                    result === "accepted"
+                      ? "#00ff41"
+                      : result === "wrong_answer"
+                        ? "#ff0040"
+                        : "#ff9900",
+                  background:
+                    result === "accepted"
+                      ? "rgba(0,255,65,0.05)"
+                      : result === "wrong_answer"
+                        ? "rgba(255,0,64,0.05)"
+                        : "rgba(255,153,0,0.05)",
+                }}
+              >
+                {result === "accepted" && "✓ HIT — SYSTEM BREACHED"}
+                {result === "wrong_answer" && "✗ WRONG ANSWER — ACCESS DENIED"}
+                {result === "runtime_error" && "⚠ RUNTIME ERROR — SYSTEM COUNTERMEASURE"}
+                {result === "time_limit_exceeded" && "⏱ TIME LIMIT — CONNECTION TIMEOUT"}
                 {feedback && typeof feedback["message"] === "string" && (
-                  <p className="mt-1 font-normal opacity-80">{feedback["message"]}</p>
+                  <div style={{ marginTop: "0.25rem", fontSize: "0.7rem", opacity: 0.8 }}>
+                    {feedback["message"]}
+                  </div>
                 )}
               </div>
             )}

@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  ci:
+    name: Build & Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Lint (Biome)
+        run: bun run lint
+
+      - name: Build
+        run: bun run build
+        env:
+          # Dummy values so Next.js build doesn't fail on missing env
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/codeworld
+          REDIS_URL: redis://localhost:6379
+          BETTER_AUTH_SECRET: ci-dummy-secret-at-least-32-characters-long
+          BETTER_AUTH_URL: http://localhost:3001
+          NEXT_PUBLIC_API_URL: http://localhost:3001
+          GITHUB_CLIENT_ID: dummy
+          GITHUB_CLIENT_SECRET: dummy

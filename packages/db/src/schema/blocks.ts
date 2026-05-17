@@ -19,7 +19,9 @@ export const blocks = pgTable(
     meta: jsonb("meta"),
     placedAt: timestamp("placed_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [unique("blocks_world_position_unique").on(t.worldId, t.positionX, t.positionY, t.positionZ)],
+  (t) => [
+    unique("blocks_world_position_unique").on(t.worldId, t.positionX, t.positionY, t.positionZ),
+  ],
 )
 
 export type Block = typeof blocks.$inferSelect

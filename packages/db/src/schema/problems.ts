@@ -1,13 +1,28 @@
-import { boolean, integer, jsonb, pgEnum, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core"
+import {
+  boolean,
+  integer,
+  jsonb,
+  pgEnum,
+  pgTable,
+  text,
+  timestamp,
+  uuid,
+} from "drizzle-orm/pg-core"
 import { users } from "./users"
 
-export const problemCategoryEnum = pgEnum("problem_category", ["sql", "debug", "design", "review"])
+export const problemCategoryEnum = pgEnum("problem_category", [
+  "sql",
+  "debug",
+  "design",
+  "review",
+  "algorithm",
+])
 export const problemStatusEnum = pgEnum("problem_status", ["pending", "approved", "rejected"])
 
 export const problems = pgTable("problems", {
   id: uuid("id").primaryKey().defaultRandom(),
   authorId: uuid("author_id").references(() => users.id, { onDelete: "set null" }),
-  title: text("title").notNull(),
+  title: text("title").notNull().unique(),
   category: problemCategoryEnum("category").notNull(),
   // 0=beginner, 1=elementary, 2=intermediate, 3=advanced
   difficulty: integer("difficulty").notNull(),

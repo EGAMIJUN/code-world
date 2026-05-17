@@ -1,6 +1,6 @@
 import { z } from "zod"
 
-export const ProblemCategorySchema = z.enum(["sql", "debug", "design", "review"])
+export const ProblemCategorySchema = z.enum(["sql", "debug", "design", "review", "algorithm"])
 export const ProblemStatusSchema = z.enum(["pending", "approved", "rejected"])
 export const ProblemDifficultySchema = z.union([
   z.literal(0),

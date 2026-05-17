@@ -1,11 +1,6 @@
 import { z } from "zod"
 
-export const UserLevelSchema = z.union([
-  z.literal(0),
-  z.literal(1),
-  z.literal(2),
-  z.literal(3),
-])
+export const UserLevelSchema = z.number().int().nonnegative()
 
 export const UserSchema = z.object({
   id: z.string().uuid(),
