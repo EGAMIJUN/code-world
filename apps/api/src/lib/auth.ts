@@ -15,8 +15,10 @@ export const auth = betterAuth({
     },
   }),
   trustedOrigins: [
+    "https://code-worldweb-production.up.railway.app",
     process.env["BETTER_AUTH_URL"] ?? "http://localhost:3001",
     process.env["WEB_URL"] ?? "http://localhost:3000",
+    "http://localhost:3000",
   ],
   emailAndPassword: {
     enabled: true,
