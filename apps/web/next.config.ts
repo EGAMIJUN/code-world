@@ -8,12 +8,9 @@ const nextConfig: NextConfig = {
 }
 
 export default withSentryConfig(nextConfig, {
-  org: process.env["SENTRY_ORG"],
+  org: process.env["SENTRY_ORG"] ?? "my-org",
   project: process.env["SENTRY_PROJECT"] ?? "code-world",
-  // Source maps are uploaded only when SENTRY_AUTH_TOKEN is set (CI/CD)
   silent: !process.env["CI"],
-  // Disable source map upload in local dev to avoid CLI prompts
   sourcemaps: { disable: !process.env["SENTRY_AUTH_TOKEN"] },
-  // Avoid adding Sentry auto-instrumentation in dev when DSN is absent
   autoInstrumentServerFunctions: !!process.env["SENTRY_DSN"],
 })
