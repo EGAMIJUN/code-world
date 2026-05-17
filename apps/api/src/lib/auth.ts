@@ -20,6 +20,15 @@ export const auth = betterAuth({
     process.env["WEB_URL"] ?? "http://localhost:3000",
     "http://localhost:3000",
   ],
+  advanced: {
+    crossSubdomainCookies: {
+      enabled: false,
+    },
+    defaultCookieAttributes: {
+      sameSite: "none",
+      secure: true,
+    },
+  },
   emailAndPassword: {
     enabled: true,
   },
