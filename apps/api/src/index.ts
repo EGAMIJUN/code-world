@@ -54,6 +54,7 @@ app.use(prettyJSON())
 app.use(
   cors({
     origin: [
+      "https://code-worldweb-production.up.railway.app",
       process.env["NEXT_PUBLIC_WEB_URL"] ?? "http://localhost:3000",
       process.env["WEB_URL"] ?? "http://localhost:3000",
     ],
