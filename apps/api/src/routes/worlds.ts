@@ -52,6 +52,44 @@ async function getOrCreateGameUser(authUser: AuthUser) {
   return user!
 }
 
+const SYSTEM_EMAIL = "system@code-world.internal"
+const SYSTEM_USERNAME = "system"
+
+async function getOrCreateSharedWorld() {
+  let sysUser = await db.query.users.findFirst({
+    where: (u, { eq: eqFn }) => eqFn(u.email, SYSTEM_EMAIL),
+  })
+  if (!sysUser) {
+    const [inserted] = await db
+      .insert(users)
+      .values({ email: SYSTEM_EMAIL, username: SYSTEM_USERNAME, displayName: "CODE WORLD" })
+      .returning()
+    sysUser = inserted!
+  }
+
+  let world = await db.query.worlds.findFirst({
+    where: (w, { eq: eqFn }) => eqFn(w.ownerId, sysUser!.id),
+  })
+  if (!world) {
+    const [newWorld] = await db
+      .insert(worlds)
+      .values({ ownerId: sysUser!.id, name: "CODE WORLD — Shared", isPublic: true })
+      .returning()
+    world = newWorld!
+  }
+
+  return world
+}
+
+// GET /worlds/shared — shared world for all players
+worldsRouter.get("/shared", async (c) => {
+  const session = await auth.api.getSession({ headers: c.req.raw.headers })
+  if (!session) return c.json({ error: "Unauthorized" }, 401)
+
+  const world = await getOrCreateSharedWorld()
+  return c.json({ data: world })
+})
+
 // GET /worlds/user/:userId — get another player's world (public, read-only)
 worldsRouter.get("/user/:userId", async (c) => {
   const userId = c.req.param("userId")
@@ -115,12 +153,12 @@ worldsRouter.post("/:id/blocks", zValidator("json", PlaceGameBlockSchema), async
   const worldId = c.req.param("id")
   const body = c.req.valid("json")
 
-  // Verify world belongs to this user
+  // Verify world exists
   const world = await db.query.worlds.findFirst({
     where: (w, { eq: eqFn }) => eqFn(w.id, worldId),
   })
-  if (!world || world.ownerId !== user.id) {
-    return c.json({ error: "Forbidden" }, 403)
+  if (!world) {
+    return c.json({ error: "World not found" }, 404)
   }
 
   // Check inventory

@@ -106,7 +106,9 @@ app.get(
         } else if (msg["type"] === "chat") {
           const { worldId } = meta
           if (!worldId) return
-          const text = String(msg["text"] ?? "").slice(0, 200).trim()
+          const text = String(msg["text"] ?? "")
+            .slice(0, 200)
+            .trim()
           if (!text) return
           const from = String(msg["from"] ?? "Player")
           const packet = JSON.stringify({ type: "chat", from, text })

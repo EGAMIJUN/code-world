@@ -1,6 +1,8 @@
 "use client"
 
+import { useRouter } from "next/navigation"
 import { useEffect, useState } from "react"
+import { signOut } from "../../lib/auth-client"
 
 const API_URL = process.env["NEXT_PUBLIC_API_URL"] ?? "http://localhost:3001"
 
@@ -53,9 +55,15 @@ function computeXpProgress(totalXp: number): {
 }
 
 export default function ProfilePage() {
+  const router = useRouter()
   const [profile, setProfile] = useState<ProfileData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+
+  const handleLogout = async () => {
+    await signOut()
+    router.push("/login")
+  }
 
   useEffect(() => {
     fetch(`${API_URL}/api/profile/me`, { credentials: "include" })
@@ -330,7 +338,7 @@ export default function ProfilePage() {
         </div>
 
         {/* Links */}
-        <div style={{ display: "flex", gap: "0.75rem" }}>
+        <div style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap" }}>
           <a
             href="/problems"
             style={{
@@ -358,6 +366,22 @@ export default function ProfilePage() {
           >
             ▷ WORLD
           </a>
+          <button
+            type="button"
+            onClick={handleLogout}
+            style={{
+              color: "#ff0040",
+              border: "1px solid #ff0040",
+              padding: "0.5rem 1.5rem",
+              fontSize: "0.8rem",
+              letterSpacing: "0.15em",
+              background: "transparent",
+              fontFamily: "monospace",
+              cursor: "pointer",
+            }}
+          >
+            ▷ LOGOUT
+          </button>
         </div>
       </div>
     </div>

@@ -61,7 +61,9 @@ export default function ProblemEditor({ problem }: { problem: Problem }) {
       await new Promise((resolve) => setTimeout(resolve, 800))
 
       try {
-        const res = await fetch(`${apiUrl}/api/submissions/${submissionId}`, { credentials: "include" })
+        const res = await fetch(`${apiUrl}/api/submissions/${submissionId}`, {
+          credentials: "include",
+        })
         if (!res.ok) {
           setStatus("done")
           setResult("runtime_error")

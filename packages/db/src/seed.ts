@@ -989,10 +989,17 @@ const pythonProblemDefs: SeedProblem[] = [
       setup: "",
       expectedOutput: [],
       hints: [
-        { level: 1, text: "`sorted(list)` は新しいリストを返す。`list.sort()` はインプレースでソートする。" },
-        { level: 2, text: "リスト内包表記: `[x for x in list if 条件]` で条件に合う要素を抽出できる。" },
+        {
+          level: 1,
+          text: "`sorted(list)` は新しいリストを返す。`list.sort()` はインプレースでソートする。",
+        },
+        {
+          level: 2,
+          text: "リスト内包表記: `[x for x in list if 条件]` で条件に合う要素を抽出できる。",
+        },
       ],
-      explanation: "`sorted()` でソート、スライス `[:3]` で先頭3件、リスト内包表記で条件フィルタリングを行う。",
+      explanation:
+        "`sorted()` でソート、スライス `[:3]` で先頭3件、リスト内包表記で条件フィルタリングを行う。",
     },
     isOfficial: true,
     status: "approved",
@@ -1006,10 +1013,17 @@ const pythonProblemDefs: SeedProblem[] = [
       setup: "",
       expectedOutput: [],
       hints: [
-        { level: 1, text: "`dict.get(key, default)` はキーが存在しない場合でも例外を起こさずデフォルト値を返す。" },
-        { level: 2, text: "`for key, value in dict.items():` で辞書のすべてのキーと値をループできる。" },
+        {
+          level: 1,
+          text: "`dict.get(key, default)` はキーが存在しない場合でも例外を起こさずデフォルト値を返す。",
+        },
+        {
+          level: 2,
+          text: "`for key, value in dict.items():` で辞書のすべてのキーと値をループできる。",
+        },
       ],
-      explanation: "辞書はキー→値のマッピング。`.get()`で安全アクセス、`.items()`でループ、直接代入で更新・追加。",
+      explanation:
+        "辞書はキー→値のマッピング。`.get()`で安全アクセス、`.items()`でループ、直接代入で更新・追加。",
     },
     isOfficial: true,
     status: "approved",
@@ -1023,10 +1037,17 @@ const pythonProblemDefs: SeedProblem[] = [
       setup: "",
       expectedOutput: [],
       hints: [
-        { level: 1, text: "`enumerate(list)` は `(index, value)` のタプルを返す。インデックスと値を同時に取得できる。" },
-        { level: 2, text: "`continue` は現在のループを次に進める。`break` はループ全体を終了する。" },
+        {
+          level: 1,
+          text: "`enumerate(list)` は `(index, value)` のタプルを返す。インデックスと値を同時に取得できる。",
+        },
+        {
+          level: 2,
+          text: "`continue` は現在のループを次に進める。`break` はループ全体を終了する。",
+        },
       ],
-      explanation: "`for`ループで順次処理、`enumerate`でインデックス付きループ、`continue`/`break`でフロー制御を行う。",
+      explanation:
+        "`for`ループで順次処理、`enumerate`でインデックス付きループ、`continue`/`break`でフロー制御を行う。",
     },
     isOfficial: true,
     status: "approved",
@@ -1040,10 +1061,17 @@ const pythonProblemDefs: SeedProblem[] = [
       setup: "",
       expectedOutput: [],
       hints: [
-        { level: 1, text: "デフォルト引数は `def func(arg=default):` のように定義する。呼び出し時に省略可能。" },
-        { level: 2, text: "`map(function, iterable)` はiterable の各要素に関数を適用し、新しいイテレータを返す。" },
+        {
+          level: 1,
+          text: "デフォルト引数は `def func(arg=default):` のように定義する。呼び出し時に省略可能。",
+        },
+        {
+          level: 2,
+          text: "`map(function, iterable)` はiterable の各要素に関数を適用し、新しいイテレータを返す。",
+        },
       ],
-      explanation: "関数定義でコードを再利用可能に。デフォルト引数で柔軟性を確保。ラムダと高階関数でFP的なスタイルを活用。",
+      explanation:
+        "関数定義でコードを再利用可能に。デフォルト引数で柔軟性を確保。ラムダと高階関数でFP的なスタイルを活用。",
     },
     isOfficial: true,
     status: "approved",
@@ -1057,10 +1085,17 @@ const pythonProblemDefs: SeedProblem[] = [
       setup: "",
       expectedOutput: [],
       hints: [
-        { level: 1, text: "`super().__init__(...)` で親クラスの初期化メソッドを呼び出す。継承時に必須。" },
-        { level: 2, text: "`@property` デコレータで属性のように見えるメソッドを定義できる（getter）。" },
+        {
+          level: 1,
+          text: "`super().__init__(...)` で親クラスの初期化メソッドを呼び出す。継承時に必須。",
+        },
+        {
+          level: 2,
+          text: "`@property` デコレータで属性のように見えるメソッドを定義できる（getter）。",
+        },
       ],
-      explanation: "クラスでデータと処理をまとめ、継承で機能を拡張。`@property`でカプセル化を実現し、`__repr__`でデバッグを容易に。",
+      explanation:
+        "クラスでデータと処理をまとめ、継承で機能を拡張。`@property`でカプセル化を実現し、`__repr__`でデバッグを容易に。",
     },
     isOfficial: true,
     status: "approved",
@@ -1078,10 +1113,17 @@ const jsProblemDefs: SeedProblem[] = [
       setup: "",
       expectedOutput: [],
       hints: [
-        { level: 1, text: "`array.filter(fn)` は条件を満たす要素のみを含む新しい配列を返す。元の配列は変更しない。" },
-        { level: 2, text: "`array.reduce((acc, cur) => ..., initial)` で配列を単一の値に集約できる。" },
+        {
+          level: 1,
+          text: "`array.filter(fn)` は条件を満たす要素のみを含む新しい配列を返す。元の配列は変更しない。",
+        },
+        {
+          level: 2,
+          text: "`array.reduce((acc, cur) => ..., initial)` で配列を単一の値に集約できる。",
+        },
       ],
-      explanation: "配列メソッド `filter`/`map`/`reduce`/`find` は関数型スタイルで配列を操作する強力なツール。メソッドチェーンで組み合わせると効果的。",
+      explanation:
+        "配列メソッド `filter`/`map`/`reduce`/`find` は関数型スタイルで配列を操作する強力なツール。メソッドチェーンで組み合わせると効果的。",
     },
     isOfficial: true,
     status: "approved",
@@ -1095,10 +1137,17 @@ const jsProblemDefs: SeedProblem[] = [
       setup: "",
       expectedOutput: [],
       hints: [
-        { level: 1, text: "`async` 関数は常にPromiseを返す。`await` はPromiseが解決されるまで実行を一時停止する。" },
-        { level: 2, text: "`Promise.all([p1, p2])` は全てのPromiseが解決されるまで待ち、結果の配列を返す。" },
+        {
+          level: 1,
+          text: "`async` 関数は常にPromiseを返す。`await` はPromiseが解決されるまで実行を一時停止する。",
+        },
+        {
+          level: 2,
+          text: "`Promise.all([p1, p2])` は全てのPromiseが解決されるまで待ち、結果の配列を返す。",
+        },
       ],
-      explanation: "async/awaitはPromiseのシンタックスシュガー。try/catchでエラーを処理し、Promise.allで並列実行を最適化する。",
+      explanation:
+        "async/awaitはPromiseのシンタックスシュガー。try/catchでエラーを処理し、Promise.allで並列実行を最適化する。",
     },
     isOfficial: true,
     status: "approved",
@@ -1112,10 +1161,17 @@ const jsProblemDefs: SeedProblem[] = [
       setup: "",
       expectedOutput: [],
       hints: [
-        { level: 1, text: "`document.querySelector(selector)` はCSSセレクタで最初に一致する要素を返す。見つからない場合は `null`。" },
-        { level: 2, text: "`element.addEventListener('click', callback)` でクリックイベントを監視。`event.target` でクリックされた要素にアクセスできる。" },
+        {
+          level: 1,
+          text: "`document.querySelector(selector)` はCSSセレクタで最初に一致する要素を返す。見つからない場合は `null`。",
+        },
+        {
+          level: 2,
+          text: "`element.addEventListener('click', callback)` でクリックイベントを監視。`event.target` でクリックされた要素にアクセスできる。",
+        },
       ],
-      explanation: "DOM APIでHTMLを動的に操作。createElement→setAttribute→addEventListener→appendChildの順で要素を作成し機能を付加する。",
+      explanation:
+        "DOM APIでHTMLを動的に操作。createElement→setAttribute→addEventListener→appendChildの順で要素を作成し機能を付加する。",
     },
     isOfficial: true,
     status: "approved",
@@ -1129,10 +1185,17 @@ const jsProblemDefs: SeedProblem[] = [
       setup: "",
       expectedOutput: [],
       hints: [
-        { level: 1, text: "クロージャは関数が定義されたスコープの変数を「閉じ込める」。関数が返されても、その変数は生き続ける。" },
-        { level: 2, text: "IIFE（即時実行関数式）: `(() => { ... })()` でスクリプト実行時に一度だけ実行。スコープ汚染を防ぐ。" },
+        {
+          level: 1,
+          text: "クロージャは関数が定義されたスコープの変数を「閉じ込める」。関数が返されても、その変数は生き続ける。",
+        },
+        {
+          level: 2,
+          text: "IIFE（即時実行関数式）: `(() => { ... })()` でスクリプト実行時に一度だけ実行。スコープ汚染を防ぐ。",
+        },
       ],
-      explanation: "クロージャで変数を外部から隠蔽し、公開APIのみを返すことでカプセル化を実現。IIFEはモジュールパターンに活用される。",
+      explanation:
+        "クロージャで変数を外部から隠蔽し、公開APIのみを返すことでカプセル化を実現。IIFEはモジュールパターンに活用される。",
     },
     isOfficial: true,
     status: "approved",
@@ -1146,10 +1209,17 @@ const jsProblemDefs: SeedProblem[] = [
       setup: "",
       expectedOutput: [],
       hints: [
-        { level: 1, text: "分割代入 `const { a, b } = obj` はオブジェクトのプロパティを変数に展開する。配列も `const [x, y] = arr` で同様に使える。" },
-        { level: 2, text: "オプショナルチェーン `obj?.prop` はobjがnull/undefinedの場合、例外を投げずundefinedを返す。`??` はnull/undefinedの場合のフォールバック。" },
+        {
+          level: 1,
+          text: "分割代入 `const { a, b } = obj` はオブジェクトのプロパティを変数に展開する。配列も `const [x, y] = arr` で同様に使える。",
+        },
+        {
+          level: 2,
+          text: "オプショナルチェーン `obj?.prop` はobjがnull/undefinedの場合、例外を投げずundefinedを返す。`??` はnull/undefinedの場合のフォールバック。",
+        },
       ],
-      explanation: "ES6+の機能（分割代入・スプレッド・テンプレートリテラル・オプショナルチェーン）でコードを簡潔で安全に記述できる。",
+      explanation:
+        "ES6+の機能（分割代入・スプレッド・テンプレートリテラル・オプショナルチェーン）でコードを簡潔で安全に記述できる。",
     },
     isOfficial: true,
     status: "approved",
@@ -1167,10 +1237,17 @@ const csProblemDefs: SeedProblem[] = [
       setup: "",
       expectedOutput: [],
       hints: [
-        { level: 1, text: "LINQのメソッドチェーン: `Where().OrderBy().Select().ToList()` のように繋げて処理を記述する。" },
-        { level: 2, text: "`GroupBy(keySelector).ToDictionary(g => g.Key, g => g.Count())` でグループ集計を辞書に変換できる。" },
+        {
+          level: 1,
+          text: "LINQのメソッドチェーン: `Where().OrderBy().Select().ToList()` のように繋げて処理を記述する。",
+        },
+        {
+          level: 2,
+          text: "`GroupBy(keySelector).ToDictionary(g => g.Key, g => g.Count())` でグループ集計を辞書に変換できる。",
+        },
       ],
-      explanation: "LINQはSQL風のクエリをC#コードとして記述できる。`Where`でフィルタ、`Select`で射影、`GroupBy`で集計、`OrderBy`でソート。",
+      explanation:
+        "LINQはSQL風のクエリをC#コードとして記述できる。`Where`でフィルタ、`Select`で射影、`GroupBy`で集計、`OrderBy`でソート。",
     },
     isOfficial: true,
     status: "approved",
@@ -1184,10 +1261,17 @@ const csProblemDefs: SeedProblem[] = [
       setup: "",
       expectedOutput: [],
       hints: [
-        { level: 1, text: "`abstract` メソッドは定義のみで実装を持たない。派生クラスで `override` して実装する必要がある。" },
-        { level: 2, text: "インターフェース型で配列を作ると、実際の型に関わらず同じメソッドを呼び出せる（ポリモーフィズム）。" },
+        {
+          level: 1,
+          text: "`abstract` メソッドは定義のみで実装を持たない。派生クラスで `override` して実装する必要がある。",
+        },
+        {
+          level: 2,
+          text: "インターフェース型で配列を作ると、実際の型に関わらず同じメソッドを呼び出せる（ポリモーフィズム）。",
+        },
       ],
-      explanation: "インターフェースで契約を定義し、抽象クラスで共通実装を提供。継承で機能を拡張し、基底型でポリモーフィックに操作する。",
+      explanation:
+        "インターフェースで契約を定義し、抽象クラスで共通実装を提供。継承で機能を拡張し、基底型でポリモーフィックに操作する。",
     },
     isOfficial: true,
     status: "approved",
@@ -1201,10 +1285,17 @@ const csProblemDefs: SeedProblem[] = [
       setup: "",
       expectedOutput: [],
       hints: [
-        { level: 1, text: "`async` メソッドは `Task` または `Task<T>` を返す。`await` は非同期操作の完了を待ち、スレッドをブロックしない。" },
-        { level: 2, text: "`Task.WhenAll(t1, t2)` は全タスクが完了するまで待ち、結果の配列を返す。例外が発生するとAggregateExceptionをスローする。" },
+        {
+          level: 1,
+          text: "`async` メソッドは `Task` または `Task<T>` を返す。`await` は非同期操作の完了を待ち、スレッドをブロックしない。",
+        },
+        {
+          level: 2,
+          text: "`Task.WhenAll(t1, t2)` は全タスクが完了するまで待ち、結果の配列を返す。例外が発生するとAggregateExceptionをスローする。",
+        },
       ],
-      explanation: "async/awaitでUIスレッドをブロックせずに非同期処理を実行。Task.WhenAllで並列実行して全体の処理時間を短縮する。",
+      explanation:
+        "async/awaitでUIスレッドをブロックせずに非同期処理を実行。Task.WhenAllで並列実行して全体の処理時間を短縮する。",
     },
     isOfficial: true,
     status: "approved",
@@ -1218,10 +1309,17 @@ const csProblemDefs: SeedProblem[] = [
       setup: "",
       expectedOutput: [],
       hints: [
-        { level: 1, text: "`HashSet<T>` は重複を自動的に排除する。`Add()` の戻り値は追加された場合 `true`、重複の場合 `false`。" },
-        { level: 2, text: "ジェネリクスメソッド `Method<T>()` は型を引数にとる。呼び出し時に型を指定する（多くの場合は型推論で省略可）。" },
+        {
+          level: 1,
+          text: "`HashSet<T>` は重複を自動的に排除する。`Add()` の戻り値は追加された場合 `true`、重複の場合 `false`。",
+        },
+        {
+          level: 2,
+          text: "ジェネリクスメソッド `Method<T>()` は型を引数にとる。呼び出し時に型を指定する（多くの場合は型推論で省略可）。",
+        },
       ],
-      explanation: "List<T>はインデックスアクセス、Dictionary<K,V>は高速なキー検索、HashSet<T>は重複排除、Stack<T>はLIFO操作に最適。",
+      explanation:
+        "List<T>はインデックスアクセス、Dictionary<K,V>は高速なキー検索、HashSet<T>は重複排除、Stack<T>はLIFO操作に最適。",
     },
     isOfficial: true,
     status: "approved",
@@ -1235,10 +1333,17 @@ const csProblemDefs: SeedProblem[] = [
       setup: "",
       expectedOutput: [],
       hints: [
-        { level: 1, text: "`catch (ExType ex) when (condition)` は例外フィルタ。例外の型に加えてconditionがtrueの場合のみキャッチする。" },
-        { level: 2, text: "`finally` ブロックは例外の有無にかかわらず必ず実行される。DBやファイルのクリーンアップに使う。" },
+        {
+          level: 1,
+          text: "`catch (ExType ex) when (condition)` は例外フィルタ。例外の型に加えてconditionがtrueの場合のみキャッチする。",
+        },
+        {
+          level: 2,
+          text: "`finally` ブロックは例外の有無にかかわらず必ず実行される。DBやファイルのクリーンアップに使う。",
+        },
       ],
-      explanation: "カスタム例外で意味のあるエラー情報を伝達。`when`フィルタで細かい条件分岐、`finally`でリソースを確実に解放する。",
+      explanation:
+        "カスタム例外で意味のあるエラー情報を伝達。`when`フィルタで細かい条件分岐、`finally`でリソースを確実に解放する。",
     },
     isOfficial: true,
     status: "approved",
@@ -1561,19 +1666,17 @@ interface WorldBlock {
 
 function fill(x0: number, y0: number, x1: number, y1: number, blockType: string): WorldBlock[] {
   const out: WorldBlock[] = []
-  for (let x = x0; x <= x1; x++)
-    for (let y = y0; y <= y1; y++)
-      out.push({ x, y, blockType })
+  for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) out.push({ x, y, blockType })
   return out
 }
 
 const _blockSeen = new Set<string>()
 const CYBERPUNK_WORLD_BLOCKS: WorldBlock[] = [
   // ── SQL District: ビル群 (stone_block, tx 0–9) ────────────────────────────
-  ...fill(0, 3, 2, 5, "stone_block"),   // ビルA
-  ...fill(5, 2, 7, 4, "stone_block"),   // ビルB
+  ...fill(0, 3, 2, 5, "stone_block"), // ビルA
+  ...fill(5, 2, 7, 4, "stone_block"), // ビルB
   ...fill(0, 10, 2, 12, "stone_block"), // ビルC
-  ...fill(5, 9, 8, 11, "stone_block"),  // ビルD (4×3)
+  ...fill(5, 9, 8, 11, "stone_block"), // ビルD (4×3)
   ...fill(0, 18, 3, 20, "stone_block"), // ビルE (4×3)
   ...fill(6, 17, 8, 19, "stone_block"), // ビルF (tx上限=8、tx=9はForestと隣接)
   ...fill(1, 26, 3, 28, "stone_block"), // ビルG
@@ -1642,9 +1745,7 @@ const CYBERPUNK_WORLD_BLOCKS: WorldBlock[] = [
 export async function seedWorldBlocks() {
   console.log(`[Seed] Cyberpunk world blocks: ${CYBERPUNK_WORLD_BLOCKS.length} positions defined.`)
 
-  const allWorlds = await db
-    .select({ id: worlds.id, ownerId: worlds.ownerId })
-    .from(worlds)
+  const allWorlds = await db.select({ id: worlds.id, ownerId: worlds.ownerId }).from(worlds)
 
   if (allWorlds.length === 0) {
     console.log("[Seed] No worlds found. Create user accounts via the app first.")

@@ -298,7 +298,7 @@ export default function PhaserGame() {
     let game: PhaserGameHandle | null = null
 
     async function initGame() {
-      const worldRes = await fetch(`${API_URL}/api/worlds/my`, { credentials: "include" })
+      const worldRes = await fetch(`${API_URL}/api/worlds/shared`, { credentials: "include" })
       if (!worldRes.ok) {
         if (!cancelled)
           setError(worldRes.status === 401 ? "ログインが必要です" : "ワールドの取得に失敗しました")
@@ -1387,7 +1387,10 @@ export default function PhaserGame() {
           }}
         >
           ダンジョンで問題を解く → ブロック獲得 → ここに建設
-          <a href="/dungeon" style={{ color: "#00aa2a", marginLeft: "0.5rem", textDecoration: "underline" }}>
+          <a
+            href="/dungeon"
+            style={{ color: "#00aa2a", marginLeft: "0.5rem", textDecoration: "underline" }}
+          >
             /dungeon へ
           </a>
         </div>

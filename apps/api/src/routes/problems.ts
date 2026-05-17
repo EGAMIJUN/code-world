@@ -1,4 +1,4 @@
-import { db, problems, submissions, users } from "@code-world/db"
+import { db, problems, submissions } from "@code-world/db"
 import { CreateProblemSchema } from "@code-world/types"
 import { zValidator } from "@hono/zod-validator"
 import { and, count, eq, inArray } from "drizzle-orm"

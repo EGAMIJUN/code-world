@@ -1,9 +1,11 @@
 "use client"
 
+import { useRouter } from "next/navigation"
 import { useState } from "react"
 import { authClient } from "../../lib/auth-client"
 
 export default function SignupPage() {
+  const router = useRouter()
   const [name, setName] = useState("")
   const [email, setEmail] = useState("")
   const [password, setPassword] = useState("")
@@ -19,10 +21,12 @@ export default function SignupPage() {
         email,
         password,
         name,
-        callbackURL: "/world",
+        callbackURL: "/login",
       })
       if (result.error) {
         setError(result.error.message ?? "REGISTRATION FAILED")
+      } else {
+        router.push("/login")
       }
     } catch {
       setError("REGISTRATION FAILED")
