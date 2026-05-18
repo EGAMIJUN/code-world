@@ -660,10 +660,12 @@ export default function BattleClient({ dungeon }: { dungeon: DungeonWithRooms })
           zIndex: 10,
           borderBottom: "1px solid #003300",
           background: "rgba(0,0,0,0.9)",
-          padding: "0.5rem 1rem",
+          padding: isMobile ? "0.35rem 0.5rem" : "0.5rem 1rem",
           display: "flex",
-          gap: "1.5rem",
+          gap: isMobile ? "0.5rem" : "1.5rem",
           alignItems: "center",
+          overflowX: "auto",
+          flexWrap: "nowrap",
         }}
       >
         <a
@@ -725,44 +727,69 @@ export default function BattleClient({ dungeon }: { dungeon: DungeonWithRooms })
 
       {/* Battle area */}
       <div
-        style={{ flex: 1, display: "flex", overflow: "hidden", position: "relative", zIndex: 10 }}
+        style={{
+          flex: 1,
+          display: "flex",
+          overflow: "hidden",
+          position: "relative",
+          zIndex: 10,
+          flexDirection: isMobile ? "column" : "row",
+        }}
       >
-        {/* Left: Boss display */}
+        {/* Boss display: left column on desktop, compact strip on mobile */}
         <div
-          style={{
-            width: "260px",
-            minWidth: "260px",
-            borderRight: "1px solid #003300",
-            background: "rgba(0,0,0,0.85)",
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "center",
-            justifyContent: "center",
-            padding: "1rem",
-            gap: "0.75rem",
-          }}
+          style={
+            isMobile
+              ? {
+                  flexShrink: 0,
+                  height: "130px",
+                  borderBottom: "1px solid #003300",
+                  background: "rgba(0,0,0,0.85)",
+                  display: "flex",
+                  flexDirection: "row",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  padding: "0.5rem 1rem",
+                  gap: "0.75rem",
+                  overflow: "hidden",
+                }
+              : {
+                  width: "260px",
+                  minWidth: "260px",
+                  borderRight: "1px solid #003300",
+                  background: "rgba(0,0,0,0.85)",
+                  display: "flex",
+                  flexDirection: "column",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  padding: "1rem",
+                  gap: "0.75rem",
+                }
+          }
         >
-          <div
-            style={{
-              fontSize: "0.7rem",
-              color: "#ff3333",
-              letterSpacing: "0.2em",
-              animation: "glitch 1s infinite",
-            }}
-          >
-            ▶ HOSTILE AI DETECTED
-          </div>
+          {!isMobile && (
+            <div
+              style={{
+                fontSize: "0.7rem",
+                color: "#ff3333",
+                letterSpacing: "0.2em",
+                animation: "glitch 1s infinite",
+              }}
+            >
+              ▶ HOSTILE AI DETECTED
+            </div>
+          )}
           <pre
             style={{
               fontFamily: "monospace",
-              fontSize: "0.85rem",
+              fontSize: isMobile ? "0.5rem" : "0.85rem",
               color:
                 currentRoom?.roomType === "boss"
                   ? "#ff3333"
                   : currentRoom?.roomType === "miniboss"
                     ? "#ff9900"
                     : "#ff6666",
-              lineHeight: 1.3,
+              lineHeight: isMobile ? 1.2 : 1.3,
               textAlign: "center",
               textShadow:
                 currentRoom?.roomType === "boss"
@@ -771,29 +798,44 @@ export default function BattleClient({ dungeon }: { dungeon: DungeonWithRooms })
               whiteSpace: "pre",
               margin: 0,
               padding: 0,
+              flexShrink: 0,
             }}
           >
             {bossArt.join("\n")}
           </pre>
           <div
             style={{
-              fontSize: "0.9rem",
-              fontWeight: "bold",
-              letterSpacing: "0.15em",
-              color: "#ff3333",
-              textShadow: "0 0 10px #ff3333",
+              display: "flex",
+              flexDirection: "column",
+              gap: "0.3rem",
+              alignItems: isMobile ? "flex-start" : "center",
             }}
           >
-            {dungeon.bossName}
-          </div>
-          <div
-            style={{ fontSize: "0.7rem", color: "#aa0000", textAlign: "center", lineHeight: 1.4 }}
-          >
-            {currentRoom?.roomType === "boss"
-              ? "⚠ BOSS FORM ACTIVATED"
-              : currentRoom?.roomType === "miniboss"
-                ? "⚠ ELITE GUARD"
-                : "SYSTEM GUARDIAN"}
+            <div
+              style={{
+                fontSize: isMobile ? "0.8rem" : "0.9rem",
+                fontWeight: "bold",
+                letterSpacing: "0.15em",
+                color: "#ff3333",
+                textShadow: "0 0 10px #ff3333",
+              }}
+            >
+              {dungeon.bossName}
+            </div>
+            <div
+              style={{
+                fontSize: "0.65rem",
+                color: "#aa0000",
+                textAlign: isMobile ? "left" : "center",
+                lineHeight: 1.4,
+              }}
+            >
+              {currentRoom?.roomType === "boss"
+                ? "⚠ BOSS FORM"
+                : currentRoom?.roomType === "miniboss"
+                  ? "⚠ ELITE GUARD"
+                  : "SYSTEM GUARDIAN"}
+            </div>
           </div>
         </div>
 
@@ -907,13 +949,14 @@ export default function BattleClient({ dungeon }: { dungeon: DungeonWithRooms })
                 background: isLoading ? "#001100" : "#003300",
                 color: "#00ff41",
                 border: "1px solid #00ff41",
-                padding: "0.5rem 1.5rem",
+                padding: isMobile ? "0.75rem 2rem" : "0.5rem 1.5rem",
                 fontFamily: "monospace",
-                fontSize: "0.85rem",
+                fontSize: isMobile ? "1rem" : "0.85rem",
                 letterSpacing: "0.2em",
                 cursor: isLoading ? "not-allowed" : "pointer",
                 opacity: isLoading ? 0.6 : 1,
                 textShadow: isLoading ? "none" : "0 0 8px #00ff41",
+                flexShrink: 0,
               }}
             >
               {isLoading ? "⟳ EXECUTING..." : "▶ EXECUTE PAYLOAD"}

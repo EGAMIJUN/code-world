@@ -111,12 +111,10 @@ interface SceneRefs {
   blocksGrid: Map<string, number> // "x,y" → max z
   remoteMeshes: Map<string, THREE.Mesh>
   focalPoint: THREE.Vector3
-  theta: number
-  phi: number
-  radius: number
   groundPlane: THREE.Mesh
   raycaster: THREE.Raycaster
   pointer: THREE.Vector2
+  playerMesh: THREE.Mesh
 }
 
 export default function ThreeWorld() {
@@ -338,23 +336,21 @@ export default function ThreeWorld() {
       groundPlane.position.set((MAP_SIZE / 2) * TILE_UNIT, 0, (MAP_SIZE / 2) * TILE_UNIT)
       scene.add(groundPlane)
 
-      // ── Orbital state ──────────────────────────────────────────────────────
+      // ── Player + camera state ──────────────────────────────────────────────
       const focalPoint = new THREE.Vector3(
         (MAP_SIZE / 2) * TILE_UNIT,
         0,
         (MAP_SIZE / 2) * TILE_UNIT,
       )
-      const theta = -Math.PI / 4
-      const phi = (Math.PI * 50) / 180
-      const radius = 24
+      const camState = { theta: -Math.PI / 4, phi: (Math.PI * 55) / 180, radius: 14 }
 
       function updateCamera() {
         camera.position.set(
-          focalPoint.x + radius * Math.sin(phi) * Math.cos(theta),
-          focalPoint.y + radius * Math.cos(phi),
-          focalPoint.z + radius * Math.sin(phi) * Math.sin(theta),
+          focalPoint.x + camState.radius * Math.sin(camState.phi) * Math.cos(camState.theta),
+          focalPoint.y + camState.radius * Math.cos(camState.phi),
+          focalPoint.z + camState.radius * Math.sin(camState.phi) * Math.sin(camState.theta),
         )
-        camera.lookAt(focalPoint)
+        camera.lookAt(focalPoint.x, focalPoint.y + 0.9, focalPoint.z)
       }
       updateCamera()
 
@@ -365,6 +361,14 @@ export default function ThreeWorld() {
       const blocksGrid = new Map<string, number>()
       const remoteMeshes = new Map<string, THREE.Mesh>()
 
+      // ── Local player mesh (green capsule) ─────────────────────────────────
+      const playerGeo = new THREE.CapsuleGeometry(0.22, 0.5, 4, 8)
+      const playerMat = new THREE.MeshLambertMaterial({ color: 0x00ff41 })
+      const playerMesh = new THREE.Mesh(playerGeo, playerMat)
+      playerMesh.position.set(focalPoint.x, 0.5, focalPoint.z)
+      playerMesh.castShadow = true
+      scene.add(playerMesh)
+
       sceneRef.current = {
         scene,
         camera,
@@ -373,12 +377,10 @@ export default function ThreeWorld() {
         blocksGrid,
         remoteMeshes,
         focalPoint,
-        theta,
-        phi,
-        radius,
         groundPlane,
         raycaster,
         pointer,
+        playerMesh,
       }
 
       // Load initial blocks
@@ -399,10 +401,8 @@ export default function ThreeWorld() {
         if (Math.abs(dx) + Math.abs(dy) > 3) isDraggingRef.current = true
         lastMouseRef.current = { x: e.clientX, y: e.clientY }
         if (!isDraggingRef.current) return
-        const refs = sceneRef.current
-        if (!refs) return
-        refs.theta -= dx * 0.008
-        refs.phi = Math.max(Math.PI / 12, Math.min((Math.PI * 80) / 180, refs.phi + dy * 0.008))
+        camState.theta -= dx * 0.008
+        camState.phi = Math.max(Math.PI / 12, Math.min((Math.PI * 80) / 180, camState.phi + dy * 0.008))
         updateCamera()
       }
 
@@ -427,9 +427,7 @@ export default function ThreeWorld() {
       }
 
       function onWheel(e: WheelEvent) {
-        const refs = sceneRef.current
-        if (!refs) return
-        refs.radius = Math.max(5, Math.min(50, refs.radius + e.deltaY * 0.02))
+        camState.radius = Math.max(5, Math.min(50, camState.radius + e.deltaY * 0.02))
         updateCamera()
       }
 
@@ -480,8 +478,19 @@ export default function ThreeWorld() {
           refs.focalPoint.addScaledVector(forward, -vz * dt)
           refs.focalPoint.x = Math.max(0, Math.min(MAP_SIZE * TILE_UNIT, refs.focalPoint.x))
           refs.focalPoint.z = Math.max(0, Math.min(MAP_SIZE * TILE_UNIT, refs.focalPoint.z))
+
+          // Rotate player to face movement direction
+          const moveX = right.x * vx + forward.x * (-vz)
+          const moveZ = right.z * vx + forward.z * (-vz)
+          refs.playerMesh.rotation.y = Math.atan2(moveX, moveZ)
+
           updateCamera()
         }
+
+        // Sync local player mesh to focal point (player position)
+        refs.playerMesh.position.x = refs.focalPoint.x
+        refs.playerMesh.position.z = refs.focalPoint.z
+        refs.playerMesh.position.y = 0.5
 
         // Update remote player meshes
         const snapshot = remotePosRef.current
