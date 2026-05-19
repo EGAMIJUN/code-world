@@ -195,3 +195,23 @@ worldsRouter.post("/:id/blocks", zValidator("json", PlaceGameBlockSchema), async
 
   return c.json({ data: block }, 201)
 })
+
+// DELETE /worlds/:id/blocks/:blockId — destroy own block
+worldsRouter.delete("/:id/blocks/:blockId", async (c) => {
+  const session = await auth.api.getSession({ headers: c.req.raw.headers })
+  if (!session) return c.json({ error: "Unauthorized" }, 401)
+
+  const user = await getOrCreateGameUser(session.user)
+  const worldId = c.req.param("id")
+  const blockId = c.req.param("blockId")
+
+  const block = await db.query.blocks.findFirst({
+    where: (b, { and: andFn, eq: eqFn }) =>
+      andFn(eqFn(b.id, blockId), eqFn(b.worldId, worldId)),
+  })
+  if (!block) return c.json({ error: "Block not found" }, 404)
+  if (block.placedBy !== user.id) return c.json({ error: "自分が設置したブロックのみ破壊できます" }, 403)
+
+  await db.delete(blocks).where(eq(blocks.id, blockId))
+  return c.json({ data: { deleted: true } })
+})

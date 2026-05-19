@@ -300,6 +300,13 @@ app.get(
           worldRooms.get(worldId)!.set(socketId, { username, x, y })
           broadcastRoom(worldId)
 
+          // Notify existing players of new arrival
+          const joinPkt = JSON.stringify({ type: "chat", from: "SYSTEM", text: `${username} が入場しました` })
+          for (const [sid, m] of socketMeta) {
+            if (m.worldId !== worldId || sid === socketId) continue
+            try { m.ws.send(joinPkt) } catch { /* ignore */ }
+          }
+
           // Sync active tag game to newly joined player
           const tagGame = tagGames.get(worldId)
           if (tagGame) {
@@ -410,6 +417,14 @@ app.get(
         if (!meta?.worldId) return
         const worldId = meta.worldId
         const room = worldRooms.get(worldId)
+
+        // Notify remaining players of departure (socketMeta already deleted above)
+        const leavingUsername = room?.get(socketId)?.username ?? "Player"
+        const leavePkt = JSON.stringify({ type: "chat", from: "SYSTEM", text: `${leavingUsername} が退場しました` })
+        for (const [, m] of socketMeta) {
+          if (m.worldId !== worldId) continue
+          try { m.ws.send(leavePkt) } catch { /* ignore */ }
+        }
 
         // Handle tag game cleanup when a player disconnects
         const tagGame = tagGames.get(worldId)

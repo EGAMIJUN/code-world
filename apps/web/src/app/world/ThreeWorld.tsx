@@ -64,6 +64,14 @@ interface PlacedBlock {
   positionX: number
   positionY: number
   positionZ: number
+  placedBy: string
+}
+
+interface TagGameInfo {
+  running: boolean
+  itUsername: string
+  remainingMs: number
+  scores: { username: string; itMs: number }[]
 }
 
 interface WorldData {
@@ -146,6 +154,11 @@ export default function ThreeWorld() {
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
   const [chatInput, setChatInput] = useState("")
   const chatEndRef = useRef<HTMLDivElement>(null)
+  const userIdRef = useRef<string | null>(null)
+  const minimapRef = useRef<HTMLCanvasElement>(null)
+  const tagGameRef = useRef<TagGameInfo | null>(null)
+  const longPressRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [tagGame, setTagGame] = useState<TagGameInfo | null>(null)
 
   useEffect(() => {
     selectedBlockRef.current = selectedBlock
@@ -183,30 +196,34 @@ export default function ThreeWorld() {
   }, [])
 
   // ── Create/update a block mesh ─────────────────────────────────────────────
-  const spawnBlock = useCallback((tx: number, ty: number, tz: number, blockType: string) => {
-    const refs = sceneRef.current
-    if (!refs) return
-    const key = `${tx},${ty},${tz}`
-    const existing = refs.blockMeshes.get(key)
-    if (existing) {
-      refs.scene.remove(existing)
-      existing.geometry.dispose()
-    }
-    const color = BLOCK_COLORS[blockType] ?? 0x888888
-    const geo = new THREE.BoxGeometry(TILE_UNIT * 0.95, BLOCK_HEIGHT, TILE_UNIT * 0.95)
-    const mat = new THREE.MeshLambertMaterial({ color })
-    const mesh = new THREE.Mesh(geo, mat)
-    mesh.position.set(
-      tx * TILE_UNIT + TILE_UNIT / 2,
-      tz * BLOCK_HEIGHT + BLOCK_HEIGHT / 2,
-      ty * TILE_UNIT + TILE_UNIT / 2,
-    )
-    mesh.castShadow = true
-    refs.scene.add(mesh)
-    refs.blockMeshes.set(key, mesh)
-    const gridKey = `${tx},${ty}`
-    refs.blocksGrid.set(gridKey, Math.max(refs.blocksGrid.get(gridKey) ?? -1, tz))
-  }, [])
+  const spawnBlock = useCallback(
+    (tx: number, ty: number, tz: number, blockType: string, blockId?: string, placedBy?: string) => {
+      const refs = sceneRef.current
+      if (!refs) return
+      const key = `${tx},${ty},${tz}`
+      const existing = refs.blockMeshes.get(key)
+      if (existing) {
+        refs.scene.remove(existing)
+        existing.geometry.dispose()
+      }
+      const color = BLOCK_COLORS[blockType] ?? 0x888888
+      const geo = new THREE.BoxGeometry(TILE_UNIT * 0.95, BLOCK_HEIGHT, TILE_UNIT * 0.95)
+      const mat = new THREE.MeshLambertMaterial({ color })
+      const mesh = new THREE.Mesh(geo, mat)
+      mesh.position.set(
+        tx * TILE_UNIT + TILE_UNIT / 2,
+        tz * BLOCK_HEIGHT + BLOCK_HEIGHT / 2,
+        ty * TILE_UNIT + TILE_UNIT / 2,
+      )
+      mesh.castShadow = true
+      mesh.userData = { blockId: blockId ?? null, placedBy: placedBy ?? null }
+      refs.scene.add(mesh)
+      refs.blockMeshes.set(key, mesh)
+      const gridKey = `${tx},${ty}`
+      refs.blocksGrid.set(gridKey, Math.max(refs.blocksGrid.get(gridKey) ?? -1, tz))
+    },
+    [],
+  )
 
   // ── Place block via API ────────────────────────────────────────────────────
   const placeBlock = useCallback(
@@ -227,7 +244,8 @@ export default function ThreeWorld() {
           body: JSON.stringify({ blockType, positionX: tx, positionY: ty, positionZ: nextZ }),
         })
         if (res.ok) {
-          spawnBlock(tx, ty, nextZ, blockType)
+          const placed = (await res.json()) as { data: PlacedBlock }
+          spawnBlock(tx, ty, nextZ, blockType, placed.data.id, placed.data.placedBy)
           await fetchInventory()
           showNotification(`${BLOCK_INFO[blockType]?.label ?? blockType} を設置しました！`)
         } else {
@@ -239,6 +257,54 @@ export default function ThreeWorld() {
       }
     },
     [spawnBlock, fetchInventory, showNotification],
+  )
+
+  // ── Destroy block via API ──────────────────────────────────────────────────
+  const destroyBlock = useCallback(
+    async (blockId: string) => {
+      const wId = worldIdRef.current
+      const refs = sceneRef.current
+      if (!wId || !refs) return
+
+      let foundKey: string | null = null
+      let foundMesh: THREE.Mesh | null = null
+      for (const [key, mesh] of refs.blockMeshes) {
+        if (mesh.userData.blockId === blockId) {
+          foundKey = key
+          foundMesh = mesh
+          break
+        }
+      }
+      if (!foundKey || !foundMesh) return
+
+      try {
+        const res = await fetch(`${API_URL}/api/worlds/${wId}/blocks/${blockId}`, {
+          method: "DELETE",
+          credentials: "include",
+        })
+        if (res.ok) {
+          refs.scene.remove(foundMesh)
+          foundMesh.geometry.dispose()
+          refs.blockMeshes.delete(foundKey)
+          const [txStr, tyStr] = foundKey.split(",")
+          const gridKey = `${txStr},${tyStr}`
+          let maxZ = -1
+          for (const [k] of refs.blockMeshes) {
+            const parts = k.split(",")
+            if (parts[0] === txStr && parts[1] === tyStr) maxZ = Math.max(maxZ, Number(parts[2]))
+          }
+          if (maxZ === -1) refs.blocksGrid.delete(gridKey)
+          else refs.blocksGrid.set(gridKey, maxZ)
+          showNotification("ブロックを破壊しました")
+        } else {
+          const json = (await res.json().catch(() => ({}))) as { error?: string }
+          showNotification(json.error ?? "破壊に失敗しました")
+        }
+      } catch {
+        showNotification("エラーが発生しました")
+      }
+    },
+    [showNotification],
   )
 
   // ── Three.js init ──────────────────────────────────────────────────────────
@@ -383,9 +449,15 @@ export default function ThreeWorld() {
         playerMesh,
       }
 
+      // Fetch current user ID for block ownership checks
+      fetch(`${API_URL}/api/me`, { credentials: "include" })
+        .then((r) => r.json() as Promise<{ data?: { user?: { id?: string } } }>)
+        .then((json) => { userIdRef.current = json.data?.user?.id ?? null })
+        .catch(() => {})
+
       // Load initial blocks
       for (const block of initialBlocks) {
-        spawnBlock(block.positionX, block.positionY, block.positionZ, block.blockType)
+        spawnBlock(block.positionX, block.positionY, block.positionZ, block.blockType, block.id, block.placedBy)
       }
 
       // ── Mouse / touch events ───────────────────────────────────────────────
@@ -431,9 +503,64 @@ export default function ThreeWorld() {
         updateCamera()
       }
 
+      // ── Right-click: destroy block ─────────────────────────────────────────
+      function onContextMenu(e: MouseEvent) {
+        e.preventDefault()
+        const rect = renderer.domElement.getBoundingClientRect()
+        pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1
+        pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1
+        raycaster.setFromCamera(pointer, camera)
+        const hits = raycaster.intersectObjects([...blockMeshes.values()], false)
+        if (hits.length > 0) {
+          const mesh = hits[0]?.object as THREE.Mesh
+          const bId = mesh?.userData.blockId as string | null
+          if (!bId) return
+          if (mesh?.userData.placedBy !== userIdRef.current) {
+            showNotification("自分が設置したブロックのみ破壊できます")
+            return
+          }
+          destroyBlock(bId).catch(() => {})
+        }
+      }
+
+      // ── Touch long press: destroy block on mobile ──────────────────────────
+      let lpTouchX = 0
+      let lpTouchY = 0
+      function onTouchStartLP(e: TouchEvent) {
+        const t = e.touches[0]
+        if (!t) return
+        lpTouchX = t.clientX
+        lpTouchY = t.clientY
+        longPressRef.current = setTimeout(() => {
+          const rect = renderer.domElement.getBoundingClientRect()
+          pointer.x = ((lpTouchX - rect.left) / rect.width) * 2 - 1
+          pointer.y = -((lpTouchY - rect.top) / rect.height) * 2 + 1
+          raycaster.setFromCamera(pointer, camera)
+          const hits = raycaster.intersectObjects([...blockMeshes.values()], false)
+          if (hits.length > 0) {
+            const mesh = hits[0]?.object as THREE.Mesh
+            const bId = mesh?.userData.blockId as string | null
+            if (!bId) return
+            if (mesh?.userData.placedBy !== userIdRef.current) {
+              showNotification("自分が設置したブロックのみ破壊できます")
+              return
+            }
+            destroyBlock(bId).catch(() => {})
+          }
+        }, 600)
+      }
+      function onTouchCancelLP() {
+        if (longPressRef.current) { clearTimeout(longPressRef.current); longPressRef.current = null }
+      }
+      renderer.domElement.addEventListener("touchstart", onTouchStartLP, { passive: true })
+      renderer.domElement.addEventListener("touchend", onTouchCancelLP)
+      renderer.domElement.addEventListener("touchmove", onTouchCancelLP, { passive: true })
+      renderer.domElement.addEventListener("touchcancel", onTouchCancelLP)
+
       renderer.domElement.addEventListener("mousedown", onMouseDown)
       renderer.domElement.addEventListener("mousemove", onMouseMove)
       renderer.domElement.addEventListener("mouseup", onMouseUp)
+      renderer.domElement.addEventListener("contextmenu", onContextMenu)
       renderer.domElement.addEventListener("wheel", onWheel, { passive: true })
 
       // ── Resize ─────────────────────────────────────────────────────────────
@@ -518,6 +645,52 @@ export default function ThreeWorld() {
           }
         }
 
+        // Color meshes based on tag game state
+        const tg = tagGameRef.current
+        for (const [rmId, rmesh] of refs.remoteMeshes) {
+          const rstate = remotePosRef.current[rmId]
+          const rmat = rmesh.material as THREE.MeshLambertMaterial
+          const wantRed = tg?.running === true && rstate?.username === tg.itUsername
+          const wantHex = wantRed ? 0xff3333 : 0xffcc00
+          if (rmat.color.getHex() !== wantHex) rmat.color.setHex(wantHex)
+        }
+        const pmat = refs.playerMesh.material as THREE.MeshLambertMaterial
+        const myItColor = tg?.running === true && usernameRef.current === tg.itUsername ? 0xff3333 : 0x00ff41
+        if (pmat.color.getHex() !== myItColor) pmat.color.setHex(myItColor)
+
+        // Draw minimap
+        const mcanvas = minimapRef.current
+        if (mcanvas) {
+          const ctx = mcanvas.getContext("2d")
+          if (ctx) {
+            const W = mcanvas.width
+            const SCALE = W / (MAP_SIZE * TILE_UNIT)
+            ctx.fillStyle = "rgba(0,0,0,0.85)"
+            ctx.fillRect(0, 0, W, W)
+            ctx.fillStyle = "#224466"
+            for (const [key] of refs.blockMeshes) {
+              const p = key.split(",")
+              ctx.fillRect(Number(p[0]) * SCALE * TILE_UNIT, Number(p[1]) * SCALE * TILE_UNIT, 2, 2)
+            }
+            const snap = remotePosRef.current
+            for (const rp of Object.values(snap)) {
+              const { tx: rtx, ty: rty } = canvasToTile(rp.x, rp.y)
+              ctx.fillStyle = "#ffcc00"
+              ctx.beginPath()
+              ctx.arc(
+                (rtx * TILE_UNIT + TILE_UNIT / 2) * SCALE,
+                (rty * TILE_UNIT + TILE_UNIT / 2) * SCALE,
+                2.5, 0, Math.PI * 2,
+              )
+              ctx.fill()
+            }
+            ctx.fillStyle = "#00ff41"
+            ctx.beginPath()
+            ctx.arc(refs.focalPoint.x * SCALE, refs.focalPoint.z * SCALE, 3, 0, Math.PI * 2)
+            ctx.fill()
+          }
+        }
+
         renderer.render(scene, camera)
       }
       animate()
@@ -527,7 +700,12 @@ export default function ThreeWorld() {
         renderer.domElement.removeEventListener("mousedown", onMouseDown)
         renderer.domElement.removeEventListener("mousemove", onMouseMove)
         renderer.domElement.removeEventListener("mouseup", onMouseUp)
+        renderer.domElement.removeEventListener("contextmenu", onContextMenu)
         renderer.domElement.removeEventListener("wheel", onWheel)
+        renderer.domElement.removeEventListener("touchstart", onTouchStartLP)
+        renderer.domElement.removeEventListener("touchend", onTouchCancelLP)
+        renderer.domElement.removeEventListener("touchmove", onTouchCancelLP)
+        renderer.domElement.removeEventListener("touchcancel", onTouchCancelLP)
         window.removeEventListener("resize", onResize)
       }
     }
@@ -554,7 +732,7 @@ export default function ThreeWorld() {
       }
       cleanup?.()
     }
-  }, [spawnBlock, placeBlock, fetchInventory, fetchPlayerStats])
+  }, [spawnBlock, placeBlock, destroyBlock, fetchInventory, fetchPlayerStats, showNotification])
 
   // ── Keyboard events ────────────────────────────────────────────────────────
   useEffect(() => {
@@ -608,6 +786,11 @@ export default function ThreeWorld() {
           players?: Record<string, RemotePlayer>
           from?: string
           text?: string
+          running?: boolean
+          itUsername?: string
+          remainingMs?: number
+          scores?: { username: string; itMs: number }[]
+          winner?: string
         }
         if (msg.type === "sync" && msg.players) {
           remotePosRef.current = msg.players
@@ -617,6 +800,26 @@ export default function ThreeWorld() {
             const next = [
               ...prev,
               { id: ++msgIdRef.current, from: msg.from ?? "?", text: msg.text ?? "" },
+            ]
+            return next.slice(-20)
+          })
+        } else if (msg.type === "tag_state") {
+          const tg: TagGameInfo = {
+            running: true,
+            itUsername: msg.itUsername ?? "?",
+            remainingMs: msg.remainingMs ?? 0,
+            scores: msg.scores ?? [],
+          }
+          tagGameRef.current = tg
+          setTagGame(tg)
+        } else if (msg.type === "tag_end") {
+          tagGameRef.current = null
+          setTagGame(null)
+          const winner = msg.winner ?? "?"
+          setChatMessages((prev) => {
+            const next = [
+              ...prev,
+              { id: ++msgIdRef.current, from: "SYSTEM", text: `🏁 鬼ごっこ終了！最も逃げた: ${winner}` },
             ]
             return next.slice(-20)
           })
@@ -648,6 +851,21 @@ export default function ThreeWorld() {
       remotePosRef.current = {}
     }
   }, [isLoading])
+
+  // ── Tag game countdown ─────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!tagGame?.running) return
+    const interval = setInterval(() => {
+      setTagGame((prev) => {
+        if (!prev?.running) return prev
+        const newMs = Math.max(0, prev.remainingMs - 1000)
+        const next = { ...prev, remainingMs: newMs }
+        tagGameRef.current = next
+        return next
+      })
+    }, 1000)
+    return () => clearInterval(interval)
+  }, [tagGame?.running])
 
   // ── Touch joystick handlers ────────────────────────────────────────────────
   const handleJoyStart = useCallback((e: React.TouchEvent) => {
@@ -783,6 +1001,49 @@ export default function ThreeWorld() {
           </span>
         </div>
 
+        {/* Tag game button / status */}
+        {!isLoading && !error && (
+          <>
+            {!tagGame?.running ? (
+              <button
+                type="button"
+                onClick={() => {
+                  if (wsRef.current?.readyState === WebSocket.OPEN) {
+                    wsRef.current.send(JSON.stringify({ type: "tag_start" }))
+                  }
+                }}
+                style={{
+                  background: "transparent",
+                  border: "1px solid #003300",
+                  color: "#005500",
+                  fontFamily: "monospace",
+                  fontSize: "0.65rem",
+                  letterSpacing: "0.1em",
+                  padding: "0.2rem 0.6rem",
+                  cursor: "pointer",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                🏷 TAG
+              </button>
+            ) : (
+              <div
+                style={{
+                  color: "#ff3333",
+                  fontSize: "0.7rem",
+                  letterSpacing: "0.1em",
+                  border: "1px solid #550000",
+                  padding: "0.2rem 0.6rem",
+                  whiteSpace: "nowrap",
+                  animation: "none",
+                }}
+              >
+                👺 {tagGame.itUsername} · {Math.ceil(tagGame.remainingMs / 1000)}s
+              </div>
+            )}
+          </>
+        )}
+
         {notification && (
           <span
             style={{
@@ -858,6 +1119,23 @@ export default function ThreeWorld() {
               ▶ LOGIN
             </a>
           </div>
+        )}
+
+        {/* Minimap */}
+        {!isLoading && !error && (
+          <canvas
+            ref={minimapRef}
+            width={80}
+            height={80}
+            style={{
+              position: "absolute",
+              top: "0.5rem",
+              right: "0.5rem",
+              border: "1px solid #003300",
+              zIndex: 20,
+              imageRendering: "pixelated",
+            }}
+          />
         )}
 
         {/* Virtual joystick */}
