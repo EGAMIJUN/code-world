@@ -5,7 +5,8 @@ const MISSIONS = [
     id: "sql",
     title: "SQL爆弾解除",
     subtitle: "QUERY BOMB DEFUSAL",
-    description: "データベースに仕掛けられたSQLクエリ爆弾を正しいクエリで解除せよ。時間切れで全データが消滅する。",
+    description:
+      "データベースに仕掛けられたSQLクエリ爆弾を正しいクエリで解除せよ。時間切れで全データが消滅する。",
     icon: "💾",
     difficulty: 2,
     reward: "木材ブロック ×3",
@@ -31,7 +32,8 @@ const MISSIONS = [
     id: "data",
     title: "データ収集",
     subtitle: "DATA COLLECTION",
-    description: "分散したサーバーから必要なデータを集め、システム設計の問題を解いて街を復旧させよ。",
+    description:
+      "分散したサーバーから必要なデータを集め、システム設計の問題を解いて街を復旧させよ。",
     icon: "📡",
     difficulty: 1,
     reward: "石ブロック ×5",
@@ -110,7 +112,14 @@ export default function MissionsPage() {
           >
             MISSIONS
           </h1>
-          <p style={{ color: "#005500", fontSize: "0.8rem", marginTop: "0.75rem", letterSpacing: "0.1em" }}>
+          <p
+            style={{
+              color: "#005500",
+              fontSize: "0.8rem",
+              marginTop: "0.75rem",
+              letterSpacing: "0.1em",
+            }}
+          >
             ミッションをクリアしてブロックとXPを獲得せよ
           </p>
         </div>
@@ -224,7 +233,14 @@ export default function MissionsPage() {
                 }}
               >
                 <div>
-                  <div style={{ fontSize: "0.6rem", color: "#334433", letterSpacing: "0.15em", marginBottom: "0.15rem" }}>
+                  <div
+                    style={{
+                      fontSize: "0.6rem",
+                      color: "#334433",
+                      letterSpacing: "0.15em",
+                      marginBottom: "0.15rem",
+                    }}
+                  >
                     REWARD
                   </div>
                   <div style={{ fontSize: "0.72rem", color: "#ffcc00", letterSpacing: "0.05em" }}>

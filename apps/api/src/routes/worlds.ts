@@ -206,11 +206,11 @@ worldsRouter.delete("/:id/blocks/:blockId", async (c) => {
   const blockId = c.req.param("blockId")
 
   const block = await db.query.blocks.findFirst({
-    where: (b, { and: andFn, eq: eqFn }) =>
-      andFn(eqFn(b.id, blockId), eqFn(b.worldId, worldId)),
+    where: (b, { and: andFn, eq: eqFn }) => andFn(eqFn(b.id, blockId), eqFn(b.worldId, worldId)),
   })
   if (!block) return c.json({ error: "Block not found" }, 404)
-  if (block.placedBy !== user.id) return c.json({ error: "自分が設置したブロックのみ破壊できます" }, 403)
+  if (block.placedBy !== user.id)
+    return c.json({ error: "自分が設置したブロックのみ破壊できます" }, 403)
 
   await db.delete(blocks).where(eq(blocks.id, blockId))
   return c.json({ data: { deleted: true } })

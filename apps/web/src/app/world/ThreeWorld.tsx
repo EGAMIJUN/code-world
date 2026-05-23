@@ -9,7 +9,29 @@ const TILE_UNIT = 1
 const BLOCK_HEIGHT = 0.5
 const EYE_HEIGHT = 1.6
 const MOVE_SPEED = 6
+// biome-ignore lint/complexity/useLiteralKeys: bracket notation required per CLAUDE.md
 const API_URL = process.env["NEXT_PUBLIC_API_URL"] ?? "http://localhost:3001"
+
+// ── Combat constants ───────────────────────────────────────────────────────────
+const PLAYER_MAX_HP = 100
+const MAX_AMMO = 30
+const RELOAD_TIME = 2500
+const BULLET_SPEED = 35
+const BULLET_LIFETIME = 0.35
+const RECOIL_STRENGTH = 0.1
+const RECOIL_RECOVER = 8
+const MUZZLE_FLASH_DURATION = 0.07
+const ENEMY_SPEED = 2.0
+const ENEMY_ATTACK_RANGE = 1.8
+const ENEMY_ATTACK_DAMAGE = 15
+const ENEMY_ATTACK_INTERVAL = 2500
+const PROBLEM_TIME = 30
+
+const ENEMY_SPAWN_POSITIONS = [
+  { x: 5.5, z: 5.5 },
+  { x: 26.5, z: 8.5 },
+  { x: 16.5, z: 26.5 },
+] as const
 
 // Canvas-space constants for WS backwards-compat
 const TILE_W = 64
@@ -36,9 +58,9 @@ function canvasToTile(x: number, y: number) {
 
 // ── Zone definitions ───────────────────────────────────────────────────────────
 const ZONES = [
-  { startTX: 0, endTX: 9, color: 0x0d2545, label: "SQL District", labelColor: "#6ab0ff" },
-  { startTX: 10, endTX: 21, color: 0x0d2e13, label: "Algorithm Forest", labelColor: "#5aef5a" },
-  { startTX: 22, endTX: 31, color: 0x1a0d38, label: "System Design City", labelColor: "#c06aff" },
+  { startTX: 0, endTX: 9, color: 0x0d2545 },
+  { startTX: 10, endTX: 21, color: 0x0d2e13 },
+  { startTX: 22, endTX: 31, color: 0x1a0d38 },
 ]
 
 // ── Block colors ───────────────────────────────────────────────────────────────
@@ -53,6 +75,81 @@ const BLOCK_INFO: Record<string, { label: string; color: string }> = {
   stone_block: { label: "石ブロック", color: "#8a8a8a" },
   diamond_block: { label: "ダイヤブロック", color: "#00cfff" },
 }
+
+// ── Combat problem pool ────────────────────────────────────────────────────────
+interface CombatProblemDef {
+  question: string
+  choices: [string, string, string, string]
+  correct: 0 | 1 | 2 | 3
+}
+
+const COMBAT_PROBLEMS: CombatProblemDef[] = [
+  {
+    question: "SELECT * FROM users WHERE age > 25 の結果は？",
+    choices: ["25歳のみ", "26歳以上の全ユーザー", "25歳以下", "全ユーザー"],
+    correct: 1,
+  },
+  {
+    question: "LEFT JOIN と INNER JOIN の違いは？",
+    choices: [
+      "全く同じ",
+      "LEFT JOINは左テーブルの全行を含む",
+      "INNER JOINが遅い",
+      "LEFT JOINはNULLを除外",
+    ],
+    correct: 1,
+  },
+  {
+    question: "O(n log n) の計算量を持つソートは？",
+    choices: ["バブルソート", "選択ソート", "マージソート", "挿入ソート"],
+    correct: 2,
+  },
+  {
+    question: "RESTful APIでリソース取得に使うHTTPメソッドは？",
+    choices: ["POST", "PUT", "DELETE", "GET"],
+    correct: 3,
+  },
+  {
+    question: "SQLでNULL値を正しく比較する構文は？",
+    choices: ["= NULL", "!= NULL", "IS NULL", "== NULL"],
+    correct: 2,
+  },
+  {
+    question: "インデックスの主な目的は？",
+    choices: ["データ暗号化", "検索の高速化", "テーブル削除", "データ圧縮"],
+    correct: 1,
+  },
+  {
+    question: "スタック（Stack）のデータ取り出し順序は？",
+    choices: ["FIFO", "LIFO", "ランダム", "優先度順"],
+    correct: 1,
+  },
+  {
+    question: "データベースのACIDのAは何の略？",
+    choices: ["Availability", "Authority", "Atomicity", "Algorithm"],
+    correct: 2,
+  },
+  {
+    question: "SQL INJECTIONを防ぐ最善策は？",
+    choices: ["文字エスケープのみ", "WAFのみ", "HTTPS使用", "プリペアドステートメント"],
+    correct: 3,
+  },
+  {
+    question: "GROUP BY句で使える集計関数は？",
+    choices: ["WHERE", "JOIN", "COUNT", "LIMIT"],
+    correct: 2,
+  },
+  {
+    question: "二分探索の計算量は？",
+    choices: ["O(n)", "O(n²)", "O(log n)", "O(1)"],
+    correct: 2,
+  },
+  {
+    question: "HTTPステータスコード404の意味は？",
+    choices: ["認証エラー", "サーバーエラー", "リクエスト成功", "リソースが見つからない"],
+    correct: 3,
+  },
+]
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 interface InventoryItem {
@@ -100,6 +197,25 @@ interface ChatMessage {
   isSystem?: boolean
 }
 
+interface CombatEnemy {
+  id: string
+  mesh: THREE.Mesh
+  hp: number
+  maxHp: number
+  lastAttackTime: number
+}
+
+interface Bullet {
+  mesh: THREE.Mesh
+  velocity: THREE.Vector3
+  life: number
+}
+
+interface ActiveProblem {
+  def: CombatProblemDef
+  enemyId: string
+}
+
 // ── XP helper ─────────────────────────────────────────────────────────────────
 function computeXpProgress(totalXp: number) {
   let level = 0
@@ -126,6 +242,11 @@ interface SceneRefs {
   raycaster: THREE.Raycaster
   pointer: THREE.Vector2
   playerMesh: THREE.Mesh
+  gunGroup: THREE.Group
+  enemies: CombatEnemy[]
+  bullets: Bullet[]
+  muzzleLight: THREE.PointLight
+  aimedEnemyId: string | null
 }
 
 export default function ThreeWorld() {
@@ -151,8 +272,19 @@ export default function ThreeWorld() {
   const tagGameRef = useRef<TagGameInfo | null>(null)
   const longPressRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const rendererDomRef = useRef<HTMLCanvasElement | null>(null)
-  const placeCenterRef = useRef<(() => void) | null>(null)
 
+  // Combat refs
+  const recoilRef = useRef(0)
+  const playerHpRef = useRef(PLAYER_MAX_HP)
+  const gamePhaseRef = useRef<"playing" | "gameover" | "clear">("playing")
+  const activeProblemRef = useRef<ActiveProblem | null>(null)
+  const ammoRef = useRef(MAX_AMMO)
+  const reloadingRef = useRef(false)
+  const scoreRef = useRef(0)
+  const muzzleFlashTimerRef = useRef(0)
+  const earnedBlocksRef = useRef(0)
+
+  // UI state
   const [inventory, setInventory] = useState<InventoryItem[]>([])
   const [selectedBlock, setSelectedBlock] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(true)
@@ -167,14 +299,28 @@ export default function ThreeWorld() {
   const [tagGame, setTagGame] = useState<TagGameInfo | null>(null)
   const [isPointerLocked, setIsPointerLocked] = useState(false)
 
+  // Combat state
+  const [playerHp, setPlayerHp] = useState(PLAYER_MAX_HP)
+  const [ammo, setAmmo] = useState(MAX_AMMO)
+  const [score, setScore] = useState(0)
+  const [gamePhase, setGamePhase] = useState<"playing" | "gameover" | "clear">("playing")
+  const [activeProblem, setActiveProblem] = useState<ActiveProblem | null>(null)
+  const [problemTimeLeft, setProblemTimeLeft] = useState(PROBLEM_TIME)
+  const [enemyStatus, setEnemyStatus] = useState<Array<{ id: string; hp: number; maxHp: number }>>(
+    [],
+  )
+  const [aimedEnemyId, setAimedEnemyId] = useState<string | null>(null)
+  const [earnedBlocks, setEarnedBlocks] = useState(0)
+  const [isReloading, setIsReloading] = useState(false)
+  const [damageFlash, setDamageFlash] = useState(false)
+
   useEffect(() => {
     selectedBlockRef.current = selectedBlock
   }, [selectedBlock])
-
   useEffect(() => {
     setIsMobile(navigator.maxTouchPoints > 0)
   }, [])
-
+  // biome-ignore lint/correctness/useExhaustiveDependencies: chatEndRef is a stable ref, no need in deps
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" })
   }, [chatMessages])
@@ -202,9 +348,16 @@ export default function ThreeWorld() {
     }
   }, [])
 
-  // ── Create/update a block mesh ─────────────────────────────────────────────
+  // ── Spawn block mesh ───────────────────────────────────────────────────────
   const spawnBlock = useCallback(
-    (tx: number, ty: number, tz: number, blockType: string, blockId?: string, placedBy?: string) => {
+    (
+      tx: number,
+      ty: number,
+      tz: number,
+      blockType: string,
+      blockId?: string,
+      placedBy?: string,
+    ) => {
       const refs = sceneRef.current
       if (!refs) return
       const key = `${tx},${ty},${tz}`
@@ -238,10 +391,8 @@ export default function ThreeWorld() {
       const blockType = selectedBlockRef.current
       const wId = worldIdRef.current
       if (!blockType || !wId || pendingPlaceRef.current) return
-
       const refs = sceneRef.current
       const nextZ = (refs?.blocksGrid.get(`${tx},${ty}`) ?? -1) + 1
-
       pendingPlaceRef.current = true
       try {
         const res = await fetch(`${API_URL}/api/worlds/${wId}/blocks`, {
@@ -272,7 +423,6 @@ export default function ThreeWorld() {
       const wId = worldIdRef.current
       const refs = sceneRef.current
       if (!wId || !refs) return
-
       let foundKey: string | null = null
       let foundMesh: THREE.Mesh | null = null
       for (const [key, mesh] of refs.blockMeshes) {
@@ -283,7 +433,6 @@ export default function ThreeWorld() {
         }
       }
       if (!foundKey || !foundMesh) return
-
       try {
         const res = await fetch(`${API_URL}/api/worlds/${wId}/blocks/${blockId}`, {
           method: "DELETE",
@@ -313,6 +462,71 @@ export default function ThreeWorld() {
     },
     [showNotification],
   )
+
+  // ── Answer combat problem ──────────────────────────────────────────────────
+  const answerProblem = useCallback(
+    (correct: boolean) => {
+      const problem = activeProblemRef.current
+      activeProblemRef.current = null
+      setActiveProblem(null)
+      if (!problem) return
+
+      if (correct) {
+        const refs = sceneRef.current
+        if (!refs) return
+        const enemy = refs.enemies.find((e) => e.id === problem.enemyId)
+        if (enemy && enemy.hp > 0) {
+          enemy.hp -= 1
+          scoreRef.current += 50
+          setScore(scoreRef.current)
+          if (enemy.hp <= 0) {
+            refs.scene.remove(enemy.mesh)
+            enemy.mesh.geometry.dispose()
+            scoreRef.current += 200
+            setScore(scoreRef.current)
+            earnedBlocksRef.current += 1
+            setEarnedBlocks(earnedBlocksRef.current)
+            showNotification("エネミー撃破！ +250pt ブロック獲得！")
+            const allDead = refs.enemies.every((e) => e.hp <= 0)
+            if (allDead) {
+              gamePhaseRef.current = "clear"
+              setGamePhase("clear")
+            }
+          } else {
+            showNotification(`正解！ダメージを与えた！(HP: ${enemy.hp}/${enemy.maxHp})`)
+          }
+          setEnemyStatus(refs.enemies.map((e) => ({ id: e.id, hp: e.hp, maxHp: e.maxHp })))
+        }
+      } else {
+        playerHpRef.current = Math.max(0, playerHpRef.current - 20)
+        setPlayerHp(playerHpRef.current)
+        setDamageFlash(true)
+        setTimeout(() => setDamageFlash(false), 300)
+        showNotification("不正解！ -20 HP")
+        if (playerHpRef.current <= 0 && gamePhaseRef.current === "playing") {
+          gamePhaseRef.current = "gameover"
+          setGamePhase("gameover")
+        }
+      }
+    },
+    [showNotification],
+  )
+
+  // Problem countdown timer
+  useEffect(() => {
+    if (!activeProblem) return
+    setProblemTimeLeft(PROBLEM_TIME)
+    const interval = setInterval(() => {
+      setProblemTimeLeft((prev) => {
+        if (prev <= 1) {
+          answerProblem(false)
+          return PROBLEM_TIME
+        }
+        return prev - 1
+      })
+    }, 1000)
+    return () => clearInterval(interval)
+  }, [activeProblem, answerProblem])
 
   // ── Three.js init ──────────────────────────────────────────────────────────
   useEffect(() => {
@@ -367,25 +581,25 @@ export default function ThreeWorld() {
       rendererDomRef.current = renderer.domElement
 
       // ── Lights ─────────────────────────────────────────────────────────────
-      const ambient = new THREE.AmbientLight(0x334466, 0.8)
-      scene.add(ambient)
+      scene.add(new THREE.AmbientLight(0x334466, 0.8))
       const sun = new THREE.DirectionalLight(0xffffff, 1.2)
       sun.position.set(20, 40, 10)
       sun.castShadow = true
       sun.shadow.mapSize.set(2048, 2048)
       sun.shadow.camera.near = 0.5
       sun.shadow.camera.far = 100
-      sun.shadow.camera.left = -40
-      sun.shadow.camera.right = 40
-      sun.shadow.camera.top = 40
-      sun.shadow.camera.bottom = -40
+      ;[-40, 40, -40, 40].forEach((v, i) => {
+        if (i === 0) sun.shadow.camera.left = v
+        else if (i === 1) sun.shadow.camera.right = v
+        else if (i === 2) sun.shadow.camera.bottom = v
+        else sun.shadow.camera.top = v
+      })
       scene.add(sun)
 
       // ── Ground zones ───────────────────────────────────────────────────────
       for (const zone of ZONES) {
         const w = (zone.endTX - zone.startTX + 1) * TILE_UNIT
-        const d = MAP_SIZE * TILE_UNIT
-        const geo = new THREE.PlaneGeometry(w, d)
+        const geo = new THREE.PlaneGeometry(w, MAP_SIZE * TILE_UNIT)
         const mat = new THREE.MeshLambertMaterial({ color: zone.color })
         const mesh = new THREE.Mesh(geo, mat)
         mesh.rotation.x = -Math.PI / 2
@@ -397,7 +611,6 @@ export default function ThreeWorld() {
         mesh.receiveShadow = true
         scene.add(mesh)
       }
-
       const gridHelper = new THREE.GridHelper(MAP_SIZE, MAP_SIZE, 0x112233, 0x112233)
       gridHelper.position.set((MAP_SIZE / 2) * TILE_UNIT, 0.01, (MAP_SIZE / 2) * TILE_UNIT)
       scene.add(gridHelper)
@@ -430,17 +643,59 @@ export default function ThreeWorld() {
 
       const raycaster = new THREE.Raycaster()
       const pointer = new THREE.Vector2()
-
       const blockMeshes = new Map<string, THREE.Mesh>()
       const blocksGrid = new Map<string, number>()
       const remoteMeshes = new Map<string, THREE.Mesh>()
 
-      // Local player mesh — hidden in FPS but position used for WS sync
+      // Hidden player mesh (FPS - position used by WS)
       const playerGeo = new THREE.CapsuleGeometry(0.22, 0.5, 4, 8)
-      const playerMat = new THREE.MeshLambertMaterial({ color: 0x00ff41 })
-      const playerMesh = new THREE.Mesh(playerGeo, playerMat)
+      const playerMesh = new THREE.Mesh(
+        playerGeo,
+        new THREE.MeshLambertMaterial({ color: 0x00ff41 }),
+      )
       playerMesh.visible = false
       scene.add(playerMesh)
+
+      // ── Weapon (FPS gun) ───────────────────────────────────────────────────
+      const gunGroup = new THREE.Group()
+      const gunMatColor = 0x445566
+      function makePart(w: number, h: number, d: number, ox: number, oy: number, oz: number) {
+        const geo = new THREE.BoxGeometry(w, h, d)
+        const mat = new THREE.MeshLambertMaterial({ color: gunMatColor, depthTest: false })
+        const m = new THREE.Mesh(geo, mat)
+        m.position.set(ox, oy, oz)
+        m.renderOrder = 999
+        return m
+      }
+      gunGroup.add(makePart(0.08, 0.055, 0.28, 0, 0, 0)) // body
+      gunGroup.add(makePart(0.032, 0.032, 0.22, 0, 0.016, -0.18)) // barrel
+      gunGroup.add(makePart(0.055, 0.1, 0.058, 0, -0.075, 0.065)) // grip
+      gunGroup.add(makePart(0.065, 0.012, 0.12, 0, 0.035, 0.04)) // slide top
+      gunGroup.renderOrder = 999
+      scene.add(gunGroup)
+
+      // Muzzle flash light
+      const muzzleLight = new THREE.PointLight(0xffee44, 0, 5)
+      scene.add(muzzleLight)
+
+      // ── AI Enemies ─────────────────────────────────────────────────────────
+      const enemies: CombatEnemy[] = ENEMY_SPAWN_POSITIONS.map((pos, i) => {
+        const geo = new THREE.BoxGeometry(0.65, 1.7, 0.65)
+        const mat = new THREE.MeshLambertMaterial({ color: 0xff2222, emissive: 0x330000 })
+        const mesh = new THREE.Mesh(geo, mat)
+        mesh.position.set(pos.x, 0.85, pos.z)
+        mesh.castShadow = true
+        scene.add(mesh)
+        // Eye glow
+        const eyeGeo = new THREE.BoxGeometry(0.28, 0.06, 0.05)
+        const eyeMat = new THREE.MeshBasicMaterial({ color: 0xff6600 })
+        const eyes = new THREE.Mesh(eyeGeo, eyeMat)
+        eyes.position.set(0, 0.45, 0.33)
+        mesh.add(eyes)
+        return { id: `enemy_${i}`, mesh, hp: 3, maxHp: 3, lastAttackTime: 0 }
+      })
+
+      const bullets: Bullet[] = []
 
       sceneRef.current = {
         scene,
@@ -454,30 +709,44 @@ export default function ThreeWorld() {
         raycaster,
         pointer,
         playerMesh,
+        gunGroup,
+        enemies,
+        bullets,
+        muzzleLight,
+        aimedEnemyId: null,
       }
+
+      setEnemyStatus(enemies.map((e) => ({ id: e.id, hp: e.hp, maxHp: e.maxHp })))
 
       fetch(`${API_URL}/api/me`, { credentials: "include" })
         .then((r) => r.json() as Promise<{ data?: { user?: { id?: string } } }>)
-        .then((json) => { userIdRef.current = json.data?.user?.id ?? null })
+        .then((json) => {
+          userIdRef.current = json.data?.user?.id ?? null
+        })
         .catch(() => {})
 
       for (const block of initialBlocks) {
-        spawnBlock(block.positionX, block.positionY, block.positionZ, block.blockType, block.id, block.placedBy)
+        spawnBlock(
+          block.positionX,
+          block.positionY,
+          block.positionZ,
+          block.blockType,
+          block.id,
+          block.placedBy,
+        )
       }
 
-      // ── Place at crosshair (center screen) ─────────────────────────────────
+      // ── Center-screen raycasting helpers ───────────────────────────────────
       function placeAtCenter() {
         if (!selectedBlockRef.current || pendingPlaceRef.current) return
         pointer.set(0, 0)
         raycaster.setFromCamera(pointer, camera)
         const blockHits = raycaster.intersectObjects([...blockMeshes.values()], false)
         if (blockHits.length > 0) {
-          const hit = blockHits[0]!
-          const normal = hit.face?.normal
-          if (normal && normal.y > 0.5) {
-            const p = hit.point
-            const tx = Math.floor((p.x + 0.001) / TILE_UNIT)
-            const ty = Math.floor((p.z + 0.001) / TILE_UNIT)
+          const hit = blockHits[0]
+          if (hit?.face && hit.face.normal.y > 0.5) {
+            const tx = Math.floor((hit.point.x + 0.001) / TILE_UNIT)
+            const ty = Math.floor((hit.point.z + 0.001) / TILE_UNIT)
             if (tx >= 0 && tx < MAP_SIZE && ty >= 0 && ty < MAP_SIZE) {
               placeBlock(tx, ty).catch(() => {})
             }
@@ -486,7 +755,8 @@ export default function ThreeWorld() {
         }
         const groundHits = raycaster.intersectObject(groundPlane)
         if (groundHits.length > 0) {
-          const p = groundHits[0]!.point
+          const p = groundHits[0]?.point
+          if (!p) return
           const tx = Math.floor(p.x / TILE_UNIT)
           const ty = Math.floor(p.z / TILE_UNIT)
           if (tx >= 0 && tx < MAP_SIZE && ty >= 0 && ty < MAP_SIZE) {
@@ -494,9 +764,7 @@ export default function ThreeWorld() {
           }
         }
       }
-      placeCenterRef.current = placeAtCenter
 
-      // ── Destroy at crosshair ───────────────────────────────────────────────
       function destroyAtCenter() {
         pointer.set(0, 0)
         raycaster.setFromCamera(pointer, camera)
@@ -513,35 +781,105 @@ export default function ThreeWorld() {
         }
       }
 
-      // ── PointerLock mouse look ─────────────────────────────────────────────
+      // ── Create bullet ──────────────────────────────────────────────────────
+      function createBullet() {
+        const bulletGeo = new THREE.BoxGeometry(0.022, 0.022, 0.32)
+        const bulletMat = new THREE.MeshBasicMaterial({ color: 0xffff88, depthTest: false })
+        const bulletMesh = new THREE.Mesh(bulletGeo, bulletMat)
+        bulletMesh.renderOrder = 998
+        const fwd = new THREE.Vector3()
+        camera.getWorldDirection(fwd)
+        bulletMesh.position.copy(camera.position).addScaledVector(fwd, 0.55)
+        bulletMesh.quaternion.copy(camera.quaternion)
+        scene.add(bulletMesh)
+        bullets.push({
+          mesh: bulletMesh,
+          velocity: fwd.clone().multiplyScalar(BULLET_SPEED),
+          life: BULLET_LIFETIME,
+        })
+        muzzleFlashTimerRef.current = MUZZLE_FLASH_DURATION
+      }
+
+      // ── Fire weapon ────────────────────────────────────────────────────────
+      function fire() {
+        if (gamePhaseRef.current !== "playing") return
+        if (activeProblemRef.current !== null) return
+        if (ammoRef.current <= 0) {
+          if (!reloadingRef.current) {
+            reloadingRef.current = true
+            setIsReloading(true)
+            showNotification("RELOADING...")
+            setTimeout(() => {
+              ammoRef.current = MAX_AMMO
+              setAmmo(MAX_AMMO)
+              reloadingRef.current = false
+              setIsReloading(false)
+            }, RELOAD_TIME)
+          }
+          return
+        }
+        ammoRef.current -= 1
+        setAmmo(ammoRef.current)
+        recoilRef.current = RECOIL_STRENGTH
+        createBullet()
+
+        // Hit detection
+        pointer.set(0, 0)
+        raycaster.setFromCamera(pointer, camera)
+        const aliveEnemies = enemies.filter((e) => e.hp > 0)
+        const enemyHits = raycaster.intersectObjects(
+          aliveEnemies.map((e) => e.mesh),
+          false,
+        )
+        if (enemyHits.length > 0) {
+          const hitEnemy = aliveEnemies.find((e) => e.mesh === enemyHits[0]?.object)
+          if (hitEnemy) {
+            const probIdx = Math.floor(Math.random() * COMBAT_PROBLEMS.length)
+            const def = COMBAT_PROBLEMS[probIdx]
+            if (!def) return
+            const ap: ActiveProblem = { def, enemyId: hitEnemy.id }
+            activeProblemRef.current = ap
+            setActiveProblem(ap)
+          }
+        } else if (selectedBlockRef.current) {
+          placeAtCenter()
+        }
+
+        if (ammoRef.current <= 0 && !reloadingRef.current) {
+          reloadingRef.current = true
+          setIsReloading(true)
+          setTimeout(() => {
+            ammoRef.current = MAX_AMMO
+            setAmmo(MAX_AMMO)
+            reloadingRef.current = false
+            setIsReloading(false)
+          }, RELOAD_TIME)
+        }
+      }
+
+      // ── PointerLock ────────────────────────────────────────────────────────
       function onDocMouseMove(e: MouseEvent) {
         if (document.pointerLockElement !== renderer.domElement) return
         camState.yaw -= e.movementX * 0.002
         camState.pitch = clampPitch(camState.pitch - e.movementY * 0.002)
         updateCamera()
       }
-
       function onPointerLockChange() {
         setIsPointerLocked(document.pointerLockElement === renderer.domElement)
       }
-
       function onMouseDown(e: MouseEvent) {
         if (document.pointerLockElement !== renderer.domElement) {
           renderer.domElement.requestPointerLock()
           return
         }
-        if (e.button === 0 && selectedBlockRef.current) {
-          placeAtCenter()
-        }
+        if (e.button === 0) fire()
+        else if (e.button === 2) destroyAtCenter()
       }
-
       function onContextMenu(e: MouseEvent) {
         e.preventDefault()
-        if (document.pointerLockElement !== renderer.domElement) return
-        destroyAtCenter()
       }
 
-      // ── Mobile long press: destroy; short tap: place ───────────────────────
+      // Mobile touch
       let touchStartTime = 0
       function onTouchStartLP(e: TouchEvent) {
         if (!e.touches[0]) return
@@ -555,9 +893,7 @@ export default function ThreeWorld() {
         if (longPressRef.current) {
           clearTimeout(longPressRef.current)
           longPressRef.current = null
-          if (Date.now() - touchStartTime < 600) {
-            placeAtCenter()
-          }
+          if (Date.now() - touchStartTime < 600) fire()
         }
       }
       function onTouchMoveLP() {
@@ -576,9 +912,7 @@ export default function ThreeWorld() {
       document.addEventListener("mousemove", onDocMouseMove)
       document.addEventListener("pointerlockchange", onPointerLockChange)
 
-      // ── Resize ─────────────────────────────────────────────────────────────
       function onResize() {
-        if (!container) return
         camera.aspect = container.clientWidth / container.clientHeight
         camera.updateProjectionMatrix()
         renderer.setSize(container.clientWidth, container.clientHeight)
@@ -587,6 +921,8 @@ export default function ThreeWorld() {
 
       // ── Animation loop ─────────────────────────────────────────────────────
       const clock = new THREE.Clock()
+      const fwd3 = new THREE.Vector3()
+      const right3 = new THREE.Vector3()
 
       function animate() {
         animFrameRef.current = requestAnimationFrame(animate)
@@ -598,7 +934,6 @@ export default function ThreeWorld() {
         const joy = joystickRef.current
         let vx = joy.vx
         let vz = joy.vy
-
         if (keysRef.current.has("ArrowLeft") || keysRef.current.has("a")) vx -= 1
         if (keysRef.current.has("ArrowRight") || keysRef.current.has("d")) vx += 1
         if (keysRef.current.has("ArrowUp") || keysRef.current.has("w")) vz -= 1
@@ -607,10 +942,8 @@ export default function ThreeWorld() {
         if (vx !== 0 || vz !== 0) {
           const fwdX = -Math.sin(camState.yaw)
           const fwdZ = -Math.cos(camState.yaw)
-          const rtX = Math.cos(camState.yaw)
-          const rtZ = -Math.sin(camState.yaw)
-          refs.focalPoint.x += (fwdX * (-vz) + rtX * vx) * MOVE_SPEED * dt
-          refs.focalPoint.z += (fwdZ * (-vz) + rtZ * vx) * MOVE_SPEED * dt
+          refs.focalPoint.x += (fwdX * -vz + Math.cos(camState.yaw) * vx) * MOVE_SPEED * dt
+          refs.focalPoint.z += (fwdZ * -vz + -Math.sin(camState.yaw) * vx) * MOVE_SPEED * dt
           refs.focalPoint.x = Math.max(0, Math.min(MAP_SIZE * TILE_UNIT, refs.focalPoint.x))
           refs.focalPoint.z = Math.max(0, Math.min(MAP_SIZE * TILE_UNIT, refs.focalPoint.z))
           updateCamera()
@@ -624,10 +957,91 @@ export default function ThreeWorld() {
           updateCamera()
         }
 
-        // Sync player mesh position (hidden but used by WS)
+        // ── Weapon update ──────────────────────────────────────────────────
+        camera.getWorldDirection(fwd3)
+        right3.crossVectors(fwd3, new THREE.Vector3(0, 1, 0)).normalize()
+        refs.gunGroup.position
+          .copy(camera.position)
+          .addScaledVector(fwd3, 0.4)
+          .addScaledVector(right3, 0.17)
+          .addScaledVector(new THREE.Vector3(0, 1, 0), -0.22)
+          .addScaledVector(fwd3, -recoilRef.current)
+        refs.gunGroup.quaternion.copy(camera.quaternion)
+        if (recoilRef.current > 0) {
+          recoilRef.current = Math.max(0, recoilRef.current - RECOIL_RECOVER * dt)
+        }
+
+        // Muzzle flash
+        if (muzzleFlashTimerRef.current > 0) {
+          refs.muzzleLight.intensity = 6
+          refs.muzzleLight.position.copy(camera.position).addScaledVector(fwd3, 0.6)
+          muzzleFlashTimerRef.current -= dt
+        } else {
+          refs.muzzleLight.intensity = 0
+        }
+
+        // ── Bullets ────────────────────────────────────────────────────────
+        for (let i = refs.bullets.length - 1; i >= 0; i--) {
+          const b = refs.bullets[i]
+          if (!b) continue
+          b.mesh.position.addScaledVector(b.velocity, dt)
+          b.life -= dt
+          if (b.life <= 0) {
+            refs.scene.remove(b.mesh)
+            b.mesh.geometry.dispose()
+            refs.bullets.splice(i, 1)
+          }
+        }
+
+        // ── Enemy AI ───────────────────────────────────────────────────────
+        if (gamePhaseRef.current === "playing" && activeProblemRef.current === null) {
+          const now = Date.now()
+          for (const enemy of refs.enemies) {
+            if (enemy.hp <= 0) continue
+            const dx = refs.focalPoint.x - enemy.mesh.position.x
+            const dz = refs.focalPoint.z - enemy.mesh.position.z
+            const dist = Math.sqrt(dx * dx + dz * dz)
+            if (dist > ENEMY_ATTACK_RANGE) {
+              const spd = ENEMY_SPEED * dt
+              enemy.mesh.position.x += (dx / dist) * spd
+              enemy.mesh.position.z += (dz / dist) * spd
+              enemy.mesh.rotation.y = Math.atan2(dx, dz)
+              enemy.mesh.position.y =
+                0.85 + Math.sin(now * 0.004 + Number(enemy.id.slice(-1))) * 0.04
+            } else if (now - enemy.lastAttackTime > ENEMY_ATTACK_INTERVAL) {
+              enemy.lastAttackTime = now
+              playerHpRef.current = Math.max(0, playerHpRef.current - ENEMY_ATTACK_DAMAGE)
+              setPlayerHp(playerHpRef.current)
+              setDamageFlash(true)
+              setTimeout(() => setDamageFlash(false), 250)
+              if (playerHpRef.current <= 0 && gamePhaseRef.current === "playing") {
+                gamePhaseRef.current = "gameover"
+                setGamePhase("gameover")
+              }
+            }
+          }
+        }
+
+        // ── Aimed enemy detection (crosshair highlight) ────────────────────
+        {
+          pointer.set(0, 0)
+          raycaster.setFromCamera(pointer, camera)
+          const aliveEnemyMeshes = refs.enemies.filter((e) => e.hp > 0).map((e) => e.mesh)
+          const aimHits = raycaster.intersectObjects(aliveEnemyMeshes, false)
+          const newAimed =
+            aimHits.length > 0
+              ? (refs.enemies.find((e) => e.mesh === aimHits[0]?.object)?.id ?? null)
+              : null
+          if (newAimed !== refs.aimedEnemyId) {
+            refs.aimedEnemyId = newAimed
+            setAimedEnemyId(newAimed)
+          }
+        }
+
+        // Player mesh sync (WS position)
         refs.playerMesh.position.set(refs.focalPoint.x, EYE_HEIGHT, refs.focalPoint.z)
 
-        // Update remote player meshes
+        // Remote players
         const snapshot = remotePosRef.current
         const liveIds = new Set(Object.keys(snapshot))
         for (const [id, mesh] of refs.remoteMeshes) {
@@ -653,17 +1067,16 @@ export default function ThreeWorld() {
           }
         }
 
-        // Tag game coloring
+        // Tag coloring
         const tg = tagGameRef.current
         for (const [rmId, rmesh] of refs.remoteMeshes) {
           const rstate = remotePosRef.current[rmId]
           const rmat = rmesh.material as THREE.MeshLambertMaterial
-          const wantRed = tg?.running === true && rstate?.username === tg.itUsername
-          const wantHex = wantRed ? 0xff3333 : 0xffcc00
+          const wantHex = tg?.running && rstate?.username === tg.itUsername ? 0xff3333 : 0xffcc00
           if (rmat.color.getHex() !== wantHex) rmat.color.setHex(wantHex)
         }
 
-        // Draw minimap
+        // Minimap
         const mcanvas = minimapRef.current
         if (mcanvas) {
           const ctx = mcanvas.getContext("2d")
@@ -677,15 +1090,30 @@ export default function ThreeWorld() {
               const p = key.split(",")
               ctx.fillRect(Number(p[0]) * SCALE * TILE_UNIT, Number(p[1]) * SCALE * TILE_UNIT, 2, 2)
             }
-            const snap = remotePosRef.current
-            for (const rp of Object.values(snap)) {
+            // Draw enemies on minimap
+            for (const enemy of refs.enemies) {
+              if (enemy.hp <= 0) continue
+              ctx.fillStyle = "#ff3333"
+              ctx.beginPath()
+              ctx.arc(
+                enemy.mesh.position.x * SCALE,
+                enemy.mesh.position.z * SCALE,
+                3,
+                0,
+                Math.PI * 2,
+              )
+              ctx.fill()
+            }
+            for (const rp of Object.values(snapshot)) {
               const { tx: rtx, ty: rty } = canvasToTile(rp.x, rp.y)
               ctx.fillStyle = "#ffcc00"
               ctx.beginPath()
               ctx.arc(
                 (rtx * TILE_UNIT + TILE_UNIT / 2) * SCALE,
                 (rty * TILE_UNIT + TILE_UNIT / 2) * SCALE,
-                2.5, 0, Math.PI * 2,
+                2.5,
+                0,
+                Math.PI * 2,
               )
               ctx.fill()
             }
@@ -715,9 +1143,10 @@ export default function ThreeWorld() {
     }
 
     let cleanup: (() => void) | undefined
-
     init()
-      .then((fn) => { cleanup = fn })
+      .then((fn) => {
+        cleanup = fn
+      })
       .catch((err) => {
         console.error("[ThreeWorld] init error:", err)
         if (!cancelled) setError("ゲームの初期化に失敗しました")
@@ -733,7 +1162,6 @@ export default function ThreeWorld() {
         sceneRef.current = null
       }
       rendererDomRef.current = null
-      placeCenterRef.current = null
       cleanup?.()
     }
   }, [spawnBlock, placeBlock, destroyBlock, fetchInventory, fetchPlayerStats, showNotification])
@@ -743,6 +1171,19 @@ export default function ThreeWorld() {
     function onKeyDown(e: KeyboardEvent) {
       keysRef.current.add(e.key)
       if (e.key === "Escape") setSelectedBlock(null)
+      if (e.key === "r" || e.key === "R") {
+        if (!reloadingRef.current && ammoRef.current < MAX_AMMO) {
+          reloadingRef.current = true
+          setIsReloading(true)
+          showNotification("RELOADING...")
+          setTimeout(() => {
+            ammoRef.current = MAX_AMMO
+            setAmmo(MAX_AMMO)
+            reloadingRef.current = false
+            setIsReloading(false)
+          }, RELOAD_TIME)
+        }
+      }
     }
     function onKeyUp(e: KeyboardEvent) {
       keysRef.current.delete(e.key)
@@ -753,12 +1194,12 @@ export default function ThreeWorld() {
       window.removeEventListener("keydown", onKeyDown)
       window.removeEventListener("keyup", onKeyUp)
     }
-  }, [])
+  }, [showNotification])
 
-  // ── WebSocket position sync ────────────────────────────────────────────────
+  // ── WebSocket ──────────────────────────────────────────────────────────────
   useEffect(() => {
     if (isLoading) return
-
+    // biome-ignore lint/complexity/useLiteralKeys: bracket notation required per CLAUDE.md
     const WS_URL = (process.env["NEXT_PUBLIC_API_URL"] ?? "http://localhost:3001").replace(
       /^http/,
       "ws",
@@ -790,7 +1231,6 @@ export default function ThreeWorld() {
           players?: Record<string, RemotePlayer>
           from?: string
           text?: string
-          running?: boolean
           itUsername?: string
           remainingMs?: number
           scores?: { username: string; itMs: number }[]
@@ -801,13 +1241,12 @@ export default function ThreeWorld() {
           setOnlineCount(Object.keys(msg.players).length + 1)
         } else if (msg.type === "chat" && msg.text) {
           const isSystem = msg.from === "SYSTEM"
-          setChatMessages((prev) => {
-            const next = [
+          setChatMessages((prev) =>
+            [
               ...prev,
               { id: ++msgIdRef.current, from: msg.from ?? "?", text: msg.text ?? "", isSystem },
-            ]
-            return next.slice(-20)
-          })
+            ].slice(-20),
+          )
         } else if (msg.type === "tag_state") {
           const tg: TagGameInfo = {
             running: true,
@@ -820,17 +1259,20 @@ export default function ThreeWorld() {
         } else if (msg.type === "tag_end") {
           tagGameRef.current = null
           setTagGame(null)
-          const winner = msg.winner ?? "?"
-          setChatMessages((prev) => {
-            const next = [
+          setChatMessages((prev) =>
+            [
               ...prev,
-              { id: ++msgIdRef.current, from: "SYSTEM", text: `鬼ごっこ終了！最も逃げた: ${winner}`, isSystem: true },
-            ]
-            return next.slice(-20)
-          })
+              {
+                id: ++msgIdRef.current,
+                from: "SYSTEM",
+                text: `鬼ごっこ終了！最も逃げた: ${msg.winner ?? "?"}`,
+                isSystem: true,
+              },
+            ].slice(-20),
+          )
         }
       } catch {
-        // ignore
+        /* ignore */
       }
     }
 
@@ -857,14 +1299,13 @@ export default function ThreeWorld() {
     }
   }, [isLoading])
 
-  // ── Tag game countdown ─────────────────────────────────────────────────────
+  // Tag game countdown
   useEffect(() => {
     if (!tagGame?.running) return
     const interval = setInterval(() => {
       setTagGame((prev) => {
         if (!prev?.running) return prev
-        const newMs = Math.max(0, prev.remainingMs - 1000)
-        const next = { ...prev, remainingMs: newMs }
+        const next = { ...prev, remainingMs: Math.max(0, prev.remainingMs - 1000) }
         tagGameRef.current = next
         return next
       })
@@ -872,14 +1313,13 @@ export default function ThreeWorld() {
     return () => clearInterval(interval)
   }, [tagGame?.running])
 
-  // ── Move joystick handlers ─────────────────────────────────────────────────
+  // ── Move joystick ──────────────────────────────────────────────────────────
   const handleJoyStart = useCallback((e: React.TouchEvent) => {
     e.preventDefault()
     const t = e.touches[0]
     if (!t) return
     joyBaseRef.current = { x: t.clientX, y: t.clientY }
   }, [])
-
   const handleJoyMove = useCallback((e: React.TouchEvent) => {
     e.preventDefault()
     if (!joyBaseRef.current) return
@@ -893,27 +1333,21 @@ export default function ThreeWorld() {
     const nx = dist > 0 ? (dx / dist) * clamped : 0
     const ny = dist > 0 ? (dy / dist) * clamped : 0
     joystickRef.current = { vx: nx / maxDist, vy: ny / maxDist }
-    if (joyThumbRef.current) {
-      joyThumbRef.current.style.transform = `translate(${nx}px, ${ny}px)`
-    }
+    if (joyThumbRef.current) joyThumbRef.current.style.transform = `translate(${nx}px, ${ny}px)`
   }, [])
-
   const handleJoyEnd = useCallback(() => {
     joyBaseRef.current = null
     joystickRef.current = { vx: 0, vy: 0 }
-    if (joyThumbRef.current) {
-      joyThumbRef.current.style.transform = "translate(0px, 0px)"
-    }
+    if (joyThumbRef.current) joyThumbRef.current.style.transform = "translate(0px, 0px)"
   }, [])
 
-  // ── Look joystick handlers ─────────────────────────────────────────────────
+  // ── Look joystick ──────────────────────────────────────────────────────────
   const handleLookJoyStart = useCallback((e: React.TouchEvent) => {
     e.preventDefault()
     const t = e.touches[0]
     if (!t) return
     lookJoyBaseRef.current = { x: t.clientX, y: t.clientY }
   }, [])
-
   const handleLookJoyMove = useCallback((e: React.TouchEvent) => {
     e.preventDefault()
     if (!lookJoyBaseRef.current) return
@@ -927,17 +1361,13 @@ export default function ThreeWorld() {
     const nx = dist > 0 ? (dx / dist) * clamped : 0
     const ny = dist > 0 ? (dy / dist) * clamped : 0
     lookJoyRef.current = { vx: nx / maxDist, vy: ny / maxDist }
-    if (lookJoyThumbRef.current) {
+    if (lookJoyThumbRef.current)
       lookJoyThumbRef.current.style.transform = `translate(${nx}px, ${ny}px)`
-    }
   }, [])
-
   const handleLookJoyEnd = useCallback(() => {
     lookJoyBaseRef.current = null
     lookJoyRef.current = { vx: 0, vy: 0 }
-    if (lookJoyThumbRef.current) {
-      lookJoyThumbRef.current.style.transform = "translate(0px, 0px)"
-    }
+    if (lookJoyThumbRef.current) lookJoyThumbRef.current.style.transform = "translate(0px, 0px)"
   }, [])
 
   const sendChat = useCallback(
@@ -951,9 +1381,13 @@ export default function ThreeWorld() {
     [chatInput],
   )
 
-  // ── HUD ────────────────────────────────────────────────────────────────────
+  // ── Derived values ─────────────────────────────────────────────────────────
   const { level, xpInLevel, xpForNext } = computeXpProgress(playerStats.xp)
   const xpPct = xpForNext > 0 ? Math.round((xpInLevel / xpForNext) * 100) : 0
+  const hpPct = Math.round((playerHp / PLAYER_MAX_HP) * 100)
+  const ammoPct = Math.round((ammo / MAX_AMMO) * 100)
+  const hpColor = playerHp > 60 ? "#00ff41" : playerHp > 30 ? "#ffaa00" : "#ff3333"
+  const aliveEnemies = enemyStatus.filter((e) => e.hp > 0).length
 
   return (
     <div
@@ -967,36 +1401,68 @@ export default function ThreeWorld() {
         color: "#00ff41",
       }}
     >
-      {/* ── HUD bar ──────────────────────────────────────────────────────────── */}
+      {/* ── HUD bar ───────────────────────────────────────────────────────── */}
       <div
         style={{
           flexShrink: 0,
           display: "flex",
           alignItems: "center",
-          gap: "1rem",
-          padding: "0.5rem 1rem",
+          gap: "0.75rem",
+          padding: "0.4rem 0.75rem",
           background: "#000000",
           borderBottom: "1px solid #003300",
+          flexWrap: "wrap",
         }}
       >
+        {/* HP bar */}
+        <div style={{ display: "flex", alignItems: "center", gap: "0.4rem", minWidth: "130px" }}>
+          <span
+            style={{ color: "#ff3333", fontSize: "0.65rem", letterSpacing: "0.1em", flexShrink: 0 }}
+          >
+            HP
+          </span>
+          <div
+            style={{
+              flex: 1,
+              height: "8px",
+              background: "#1a0000",
+              border: "1px solid #550000",
+              overflow: "hidden",
+              minWidth: "60px",
+            }}
+          >
+            <div
+              style={{
+                height: "100%",
+                width: `${hpPct}%`,
+                background: hpColor,
+                boxShadow: `0 0 6px ${hpColor}`,
+                transition: "width 0.3s ease, background 0.3s",
+              }}
+            />
+          </div>
+          <span style={{ color: hpColor, fontSize: "0.65rem", flexShrink: 0 }}>{playerHp}</span>
+        </div>
+
+        {/* XP bar */}
         <div
           style={{
             display: "flex",
             alignItems: "center",
-            gap: "0.5rem",
+            gap: "0.4rem",
             border: "1px solid #003300",
-            padding: "0.25rem 0.75rem",
+            padding: "0.2rem 0.5rem",
           }}
         >
-          <span style={{ color: "#00ff41", fontSize: "0.75rem", letterSpacing: "0.15em" }}>
+          <span style={{ color: "#00ff41", fontSize: "0.65rem", letterSpacing: "0.1em" }}>
             LV.{level}
           </span>
           <div
             style={{
-              width: "80px",
-              height: "6px",
+              width: "50px",
+              height: "5px",
               background: "#001100",
-              border: "1px solid #003300",
+              border: "1px solid #002200",
               overflow: "hidden",
             }}
           >
@@ -1005,22 +1471,71 @@ export default function ThreeWorld() {
                 height: "100%",
                 width: `${xpPct}%`,
                 background: "#00ff41",
-                boxShadow: "0 0 6px #00ff41",
-                transition: "width 0.7s ease",
+                transition: "width 0.7s",
               }}
             />
           </div>
-          <span style={{ color: "#005500", fontSize: "0.7rem" }}>
-            {xpInLevel}/{xpForNext}
+        </div>
+
+        {/* Ammo */}
+        <div style={{ display: "flex", alignItems: "center", gap: "0.35rem" }}>
+          <span style={{ color: "#8888ff", fontSize: "0.6rem", letterSpacing: "0.1em" }}>AMMO</span>
+          <div
+            style={{
+              width: "40px",
+              height: "5px",
+              background: "#001133",
+              border: "1px solid #223366",
+              overflow: "hidden",
+            }}
+          >
+            <div
+              style={{
+                height: "100%",
+                width: isReloading ? "100%" : `${ammoPct}%`,
+                background: isReloading ? "#ffaa00" : "#8888ff",
+                transition: isReloading ? `width ${RELOAD_TIME}ms linear` : "width 0.1s",
+              }}
+            />
+          </div>
+          <span
+            style={{
+              color: isReloading ? "#ffaa00" : "#8888ff",
+              fontSize: "0.65rem",
+              minWidth: "32px",
+            }}
+          >
+            {isReloading ? "REL" : `${ammo}/${MAX_AMMO}`}
           </span>
         </div>
 
-        <span
-          style={{ color: "#003300", fontSize: "0.7rem", letterSpacing: "0.1em" }}
-          className="hidden sm:block"
+        {/* Score */}
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: "0.35rem",
+            border: "1px solid #222244",
+            padding: "0.2rem 0.5rem",
+          }}
         >
-          WASD: MOVE · MOUSE: LOOK · CLICK: PLACE · R-CLICK: DESTROY
-        </span>
+          <span style={{ color: "#ffcc00", fontSize: "0.65rem", letterSpacing: "0.1em" }}>
+            SCORE
+          </span>
+          <span style={{ color: "#ffcc00", fontSize: "0.7rem", fontWeight: "bold" }}>
+            {score.toString().padStart(5, "0")}
+          </span>
+        </div>
+
+        {/* Enemies remaining */}
+        <div style={{ display: "flex", alignItems: "center", gap: "0.35rem" }}>
+          <span style={{ color: "#ff5555", fontSize: "0.6rem", letterSpacing: "0.1em" }}>
+            ENEMIES
+          </span>
+          <span style={{ color: "#ff5555", fontSize: "0.7rem", fontWeight: "bold" }}>
+            {aliveEnemies}
+          </span>
+        </div>
 
         <div style={{ flex: 1 }} />
 
@@ -1035,61 +1550,55 @@ export default function ThreeWorld() {
               display: "inline-block",
             }}
           />
-          <span style={{ color: "#00ff41", fontSize: "0.7rem", letterSpacing: "0.1em" }}>
-            {onlineCount} ONLINE
-          </span>
+          <span style={{ color: "#00ff41", fontSize: "0.65rem" }}>{onlineCount} ONLINE</span>
         </div>
 
-        {/* Tag game button / status */}
-        {!isLoading && !error && (
-          <>
-            {!tagGame?.running ? (
-              <button
-                type="button"
-                onClick={() => {
-                  if (wsRef.current?.readyState === WebSocket.OPEN) {
-                    wsRef.current.send(JSON.stringify({ type: "tag_start" }))
-                  }
-                }}
-                style={{
-                  background: "transparent",
-                  border: "1px solid #003300",
-                  color: "#005500",
-                  fontFamily: "monospace",
-                  fontSize: "0.65rem",
-                  letterSpacing: "0.1em",
-                  padding: "0.2rem 0.6rem",
-                  cursor: "pointer",
-                  whiteSpace: "nowrap",
-                }}
-              >
-                TAG
-              </button>
-            ) : (
-              <div
-                style={{
-                  color: "#ff3333",
-                  fontSize: "0.7rem",
-                  letterSpacing: "0.1em",
-                  border: "1px solid #550000",
-                  padding: "0.2rem 0.6rem",
-                  whiteSpace: "nowrap",
-                }}
-              >
-                IT: {tagGame.itUsername} · {Math.ceil(tagGame.remainingMs / 1000)}s
-              </div>
-            )}
-          </>
-        )}
+        {!isLoading &&
+          !error &&
+          (tagGame?.running ? (
+            <div
+              style={{
+                color: "#ff3333",
+                fontSize: "0.65rem",
+                border: "1px solid #550000",
+                padding: "0.2rem 0.5rem",
+                whiteSpace: "nowrap",
+              }}
+            >
+              IT: {tagGame.itUsername} · {Math.ceil(tagGame.remainingMs / 1000)}s
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={() =>
+                wsRef.current?.readyState === WebSocket.OPEN &&
+                wsRef.current.send(JSON.stringify({ type: "tag_start" }))
+              }
+              style={{
+                background: "transparent",
+                border: "1px solid #003300",
+                color: "#005500",
+                fontFamily: "monospace",
+                fontSize: "0.6rem",
+                letterSpacing: "0.08em",
+                padding: "0.2rem 0.5rem",
+                cursor: "pointer",
+                whiteSpace: "nowrap",
+              }}
+            >
+              TAG
+            </button>
+          ))}
 
         {notification && (
           <span
             style={{
-              fontSize: "0.75rem",
+              fontSize: "0.7rem",
               color: "#00ff41",
               border: "1px solid #00ff41",
-              padding: "0.2rem 0.75rem",
+              padding: "0.15rem 0.6rem",
               textShadow: "0 0 8px #00ff41",
+              whiteSpace: "nowrap",
             }}
           >
             {notification}
@@ -1097,10 +1606,24 @@ export default function ThreeWorld() {
         )}
       </div>
 
-      {/* ── Three.js canvas area ─────────────────────────────────────────────── */}
+      {/* ── Canvas + overlays ─────────────────────────────────────────────── */}
       <div style={{ position: "relative", flex: 1, overflow: "hidden" }}>
         <div ref={mountRef} style={{ width: "100%", height: "100%" }} />
 
+        {/* Damage flash */}
+        {damageFlash && (
+          <div
+            style={{
+              position: "absolute",
+              inset: 0,
+              background: "rgba(255,0,0,0.25)",
+              pointerEvents: "none",
+              zIndex: 25,
+            }}
+          />
+        )}
+
+        {/* Loading */}
         {isLoading && !error && (
           <div
             style={{
@@ -1112,7 +1635,6 @@ export default function ThreeWorld() {
               justifyContent: "center",
               gap: "1.5rem",
               background: "#000000",
-              fontFamily: "monospace",
             }}
           >
             <div
@@ -1139,7 +1661,6 @@ export default function ThreeWorld() {
               justifyContent: "center",
               gap: "1.5rem",
               background: "#000000",
-              fontFamily: "monospace",
             }}
           >
             <p style={{ color: "#ff3333", fontSize: "1rem", letterSpacing: "0.2em" }}>⚠ {error}</p>
@@ -1159,20 +1680,24 @@ export default function ThreeWorld() {
           </div>
         )}
 
-        {/* ENTER WORLD overlay (desktop, not yet locked) */}
-        {!isMobile && !isLoading && !error && !isPointerLocked && (
-          <div
+        {/* ENTER WORLD overlay */}
+        {!isMobile && !isLoading && !error && !isPointerLocked && gamePhase === "playing" && (
+          <button
+            type="button"
             onClick={() => rendererDomRef.current?.requestPointerLock()}
             style={{
               position: "absolute",
               inset: 0,
+              width: "100%",
+              height: "100%",
               display: "flex",
               flexDirection: "column",
               alignItems: "center",
               justifyContent: "center",
               gap: "1rem",
-              background: "rgba(0,0,0,0.55)",
+              background: "rgba(0,0,0,0.6)",
               cursor: "pointer",
+              border: "none",
               fontFamily: "monospace",
             }}
           >
@@ -1187,17 +1712,18 @@ export default function ThreeWorld() {
               ENTER WORLD
             </div>
             <div style={{ color: "#005500", fontSize: "0.75rem", letterSpacing: "0.2em" }}>
-              CLICK TO LOCK MOUSE
+              CLICK TO LOCK MOUSE · WASD: MOVE · MOUSE: AIM · LMB: FIRE · RMB: DESTROY
             </div>
-          </div>
+          </button>
         )}
 
         {/* Crosshair */}
-        {!isLoading && !error && (isPointerLocked || isMobile) && (
+        {!isLoading && !error && (isPointerLocked || isMobile) && gamePhase === "playing" && (
           <svg
-            width="20"
-            height="20"
-            viewBox="0 0 20 20"
+            width="24"
+            height="24"
+            viewBox="0 0 24 24"
+            aria-label="crosshair"
             style={{
               position: "absolute",
               top: "50%",
@@ -1207,12 +1733,98 @@ export default function ThreeWorld() {
               zIndex: 30,
             }}
           >
-            <line x1="10" y1="2" x2="10" y2="8" stroke="#00ff41" strokeWidth="1.5" opacity="0.8" />
-            <line x1="10" y1="12" x2="10" y2="18" stroke="#00ff41" strokeWidth="1.5" opacity="0.8" />
-            <line x1="2" y1="10" x2="8" y2="10" stroke="#00ff41" strokeWidth="1.5" opacity="0.8" />
-            <line x1="12" y1="10" x2="18" y2="10" stroke="#00ff41" strokeWidth="1.5" opacity="0.8" />
-            <circle cx="10" cy="10" r="1" fill="#00ff41" opacity="0.6" />
+            <title>crosshair</title>
+            <line
+              x1="12"
+              y1="2"
+              x2="12"
+              y2="9"
+              stroke={aimedEnemyId ? "#ff3333" : "#00ff41"}
+              strokeWidth="1.5"
+              opacity="0.9"
+            />
+            <line
+              x1="12"
+              y1="15"
+              x2="12"
+              y2="22"
+              stroke={aimedEnemyId ? "#ff3333" : "#00ff41"}
+              strokeWidth="1.5"
+              opacity="0.9"
+            />
+            <line
+              x1="2"
+              y1="12"
+              x2="9"
+              y2="12"
+              stroke={aimedEnemyId ? "#ff3333" : "#00ff41"}
+              strokeWidth="1.5"
+              opacity="0.9"
+            />
+            <line
+              x1="15"
+              y1="12"
+              x2="22"
+              y2="12"
+              stroke={aimedEnemyId ? "#ff3333" : "#00ff41"}
+              strokeWidth="1.5"
+              opacity="0.9"
+            />
+            <circle
+              cx="12"
+              cy="12"
+              r="1.2"
+              fill={aimedEnemyId ? "#ff3333" : "#00ff41"}
+              opacity="0.8"
+            />
+            {aimedEnemyId && (
+              <circle
+                cx="12"
+                cy="12"
+                r="5"
+                stroke="#ff3333"
+                strokeWidth="0.8"
+                fill="none"
+                opacity="0.5"
+              />
+            )}
           </svg>
+        )}
+
+        {/* Enemy status (top-right) */}
+        {!isLoading && !error && gamePhase === "playing" && (
+          <div
+            style={{
+              position: "absolute",
+              top: "0.5rem",
+              right: "5.5rem",
+              zIndex: 20,
+              fontFamily: "monospace",
+              display: "flex",
+              flexDirection: "column",
+              gap: "4px",
+            }}
+          >
+            {enemyStatus.map((e, i) => (
+              <div key={e.id} style={{ display: "flex", alignItems: "center", gap: "4px" }}>
+                <span style={{ color: "#ff5555", fontSize: "0.6rem" }}>E{i + 1}</span>
+                <div style={{ display: "flex", gap: "2px" }}>
+                  {Array.from({ length: e.maxHp }).map((_, j) => (
+                    <div
+                      key={`${e.id}-hp-${j}`}
+                      style={{
+                        width: "10px",
+                        height: "10px",
+                        background: j < e.hp ? "#ff2222" : "#330000",
+                        border: "1px solid #550000",
+                        boxShadow: j < e.hp ? "0 0 4px #ff2222" : "none",
+                      }}
+                    />
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
         )}
 
         {/* Minimap */}
@@ -1232,7 +1844,7 @@ export default function ThreeWorld() {
           />
         )}
 
-        {/* Move joystick (mobile, bottom-left) */}
+        {/* Move joystick */}
         {isMobile && !isLoading && !error && (
           <div
             style={{
@@ -1269,7 +1881,7 @@ export default function ThreeWorld() {
           </div>
         )}
 
-        {/* Look joystick (mobile, bottom-right) */}
+        {/* Look joystick */}
         {isMobile && !isLoading && !error && (
           <div
             style={{
@@ -1306,7 +1918,7 @@ export default function ThreeWorld() {
           </div>
         )}
 
-        {/* World chat */}
+        {/* Chat */}
         {!isLoading && !error && (
           <div
             style={{
@@ -1323,7 +1935,7 @@ export default function ThreeWorld() {
           >
             <div
               style={{
-                maxHeight: "100px",
+                maxHeight: "90px",
                 overflowY: "auto",
                 display: "flex",
                 flexDirection: "column",
@@ -1334,11 +1946,10 @@ export default function ThreeWorld() {
                 <div
                   key={m.id}
                   style={{
-                    fontSize: "0.68rem",
+                    fontSize: "0.65rem",
                     color: m.isSystem ? "#00aaff" : "#00ff41",
                     background: "rgba(0,0,0,0.75)",
                     padding: "2px 6px",
-                    letterSpacing: "0.04em",
                     wordBreak: "break-all",
                   }}
                 >
@@ -1360,7 +1971,7 @@ export default function ThreeWorld() {
                   border: "1px solid #003300",
                   color: "#00ff41",
                   fontFamily: "monospace",
-                  fontSize: "0.68rem",
+                  fontSize: "0.65rem",
                   padding: "3px 6px",
                   outline: "none",
                   minWidth: 0,
@@ -1383,9 +1994,346 @@ export default function ThreeWorld() {
             </form>
           </div>
         )}
+
+        {/* ── Combat Problem Modal ─────────────────────────────────────────── */}
+        {activeProblem && (
+          <div
+            style={{
+              position: "absolute",
+              inset: 0,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              background: "rgba(0,0,0,0.88)",
+              zIndex: 50,
+              fontFamily: "monospace",
+            }}
+          >
+            <div
+              style={{
+                width: "min(500px, 92vw)",
+                border: "1px solid #ff3333",
+                background: "#050505",
+                padding: "1.5rem",
+                display: "flex",
+                flexDirection: "column",
+                gap: "1rem",
+              }}
+            >
+              {/* Header */}
+              <div
+                style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}
+              >
+                <div style={{ color: "#ff3333", fontSize: "0.7rem", letterSpacing: "0.3em" }}>
+                  ENEMY HIT — ANSWER TO DEAL DAMAGE
+                </div>
+                <div
+                  style={{
+                    color: problemTimeLeft <= 10 ? "#ff3333" : "#ffaa00",
+                    fontSize: "1rem",
+                    fontWeight: "bold",
+                    letterSpacing: "0.1em",
+                    border: `1px solid ${problemTimeLeft <= 10 ? "#550000" : "#553300"}`,
+                    padding: "0.1rem 0.5rem",
+                    minWidth: "3rem",
+                    textAlign: "center",
+                    animation:
+                      problemTimeLeft <= 10 ? "pulse 0.5s ease-in-out infinite alternate" : "none",
+                  }}
+                >
+                  {problemTimeLeft}s
+                </div>
+              </div>
+
+              {/* Timer bar */}
+              <div
+                style={{
+                  height: "3px",
+                  background: "#1a0000",
+                  border: "1px solid #330000",
+                  overflow: "hidden",
+                }}
+              >
+                <div
+                  style={{
+                    height: "100%",
+                    width: `${(problemTimeLeft / PROBLEM_TIME) * 100}%`,
+                    background: problemTimeLeft <= 10 ? "#ff3333" : "#ffaa00",
+                    transition: "width 1s linear",
+                  }}
+                />
+              </div>
+
+              {/* Question */}
+              <div
+                style={{
+                  color: "#00ff41",
+                  fontSize: "0.88rem",
+                  letterSpacing: "0.05em",
+                  lineHeight: 1.6,
+                  padding: "0.75rem",
+                  border: "1px solid #003300",
+                  background: "rgba(0,20,0,0.5)",
+                }}
+              >
+                {activeProblem.def.question}
+              </div>
+
+              {/* Choices */}
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.5rem" }}>
+                {activeProblem.def.choices.map((choice, i) => (
+                  <button
+                    key={choice}
+                    type="button"
+                    onClick={() => answerProblem(i === activeProblem.def.correct)}
+                    style={{
+                      background: "transparent",
+                      border: "1px solid #225522",
+                      color: "#00cc33",
+                      fontFamily: "monospace",
+                      fontSize: "0.78rem",
+                      padding: "0.6rem 0.75rem",
+                      cursor: "pointer",
+                      textAlign: "left",
+                      letterSpacing: "0.04em",
+                      lineHeight: 1.4,
+                    }}
+                    onMouseEnter={(e) => {
+                      ;(e.currentTarget as HTMLButtonElement).style.background =
+                        "rgba(0,255,65,0.08)"
+                      ;(e.currentTarget as HTMLButtonElement).style.borderColor = "#00ff41"
+                    }}
+                    onMouseLeave={(e) => {
+                      ;(e.currentTarget as HTMLButtonElement).style.background = "transparent"
+                      ;(e.currentTarget as HTMLButtonElement).style.borderColor = "#225522"
+                    }}
+                  >
+                    <span style={{ color: "#005500", marginRight: "0.4rem" }}>
+                      {["A", "B", "C", "D"][i]}.
+                    </span>
+                    {choice}
+                  </button>
+                ))}
+              </div>
+
+              <div
+                style={{
+                  color: "#334433",
+                  fontSize: "0.6rem",
+                  letterSpacing: "0.08em",
+                  textAlign: "center",
+                }}
+              >
+                正解: +50pt · 不正解: -20 HP · 時間切れ: -20 HP
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── Game Over ────────────────────────────────────────────────────── */}
+        {gamePhase === "gameover" && (
+          <div
+            style={{
+              position: "absolute",
+              inset: 0,
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: "1.5rem",
+              background: "rgba(0,0,0,0.92)",
+              zIndex: 60,
+              fontFamily: "monospace",
+            }}
+          >
+            <div
+              style={{
+                color: "#ff3333",
+                fontSize: "2.5rem",
+                fontWeight: "bold",
+                letterSpacing: "0.4em",
+                textShadow: "0 0 40px #ff3333",
+              }}
+            >
+              GAME OVER
+            </div>
+            <div
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                gap: "0.5rem",
+                border: "1px solid #330000",
+                padding: "1rem 2rem",
+              }}
+            >
+              <div style={{ color: "#ffcc00", fontSize: "1rem", letterSpacing: "0.2em" }}>
+                FINAL SCORE
+              </div>
+              <div
+                style={{
+                  color: "#ffcc00",
+                  fontSize: "2rem",
+                  fontWeight: "bold",
+                  letterSpacing: "0.3em",
+                }}
+              >
+                {score.toString().padStart(5, "0")}
+              </div>
+              <div style={{ color: "#554400", fontSize: "0.75rem" }}>
+                ENEMIES DEFEATED: {3 - aliveEnemies}/3
+              </div>
+              <div style={{ color: "#554400", fontSize: "0.75rem" }}>
+                BLOCKS EARNED: {earnedBlocks}
+              </div>
+            </div>
+            <div
+              style={{ display: "flex", gap: "1rem", flexWrap: "wrap", justifyContent: "center" }}
+            >
+              <button
+                type="button"
+                onClick={() => window.location.reload()}
+                style={{
+                  background: "transparent",
+                  border: "1px solid #ff3333",
+                  color: "#ff3333",
+                  fontFamily: "monospace",
+                  fontSize: "0.85rem",
+                  letterSpacing: "0.2em",
+                  padding: "0.6rem 1.5rem",
+                  cursor: "pointer",
+                }}
+              >
+                RETRY
+              </button>
+              <a
+                href="/dungeon"
+                style={{
+                  border: "1px solid #003300",
+                  color: "#005500",
+                  fontFamily: "monospace",
+                  fontSize: "0.85rem",
+                  letterSpacing: "0.2em",
+                  padding: "0.6rem 1.5rem",
+                  textDecoration: "none",
+                }}
+              >
+                DUNGEON
+              </a>
+            </div>
+          </div>
+        )}
+
+        {/* ── Stage Clear ──────────────────────────────────────────────────── */}
+        {gamePhase === "clear" && (
+          <div
+            style={{
+              position: "absolute",
+              inset: 0,
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: "1.5rem",
+              background: "rgba(0,0,0,0.9)",
+              zIndex: 60,
+              fontFamily: "monospace",
+            }}
+          >
+            <div
+              style={{
+                color: "#00ff41",
+                fontSize: "2rem",
+                fontWeight: "bold",
+                letterSpacing: "0.4em",
+                textShadow: "0 0 40px #00ff41",
+              }}
+            >
+              STAGE CLEAR!
+            </div>
+            <div
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                gap: "0.75rem",
+                border: "1px solid #003300",
+                padding: "1.25rem 2.5rem",
+                background: "rgba(0,10,0,0.8)",
+              }}
+            >
+              <div style={{ color: "#ffcc00", fontSize: "0.8rem", letterSpacing: "0.3em" }}>
+                RESULT
+              </div>
+              <div
+                style={{ display: "flex", gap: "2rem", flexWrap: "wrap", justifyContent: "center" }}
+              >
+                <div style={{ textAlign: "center" }}>
+                  <div style={{ color: "#446644", fontSize: "0.65rem", letterSpacing: "0.2em" }}>
+                    SCORE
+                  </div>
+                  <div style={{ color: "#ffcc00", fontSize: "1.5rem", fontWeight: "bold" }}>
+                    {score.toString().padStart(5, "0")}
+                  </div>
+                </div>
+                <div style={{ textAlign: "center" }}>
+                  <div style={{ color: "#446644", fontSize: "0.65rem", letterSpacing: "0.2em" }}>
+                    BLOCKS EARNED
+                  </div>
+                  <div style={{ color: "#00cfff", fontSize: "1.5rem", fontWeight: "bold" }}>
+                    {earnedBlocks}
+                  </div>
+                </div>
+                <div style={{ textAlign: "center" }}>
+                  <div style={{ color: "#446644", fontSize: "0.65rem", letterSpacing: "0.2em" }}>
+                    SURVIVORS
+                  </div>
+                  <div style={{ color: "#00ff41", fontSize: "1.5rem", fontWeight: "bold" }}>
+                    {playerHp} HP
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div
+              style={{ display: "flex", gap: "1rem", flexWrap: "wrap", justifyContent: "center" }}
+            >
+              <a
+                href="/world"
+                style={{
+                  border: "1px solid #00ff41",
+                  color: "#00ff41",
+                  fontFamily: "monospace",
+                  fontSize: "0.85rem",
+                  letterSpacing: "0.2em",
+                  padding: "0.6rem 1.5rem",
+                  textDecoration: "none",
+                  textShadow: "0 0 8px #00ff41",
+                }}
+              >
+                BUILD WORLD
+              </a>
+              <button
+                type="button"
+                onClick={() => window.location.reload()}
+                style={{
+                  background: "transparent",
+                  border: "1px solid #003300",
+                  color: "#005500",
+                  fontFamily: "monospace",
+                  fontSize: "0.85rem",
+                  letterSpacing: "0.2em",
+                  padding: "0.6rem 1.5rem",
+                  cursor: "pointer",
+                }}
+              >
+                PLAY AGAIN
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
-      {/* ── Inventory bar ────────────────────────────────────────────────────── */}
+      {/* ── Inventory bar ─────────────────────────────────────────────────── */}
       <div
         style={{
           flexShrink: 0,
@@ -1398,23 +2346,23 @@ export default function ThreeWorld() {
           style={{
             fontSize: "0.6rem",
             color: "#003300",
-            letterSpacing: "0.12em",
-            marginBottom: "0.35rem",
+            letterSpacing: "0.1em",
+            marginBottom: "0.3rem",
           }}
         >
-          ダンジョンで問題を解く → ブロック獲得 → ここに建設
+          LMB: FIRE / PLACE BLOCK · RMB: DESTROY · R: RELOAD · ESC: DESELECT
           <a
             href="/dungeon"
             style={{ color: "#00aa2a", marginLeft: "0.5rem", textDecoration: "underline" }}
           >
-            /dungeon へ
+            DUNGEON
           </a>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
           <span
-            style={{ flexShrink: 0, color: "#003300", fontSize: "0.65rem", letterSpacing: "0.2em" }}
+            style={{ flexShrink: 0, color: "#003300", fontSize: "0.6rem", letterSpacing: "0.15em" }}
           >
-            INVENTORY
+            INV
           </span>
           <div
             style={{
@@ -1431,13 +2379,13 @@ export default function ThreeWorld() {
                   display: "flex",
                   alignItems: "center",
                   gap: "0.75rem",
-                  fontSize: "0.75rem",
+                  fontSize: "0.72rem",
                 }}
               >
-                <span style={{ color: "#003300", letterSpacing: "0.1em" }}>NO BLOCKS</span>
+                <span style={{ color: "#003300", letterSpacing: "0.08em" }}>NO BLOCKS</span>
                 <a
                   href="/problems"
-                  style={{ color: "#00aa2a", letterSpacing: "0.1em", textDecoration: "underline" }}
+                  style={{ color: "#00aa2a", letterSpacing: "0.08em", textDecoration: "underline" }}
                 >
                   SOLVE PROBLEMS →
                 </a>
@@ -1460,11 +2408,11 @@ export default function ThreeWorld() {
                         display: "flex",
                         flexShrink: 0,
                         alignItems: "center",
-                        gap: "0.5rem",
-                        padding: "0.25rem 0.75rem",
+                        gap: "0.4rem",
+                        padding: "0.2rem 0.6rem",
                         fontFamily: "monospace",
-                        fontSize: "0.75rem",
-                        letterSpacing: "0.1em",
+                        fontSize: "0.72rem",
+                        letterSpacing: "0.08em",
                         border: isSelected ? `1px solid ${info.color}` : "1px solid #003300",
                         background: isSelected ? "rgba(0,255,65,0.05)" : "transparent",
                         color: isSelected ? "#00ff41" : "#005500",
@@ -1473,8 +2421,8 @@ export default function ThreeWorld() {
                     >
                       <span
                         style={{
-                          width: "8px",
-                          height: "8px",
+                          width: "7px",
+                          height: "7px",
                           flexShrink: 0,
                           background: info.color,
                         }}
@@ -1487,18 +2435,18 @@ export default function ThreeWorld() {
             )}
           </div>
           {selectedBlock && (
-            <div style={{ flexShrink: 0, display: "flex", alignItems: "center", gap: "0.5rem" }}>
-              <span style={{ color: "#00ff41", fontSize: "0.7rem", letterSpacing: "0.1em" }}>
-                SELECTED
+            <div style={{ flexShrink: 0, display: "flex", alignItems: "center", gap: "0.4rem" }}>
+              <span style={{ color: "#00ff41", fontSize: "0.65rem", letterSpacing: "0.1em" }}>
+                SEL
               </span>
               <button
                 type="button"
                 onClick={() => setSelectedBlock(null)}
                 style={{
                   color: "#003300",
-                  fontSize: "0.65rem",
+                  fontSize: "0.6rem",
                   border: "1px solid #003300",
-                  padding: "0.15rem 0.4rem",
+                  padding: "0.1rem 0.35rem",
                   background: "transparent",
                   fontFamily: "monospace",
                   cursor: "pointer",
