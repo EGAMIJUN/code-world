@@ -131,10 +131,29 @@ const WALL_DEFS: [number, number, number, number][] = [
 type WallAABB = { x1: number; z1: number; x2: number; z2: number }
 const WALL_AABBS: WallAABB[] = WALL_DEFS.map(([x, z, w, d]) => ({ x1: x, z1: z, x2: x + w, z2: z + d }))
 
+// ── Cover objects [x, z, width, depth, height] ─────────────────────────────────
+const COVER_DEFS: [number, number, number, number, number][] = [
+  // Wooden crates
+  [6.0, 5.5, 1.0, 1.0, 0.9],
+  [8.5, 12.0, 1.0, 1.0, 0.9],
+  [13.0, 11.0, 1.0, 1.0, 0.9],
+  [19.5, 4.5, 1.0, 1.0, 0.9],
+  // Metal barriers (long low walls)
+  [21.0, 10.0, 2.8, 0.4, 0.85],
+  [15.0, 19.0, 0.4, 2.8, 0.85],
+  [9.0,  17.0, 2.5, 0.4, 0.85],
+  // Car-like hulks (wider, lower)
+  [11.0, 5.0,  1.8, 0.9, 0.75],
+  [24.0, 20.0, 1.8, 0.9, 0.75],
+  [4.5,  20.5, 0.9, 1.8, 0.75],
+]
+const COVER_AABBS: WallAABB[] = COVER_DEFS.map(([x, z, w, d]) => ({ x1: x, z1: z, x2: x + w, z2: z + d }))
+const ALL_AABBS: WallAABB[] = [...WALL_AABBS, ...COVER_AABBS]
+
 function collidesWithWall(px: number, pz: number, radius: number): boolean {
   if (px - radius < 0 || px + radius > MAP_SIZE || pz - radius < 0 || pz + radius > MAP_SIZE)
     return true
-  for (const w of WALL_AABBS) {
+  for (const w of ALL_AABBS) {
     if (px + radius > w.x1 && px - radius < w.x2 && pz + radius > w.z1 && pz - radius < w.z2)
       return true
   }
@@ -322,6 +341,7 @@ interface CombatEnemy {
   respawnTimer: number
   spawnX: number
   spawnZ: number
+  dyingTimer: number  // 2→0 during death anim, -1 when fully dead
 }
 
 interface Bullet {
@@ -402,6 +422,7 @@ export default function ThreeWorld() {
   const consecutiveKillsRef = useRef(0)
   const lastKillTimeRef = useRef(0)
   const killStreakTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const reloadStartTimeRef = useRef<number | null>(null)
 
   // Combat refs
   const recoilRef = useRef(0)
@@ -450,6 +471,7 @@ export default function ThreeWorld() {
   const [isReloading, setIsReloading] = useState(false)
   const [damageFlash, setDamageFlash] = useState(false)
   const [killStreakMsg, setKillStreakMsg] = useState<string | null>(null)
+  const [headshotMsg, setHeadshotMsg] = useState(false)
 
   useEffect(() => {
     selectedBlockRef.current = selectedBlock
@@ -720,6 +742,23 @@ export default function ThreeWorld() {
         wallMeshes.push(mesh)
       }
 
+      // ── Cover objects (crates, barriers, cars) ─────────────────────────────
+      const crateMatCover = new THREE.MeshLambertMaterial({ color: 0x8b5a2b })
+      const barrierMat = new THREE.MeshLambertMaterial({ color: 0x556677 })
+      const carMat = new THREE.MeshLambertMaterial({ color: 0x3a4a3a })
+      for (const [cx, cz, cw, cd, ch] of COVER_DEFS) {
+        const isCar = cw >= 1.5 || cd >= 1.5
+        const isBarrier = (cw >= 2.0 || cd >= 2.0) && ch < 0.9
+        const coverMeshMat = isCar ? carMat : isBarrier ? barrierMat : crateMatCover
+        const geo = new THREE.BoxGeometry(cw, ch, cd)
+        const mesh = new THREE.Mesh(geo, coverMeshMat)
+        mesh.position.set(cx + cw / 2, ch / 2, cz + cd / 2)
+        mesh.castShadow = true
+        mesh.receiveShadow = true
+        scene.add(mesh)
+        wallMeshes.push(mesh)
+      }
+
       // ── FPS camera state ───────────────────────────────────────────────────
       const focalPoint = new THREE.Vector3(
         (MAP_SIZE / 2) * TILE_UNIT,
@@ -808,6 +847,7 @@ export default function ThreeWorld() {
           respawnTimer: 0,
           spawnX: def.x,
           spawnZ: def.z,
+          dyingTimer: -1,
         }
       })
 
@@ -924,6 +964,7 @@ export default function ThreeWorld() {
       function startReload(weapon: WeaponDef) {
         if (reloadingRef.current || weapon.maxAmmo === -1) return
         reloadingRef.current = true
+        reloadStartTimeRef.current = Date.now()
         setIsReloading(true)
         showNotification(`RELOADING ${weapon.name}...`)
         setTimeout(() => {
@@ -934,6 +975,7 @@ export default function ThreeWorld() {
           ammoRef.current = reloadedWeapon.maxAmmo
           setAmmo(reloadedWeapon.maxAmmo)
           reloadingRef.current = false
+          reloadStartTimeRef.current = null
           setIsReloading(false)
         }, weapon.reloadTime)
       }
@@ -1000,14 +1042,21 @@ export default function ThreeWorld() {
           if (hitEnemy && enemyHits[0]) {
             SOUNDS.hit()
             spawnBlood(enemyHits[0].point)
-            hitEnemy.hp -= weapon.hitDamage
-            scoreRef.current += Math.floor(weapon.hitDamage * 10)
+            const bodyH = hitEnemy.config.bodyH
+            const enemyBottomY = hitEnemy.mesh.position.y - bodyH / 2
+            const isHeadshot = enemyHits[0].point.y >= enemyBottomY + bodyH * 0.67
+            const dmg = isHeadshot ? weapon.hitDamage * 2 : weapon.hitDamage
+            if (isHeadshot) {
+              setHeadshotMsg(true)
+              setTimeout(() => setHeadshotMsg(false), 800)
+            }
+            hitEnemy.hp -= dmg
+            scoreRef.current += Math.floor(dmg * 10)
             setScore(scoreRef.current)
             if (hitEnemy.hp <= 0) {
               hitEnemy.hp = 0
-              hitEnemy.mesh.visible = false
+              hitEnemy.dyingTimer = 2.0
               hitEnemy.state = "patrol"
-              hitEnemy.respawnTimer = ENEMY_RESPAWN_SEC
               killsRef.current += 1
               setKills(killsRef.current)
               scoreRef.current += hitEnemy.config.score
@@ -1176,6 +1225,12 @@ export default function ThreeWorld() {
           .addScaledVector(new THREE.Vector3(0, 1, 0), -0.22)
           .addScaledVector(fwd3, -recoilRef.current)
         refs.gunGroup.quaternion.copy(camera.quaternion)
+        if (reloadStartTimeRef.current !== null) {
+          const wDef = WEAPONS[currentWeaponIdxRef.current]
+          const reloadDur = wDef?.reloadTime ?? 1
+          const progress = Math.min((Date.now() - reloadStartTimeRef.current) / reloadDur, 1)
+          refs.gunGroup.position.y -= Math.sin(progress * Math.PI) * 0.15
+        }
         if (recoilRef.current > 0) {
           recoilRef.current = Math.max(0, recoilRef.current - RECOIL_RECOVER * dt)
         }
@@ -1254,16 +1309,37 @@ export default function ThreeWorld() {
           const now = Date.now()
           const fp = refs.focalPoint
           for (const enemy of refs.enemies) {
-            // Respawn dead enemies
+            // Respawn dead enemies (with death animation)
             if (enemy.hp <= 0) {
-              enemy.respawnTimer -= dt
-              if (enemy.respawnTimer <= 0) {
-                enemy.hp = enemy.maxHp
-                enemy.mesh.visible = true
-                enemy.mesh.position.set(enemy.spawnX, enemy.config.bodyH / 2, enemy.spawnZ)
-                enemy.state = "patrol"
-                enemy.patrolIndex = 0
-                setEnemyStatus(refs.enemies.map((e) => ({ id: e.id, hp: e.hp, maxHp: e.maxHp, type: e.type, alive: e.hp > 0 })))
+              if (enemy.dyingTimer >= 0) {
+                // Death fall animation
+                enemy.dyingTimer -= dt
+                const progress = Math.max(0, 1 - enemy.dyingTimer / 2.0)
+                enemy.mesh.rotation.x = progress * (Math.PI / 2)
+                enemy.mesh.position.y = enemy.config.bodyH / 2 * Math.cos(progress * Math.PI / 2)
+                const opacity = enemy.dyingTimer < 1.0 ? enemy.dyingTimer : 1.0
+                const mat = enemy.mesh.material as THREE.MeshLambertMaterial
+                mat.transparent = true
+                mat.opacity = opacity
+                if (enemy.dyingTimer <= 0) {
+                  enemy.dyingTimer = -1
+                  enemy.mesh.visible = false
+                  mat.opacity = 1
+                  mat.transparent = false
+                  enemy.mesh.rotation.x = 0
+                  enemy.respawnTimer = ENEMY_RESPAWN_SEC
+                }
+              } else {
+                enemy.respawnTimer -= dt
+                if (enemy.respawnTimer <= 0) {
+                  enemy.hp = enemy.maxHp
+                  enemy.mesh.visible = true
+                  enemy.mesh.position.set(enemy.spawnX, enemy.config.bodyH / 2, enemy.spawnZ)
+                  enemy.mesh.rotation.x = 0
+                  enemy.state = "patrol"
+                  enemy.patrolIndex = 0
+                  setEnemyStatus(refs.enemies.map((e) => ({ id: e.id, hp: e.hp, maxHp: e.maxHp, type: e.type, alive: e.hp > 0 })))
+                }
               }
               continue
             }
@@ -1307,11 +1383,21 @@ export default function ThreeWorld() {
               if (distToPlayer <= enemy.config.attackRange) {
                 enemy.state = "attack"
               } else {
-                const spd = enemy.config.speed * dt
-                const nx = ex + (toPx / distToPlayer) * spd
-                const nz = ez + (toPz / distToPlayer) * spd
-                if (!collidesWithWall(nx, ez, ENEMY_RADIUS)) enemy.mesh.position.x = nx
-                if (!collidesWithWall(ex, nz, ENEMY_RADIUS)) enemy.mesh.position.z = nz
+                // Cover AI: stop moving and only shoot when near a wall/cover
+                const nearCover = ALL_AABBS.some((w) => {
+                  const cx2 = (w.x1 + w.x2) / 2
+                  const cz2 = (w.z1 + w.z2) / 2
+                  const ddx = ex - cx2
+                  const ddz = ez - cz2
+                  return Math.sqrt(ddx * ddx + ddz * ddz) < 2.5
+                })
+                if (!nearCover || distToPlayer > enemy.config.fireRange) {
+                  const spd = enemy.config.speed * dt
+                  const nx = ex + (toPx / distToPlayer) * spd
+                  const nz = ez + (toPz / distToPlayer) * spd
+                  if (!collidesWithWall(nx, ez, ENEMY_RADIUS)) enemy.mesh.position.x = nx
+                  if (!collidesWithWall(ex, nz, ENEMY_RADIUS)) enemy.mesh.position.z = nz
+                }
                 enemy.facing.set(toPx / distToPlayer, 0, toPz / distToPlayer)
                 enemy.mesh.rotation.y = Math.atan2(enemy.facing.x, enemy.facing.z)
                 if (!enemyCanSee(enemy.facing.x, enemy.facing.z, toPx, toPz, distToPlayer, enemy.config)) {
@@ -2039,6 +2125,26 @@ export default function ThreeWorld() {
               <span>KILLS <span style={{ color: "#ff5555", fontWeight: "bold", marginLeft: "0.2rem" }}>{kills}</span></span>
               <span>DEATHS <span style={{ color: "#aaa", fontWeight: "bold", marginLeft: "0.2rem" }}>{deaths}</span></span>
             </div>
+          </div>
+        )}
+
+        {/* Headshot message */}
+        {headshotMsg && (
+          <div style={{
+            position: "absolute",
+            top: "36%",
+            left: "50%",
+            transform: "translateX(-50%)",
+            zIndex: 36,
+            pointerEvents: "none",
+            fontSize: "1.6rem",
+            fontWeight: "bold",
+            color: "#ff4444",
+            letterSpacing: "0.2em",
+            textShadow: "0 0 18px rgba(255,0,0,0.9)",
+            whiteSpace: "nowrap",
+          }}>
+            HEADSHOT!
           </div>
         )}
 
