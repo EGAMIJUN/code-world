@@ -15,11 +15,14 @@ const API_URL = process.env["NEXT_PUBLIC_API_URL"] ?? "http://localhost:3001"
 // ── Combat constants ───────────────────────────────────────────────────────────
 const PLAYER_MAX_HP = 100
 const BULLET_SPEED = 35
+const ENEMY_BULLET_SPEED = 14
 const RECOIL_RECOVER = 8
 const MUZZLE_FLASH_DURATION = 0.07
-const PROBLEM_TIME = 30
 const PLAYER_RADIUS = 0.35
 const ENEMY_RADIUS = 0.4
+const ENEMY_RESPAWN_SEC = 30
+const PARTICLE_COUNT = 10
+const PARTICLE_LIFETIME = 0.5
 
 // ── Weapon definitions ─────────────────────────────────────────────────────────
 interface WeaponDef {
@@ -36,9 +39,9 @@ interface WeaponDef {
 }
 
 const WEAPONS: WeaponDef[] = [
-  { id: "pistol",  name: "PISTOL",  maxAmmo: -1, hitDamage: 1, reloadTime: 0,    spread: 0,    pellets: 1, bulletLifetime: 0.38, bulletColor: 0xffff88, recoil: 0.08 },
-  { id: "shotgun", name: "SHOTGUN", maxAmmo: 8,  hitDamage: 2, reloadTime: 2500, spread: 0.09, pellets: 5, bulletLifetime: 0.14, bulletColor: 0xff8800, recoil: 0.20 },
-  { id: "sniper",  name: "SNIPER",  maxAmmo: 5,  hitDamage: 3, reloadTime: 3000, spread: 0,    pellets: 1, bulletLifetime: 1.60, bulletColor: 0x00ffff, recoil: 0.28 },
+  { id: "pistol",  name: "PISTOL",  maxAmmo: -1, hitDamage: 20,  reloadTime: 0,    spread: 0,    pellets: 1, bulletLifetime: 0.38, bulletColor: 0xffff88, recoil: 0.08 },
+  { id: "shotgun", name: "SHOTGUN", maxAmmo: 8,  hitDamage: 55,  reloadTime: 2500, spread: 0.09, pellets: 5, bulletLifetime: 0.14, bulletColor: 0xff8800, recoil: 0.20 },
+  { id: "sniper",  name: "SNIPER",  maxAmmo: 5,  hitDamage: 120, reloadTime: 3000, spread: 0,    pellets: 1, bulletLifetime: 1.60, bulletColor: 0x00ffff, recoil: 0.28 },
 ]
 
 // ── Sound system (Web Audio API) ───────────────────────────────────────────────
@@ -144,6 +147,9 @@ interface EnemyConfig {
   attackDamage: number
   attackInterval: number
   attackRange: number
+  fireRange: number
+  fireInterval: number
+  fireDamage: number
   color: number
   emissive: number
   bodyW: number
@@ -156,17 +162,20 @@ interface EnemyConfig {
 
 const ENEMY_CONFIGS: Record<EnemyType, EnemyConfig> = {
   grunt: {
-    hp: 3, speed: 2.0, attackDamage: 10, attackInterval: 2000, attackRange: 1.8,
+    hp: 60, speed: 2.0, attackDamage: 10, attackInterval: 2000, attackRange: 1.8,
+    fireRange: 10, fireInterval: 2000, fireDamage: 8,
     color: 0xff2222, emissive: 0x330000, bodyW: 0.65, bodyH: 1.7,
     sightRange: 12, fovAngle: Math.PI, score: 250, blockReward: 1,
   },
   miniboss: {
-    hp: 5, speed: 1.6, attackDamage: 20, attackInterval: 1500, attackRange: 2.0,
+    hp: 150, speed: 1.6, attackDamage: 20, attackInterval: 1500, attackRange: 2.0,
+    fireRange: 14, fireInterval: 1500, fireDamage: 14,
     color: 0xff6600, emissive: 0x331100, bodyW: 0.85, bodyH: 2.1,
     sightRange: 16, fovAngle: Math.PI * 0.9, score: 600, blockReward: 3,
   },
   boss: {
-    hp: 8, speed: 1.2, attackDamage: 35, attackInterval: 2500, attackRange: 2.5,
+    hp: 350, speed: 1.2, attackDamage: 35, attackInterval: 2500, attackRange: 2.5,
+    fireRange: 20, fireInterval: 1200, fireDamage: 20,
     color: 0xaa00ff, emissive: 0x220033, bodyW: 1.1, bodyH: 2.5,
     sightRange: 22, fovAngle: Math.PI * 0.8, score: 1500, blockReward: 8,
   },
@@ -244,80 +253,6 @@ const BLOCK_INFO: Record<string, { label: string; color: string }> = {
   diamond_block: { label: "ダイヤブロック", color: "#00cfff" },
 }
 
-// ── Combat problem pool ────────────────────────────────────────────────────────
-interface CombatProblemDef {
-  question: string
-  choices: [string, string, string, string]
-  correct: 0 | 1 | 2 | 3
-}
-
-const COMBAT_PROBLEMS: CombatProblemDef[] = [
-  {
-    question: "SELECT * FROM users WHERE age > 25 の結果は？",
-    choices: ["25歳のみ", "26歳以上の全ユーザー", "25歳以下", "全ユーザー"],
-    correct: 1,
-  },
-  {
-    question: "LEFT JOIN と INNER JOIN の違いは？",
-    choices: [
-      "全く同じ",
-      "LEFT JOINは左テーブルの全行を含む",
-      "INNER JOINが遅い",
-      "LEFT JOINはNULLを除外",
-    ],
-    correct: 1,
-  },
-  {
-    question: "O(n log n) の計算量を持つソートは？",
-    choices: ["バブルソート", "選択ソート", "マージソート", "挿入ソート"],
-    correct: 2,
-  },
-  {
-    question: "RESTful APIでリソース取得に使うHTTPメソッドは？",
-    choices: ["POST", "PUT", "DELETE", "GET"],
-    correct: 3,
-  },
-  {
-    question: "SQLでNULL値を正しく比較する構文は？",
-    choices: ["= NULL", "!= NULL", "IS NULL", "== NULL"],
-    correct: 2,
-  },
-  {
-    question: "インデックスの主な目的は？",
-    choices: ["データ暗号化", "検索の高速化", "テーブル削除", "データ圧縮"],
-    correct: 1,
-  },
-  {
-    question: "スタック（Stack）のデータ取り出し順序は？",
-    choices: ["FIFO", "LIFO", "ランダム", "優先度順"],
-    correct: 1,
-  },
-  {
-    question: "データベースのACIDのAは何の略？",
-    choices: ["Availability", "Authority", "Atomicity", "Algorithm"],
-    correct: 2,
-  },
-  {
-    question: "SQL INJECTIONを防ぐ最善策は？",
-    choices: ["文字エスケープのみ", "WAFのみ", "HTTPS使用", "プリペアドステートメント"],
-    correct: 3,
-  },
-  {
-    question: "GROUP BY句で使える集計関数は？",
-    choices: ["WHERE", "JOIN", "COUNT", "LIMIT"],
-    correct: 2,
-  },
-  {
-    question: "二分探索の計算量は？",
-    choices: ["O(n)", "O(n²)", "O(log n)", "O(1)"],
-    correct: 2,
-  },
-  {
-    question: "HTTPステータスコード404の意味は？",
-    choices: ["認証エラー", "サーバーエラー", "リクエスト成功", "リソースが見つからない"],
-    correct: 3,
-  },
-]
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 interface InventoryItem {
@@ -376,20 +311,27 @@ interface CombatEnemy {
   patrolWaypoints: { x: number; z: number }[]
   patrolIndex: number
   lastAttackTime: number
+  lastFireTime: number
   facing: THREE.Vector3
   lastSeenPlayer: { x: number; z: number } | null
   searchTimer: number
+  respawnTimer: number
+  spawnX: number
+  spawnZ: number
 }
 
 interface Bullet {
   mesh: THREE.Mesh
   velocity: THREE.Vector3
   life: number
+  isEnemy: boolean
 }
 
-interface ActiveProblem {
-  def: CombatProblemDef
-  enemyId: string
+interface BloodParticle {
+  mesh: THREE.Mesh
+  velocity: THREE.Vector3
+  life: number
+  maxLife: number
 }
 
 // ── XP helper ─────────────────────────────────────────────────────────────────
@@ -422,6 +364,7 @@ interface SceneRefs {
   gunGroup: THREE.Group
   enemies: CombatEnemy[]
   bullets: Bullet[]
+  bloodParticles: BloodParticle[]
   muzzleLight: THREE.PointLight
   aimedEnemyId: string | null
 }
@@ -454,17 +397,18 @@ export default function ThreeWorld() {
   // Combat refs
   const recoilRef = useRef(0)
   const playerHpRef = useRef(PLAYER_MAX_HP)
-  const gamePhaseRef = useRef<"playing" | "gameover" | "clear">("playing")
-  const activeProblemRef = useRef<ActiveProblem | null>(null)
+  const gamePhaseRef = useRef<"playing" | "gameover">("playing")
   const ammoRef = useRef(-1) // -1 = infinite (pistol default)
   const reloadingRef = useRef(false)
   const scoreRef = useRef(0)
+  const killsRef = useRef(0)
+  const deathsRef = useRef(0)
   const muzzleFlashTimerRef = useRef(0)
-  const earnedBlocksRef = useRef(0)
+  const mouseDownRef = useRef(false)
+  const lastFireTimeRef = useRef(0)
   // Weapon refs
   const currentWeaponIdxRef = useRef(0)
   const weaponAmmoRef = useRef<[number, number, number]>([-1, 8, 5])
-  const pendingDmgRef = useRef(1)
 
   // UI state
   const [inventory, setInventory] = useState<InventoryItem[]>([])
@@ -487,14 +431,13 @@ export default function ThreeWorld() {
   const [currentWeaponIdx, setCurrentWeaponIdx] = useState(0)
   const [unlockedWeapons, setUnlockedWeapons] = useState<Set<string>>(new Set(["pistol"]))
   const [score, setScore] = useState(0)
-  const [gamePhase, setGamePhase] = useState<"playing" | "gameover" | "clear">("playing")
-  const [activeProblem, setActiveProblem] = useState<ActiveProblem | null>(null)
-  const [problemTimeLeft, setProblemTimeLeft] = useState(PROBLEM_TIME)
+  const [kills, setKills] = useState(0)
+  const [deaths, setDeaths] = useState(0)
+  const [gamePhase, setGamePhase] = useState<"playing" | "gameover">("playing")
   const [enemyStatus, setEnemyStatus] = useState<
-    Array<{ id: string; hp: number; maxHp: number; type: EnemyType }>
+    Array<{ id: string; hp: number; maxHp: number; type: EnemyType; alive: boolean }>
   >([])
   const [aimedEnemyId, setAimedEnemyId] = useState<string | null>(null)
-  const [earnedBlocks, setEarnedBlocks] = useState(0)
   const [isReloading, setIsReloading] = useState(false)
   const [damageFlash, setDamageFlash] = useState(false)
 
@@ -512,8 +455,7 @@ export default function ThreeWorld() {
     } catch { /* ignore */ }
   }, [])
   useEffect(() => {
-    if (gamePhase === "clear") SOUNDS.clear()
-    else if (gamePhase === "gameover") SOUNDS.gameover()
+    if (gamePhase === "gameover") SOUNDS.gameover()
   }, [gamePhase])
   // biome-ignore lint/correctness/useExhaustiveDependencies: chatEndRef is a stable ref, no need in deps
   useEffect(() => {
@@ -658,72 +600,6 @@ export default function ThreeWorld() {
     [showNotification],
   )
 
-  // ── Answer combat problem ──────────────────────────────────────────────────
-  const answerProblem = useCallback(
-    (correct: boolean) => {
-      const problem = activeProblemRef.current
-      activeProblemRef.current = null
-      setActiveProblem(null)
-      if (!problem) return
-
-      if (correct) {
-        const refs = sceneRef.current
-        if (!refs) return
-        const enemy = refs.enemies.find((e) => e.id === problem.enemyId)
-        if (enemy && enemy.hp > 0) {
-          enemy.hp -= pendingDmgRef.current
-          scoreRef.current += 50 * pendingDmgRef.current
-          setScore(scoreRef.current)
-          if (enemy.hp <= 0) {
-            refs.scene.remove(enemy.mesh)
-            enemy.mesh.geometry.dispose()
-            scoreRef.current += enemy.config.score
-            setScore(scoreRef.current)
-            earnedBlocksRef.current += enemy.config.blockReward
-            setEarnedBlocks(earnedBlocksRef.current)
-            const tag = enemy.type === "boss" ? "BOSS撃破！" : enemy.type === "miniboss" ? "ミニボス撃破！" : "エネミー撃破！"
-            showNotification(`${tag} +${enemy.config.score}pt ブロック×${enemy.config.blockReward}獲得！`)
-            const allDead = refs.enemies.every((e) => e.hp <= 0)
-            if (allDead) {
-              gamePhaseRef.current = "clear"
-              setGamePhase("clear")
-            }
-          } else {
-            showNotification(`正解！ダメージを与えた！(HP: ${enemy.hp}/${enemy.maxHp})`)
-          }
-          setEnemyStatus(refs.enemies.map((e) => ({ id: e.id, hp: e.hp, maxHp: e.maxHp, type: e.type })))
-        }
-      } else {
-        playerHpRef.current = Math.max(0, playerHpRef.current - 20)
-        setPlayerHp(playerHpRef.current)
-        setDamageFlash(true)
-        SOUNDS.damage()
-        setTimeout(() => setDamageFlash(false), 300)
-        showNotification("不正解！ -20 HP")
-        if (playerHpRef.current <= 0 && gamePhaseRef.current === "playing") {
-          gamePhaseRef.current = "gameover"
-          setGamePhase("gameover")
-        }
-      }
-    },
-    [showNotification],
-  )
-
-  // Problem countdown timer
-  useEffect(() => {
-    if (!activeProblem) return
-    setProblemTimeLeft(PROBLEM_TIME)
-    const interval = setInterval(() => {
-      setProblemTimeLeft((prev) => {
-        if (prev <= 1) {
-          answerProblem(false)
-          return PROBLEM_TIME
-        }
-        return prev - 1
-      })
-    }, 1000)
-    return () => clearInterval(interval)
-  }, [activeProblem, answerProblem])
 
   // ── Three.js init ──────────────────────────────────────────────────────────
   useEffect(() => {
@@ -915,13 +791,18 @@ export default function ThreeWorld() {
           patrolWaypoints: def.patrol,
           patrolIndex: 0,
           lastAttackTime: 0,
+          lastFireTime: 0,
           facing: new THREE.Vector3(0, 0, 1),
           lastSeenPlayer: null,
           searchTimer: 0,
+          respawnTimer: 0,
+          spawnX: def.x,
+          spawnZ: def.z,
         }
       })
 
       const bullets: Bullet[] = []
+      const bloodParticles: BloodParticle[] = []
 
       sceneRef.current = {
         scene,
@@ -939,11 +820,12 @@ export default function ThreeWorld() {
         gunGroup,
         enemies,
         bullets,
+        bloodParticles,
         muzzleLight,
         aimedEnemyId: null,
       }
 
-      setEnemyStatus(enemies.map((e) => ({ id: e.id, hp: e.hp, maxHp: e.maxHp, type: e.type })))
+      setEnemyStatus(enemies.map((e) => ({ id: e.id, hp: e.hp, maxHp: e.maxHp, type: e.type, alive: true })))
 
       fetch(`${API_URL}/api/me`, { credentials: "include" })
         .then((r) => r.json() as Promise<{ data?: { user?: { id?: string } } }>)
@@ -1024,7 +906,7 @@ export default function ThreeWorld() {
         bulletMesh.position.copy(camera.position).addScaledVector(fwd, 0.55)
         bulletMesh.lookAt(bulletMesh.position.clone().add(fwd))
         scene.add(bulletMesh)
-        bullets.push({ mesh: bulletMesh, velocity: fwd.clone().multiplyScalar(BULLET_SPEED), life: weapon.bulletLifetime })
+        bullets.push({ mesh: bulletMesh, velocity: fwd.clone().multiplyScalar(BULLET_SPEED), life: weapon.bulletLifetime, isEnemy: false })
         muzzleFlashTimerRef.current = MUZZLE_FLASH_DURATION
       }
 
@@ -1046,10 +928,26 @@ export default function ThreeWorld() {
         }, weapon.reloadTime)
       }
 
+      // ── Spawn blood particles ──────────────────────────────────────────────
+      function spawnBlood(pos: THREE.Vector3) {
+        for (let i = 0; i < PARTICLE_COUNT; i++) {
+          const geo = new THREE.SphereGeometry(0.04 + Math.random() * 0.04, 4, 4)
+          const mat = new THREE.MeshBasicMaterial({ color: 0xcc0000 })
+          const mesh = new THREE.Mesh(geo, mat)
+          mesh.position.copy(pos)
+          scene.add(mesh)
+          const vel = new THREE.Vector3(
+            (Math.random() - 0.5) * 4,
+            Math.random() * 3 + 1,
+            (Math.random() - 0.5) * 4,
+          )
+          bloodParticles.push({ mesh, velocity: vel, life: PARTICLE_LIFETIME, maxLife: PARTICLE_LIFETIME })
+        }
+      }
+
       // ── Fire weapon ────────────────────────────────────────────────────────
       function fire() {
         if (gamePhaseRef.current !== "playing") return
-        if (activeProblemRef.current !== null) return
         const weapon = WEAPONS[currentWeaponIdxRef.current]
         if (!weapon) return
         if (reloadingRef.current) return
@@ -1057,6 +955,11 @@ export default function ThreeWorld() {
           startReload(weapon)
           return
         }
+
+        // Rate-limit pistol (auto-fire)
+        const now = Date.now()
+        if (weapon.id === "pistol" && now - lastFireTimeRef.current < 120) return
+        lastFireTimeRef.current = now
 
         // Consume ammo
         if (weapon.maxAmmo !== -1) {
@@ -1066,7 +969,6 @@ export default function ThreeWorld() {
         }
 
         recoilRef.current = weapon.recoil
-        pendingDmgRef.current = weapon.hitDamage
 
         // Spawn visual bullets (spread for shotgun)
         for (let p = 0; p < weapon.pellets; p++) {
@@ -1085,13 +987,25 @@ export default function ThreeWorld() {
         const enemyHits = raycaster.intersectObjects(aliveEnemies.map((e) => e.mesh), false)
         if (enemyHits.length > 0) {
           const hitEnemy = aliveEnemies.find((e) => e.mesh === enemyHits[0]?.object)
-          if (hitEnemy) {
+          if (hitEnemy && enemyHits[0]) {
             SOUNDS.hit()
-            const probIdx = Math.floor(Math.random() * COMBAT_PROBLEMS.length)
-            const def = COMBAT_PROBLEMS[probIdx]
-            if (!def) return
-            activeProblemRef.current = { def, enemyId: hitEnemy.id }
-            setActiveProblem({ def, enemyId: hitEnemy.id })
+            spawnBlood(enemyHits[0].point)
+            hitEnemy.hp -= weapon.hitDamage
+            scoreRef.current += Math.floor(weapon.hitDamage * 10)
+            setScore(scoreRef.current)
+            if (hitEnemy.hp <= 0) {
+              hitEnemy.hp = 0
+              hitEnemy.mesh.visible = false
+              hitEnemy.state = "patrol"
+              hitEnemy.respawnTimer = ENEMY_RESPAWN_SEC
+              killsRef.current += 1
+              setKills(killsRef.current)
+              scoreRef.current += hitEnemy.config.score
+              setScore(scoreRef.current)
+              const tag = hitEnemy.type === "boss" ? "BOSS撃破！" : hitEnemy.type === "miniboss" ? "ミニボス撃破！" : "KILL!"
+              showNotification(`${tag} +${hitEnemy.config.score}pt`)
+            }
+            setEnemyStatus(enemies.map((e) => ({ id: e.id, hp: e.hp, maxHp: e.maxHp, type: e.type, alive: e.hp > 0 })))
           }
         } else if (selectedBlockRef.current) {
           placeAtCenter()
@@ -1115,8 +1029,11 @@ export default function ThreeWorld() {
           renderer.domElement.requestPointerLock()
           return
         }
-        if (e.button === 0) fire()
+        if (e.button === 0) { mouseDownRef.current = true; fire() }
         else if (e.button === 2) destroyAtCenter()
+      }
+      function onMouseUp(e: MouseEvent) {
+        if (e.button === 0) mouseDownRef.current = false
       }
       function onContextMenu(e: MouseEvent) {
         e.preventDefault()
@@ -1153,6 +1070,7 @@ export default function ThreeWorld() {
       renderer.domElement.addEventListener("mousedown", onMouseDown)
       renderer.domElement.addEventListener("contextmenu", onContextMenu)
       document.addEventListener("mousemove", onDocMouseMove)
+      document.addEventListener("mouseup", onMouseUp)
       document.addEventListener("pointerlockchange", onPointerLockChange)
 
       function onResize() {
@@ -1225,12 +1143,40 @@ export default function ThreeWorld() {
           refs.muzzleLight.intensity = 0
         }
 
+        // Continuous fire
+        if (mouseDownRef.current && gamePhaseRef.current === "playing") fire()
+
         // ── Bullets ────────────────────────────────────────────────────────
         for (let i = refs.bullets.length - 1; i >= 0; i--) {
           const b = refs.bullets[i]
           if (!b) continue
           b.mesh.position.addScaledVector(b.velocity, dt)
           b.life -= dt
+          // Enemy bullet hits player
+          if (b.isEnemy && b.life > 0) {
+            const dx = b.mesh.position.x - refs.focalPoint.x
+            const dy = b.mesh.position.y - EYE_HEIGHT
+            const dz = b.mesh.position.z - refs.focalPoint.z
+            if (Math.sqrt(dx * dx + dy * dy + dz * dz) < 0.5) {
+              refs.scene.remove(b.mesh)
+              b.mesh.geometry.dispose()
+              refs.bullets.splice(i, 1)
+              if (gamePhaseRef.current === "playing") {
+                playerHpRef.current = Math.max(0, playerHpRef.current - 8)
+                setPlayerHp(playerHpRef.current)
+                setDamageFlash(true)
+                SOUNDS.damage()
+                setTimeout(() => setDamageFlash(false), 250)
+                if (playerHpRef.current <= 0) {
+                  gamePhaseRef.current = "gameover"
+                  setGamePhase("gameover")
+                  deathsRef.current += 1
+                  setDeaths(deathsRef.current)
+                }
+              }
+              continue
+            }
+          }
           if (b.life <= 0) {
             refs.scene.remove(b.mesh)
             b.mesh.geometry.dispose()
@@ -1238,12 +1184,41 @@ export default function ThreeWorld() {
           }
         }
 
+        // ── Blood particles ────────────────────────────────────────────────
+        for (let i = refs.bloodParticles.length - 1; i >= 0; i--) {
+          const p = refs.bloodParticles[i]
+          if (!p) continue
+          p.velocity.y -= 9.8 * dt
+          p.mesh.position.addScaledVector(p.velocity, dt)
+          p.life -= dt
+          const alpha = p.life / p.maxLife
+          ;(p.mesh.material as THREE.MeshBasicMaterial).opacity = alpha
+          ;(p.mesh.material as THREE.MeshBasicMaterial).transparent = true
+          if (p.life <= 0) {
+            refs.scene.remove(p.mesh)
+            p.mesh.geometry.dispose()
+            refs.bloodParticles.splice(i, 1)
+          }
+        }
+
         // ── Enemy AI state machine ─────────────────────────────────────────
-        if (gamePhaseRef.current === "playing" && activeProblemRef.current === null) {
+        if (gamePhaseRef.current === "playing") {
           const now = Date.now()
           const fp = refs.focalPoint
           for (const enemy of refs.enemies) {
-            if (enemy.hp <= 0) continue
+            // Respawn dead enemies
+            if (enemy.hp <= 0) {
+              enemy.respawnTimer -= dt
+              if (enemy.respawnTimer <= 0) {
+                enemy.hp = enemy.maxHp
+                enemy.mesh.visible = true
+                enemy.mesh.position.set(enemy.spawnX, enemy.config.bodyH / 2, enemy.spawnZ)
+                enemy.state = "patrol"
+                enemy.patrolIndex = 0
+                setEnemyStatus(refs.enemies.map((e) => ({ id: e.id, hp: e.hp, maxHp: e.maxHp, type: e.type, alive: e.hp > 0 })))
+              }
+              continue
+            }
             const ex = enemy.mesh.position.x
             const ez = enemy.mesh.position.z
             const toPx = fp.x - ex
@@ -1296,6 +1271,21 @@ export default function ThreeWorld() {
                   enemy.searchTimer = 3.5
                 }
               }
+              // Shoot while chasing (alert range fire)
+              if (distToPlayer <= enemy.config.fireRange && now - enemy.lastFireTime > enemy.config.fireInterval * 1.5) {
+                enemy.lastFireTime = now
+                const fwd = new THREE.Vector3(toPx / distToPlayer, 0, toPz / distToPlayer)
+                fwd.x += (Math.random() - 0.5) * 0.12
+                fwd.z += (Math.random() - 0.5) * 0.12
+                fwd.normalize()
+                const bGeo = new THREE.BoxGeometry(0.04, 0.04, 0.22)
+                const bMat = new THREE.MeshBasicMaterial({ color: 0xff4400 })
+                const bMesh = new THREE.Mesh(bGeo, bMat)
+                bMesh.position.set(enemy.mesh.position.x, EYE_HEIGHT * 0.7, enemy.mesh.position.z)
+                bMesh.lookAt(bMesh.position.clone().add(fwd))
+                refs.scene.add(bMesh)
+                refs.bullets.push({ mesh: bMesh, velocity: fwd.clone().multiplyScalar(ENEMY_BULLET_SPEED), life: 1.8, isEnemy: true })
+              }
               enemy.mesh.position.y = enemy.config.bodyH / 2 + Math.sin(now * 0.006) * 0.04
 
             } else if (enemy.state === "attack") {
@@ -1315,7 +1305,25 @@ export default function ThreeWorld() {
                 if (playerHpRef.current <= 0 && gamePhaseRef.current === "playing") {
                   gamePhaseRef.current = "gameover"
                   setGamePhase("gameover")
+                  deathsRef.current += 1
+                  setDeaths(deathsRef.current)
                 }
+              }
+              // Enemy ranged fire
+              if (distToPlayer <= enemy.config.fireRange && now - enemy.lastFireTime > enemy.config.fireInterval) {
+                enemy.lastFireTime = now
+                const fwd = new THREE.Vector3(toPx / distToPlayer, 0, toPz / distToPlayer)
+                const spread = 0.06
+                fwd.x += (Math.random() - 0.5) * spread
+                fwd.z += (Math.random() - 0.5) * spread
+                fwd.normalize()
+                const bGeo = new THREE.BoxGeometry(0.04, 0.04, 0.22)
+                const bMat = new THREE.MeshBasicMaterial({ color: 0xff4400 })
+                const bMesh = new THREE.Mesh(bGeo, bMat)
+                bMesh.position.set(enemy.mesh.position.x, EYE_HEIGHT * 0.7, enemy.mesh.position.z)
+                bMesh.lookAt(bMesh.position.clone().add(fwd))
+                refs.scene.add(bMesh)
+                refs.bullets.push({ mesh: bMesh, velocity: fwd.clone().multiplyScalar(ENEMY_BULLET_SPEED), life: 1.8, isEnemy: true })
               }
 
             } else if (enemy.state === "search") {
@@ -1463,6 +1471,7 @@ export default function ThreeWorld() {
 
       return () => {
         document.removeEventListener("mousemove", onDocMouseMove)
+        document.removeEventListener("mouseup", onMouseUp)
         document.removeEventListener("pointerlockchange", onPointerLockChange)
         if (document.pointerLockElement === renderer.domElement) document.exitPointerLock()
         renderer.domElement.removeEventListener("mousedown", onMouseDown)
@@ -1743,11 +1752,10 @@ export default function ThreeWorld() {
   const { level, xpInLevel, xpForNext } = computeXpProgress(playerStats.xp)
   const xpPct = xpForNext > 0 ? Math.round((xpInLevel / xpForNext) * 100) : 0
   const hpPct = Math.round((playerHp / PLAYER_MAX_HP) * 100)
-  const currentWeapon: WeaponDef = WEAPONS[currentWeaponIdx] ?? WEAPONS[0] ?? { id: "pistol", name: "PISTOL", maxAmmo: -1, hitDamage: 1, reloadTime: 0, spread: 0, pellets: 1, bulletLifetime: 0.38, bulletColor: 0xffff88, recoil: 0.08 }
+  const currentWeapon: WeaponDef = WEAPONS[currentWeaponIdx] ?? WEAPONS[0] ?? { id: "pistol", name: "PISTOL", maxAmmo: -1, hitDamage: 20, reloadTime: 0, spread: 0, pellets: 1, bulletLifetime: 0.38, bulletColor: 0xffff88, recoil: 0.08 }
   const ammoPct = currentWeapon.maxAmmo === -1 ? 100 : Math.round((ammo / currentWeapon.maxAmmo) * 100)
   const ammoDisplay = currentWeapon.maxAmmo === -1 ? "∞" : `${ammo}/${currentWeapon.maxAmmo}`
   const hpColor = playerHp > 60 ? "#00ff41" : playerHp > 30 ? "#ffaa00" : "#ff3333"
-  const aliveEnemies = enemyStatus.filter((e) => e.hp > 0).length
 
   return (
     <div
@@ -1873,13 +1881,14 @@ export default function ThreeWorld() {
           </span>
         </div>
 
-        {/* Enemies remaining */}
-        <div style={{ display: "flex", alignItems: "center", gap: "0.35rem" }}>
-          <span style={{ color: "#ff5555", fontSize: "0.6rem", letterSpacing: "0.1em" }}>
-            ENEMIES
+        {/* Kill / Death counter */}
+        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+          <span style={{ color: "#ff5555", fontSize: "0.65rem", letterSpacing: "0.1em" }}>
+            K <span style={{ color: "#ff8888", fontWeight: "bold" }}>{kills}</span>
           </span>
-          <span style={{ color: "#ff5555", fontSize: "0.7rem", fontWeight: "bold" }}>
-            {aliveEnemies}
+          <span style={{ color: "#555", fontSize: "0.55rem" }}>/</span>
+          <span style={{ color: "#aaaaaa", fontSize: "0.65rem", letterSpacing: "0.1em" }}>
+            D <span style={{ color: "#cccccc", fontWeight: "bold" }}>{deaths}</span>
           </span>
         </div>
 
@@ -2027,7 +2036,7 @@ export default function ThreeWorld() {
         )}
 
         {/* ENTER WORLD overlay */}
-        {!isMobile && !isLoading && !error && !isPointerLocked && gamePhase === "playing" && (
+        {!isMobile && !isLoading && !error && !isPointerLocked && gamePhase !== "gameover" && (
           <button
             type="button"
             onClick={() => rendererDomRef.current?.requestPointerLock()}
@@ -2157,13 +2166,13 @@ export default function ThreeWorld() {
               const label = e.type === "boss" ? "BOSS" : e.type === "miniboss" ? "MINI" : `E${i + 1}`
               const hpPctEnemy = e.maxHp > 0 ? Math.round((e.hp / e.maxHp) * 100) : 0
               return (
-                <div key={e.id} style={{ display: "flex", alignItems: "center", gap: "4px" }}>
-                  <span style={{ color: typeColor, fontSize: "0.55rem", minWidth: "26px" }}>{label}</span>
-                  <div style={{ width: "40px", height: "6px", background: "#1a0000", border: `1px solid ${typeColor}33`, overflow: "hidden" }}>
-                    <div style={{ height: "100%", width: `${hpPctEnemy}%`, background: hpBarColor, transition: "width 0.3s", boxShadow: e.hp > 0 ? `0 0 4px ${hpBarColor}` : "none" }} />
+                <div key={e.id} style={{ display: "flex", alignItems: "center", gap: "4px", opacity: e.alive ? 1 : 0.4 }}>
+                  <span style={{ color: e.alive ? typeColor : "#444", fontSize: "0.55rem", minWidth: "26px" }}>{label}</span>
+                  <div style={{ width: "40px", height: "6px", background: "#1a0000", border: `1px solid ${e.alive ? typeColor : "#333"}33`, overflow: "hidden" }}>
+                    <div style={{ height: "100%", width: `${hpPctEnemy}%`, background: e.alive ? hpBarColor : "#333", transition: "width 0.3s" }} />
                   </div>
-                  <span style={{ color: typeColor, fontSize: "0.55rem", minWidth: "24px" }}>
-                    {e.hp}/{e.maxHp}
+                  <span style={{ color: e.alive ? typeColor : "#444", fontSize: "0.55rem", minWidth: "24px" }}>
+                    {e.alive ? `${e.hp}/${e.maxHp}` : "↺"}
                   </span>
                 </div>
               )
@@ -2395,141 +2404,6 @@ export default function ThreeWorld() {
           </div>
         )}
 
-        {/* ── Combat Problem Modal ─────────────────────────────────────────── */}
-        {activeProblem && (
-          <div
-            style={{
-              position: "absolute",
-              inset: 0,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              background: "rgba(0,0,0,0.88)",
-              zIndex: 50,
-              fontFamily: "monospace",
-            }}
-          >
-            <div
-              style={{
-                width: "min(500px, 92vw)",
-                border: "1px solid #ff3333",
-                background: "#050505",
-                padding: "1.5rem",
-                display: "flex",
-                flexDirection: "column",
-                gap: "1rem",
-              }}
-            >
-              {/* Header */}
-              <div
-                style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}
-              >
-                <div style={{ color: "#ff3333", fontSize: "0.7rem", letterSpacing: "0.3em" }}>
-                  ENEMY HIT — ANSWER TO DEAL DAMAGE
-                </div>
-                <div
-                  style={{
-                    color: problemTimeLeft <= 10 ? "#ff3333" : "#ffaa00",
-                    fontSize: "1rem",
-                    fontWeight: "bold",
-                    letterSpacing: "0.1em",
-                    border: `1px solid ${problemTimeLeft <= 10 ? "#550000" : "#553300"}`,
-                    padding: "0.1rem 0.5rem",
-                    minWidth: "3rem",
-                    textAlign: "center",
-                    animation:
-                      problemTimeLeft <= 10 ? "pulse 0.5s ease-in-out infinite alternate" : "none",
-                  }}
-                >
-                  {problemTimeLeft}s
-                </div>
-              </div>
-
-              {/* Timer bar */}
-              <div
-                style={{
-                  height: "3px",
-                  background: "#1a0000",
-                  border: "1px solid #330000",
-                  overflow: "hidden",
-                }}
-              >
-                <div
-                  style={{
-                    height: "100%",
-                    width: `${(problemTimeLeft / PROBLEM_TIME) * 100}%`,
-                    background: problemTimeLeft <= 10 ? "#ff3333" : "#ffaa00",
-                    transition: "width 1s linear",
-                  }}
-                />
-              </div>
-
-              {/* Question */}
-              <div
-                style={{
-                  color: "#00ff41",
-                  fontSize: "0.88rem",
-                  letterSpacing: "0.05em",
-                  lineHeight: 1.6,
-                  padding: "0.75rem",
-                  border: "1px solid #003300",
-                  background: "rgba(0,20,0,0.5)",
-                }}
-              >
-                {activeProblem.def.question}
-              </div>
-
-              {/* Choices */}
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.5rem" }}>
-                {activeProblem.def.choices.map((choice, i) => (
-                  <button
-                    key={choice}
-                    type="button"
-                    onClick={() => answerProblem(i === activeProblem.def.correct)}
-                    style={{
-                      background: "transparent",
-                      border: "1px solid #225522",
-                      color: "#00cc33",
-                      fontFamily: "monospace",
-                      fontSize: "0.78rem",
-                      padding: "0.6rem 0.75rem",
-                      cursor: "pointer",
-                      textAlign: "left",
-                      letterSpacing: "0.04em",
-                      lineHeight: 1.4,
-                    }}
-                    onMouseEnter={(e) => {
-                      ;(e.currentTarget as HTMLButtonElement).style.background =
-                        "rgba(0,255,65,0.08)"
-                      ;(e.currentTarget as HTMLButtonElement).style.borderColor = "#00ff41"
-                    }}
-                    onMouseLeave={(e) => {
-                      ;(e.currentTarget as HTMLButtonElement).style.background = "transparent"
-                      ;(e.currentTarget as HTMLButtonElement).style.borderColor = "#225522"
-                    }}
-                  >
-                    <span style={{ color: "#005500", marginRight: "0.4rem" }}>
-                      {["A", "B", "C", "D"][i]}.
-                    </span>
-                    {choice}
-                  </button>
-                ))}
-              </div>
-
-              <div
-                style={{
-                  color: "#334433",
-                  fontSize: "0.6rem",
-                  letterSpacing: "0.08em",
-                  textAlign: "center",
-                }}
-              >
-                正解: +50pt · 不正解: -20 HP · 時間切れ: -20 HP
-              </div>
-            </div>
-          </div>
-        )}
-
         {/* ── Game Over ────────────────────────────────────────────────────── */}
         {gamePhase === "gameover" && (
           <div
@@ -2581,10 +2455,7 @@ export default function ThreeWorld() {
                 {score.toString().padStart(5, "0")}
               </div>
               <div style={{ color: "#554400", fontSize: "0.75rem" }}>
-                ENEMIES DEFEATED: {enemyStatus.length - aliveEnemies}/{enemyStatus.length}
-              </div>
-              <div style={{ color: "#554400", fontSize: "0.75rem" }}>
-                BLOCKS EARNED: {earnedBlocks}
+                KILLS: {kills} · DEATHS: {deaths}
               </div>
             </div>
             <div
@@ -2624,113 +2495,6 @@ export default function ThreeWorld() {
           </div>
         )}
 
-        {/* ── Stage Clear ──────────────────────────────────────────────────── */}
-        {gamePhase === "clear" && (
-          <div
-            style={{
-              position: "absolute",
-              inset: 0,
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "center",
-              justifyContent: "center",
-              gap: "1.5rem",
-              background: "rgba(0,0,0,0.9)",
-              zIndex: 60,
-              fontFamily: "monospace",
-            }}
-          >
-            <div
-              style={{
-                color: "#00ff41",
-                fontSize: "2rem",
-                fontWeight: "bold",
-                letterSpacing: "0.4em",
-                textShadow: "0 0 40px #00ff41",
-              }}
-            >
-              STAGE CLEAR!
-            </div>
-            <div
-              style={{
-                display: "flex",
-                flexDirection: "column",
-                alignItems: "center",
-                gap: "0.75rem",
-                border: "1px solid #003300",
-                padding: "1.25rem 2.5rem",
-                background: "rgba(0,10,0,0.8)",
-              }}
-            >
-              <div style={{ color: "#ffcc00", fontSize: "0.8rem", letterSpacing: "0.3em" }}>
-                RESULT
-              </div>
-              <div
-                style={{ display: "flex", gap: "2rem", flexWrap: "wrap", justifyContent: "center" }}
-              >
-                <div style={{ textAlign: "center" }}>
-                  <div style={{ color: "#446644", fontSize: "0.65rem", letterSpacing: "0.2em" }}>
-                    SCORE
-                  </div>
-                  <div style={{ color: "#ffcc00", fontSize: "1.5rem", fontWeight: "bold" }}>
-                    {score.toString().padStart(5, "0")}
-                  </div>
-                </div>
-                <div style={{ textAlign: "center" }}>
-                  <div style={{ color: "#446644", fontSize: "0.65rem", letterSpacing: "0.2em" }}>
-                    BLOCKS EARNED
-                  </div>
-                  <div style={{ color: "#00cfff", fontSize: "1.5rem", fontWeight: "bold" }}>
-                    {earnedBlocks}
-                  </div>
-                </div>
-                <div style={{ textAlign: "center" }}>
-                  <div style={{ color: "#446644", fontSize: "0.65rem", letterSpacing: "0.2em" }}>
-                    SURVIVORS
-                  </div>
-                  <div style={{ color: "#00ff41", fontSize: "1.5rem", fontWeight: "bold" }}>
-                    {playerHp} HP
-                  </div>
-                </div>
-              </div>
-            </div>
-            <div
-              style={{ display: "flex", gap: "1rem", flexWrap: "wrap", justifyContent: "center" }}
-            >
-              <a
-                href="/world"
-                style={{
-                  border: "1px solid #00ff41",
-                  color: "#00ff41",
-                  fontFamily: "monospace",
-                  fontSize: "0.85rem",
-                  letterSpacing: "0.2em",
-                  padding: "0.6rem 1.5rem",
-                  textDecoration: "none",
-                  textShadow: "0 0 8px #00ff41",
-                }}
-              >
-                BUILD WORLD
-              </a>
-              <button
-                type="button"
-                onClick={() => window.location.reload()}
-                style={{
-                  background: "transparent",
-                  border: "1px solid #003300",
-                  color: "#005500",
-                  fontFamily: "monospace",
-                  fontSize: "0.85rem",
-                  letterSpacing: "0.2em",
-                  padding: "0.6rem 1.5rem",
-                  cursor: "pointer",
-                }}
-              >
-                PLAY AGAIN
-              </button>
-            </div>
-          </div>
-        )}
       </div>
 
       {/* ── Inventory bar ─────────────────────────────────────────────────── */}
