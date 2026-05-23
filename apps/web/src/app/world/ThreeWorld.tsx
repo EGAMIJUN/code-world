@@ -21,17 +21,96 @@ const BULLET_LIFETIME = 0.35
 const RECOIL_STRENGTH = 0.1
 const RECOIL_RECOVER = 8
 const MUZZLE_FLASH_DURATION = 0.07
-const ENEMY_SPEED = 2.0
-const ENEMY_ATTACK_RANGE = 1.8
-const ENEMY_ATTACK_DAMAGE = 15
-const ENEMY_ATTACK_INTERVAL = 2500
 const PROBLEM_TIME = 30
+const PLAYER_RADIUS = 0.35
+const ENEMY_RADIUS = 0.4
 
-const ENEMY_SPAWN_POSITIONS = [
-  { x: 5.5, z: 5.5 },
-  { x: 26.5, z: 8.5 },
-  { x: 16.5, z: 26.5 },
-] as const
+// ── Map wall definitions [x, z, width, depth] ──────────────────────────────────
+const WALL_DEFS: [number, number, number, number][] = [
+  [3, 3, 4, 4], [9, 1, 3, 5], [14, 8, 5, 4], [22, 3, 4, 6],
+  [5, 14, 2, 5], [20, 12, 4, 2], [7, 21, 4, 3], [17, 21, 5, 4],
+  [25, 18, 3, 6], [10, 26, 5, 3], [2, 26, 3, 3], [27, 8, 2, 5],
+  [5, 9, 1, 1], [12, 17, 1, 1], [18, 7, 1, 1], [24, 15, 1, 1],
+]
+type WallAABB = { x1: number; z1: number; x2: number; z2: number }
+const WALL_AABBS: WallAABB[] = WALL_DEFS.map(([x, z, w, d]) => ({ x1: x, z1: z, x2: x + w, z2: z + d }))
+
+function collidesWithWall(px: number, pz: number, radius: number): boolean {
+  if (px - radius < 0 || px + radius > MAP_SIZE || pz - radius < 0 || pz + radius > MAP_SIZE)
+    return true
+  for (const w of WALL_AABBS) {
+    if (px + radius > w.x1 && px - radius < w.x2 && pz + radius > w.z1 && pz - radius < w.z2)
+      return true
+  }
+  return false
+}
+
+// ── Enemy type system ──────────────────────────────────────────────────────────
+type EnemyType = "grunt" | "miniboss" | "boss"
+type EnemyState = "patrol" | "alert" | "attack" | "search"
+
+interface EnemyConfig {
+  hp: number
+  speed: number
+  attackDamage: number
+  attackInterval: number
+  attackRange: number
+  color: number
+  emissive: number
+  bodyW: number
+  bodyH: number
+  sightRange: number
+  fovAngle: number
+  score: number
+  blockReward: number
+}
+
+const ENEMY_CONFIGS: Record<EnemyType, EnemyConfig> = {
+  grunt: {
+    hp: 3, speed: 2.0, attackDamage: 10, attackInterval: 2000, attackRange: 1.8,
+    color: 0xff2222, emissive: 0x330000, bodyW: 0.65, bodyH: 1.7,
+    sightRange: 12, fovAngle: Math.PI, score: 250, blockReward: 1,
+  },
+  miniboss: {
+    hp: 5, speed: 1.6, attackDamage: 20, attackInterval: 1500, attackRange: 2.0,
+    color: 0xff6600, emissive: 0x331100, bodyW: 0.85, bodyH: 2.1,
+    sightRange: 16, fovAngle: Math.PI * 0.9, score: 600, blockReward: 3,
+  },
+  boss: {
+    hp: 8, speed: 1.2, attackDamage: 35, attackInterval: 2500, attackRange: 2.5,
+    color: 0xaa00ff, emissive: 0x220033, bodyW: 1.1, bodyH: 2.5,
+    sightRange: 22, fovAngle: Math.PI * 0.8, score: 1500, blockReward: 8,
+  },
+}
+
+interface EnemySpawnDef {
+  x: number
+  z: number
+  type: EnemyType
+  patrol: { x: number; z: number }[]
+}
+
+const ENEMY_SPAWN_DEFS: EnemySpawnDef[] = [
+  { x: 2, z: 2, type: "grunt", patrol: [{ x: 2, z: 2 }, { x: 2, z: 8 }, { x: 7, z: 8 }] },
+  { x: 13, z: 3, type: "grunt", patrol: [{ x: 13, z: 3 }, { x: 13, z: 7 }, { x: 8, z: 7 }] },
+  { x: 26, z: 2, type: "grunt", patrol: [{ x: 26, z: 2 }, { x: 26, z: 8 }, { x: 22, z: 8 }] },
+  { x: 1, z: 18, type: "grunt", patrol: [{ x: 1, z: 18 }, { x: 4, z: 18 }, { x: 4, z: 25 }] },
+  { x: 11, z: 20, type: "miniboss", patrol: [{ x: 11, z: 20 }, { x: 11, z: 25 }, { x: 16, z: 25 }] },
+  { x: 23, z: 24, type: "miniboss", patrol: [{ x: 23, z: 24 }, { x: 28, z: 24 }, { x: 28, z: 19 }] },
+  { x: 16, z: 14, type: "boss", patrol: [{ x: 16, z: 14 }, { x: 16, z: 20 }, { x: 20, z: 20 }, { x: 20, z: 14 }] },
+]
+
+function enemyCanSee(
+  facingX: number, facingZ: number,
+  toDx: number, toDz: number,
+  dist: number, cfg: EnemyConfig,
+): boolean {
+  if (dist > cfg.sightRange) return false
+  const fLen = Math.sqrt(facingX * facingX + facingZ * facingZ)
+  if (fLen < 0.001) return true
+  const dot = (toDx / dist) * (facingX / fLen) + (toDz / dist) * (facingZ / fLen)
+  return Math.acos(Math.max(-1, Math.min(1, dot))) < cfg.fovAngle / 2
+}
 
 // Canvas-space constants for WS backwards-compat
 const TILE_W = 64
@@ -202,7 +281,15 @@ interface CombatEnemy {
   mesh: THREE.Mesh
   hp: number
   maxHp: number
+  type: EnemyType
+  config: EnemyConfig
+  state: EnemyState
+  patrolWaypoints: { x: number; z: number }[]
+  patrolIndex: number
   lastAttackTime: number
+  facing: THREE.Vector3
+  lastSeenPlayer: { x: number; z: number } | null
+  searchTimer: number
 }
 
 interface Bullet {
@@ -237,6 +324,7 @@ interface SceneRefs {
   blockMeshes: Map<string, THREE.Mesh>
   blocksGrid: Map<string, number>
   remoteMeshes: Map<string, THREE.Mesh>
+  wallMeshes: THREE.Mesh[]
   focalPoint: THREE.Vector3
   groundPlane: THREE.Mesh
   raycaster: THREE.Raycaster
@@ -272,6 +360,7 @@ export default function ThreeWorld() {
   const tagGameRef = useRef<TagGameInfo | null>(null)
   const longPressRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const rendererDomRef = useRef<HTMLCanvasElement | null>(null)
+  const lastAlertTimeRef = useRef(0)
 
   // Combat refs
   const recoilRef = useRef(0)
@@ -306,9 +395,9 @@ export default function ThreeWorld() {
   const [gamePhase, setGamePhase] = useState<"playing" | "gameover" | "clear">("playing")
   const [activeProblem, setActiveProblem] = useState<ActiveProblem | null>(null)
   const [problemTimeLeft, setProblemTimeLeft] = useState(PROBLEM_TIME)
-  const [enemyStatus, setEnemyStatus] = useState<Array<{ id: string; hp: number; maxHp: number }>>(
-    [],
-  )
+  const [enemyStatus, setEnemyStatus] = useState<
+    Array<{ id: string; hp: number; maxHp: number; type: EnemyType }>
+  >([])
   const [aimedEnemyId, setAimedEnemyId] = useState<string | null>(null)
   const [earnedBlocks, setEarnedBlocks] = useState(0)
   const [isReloading, setIsReloading] = useState(false)
@@ -482,11 +571,12 @@ export default function ThreeWorld() {
           if (enemy.hp <= 0) {
             refs.scene.remove(enemy.mesh)
             enemy.mesh.geometry.dispose()
-            scoreRef.current += 200
+            scoreRef.current += enemy.config.score
             setScore(scoreRef.current)
-            earnedBlocksRef.current += 1
+            earnedBlocksRef.current += enemy.config.blockReward
             setEarnedBlocks(earnedBlocksRef.current)
-            showNotification("エネミー撃破！ +250pt ブロック獲得！")
+            const tag = enemy.type === "boss" ? "BOSS撃破！" : enemy.type === "miniboss" ? "ミニボス撃破！" : "エネミー撃破！"
+            showNotification(`${tag} +${enemy.config.score}pt ブロック×${enemy.config.blockReward}獲得！`)
             const allDead = refs.enemies.every((e) => e.hp <= 0)
             if (allDead) {
               gamePhaseRef.current = "clear"
@@ -495,7 +585,7 @@ export default function ThreeWorld() {
           } else {
             showNotification(`正解！ダメージを与えた！(HP: ${enemy.hp}/${enemy.maxHp})`)
           }
-          setEnemyStatus(refs.enemies.map((e) => ({ id: e.id, hp: e.hp, maxHp: e.maxHp })))
+          setEnemyStatus(refs.enemies.map((e) => ({ id: e.id, hp: e.hp, maxHp: e.maxHp, type: e.type })))
         }
       } else {
         playerHpRef.current = Math.max(0, playerHpRef.current - 20)
@@ -622,6 +712,21 @@ export default function ThreeWorld() {
       groundPlane.position.set((MAP_SIZE / 2) * TILE_UNIT, 0, (MAP_SIZE / 2) * TILE_UNIT)
       scene.add(groundPlane)
 
+      // ── Map walls ──────────────────────────────────────────────────────────────
+      const wallMeshes: THREE.Mesh[] = []
+      const wallMat = new THREE.MeshLambertMaterial({ color: 0x445566 })
+      const wallMatAccent = new THREE.MeshLambertMaterial({ color: 0x334455 })
+      for (const [wx, wz, ww, wd] of WALL_DEFS) {
+        const wallH = ww === 1 && wd === 1 ? 1.2 : 3.0
+        const geo = new THREE.BoxGeometry(ww, wallH, wd)
+        const mesh = new THREE.Mesh(geo, ww * wd > 4 ? wallMat : wallMatAccent)
+        mesh.position.set(wx + ww / 2, wallH / 2, wz + wd / 2)
+        mesh.castShadow = true
+        mesh.receiveShadow = true
+        scene.add(mesh)
+        wallMeshes.push(mesh)
+      }
+
       // ── FPS camera state ───────────────────────────────────────────────────
       const focalPoint = new THREE.Vector3(
         (MAP_SIZE / 2) * TILE_UNIT,
@@ -679,20 +784,34 @@ export default function ThreeWorld() {
       scene.add(muzzleLight)
 
       // ── AI Enemies ─────────────────────────────────────────────────────────
-      const enemies: CombatEnemy[] = ENEMY_SPAWN_POSITIONS.map((pos, i) => {
-        const geo = new THREE.BoxGeometry(0.65, 1.7, 0.65)
-        const mat = new THREE.MeshLambertMaterial({ color: 0xff2222, emissive: 0x330000 })
+      const enemies: CombatEnemy[] = ENEMY_SPAWN_DEFS.map((def, i) => {
+        const cfg = ENEMY_CONFIGS[def.type]
+        const geo = new THREE.BoxGeometry(cfg.bodyW, cfg.bodyH, cfg.bodyW)
+        const mat = new THREE.MeshLambertMaterial({ color: cfg.color, emissive: cfg.emissive })
         const mesh = new THREE.Mesh(geo, mat)
-        mesh.position.set(pos.x, 0.85, pos.z)
+        mesh.position.set(def.x, cfg.bodyH / 2, def.z)
         mesh.castShadow = true
         scene.add(mesh)
-        // Eye glow
-        const eyeGeo = new THREE.BoxGeometry(0.28, 0.06, 0.05)
-        const eyeMat = new THREE.MeshBasicMaterial({ color: 0xff6600 })
+        const eyeGeo = new THREE.BoxGeometry(cfg.bodyW * 0.44, cfg.bodyH * 0.036, 0.05)
+        const eyeMat = new THREE.MeshBasicMaterial({ color: 0xff8800 })
         const eyes = new THREE.Mesh(eyeGeo, eyeMat)
-        eyes.position.set(0, 0.45, 0.33)
+        eyes.position.set(0, cfg.bodyH * 0.27, cfg.bodyW / 2 + 0.01)
         mesh.add(eyes)
-        return { id: `enemy_${i}`, mesh, hp: 3, maxHp: 3, lastAttackTime: 0 }
+        return {
+          id: `enemy_${i}`,
+          mesh,
+          hp: cfg.hp,
+          maxHp: cfg.hp,
+          type: def.type,
+          config: cfg,
+          state: "patrol" as EnemyState,
+          patrolWaypoints: def.patrol,
+          patrolIndex: 0,
+          lastAttackTime: 0,
+          facing: new THREE.Vector3(0, 0, 1),
+          lastSeenPlayer: null,
+          searchTimer: 0,
+        }
       })
 
       const bullets: Bullet[] = []
@@ -704,6 +823,7 @@ export default function ThreeWorld() {
         blockMeshes,
         blocksGrid,
         remoteMeshes,
+        wallMeshes,
         focalPoint,
         groundPlane,
         raycaster,
@@ -716,7 +836,7 @@ export default function ThreeWorld() {
         aimedEnemyId: null,
       }
 
-      setEnemyStatus(enemies.map((e) => ({ id: e.id, hp: e.hp, maxHp: e.maxHp })))
+      setEnemyStatus(enemies.map((e) => ({ id: e.id, hp: e.hp, maxHp: e.maxHp, type: e.type })))
 
       fetch(`${API_URL}/api/me`, { credentials: "include" })
         .then((r) => r.json() as Promise<{ data?: { user?: { id?: string } } }>)
@@ -942,10 +1062,12 @@ export default function ThreeWorld() {
         if (vx !== 0 || vz !== 0) {
           const fwdX = -Math.sin(camState.yaw)
           const fwdZ = -Math.cos(camState.yaw)
-          refs.focalPoint.x += (fwdX * -vz + Math.cos(camState.yaw) * vx) * MOVE_SPEED * dt
-          refs.focalPoint.z += (fwdZ * -vz + -Math.sin(camState.yaw) * vx) * MOVE_SPEED * dt
-          refs.focalPoint.x = Math.max(0, Math.min(MAP_SIZE * TILE_UNIT, refs.focalPoint.x))
-          refs.focalPoint.z = Math.max(0, Math.min(MAP_SIZE * TILE_UNIT, refs.focalPoint.z))
+          const dx = (fwdX * -vz + Math.cos(camState.yaw) * vx) * MOVE_SPEED * dt
+          const dz = (fwdZ * -vz + -Math.sin(camState.yaw) * vx) * MOVE_SPEED * dt
+          const nx = refs.focalPoint.x + dx
+          const nz = refs.focalPoint.z + dz
+          if (!collidesWithWall(nx, refs.focalPoint.z, PLAYER_RADIUS)) refs.focalPoint.x = nx
+          if (!collidesWithWall(refs.focalPoint.x, nz, PLAYER_RADIUS)) refs.focalPoint.z = nz
           updateCamera()
         }
 
@@ -993,30 +1115,108 @@ export default function ThreeWorld() {
           }
         }
 
-        // ── Enemy AI ───────────────────────────────────────────────────────
+        // ── Enemy AI state machine ─────────────────────────────────────────
         if (gamePhaseRef.current === "playing" && activeProblemRef.current === null) {
           const now = Date.now()
+          const fp = refs.focalPoint
           for (const enemy of refs.enemies) {
             if (enemy.hp <= 0) continue
-            const dx = refs.focalPoint.x - enemy.mesh.position.x
-            const dz = refs.focalPoint.z - enemy.mesh.position.z
-            const dist = Math.sqrt(dx * dx + dz * dz)
-            if (dist > ENEMY_ATTACK_RANGE) {
-              const spd = ENEMY_SPEED * dt
-              enemy.mesh.position.x += (dx / dist) * spd
-              enemy.mesh.position.z += (dz / dist) * spd
-              enemy.mesh.rotation.y = Math.atan2(dx, dz)
-              enemy.mesh.position.y =
-                0.85 + Math.sin(now * 0.004 + Number(enemy.id.slice(-1))) * 0.04
-            } else if (now - enemy.lastAttackTime > ENEMY_ATTACK_INTERVAL) {
-              enemy.lastAttackTime = now
-              playerHpRef.current = Math.max(0, playerHpRef.current - ENEMY_ATTACK_DAMAGE)
-              setPlayerHp(playerHpRef.current)
-              setDamageFlash(true)
-              setTimeout(() => setDamageFlash(false), 250)
-              if (playerHpRef.current <= 0 && gamePhaseRef.current === "playing") {
-                gamePhaseRef.current = "gameover"
-                setGamePhase("gameover")
+            const ex = enemy.mesh.position.x
+            const ez = enemy.mesh.position.z
+            const toPx = fp.x - ex
+            const toPz = fp.z - ez
+            const distToPlayer = Math.sqrt(toPx * toPx + toPz * toPz)
+
+            if (enemy.state === "patrol") {
+              const wp = enemy.patrolWaypoints[enemy.patrolIndex % enemy.patrolWaypoints.length]
+              if (wp) {
+                const wpDx = wp.x - ex
+                const wpDz = wp.z - ez
+                const wpDist = Math.sqrt(wpDx * wpDx + wpDz * wpDz)
+                if (wpDist < 0.4) {
+                  enemy.patrolIndex = (enemy.patrolIndex + 1) % enemy.patrolWaypoints.length
+                } else {
+                  const spd = enemy.config.speed * 0.45 * dt
+                  const nx = ex + (wpDx / wpDist) * spd
+                  const nz = ez + (wpDz / wpDist) * spd
+                  if (!collidesWithWall(nx, ez, ENEMY_RADIUS)) enemy.mesh.position.x = nx
+                  if (!collidesWithWall(ex, nz, ENEMY_RADIUS)) enemy.mesh.position.z = nz
+                  enemy.facing.set(wpDx / wpDist, 0, wpDz / wpDist)
+                }
+              }
+              enemy.mesh.rotation.y = Math.atan2(enemy.facing.x, enemy.facing.z)
+              if (enemyCanSee(enemy.facing.x, enemy.facing.z, toPx, toPz, distToPlayer, enemy.config)) {
+                enemy.state = "alert"
+                enemy.lastSeenPlayer = { x: fp.x, z: fp.z }
+                const alertNow = Date.now()
+                if (alertNow - lastAlertTimeRef.current > 4000) {
+                  lastAlertTimeRef.current = alertNow
+                  showNotification("⚠ エネミーに発見された！")
+                }
+              }
+
+            } else if (enemy.state === "alert") {
+              enemy.lastSeenPlayer = { x: fp.x, z: fp.z }
+              if (distToPlayer <= enemy.config.attackRange) {
+                enemy.state = "attack"
+              } else {
+                const spd = enemy.config.speed * dt
+                const nx = ex + (toPx / distToPlayer) * spd
+                const nz = ez + (toPz / distToPlayer) * spd
+                if (!collidesWithWall(nx, ez, ENEMY_RADIUS)) enemy.mesh.position.x = nx
+                if (!collidesWithWall(ex, nz, ENEMY_RADIUS)) enemy.mesh.position.z = nz
+                enemy.facing.set(toPx / distToPlayer, 0, toPz / distToPlayer)
+                enemy.mesh.rotation.y = Math.atan2(enemy.facing.x, enemy.facing.z)
+                if (!enemyCanSee(enemy.facing.x, enemy.facing.z, toPx, toPz, distToPlayer, enemy.config)) {
+                  enemy.state = "search"
+                  enemy.searchTimer = 3.5
+                }
+              }
+              enemy.mesh.position.y = enemy.config.bodyH / 2 + Math.sin(now * 0.006) * 0.04
+
+            } else if (enemy.state === "attack") {
+              if (distToPlayer > 0.001) {
+                enemy.facing.set(toPx / distToPlayer, 0, toPz / distToPlayer)
+                enemy.mesh.rotation.y = Math.atan2(enemy.facing.x, enemy.facing.z)
+              }
+              if (distToPlayer > enemy.config.attackRange * 1.5) {
+                enemy.state = "alert"
+              } else if (now - enemy.lastAttackTime > enemy.config.attackInterval) {
+                enemy.lastAttackTime = now
+                playerHpRef.current = Math.max(0, playerHpRef.current - enemy.config.attackDamage)
+                setPlayerHp(playerHpRef.current)
+                setDamageFlash(true)
+                setTimeout(() => setDamageFlash(false), 250)
+                if (playerHpRef.current <= 0 && gamePhaseRef.current === "playing") {
+                  gamePhaseRef.current = "gameover"
+                  setGamePhase("gameover")
+                }
+              }
+
+            } else if (enemy.state === "search") {
+              enemy.searchTimer -= dt
+              if (enemy.searchTimer <= 0) {
+                enemy.state = "patrol"
+                enemy.lastSeenPlayer = null
+              } else if (enemy.lastSeenPlayer) {
+                const lx = enemy.lastSeenPlayer.x - ex
+                const lz = enemy.lastSeenPlayer.z - ez
+                const ld = Math.sqrt(lx * lx + lz * lz)
+                if (ld > 0.4) {
+                  const spd = enemy.config.speed * 0.7 * dt
+                  const nx = ex + (lx / ld) * spd
+                  const nz = ez + (lz / ld) * spd
+                  if (!collidesWithWall(nx, ez, ENEMY_RADIUS)) enemy.mesh.position.x = nx
+                  if (!collidesWithWall(ex, nz, ENEMY_RADIUS)) enemy.mesh.position.z = nz
+                  enemy.facing.set(lx / ld, 0, lz / ld)
+                  enemy.mesh.rotation.y = Math.atan2(enemy.facing.x, enemy.facing.z)
+                } else {
+                  enemy.lastSeenPlayer = null
+                }
+              }
+              if (enemyCanSee(enemy.facing.x, enemy.facing.z, toPx, toPz, distToPlayer, enemy.config)) {
+                enemy.state = "alert"
+                enemy.lastSeenPlayer = { x: fp.x, z: fp.z }
               }
             }
           }
@@ -1090,10 +1290,18 @@ export default function ThreeWorld() {
               const p = key.split(",")
               ctx.fillRect(Number(p[0]) * SCALE * TILE_UNIT, Number(p[1]) * SCALE * TILE_UNIT, 2, 2)
             }
-            // Draw enemies on minimap
+            // Draw walls on minimap
+            ctx.fillStyle = "#334455"
+            for (const [wx, wz, ww, wd] of WALL_DEFS) {
+              ctx.fillRect(wx * SCALE, wz * SCALE, ww * SCALE, wd * SCALE)
+            }
+            // Draw enemies on minimap (color by type/state)
             for (const enemy of refs.enemies) {
               if (enemy.hp <= 0) continue
-              ctx.fillStyle = "#ff3333"
+              ctx.fillStyle =
+                enemy.type === "boss" ? "#cc44ff" :
+                enemy.type === "miniboss" ? "#ff8800" :
+                enemy.state === "alert" || enemy.state === "attack" ? "#ff2222" : "#ff6666"
               ctx.beginPath()
               ctx.arc(
                 enemy.mesh.position.x * SCALE,
@@ -1805,25 +2013,23 @@ export default function ThreeWorld() {
               gap: "4px",
             }}
           >
-            {enemyStatus.map((e, i) => (
-              <div key={e.id} style={{ display: "flex", alignItems: "center", gap: "4px" }}>
-                <span style={{ color: "#ff5555", fontSize: "0.6rem" }}>E{i + 1}</span>
-                <div style={{ display: "flex", gap: "2px" }}>
-                  {Array.from({ length: e.maxHp }).map((_, j) => (
-                    <div
-                      key={`${e.id}-hp-${j}`}
-                      style={{
-                        width: "10px",
-                        height: "10px",
-                        background: j < e.hp ? "#ff2222" : "#330000",
-                        border: "1px solid #550000",
-                        boxShadow: j < e.hp ? "0 0 4px #ff2222" : "none",
-                      }}
-                    />
-                  ))}
+            {enemyStatus.map((e, i) => {
+              const typeColor = e.type === "boss" ? "#cc44ff" : e.type === "miniboss" ? "#ff8800" : "#ff5555"
+              const hpBarColor = e.type === "boss" ? "#aa00ff" : e.type === "miniboss" ? "#ff6600" : "#ff2222"
+              const label = e.type === "boss" ? "BOSS" : e.type === "miniboss" ? "MINI" : `E${i + 1}`
+              const hpPctEnemy = e.maxHp > 0 ? Math.round((e.hp / e.maxHp) * 100) : 0
+              return (
+                <div key={e.id} style={{ display: "flex", alignItems: "center", gap: "4px" }}>
+                  <span style={{ color: typeColor, fontSize: "0.55rem", minWidth: "26px" }}>{label}</span>
+                  <div style={{ width: "40px", height: "6px", background: "#1a0000", border: `1px solid ${typeColor}33`, overflow: "hidden" }}>
+                    <div style={{ height: "100%", width: `${hpPctEnemy}%`, background: hpBarColor, transition: "width 0.3s", boxShadow: e.hp > 0 ? `0 0 4px ${hpBarColor}` : "none" }} />
+                  </div>
+                  <span style={{ color: typeColor, fontSize: "0.55rem", minWidth: "24px" }}>
+                    {e.hp}/{e.maxHp}
+                  </span>
                 </div>
-              </div>
-            ))}
+              )
+            })}
           </div>
         )}
 
@@ -2181,7 +2387,7 @@ export default function ThreeWorld() {
                 {score.toString().padStart(5, "0")}
               </div>
               <div style={{ color: "#554400", fontSize: "0.75rem" }}>
-                ENEMIES DEFEATED: {3 - aliveEnemies}/3
+                ENEMIES DEFEATED: {enemyStatus.length - aliveEnemies}/{enemyStatus.length}
               </div>
               <div style={{ color: "#554400", fontSize: "0.75rem" }}>
                 BLOCKS EARNED: {earnedBlocks}
