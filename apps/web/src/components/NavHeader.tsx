@@ -7,6 +7,7 @@ const NAV_LINKS = [
   { href: "/", label: "HOME", exact: true },
   { href: "/problems", label: "PROBLEMS", exact: false },
   { href: "/dungeon", label: "DUNGEON", exact: false },
+  { href: "/missions", label: "MISSIONS", exact: false },
   { href: "/world", label: "WORLD", exact: false },
   { href: "/leaderboard", label: "RANKING", exact: false },
   { href: "/profile", label: "PROFILE", exact: false },

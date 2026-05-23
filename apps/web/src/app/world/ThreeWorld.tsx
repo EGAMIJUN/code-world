@@ -7,6 +7,8 @@ import * as THREE from "three"
 const MAP_SIZE = 32
 const TILE_UNIT = 1
 const BLOCK_HEIGHT = 0.5
+const EYE_HEIGHT = 1.6
+const MOVE_SPEED = 6
 const API_URL = process.env["NEXT_PUBLIC_API_URL"] ?? "http://localhost:3001"
 
 // Canvas-space constants for WS backwards-compat
@@ -95,6 +97,7 @@ interface ChatMessage {
   id: number
   from: string
   text: string
+  isSystem?: boolean
 }
 
 // ── XP helper ─────────────────────────────────────────────────────────────────
@@ -115,8 +118,8 @@ interface SceneRefs {
   scene: THREE.Scene
   camera: THREE.PerspectiveCamera
   renderer: THREE.WebGLRenderer
-  blockMeshes: Map<string, THREE.Mesh> // "x,y,z" → mesh
-  blocksGrid: Map<string, number> // "x,y" → max z
+  blockMeshes: Map<string, THREE.Mesh>
+  blocksGrid: Map<string, number>
   remoteMeshes: Map<string, THREE.Mesh>
   focalPoint: THREE.Vector3
   groundPlane: THREE.Mesh
@@ -130,11 +133,12 @@ export default function ThreeWorld() {
   const sceneRef = useRef<SceneRefs | null>(null)
   const animFrameRef = useRef<number>(0)
   const keysRef = useRef<Set<string>>(new Set())
-  const isDraggingRef = useRef(false)
-  const lastMouseRef = useRef({ x: 0, y: 0 })
   const joystickRef = useRef({ vx: 0, vy: 0 })
   const joyBaseRef = useRef<{ x: number; y: number } | null>(null)
   const joyThumbRef = useRef<HTMLDivElement>(null)
+  const lookJoyRef = useRef({ vx: 0, vy: 0 })
+  const lookJoyBaseRef = useRef<{ x: number; y: number } | null>(null)
+  const lookJoyThumbRef = useRef<HTMLDivElement>(null)
   const worldIdRef = useRef<string | null>(null)
   const selectedBlockRef = useRef<string | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
@@ -142,6 +146,12 @@ export default function ThreeWorld() {
   const remotePosRef = useRef<Record<string, RemotePlayer>>({})
   const msgIdRef = useRef(0)
   const pendingPlaceRef = useRef(false)
+  const userIdRef = useRef<string | null>(null)
+  const minimapRef = useRef<HTMLCanvasElement>(null)
+  const tagGameRef = useRef<TagGameInfo | null>(null)
+  const longPressRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const rendererDomRef = useRef<HTMLCanvasElement | null>(null)
+  const placeCenterRef = useRef<(() => void) | null>(null)
 
   const [inventory, setInventory] = useState<InventoryItem[]>([])
   const [selectedBlock, setSelectedBlock] = useState<string | null>(null)
@@ -154,11 +164,8 @@ export default function ThreeWorld() {
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
   const [chatInput, setChatInput] = useState("")
   const chatEndRef = useRef<HTMLDivElement>(null)
-  const userIdRef = useRef<string | null>(null)
-  const minimapRef = useRef<HTMLCanvasElement>(null)
-  const tagGameRef = useRef<TagGameInfo | null>(null)
-  const longPressRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [tagGame, setTagGame] = useState<TagGameInfo | null>(null)
+  const [isPointerLocked, setIsPointerLocked] = useState(false)
 
   useEffect(() => {
     selectedBlockRef.current = selectedBlock
@@ -341,13 +348,14 @@ export default function ThreeWorld() {
       scene.background = new THREE.Color(0x050510)
       scene.fog = new THREE.Fog(0x050510, 30, 80)
 
-      // ── Camera ─────────────────────────────────────────────────────────────
+      // ── Camera (FPS) ───────────────────────────────────────────────────────
       const camera = new THREE.PerspectiveCamera(
-        55,
+        75,
         container.clientWidth / container.clientHeight,
         0.1,
         200,
       )
+      camera.rotation.order = "YXZ"
 
       // ── Renderer ───────────────────────────────────────────────────────────
       const renderer = new THREE.WebGLRenderer({ antialias: true })
@@ -356,6 +364,7 @@ export default function ThreeWorld() {
       renderer.shadowMap.enabled = true
       renderer.shadowMap.type = THREE.PCFSoftShadowMap
       container.appendChild(renderer.domElement)
+      rendererDomRef.current = renderer.domElement
 
       // ── Lights ─────────────────────────────────────────────────────────────
       const ambient = new THREE.AmbientLight(0x334466, 0.8)
@@ -389,12 +398,10 @@ export default function ThreeWorld() {
         scene.add(mesh)
       }
 
-      // Grid lines
       const gridHelper = new THREE.GridHelper(MAP_SIZE, MAP_SIZE, 0x112233, 0x112233)
       gridHelper.position.set((MAP_SIZE / 2) * TILE_UNIT, 0.01, (MAP_SIZE / 2) * TILE_UNIT)
       scene.add(gridHelper)
 
-      // Invisible ground plane for raycasting
       const groundGeo = new THREE.PlaneGeometry(MAP_SIZE * TILE_UNIT, MAP_SIZE * TILE_UNIT)
       const groundMat = new THREE.MeshBasicMaterial({ visible: false })
       const groundPlane = new THREE.Mesh(groundGeo, groundMat)
@@ -402,21 +409,22 @@ export default function ThreeWorld() {
       groundPlane.position.set((MAP_SIZE / 2) * TILE_UNIT, 0, (MAP_SIZE / 2) * TILE_UNIT)
       scene.add(groundPlane)
 
-      // ── Player + camera state ──────────────────────────────────────────────
+      // ── FPS camera state ───────────────────────────────────────────────────
       const focalPoint = new THREE.Vector3(
         (MAP_SIZE / 2) * TILE_UNIT,
         0,
         (MAP_SIZE / 2) * TILE_UNIT,
       )
-      const camState = { theta: -Math.PI / 4, phi: (Math.PI * 55) / 180, radius: 14 }
+      const camState = { yaw: Math.PI, pitch: 0 }
+
+      function clampPitch(p: number) {
+        return Math.max(-Math.PI / 2 + 0.05, Math.min(Math.PI / 2 - 0.05, p))
+      }
 
       function updateCamera() {
-        camera.position.set(
-          focalPoint.x + camState.radius * Math.sin(camState.phi) * Math.cos(camState.theta),
-          focalPoint.y + camState.radius * Math.cos(camState.phi),
-          focalPoint.z + camState.radius * Math.sin(camState.phi) * Math.sin(camState.theta),
-        )
-        camera.lookAt(focalPoint.x, focalPoint.y + 0.9, focalPoint.z)
+        camera.position.set(focalPoint.x, EYE_HEIGHT, focalPoint.z)
+        camera.rotation.y = camState.yaw
+        camera.rotation.x = camState.pitch
       }
       updateCamera()
 
@@ -427,12 +435,11 @@ export default function ThreeWorld() {
       const blocksGrid = new Map<string, number>()
       const remoteMeshes = new Map<string, THREE.Mesh>()
 
-      // ── Local player mesh (green capsule) ─────────────────────────────────
+      // Local player mesh — hidden in FPS but position used for WS sync
       const playerGeo = new THREE.CapsuleGeometry(0.22, 0.5, 4, 8)
       const playerMat = new THREE.MeshLambertMaterial({ color: 0x00ff41 })
       const playerMesh = new THREE.Mesh(playerGeo, playerMat)
-      playerMesh.position.set(focalPoint.x, 0.5, focalPoint.z)
-      playerMesh.castShadow = true
+      playerMesh.visible = false
       scene.add(playerMesh)
 
       sceneRef.current = {
@@ -449,66 +456,49 @@ export default function ThreeWorld() {
         playerMesh,
       }
 
-      // Fetch current user ID for block ownership checks
       fetch(`${API_URL}/api/me`, { credentials: "include" })
         .then((r) => r.json() as Promise<{ data?: { user?: { id?: string } } }>)
         .then((json) => { userIdRef.current = json.data?.user?.id ?? null })
         .catch(() => {})
 
-      // Load initial blocks
       for (const block of initialBlocks) {
         spawnBlock(block.positionX, block.positionY, block.positionZ, block.blockType, block.id, block.placedBy)
       }
 
-      // ── Mouse / touch events ───────────────────────────────────────────────
-      function onMouseDown(e: MouseEvent) {
-        isDraggingRef.current = false
-        lastMouseRef.current = { x: e.clientX, y: e.clientY }
-      }
-
-      function onMouseMove(e: MouseEvent) {
-        if (e.buttons !== 1) return
-        const dx = e.clientX - lastMouseRef.current.x
-        const dy = e.clientY - lastMouseRef.current.y
-        if (Math.abs(dx) + Math.abs(dy) > 3) isDraggingRef.current = true
-        lastMouseRef.current = { x: e.clientX, y: e.clientY }
-        if (!isDraggingRef.current) return
-        camState.theta -= dx * 0.008
-        camState.phi = Math.max(Math.PI / 12, Math.min((Math.PI * 80) / 180, camState.phi + dy * 0.008))
-        updateCamera()
-      }
-
-      function onMouseUp(e: MouseEvent) {
-        if (!isDraggingRef.current && selectedBlockRef.current) {
-          const rect = renderer.domElement.getBoundingClientRect()
-          pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1
-          pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1
-          raycaster.setFromCamera(pointer, camera)
-          const hits = raycaster.intersectObject(groundPlane)
-          if (hits.length > 0) {
-            const p = hits[0]?.point
-            if (!p) return
-            const tx = Math.floor(p.x / TILE_UNIT)
-            const ty = Math.floor(p.z / TILE_UNIT)
+      // ── Place at crosshair (center screen) ─────────────────────────────────
+      function placeAtCenter() {
+        if (!selectedBlockRef.current || pendingPlaceRef.current) return
+        pointer.set(0, 0)
+        raycaster.setFromCamera(pointer, camera)
+        const blockHits = raycaster.intersectObjects([...blockMeshes.values()], false)
+        if (blockHits.length > 0) {
+          const hit = blockHits[0]!
+          const normal = hit.face?.normal
+          if (normal && normal.y > 0.5) {
+            const p = hit.point
+            const tx = Math.floor((p.x + 0.001) / TILE_UNIT)
+            const ty = Math.floor((p.z + 0.001) / TILE_UNIT)
             if (tx >= 0 && tx < MAP_SIZE && ty >= 0 && ty < MAP_SIZE) {
               placeBlock(tx, ty).catch(() => {})
             }
+            return
           }
         }
-        isDraggingRef.current = false
+        const groundHits = raycaster.intersectObject(groundPlane)
+        if (groundHits.length > 0) {
+          const p = groundHits[0]!.point
+          const tx = Math.floor(p.x / TILE_UNIT)
+          const ty = Math.floor(p.z / TILE_UNIT)
+          if (tx >= 0 && tx < MAP_SIZE && ty >= 0 && ty < MAP_SIZE) {
+            placeBlock(tx, ty).catch(() => {})
+          }
+        }
       }
+      placeCenterRef.current = placeAtCenter
 
-      function onWheel(e: WheelEvent) {
-        camState.radius = Math.max(5, Math.min(50, camState.radius + e.deltaY * 0.02))
-        updateCamera()
-      }
-
-      // ── Right-click: destroy block ─────────────────────────────────────────
-      function onContextMenu(e: MouseEvent) {
-        e.preventDefault()
-        const rect = renderer.domElement.getBoundingClientRect()
-        pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1
-        pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1
+      // ── Destroy at crosshair ───────────────────────────────────────────────
+      function destroyAtCenter() {
+        pointer.set(0, 0)
         raycaster.setFromCamera(pointer, camera)
         const hits = raycaster.intersectObjects([...blockMeshes.values()], false)
         if (hits.length > 0) {
@@ -523,45 +513,68 @@ export default function ThreeWorld() {
         }
       }
 
-      // ── Touch long press: destroy block on mobile ──────────────────────────
-      let lpTouchX = 0
-      let lpTouchY = 0
+      // ── PointerLock mouse look ─────────────────────────────────────────────
+      function onDocMouseMove(e: MouseEvent) {
+        if (document.pointerLockElement !== renderer.domElement) return
+        camState.yaw -= e.movementX * 0.002
+        camState.pitch = clampPitch(camState.pitch - e.movementY * 0.002)
+        updateCamera()
+      }
+
+      function onPointerLockChange() {
+        setIsPointerLocked(document.pointerLockElement === renderer.domElement)
+      }
+
+      function onMouseDown(e: MouseEvent) {
+        if (document.pointerLockElement !== renderer.domElement) {
+          renderer.domElement.requestPointerLock()
+          return
+        }
+        if (e.button === 0 && selectedBlockRef.current) {
+          placeAtCenter()
+        }
+      }
+
+      function onContextMenu(e: MouseEvent) {
+        e.preventDefault()
+        if (document.pointerLockElement !== renderer.domElement) return
+        destroyAtCenter()
+      }
+
+      // ── Mobile long press: destroy; short tap: place ───────────────────────
+      let touchStartTime = 0
       function onTouchStartLP(e: TouchEvent) {
-        const t = e.touches[0]
-        if (!t) return
-        lpTouchX = t.clientX
-        lpTouchY = t.clientY
+        if (!e.touches[0]) return
+        touchStartTime = Date.now()
         longPressRef.current = setTimeout(() => {
-          const rect = renderer.domElement.getBoundingClientRect()
-          pointer.x = ((lpTouchX - rect.left) / rect.width) * 2 - 1
-          pointer.y = -((lpTouchY - rect.top) / rect.height) * 2 + 1
-          raycaster.setFromCamera(pointer, camera)
-          const hits = raycaster.intersectObjects([...blockMeshes.values()], false)
-          if (hits.length > 0) {
-            const mesh = hits[0]?.object as THREE.Mesh
-            const bId = mesh?.userData.blockId as string | null
-            if (!bId) return
-            if (mesh?.userData.placedBy !== userIdRef.current) {
-              showNotification("自分が設置したブロックのみ破壊できます")
-              return
-            }
-            destroyBlock(bId).catch(() => {})
-          }
+          longPressRef.current = null
+          destroyAtCenter()
         }, 600)
       }
-      function onTouchCancelLP() {
-        if (longPressRef.current) { clearTimeout(longPressRef.current); longPressRef.current = null }
+      function onTouchEndLP() {
+        if (longPressRef.current) {
+          clearTimeout(longPressRef.current)
+          longPressRef.current = null
+          if (Date.now() - touchStartTime < 600) {
+            placeAtCenter()
+          }
+        }
       }
-      renderer.domElement.addEventListener("touchstart", onTouchStartLP, { passive: true })
-      renderer.domElement.addEventListener("touchend", onTouchCancelLP)
-      renderer.domElement.addEventListener("touchmove", onTouchCancelLP, { passive: true })
-      renderer.domElement.addEventListener("touchcancel", onTouchCancelLP)
+      function onTouchMoveLP() {
+        if (longPressRef.current) {
+          clearTimeout(longPressRef.current)
+          longPressRef.current = null
+        }
+      }
 
+      renderer.domElement.addEventListener("touchstart", onTouchStartLP, { passive: true })
+      renderer.domElement.addEventListener("touchend", onTouchEndLP)
+      renderer.domElement.addEventListener("touchmove", onTouchMoveLP, { passive: true })
+      renderer.domElement.addEventListener("touchcancel", onTouchMoveLP)
       renderer.domElement.addEventListener("mousedown", onMouseDown)
-      renderer.domElement.addEventListener("mousemove", onMouseMove)
-      renderer.domElement.addEventListener("mouseup", onMouseUp)
       renderer.domElement.addEventListener("contextmenu", onContextMenu)
-      renderer.domElement.addEventListener("wheel", onWheel, { passive: true })
+      document.addEventListener("mousemove", onDocMouseMove)
+      document.addEventListener("pointerlockchange", onPointerLockChange)
 
       // ── Resize ─────────────────────────────────────────────────────────────
       function onResize() {
@@ -581,43 +594,38 @@ export default function ThreeWorld() {
         const refs = sceneRef.current
         if (!refs) return
 
-        // WASD / arrows + joystick movement
-        const speed = 8
+        // WASD + move joystick
         const joy = joystickRef.current
-        let vx = joy.vx * speed
-        let vz = joy.vy * speed
+        let vx = joy.vx
+        let vz = joy.vy
 
-        if (keysRef.current.has("ArrowLeft") || keysRef.current.has("a")) vx -= speed
-        if (keysRef.current.has("ArrowRight") || keysRef.current.has("d")) vx += speed
-        if (keysRef.current.has("ArrowUp") || keysRef.current.has("w")) vz -= speed
-        if (keysRef.current.has("ArrowDown") || keysRef.current.has("s")) vz += speed
+        if (keysRef.current.has("ArrowLeft") || keysRef.current.has("a")) vx -= 1
+        if (keysRef.current.has("ArrowRight") || keysRef.current.has("d")) vx += 1
+        if (keysRef.current.has("ArrowUp") || keysRef.current.has("w")) vz -= 1
+        if (keysRef.current.has("ArrowDown") || keysRef.current.has("s")) vz += 1
 
         if (vx !== 0 || vz !== 0) {
-          // Move in camera-relative horizontal direction
-          const forward = new THREE.Vector3()
-          camera.getWorldDirection(forward)
-          forward.y = 0
-          forward.normalize()
-          const right = new THREE.Vector3()
-          right.crossVectors(forward, new THREE.Vector3(0, 1, 0)).normalize()
-
-          refs.focalPoint.addScaledVector(right, vx * dt)
-          refs.focalPoint.addScaledVector(forward, -vz * dt)
+          const fwdX = -Math.sin(camState.yaw)
+          const fwdZ = -Math.cos(camState.yaw)
+          const rtX = Math.cos(camState.yaw)
+          const rtZ = -Math.sin(camState.yaw)
+          refs.focalPoint.x += (fwdX * (-vz) + rtX * vx) * MOVE_SPEED * dt
+          refs.focalPoint.z += (fwdZ * (-vz) + rtZ * vx) * MOVE_SPEED * dt
           refs.focalPoint.x = Math.max(0, Math.min(MAP_SIZE * TILE_UNIT, refs.focalPoint.x))
           refs.focalPoint.z = Math.max(0, Math.min(MAP_SIZE * TILE_UNIT, refs.focalPoint.z))
-
-          // Rotate player to face movement direction
-          const moveX = right.x * vx + forward.x * (-vz)
-          const moveZ = right.z * vx + forward.z * (-vz)
-          refs.playerMesh.rotation.y = Math.atan2(moveX, moveZ)
-
           updateCamera()
         }
 
-        // Sync local player mesh to focal point (player position)
-        refs.playerMesh.position.x = refs.focalPoint.x
-        refs.playerMesh.position.z = refs.focalPoint.z
-        refs.playerMesh.position.y = 0.5
+        // Mobile look joystick
+        const lJoy = lookJoyRef.current
+        if (lJoy.vx !== 0 || lJoy.vy !== 0) {
+          camState.yaw -= lJoy.vx * 2.5 * dt
+          camState.pitch = clampPitch(camState.pitch - lJoy.vy * 2 * dt)
+          updateCamera()
+        }
+
+        // Sync player mesh position (hidden but used by WS)
+        refs.playerMesh.position.set(refs.focalPoint.x, EYE_HEIGHT, refs.focalPoint.z)
 
         // Update remote player meshes
         const snapshot = remotePosRef.current
@@ -634,18 +642,18 @@ export default function ThreeWorld() {
           const wz = ty * TILE_UNIT + TILE_UNIT / 2
           const existing = refs.remoteMeshes.get(id)
           if (existing) {
-            existing.position.set(wx, BLOCK_HEIGHT * 0.6, wz)
+            existing.position.set(wx, 0.5, wz)
           } else {
             const geo = new THREE.CapsuleGeometry(0.18, 0.4, 4, 8)
             const mat = new THREE.MeshLambertMaterial({ color: 0xffcc00 })
             const mesh = new THREE.Mesh(geo, mat)
-            mesh.position.set(wx, BLOCK_HEIGHT * 0.6, wz)
+            mesh.position.set(wx, 0.5, wz)
             refs.scene.add(mesh)
             refs.remoteMeshes.set(id, mesh)
           }
         }
 
-        // Color meshes based on tag game state
+        // Tag game coloring
         const tg = tagGameRef.current
         for (const [rmId, rmesh] of refs.remoteMeshes) {
           const rstate = remotePosRef.current[rmId]
@@ -654,9 +662,6 @@ export default function ThreeWorld() {
           const wantHex = wantRed ? 0xff3333 : 0xffcc00
           if (rmat.color.getHex() !== wantHex) rmat.color.setHex(wantHex)
         }
-        const pmat = refs.playerMesh.material as THREE.MeshLambertMaterial
-        const myItColor = tg?.running === true && usernameRef.current === tg.itUsername ? 0xff3333 : 0x00ff41
-        if (pmat.color.getHex() !== myItColor) pmat.color.setHex(myItColor)
 
         // Draw minimap
         const mcanvas = minimapRef.current
@@ -695,17 +700,16 @@ export default function ThreeWorld() {
       }
       animate()
 
-      // Cleanup
       return () => {
+        document.removeEventListener("mousemove", onDocMouseMove)
+        document.removeEventListener("pointerlockchange", onPointerLockChange)
+        if (document.pointerLockElement === renderer.domElement) document.exitPointerLock()
         renderer.domElement.removeEventListener("mousedown", onMouseDown)
-        renderer.domElement.removeEventListener("mousemove", onMouseMove)
-        renderer.domElement.removeEventListener("mouseup", onMouseUp)
         renderer.domElement.removeEventListener("contextmenu", onContextMenu)
-        renderer.domElement.removeEventListener("wheel", onWheel)
         renderer.domElement.removeEventListener("touchstart", onTouchStartLP)
-        renderer.domElement.removeEventListener("touchend", onTouchCancelLP)
-        renderer.domElement.removeEventListener("touchmove", onTouchCancelLP)
-        renderer.domElement.removeEventListener("touchcancel", onTouchCancelLP)
+        renderer.domElement.removeEventListener("touchend", onTouchEndLP)
+        renderer.domElement.removeEventListener("touchmove", onTouchMoveLP)
+        renderer.domElement.removeEventListener("touchcancel", onTouchMoveLP)
         window.removeEventListener("resize", onResize)
       }
     }
@@ -713,9 +717,7 @@ export default function ThreeWorld() {
     let cleanup: (() => void) | undefined
 
     init()
-      .then((fn) => {
-        cleanup = fn
-      })
+      .then((fn) => { cleanup = fn })
       .catch((err) => {
         console.error("[ThreeWorld] init error:", err)
         if (!cancelled) setError("ゲームの初期化に失敗しました")
@@ -730,6 +732,8 @@ export default function ThreeWorld() {
         if (canvas.parentNode) canvas.parentNode.removeChild(canvas)
         sceneRef.current = null
       }
+      rendererDomRef.current = null
+      placeCenterRef.current = null
       cleanup?.()
     }
   }, [spawnBlock, placeBlock, destroyBlock, fetchInventory, fetchPlayerStats, showNotification])
@@ -796,10 +800,11 @@ export default function ThreeWorld() {
           remotePosRef.current = msg.players
           setOnlineCount(Object.keys(msg.players).length + 1)
         } else if (msg.type === "chat" && msg.text) {
+          const isSystem = msg.from === "SYSTEM"
           setChatMessages((prev) => {
             const next = [
               ...prev,
-              { id: ++msgIdRef.current, from: msg.from ?? "?", text: msg.text ?? "" },
+              { id: ++msgIdRef.current, from: msg.from ?? "?", text: msg.text ?? "", isSystem },
             ]
             return next.slice(-20)
           })
@@ -819,7 +824,7 @@ export default function ThreeWorld() {
           setChatMessages((prev) => {
             const next = [
               ...prev,
-              { id: ++msgIdRef.current, from: "SYSTEM", text: `🏁 鬼ごっこ終了！最も逃げた: ${winner}` },
+              { id: ++msgIdRef.current, from: "SYSTEM", text: `鬼ごっこ終了！最も逃げた: ${winner}`, isSystem: true },
             ]
             return next.slice(-20)
           })
@@ -867,7 +872,7 @@ export default function ThreeWorld() {
     return () => clearInterval(interval)
   }, [tagGame?.running])
 
-  // ── Touch joystick handlers ────────────────────────────────────────────────
+  // ── Move joystick handlers ─────────────────────────────────────────────────
   const handleJoyStart = useCallback((e: React.TouchEvent) => {
     e.preventDefault()
     const t = e.touches[0]
@@ -898,6 +903,40 @@ export default function ThreeWorld() {
     joystickRef.current = { vx: 0, vy: 0 }
     if (joyThumbRef.current) {
       joyThumbRef.current.style.transform = "translate(0px, 0px)"
+    }
+  }, [])
+
+  // ── Look joystick handlers ─────────────────────────────────────────────────
+  const handleLookJoyStart = useCallback((e: React.TouchEvent) => {
+    e.preventDefault()
+    const t = e.touches[0]
+    if (!t) return
+    lookJoyBaseRef.current = { x: t.clientX, y: t.clientY }
+  }, [])
+
+  const handleLookJoyMove = useCallback((e: React.TouchEvent) => {
+    e.preventDefault()
+    if (!lookJoyBaseRef.current) return
+    const t = e.touches[0]
+    if (!t) return
+    const dx = t.clientX - lookJoyBaseRef.current.x
+    const dy = t.clientY - lookJoyBaseRef.current.y
+    const dist = Math.sqrt(dx * dx + dy * dy)
+    const maxDist = 40
+    const clamped = Math.min(dist, maxDist)
+    const nx = dist > 0 ? (dx / dist) * clamped : 0
+    const ny = dist > 0 ? (dy / dist) * clamped : 0
+    lookJoyRef.current = { vx: nx / maxDist, vy: ny / maxDist }
+    if (lookJoyThumbRef.current) {
+      lookJoyThumbRef.current.style.transform = `translate(${nx}px, ${ny}px)`
+    }
+  }, [])
+
+  const handleLookJoyEnd = useCallback(() => {
+    lookJoyBaseRef.current = null
+    lookJoyRef.current = { vx: 0, vy: 0 }
+    if (lookJoyThumbRef.current) {
+      lookJoyThumbRef.current.style.transform = "translate(0px, 0px)"
     }
   }, [])
 
@@ -980,7 +1019,7 @@ export default function ThreeWorld() {
           style={{ color: "#003300", fontSize: "0.7rem", letterSpacing: "0.1em" }}
           className="hidden sm:block"
         >
-          WASD: MOVE · DRAG: ROTATE · SCROLL: ZOOM · CLICK: PLACE
+          WASD: MOVE · MOUSE: LOOK · CLICK: PLACE · R-CLICK: DESTROY
         </span>
 
         <div style={{ flex: 1 }} />
@@ -1024,7 +1063,7 @@ export default function ThreeWorld() {
                   whiteSpace: "nowrap",
                 }}
               >
-                🏷 TAG
+                TAG
               </button>
             ) : (
               <div
@@ -1035,10 +1074,9 @@ export default function ThreeWorld() {
                   border: "1px solid #550000",
                   padding: "0.2rem 0.6rem",
                   whiteSpace: "nowrap",
-                  animation: "none",
                 }}
               >
-                👺 {tagGame.itUsername} · {Math.ceil(tagGame.remainingMs / 1000)}s
+                IT: {tagGame.itUsername} · {Math.ceil(tagGame.remainingMs / 1000)}s
               </div>
             )}
           </>
@@ -1054,7 +1092,7 @@ export default function ThreeWorld() {
               textShadow: "0 0 8px #00ff41",
             }}
           >
-            ✓ {notification}
+            {notification}
           </span>
         )}
       </div>
@@ -1116,9 +1154,65 @@ export default function ThreeWorld() {
                 letterSpacing: "0.2em",
               }}
             >
-              ▶ LOGIN
+              LOGIN
             </a>
           </div>
+        )}
+
+        {/* ENTER WORLD overlay (desktop, not yet locked) */}
+        {!isMobile && !isLoading && !error && !isPointerLocked && (
+          <div
+            onClick={() => rendererDomRef.current?.requestPointerLock()}
+            style={{
+              position: "absolute",
+              inset: 0,
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: "1rem",
+              background: "rgba(0,0,0,0.55)",
+              cursor: "pointer",
+              fontFamily: "monospace",
+            }}
+          >
+            <div
+              style={{
+                color: "#00ff41",
+                fontSize: "1.5rem",
+                letterSpacing: "0.4em",
+                textShadow: "0 0 30px #00ff41",
+              }}
+            >
+              ENTER WORLD
+            </div>
+            <div style={{ color: "#005500", fontSize: "0.75rem", letterSpacing: "0.2em" }}>
+              CLICK TO LOCK MOUSE
+            </div>
+          </div>
+        )}
+
+        {/* Crosshair */}
+        {!isLoading && !error && (isPointerLocked || isMobile) && (
+          <svg
+            width="20"
+            height="20"
+            viewBox="0 0 20 20"
+            style={{
+              position: "absolute",
+              top: "50%",
+              left: "50%",
+              transform: "translate(-50%, -50%)",
+              pointerEvents: "none",
+              zIndex: 30,
+            }}
+          >
+            <line x1="10" y1="2" x2="10" y2="8" stroke="#00ff41" strokeWidth="1.5" opacity="0.8" />
+            <line x1="10" y1="12" x2="10" y2="18" stroke="#00ff41" strokeWidth="1.5" opacity="0.8" />
+            <line x1="2" y1="10" x2="8" y2="10" stroke="#00ff41" strokeWidth="1.5" opacity="0.8" />
+            <line x1="12" y1="10" x2="18" y2="10" stroke="#00ff41" strokeWidth="1.5" opacity="0.8" />
+            <circle cx="10" cy="10" r="1" fill="#00ff41" opacity="0.6" />
+          </svg>
         )}
 
         {/* Minimap */}
@@ -1138,7 +1232,7 @@ export default function ThreeWorld() {
           />
         )}
 
-        {/* Virtual joystick */}
+        {/* Move joystick (mobile, bottom-left) */}
         {isMobile && !isLoading && !error && (
           <div
             style={{
@@ -1175,14 +1269,51 @@ export default function ThreeWorld() {
           </div>
         )}
 
+        {/* Look joystick (mobile, bottom-right) */}
+        {isMobile && !isLoading && !error && (
+          <div
+            style={{
+              position: "absolute",
+              bottom: "1rem",
+              right: "1rem",
+              width: "96px",
+              height: "96px",
+              borderRadius: "50%",
+              background: "rgba(0,100,255,0.08)",
+              border: "2px solid rgba(0,100,255,0.3)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              touchAction: "none",
+              zIndex: 20,
+              userSelect: "none",
+            }}
+            onTouchStart={handleLookJoyStart}
+            onTouchMove={handleLookJoyMove}
+            onTouchEnd={handleLookJoyEnd}
+          >
+            <div
+              ref={lookJoyThumbRef}
+              style={{
+                width: "36px",
+                height: "36px",
+                borderRadius: "50%",
+                background: "rgba(0,100,255,0.4)",
+                border: "1px solid #0064ff",
+                pointerEvents: "none",
+              }}
+            />
+          </div>
+        )}
+
         {/* World chat */}
         {!isLoading && !error && (
           <div
             style={{
               position: "absolute",
-              bottom: "1rem",
+              bottom: isMobile ? "7.5rem" : "1rem",
               left: isMobile ? "7.5rem" : "1rem",
-              width: "220px",
+              width: "200px",
               zIndex: 20,
               fontFamily: "monospace",
               display: "flex",
@@ -1192,7 +1323,7 @@ export default function ThreeWorld() {
           >
             <div
               style={{
-                maxHeight: "120px",
+                maxHeight: "100px",
                 overflowY: "auto",
                 display: "flex",
                 flexDirection: "column",
@@ -1204,14 +1335,14 @@ export default function ThreeWorld() {
                   key={m.id}
                   style={{
                     fontSize: "0.68rem",
-                    color: "#00ff41",
+                    color: m.isSystem ? "#00aaff" : "#00ff41",
                     background: "rgba(0,0,0,0.75)",
                     padding: "2px 6px",
                     letterSpacing: "0.04em",
                     wordBreak: "break-all",
                   }}
                 >
-                  <span style={{ color: "#005500" }}>{m.from}: </span>
+                  <span style={{ color: m.isSystem ? "#005588" : "#005500" }}>{m.from}: </span>
                   {m.text}
                 </div>
               ))}
@@ -1358,7 +1489,7 @@ export default function ThreeWorld() {
           {selectedBlock && (
             <div style={{ flexShrink: 0, display: "flex", alignItems: "center", gap: "0.5rem" }}>
               <span style={{ color: "#00ff41", fontSize: "0.7rem", letterSpacing: "0.1em" }}>
-                ▶ SELECTED
+                SELECTED
               </span>
               <button
                 type="button"
