@@ -14,16 +14,105 @@ const API_URL = process.env["NEXT_PUBLIC_API_URL"] ?? "http://localhost:3001"
 
 // ── Combat constants ───────────────────────────────────────────────────────────
 const PLAYER_MAX_HP = 100
-const MAX_AMMO = 30
-const RELOAD_TIME = 2500
 const BULLET_SPEED = 35
-const BULLET_LIFETIME = 0.35
-const RECOIL_STRENGTH = 0.1
 const RECOIL_RECOVER = 8
 const MUZZLE_FLASH_DURATION = 0.07
 const PROBLEM_TIME = 30
 const PLAYER_RADIUS = 0.35
 const ENEMY_RADIUS = 0.4
+
+// ── Weapon definitions ─────────────────────────────────────────────────────────
+interface WeaponDef {
+  id: "pistol" | "shotgun" | "sniper"
+  name: string
+  maxAmmo: number  // -1 = infinite
+  hitDamage: number
+  reloadTime: number
+  spread: number
+  pellets: number
+  bulletLifetime: number
+  bulletColor: number
+  recoil: number
+}
+
+const WEAPONS: WeaponDef[] = [
+  { id: "pistol",  name: "PISTOL",  maxAmmo: -1, hitDamage: 1, reloadTime: 0,    spread: 0,    pellets: 1, bulletLifetime: 0.38, bulletColor: 0xffff88, recoil: 0.08 },
+  { id: "shotgun", name: "SHOTGUN", maxAmmo: 8,  hitDamage: 2, reloadTime: 2500, spread: 0.09, pellets: 5, bulletLifetime: 0.14, bulletColor: 0xff8800, recoil: 0.20 },
+  { id: "sniper",  name: "SNIPER",  maxAmmo: 5,  hitDamage: 3, reloadTime: 3000, spread: 0,    pellets: 1, bulletLifetime: 1.60, bulletColor: 0x00ffff, recoil: 0.28 },
+]
+
+// ── Sound system (Web Audio API) ───────────────────────────────────────────────
+let _audioCtx: AudioContext | null = null
+function _getCtx(): AudioContext {
+  if (!_audioCtx) _audioCtx = new AudioContext()
+  if (_audioCtx.state === "suspended") _audioCtx.resume().catch(() => {})
+  return _audioCtx
+}
+function _noise(dur: number, gain: number, fType: BiquadFilterType, fFreq: number) {
+  const ctx = _getCtx()
+  const now = ctx.currentTime
+  const buf = ctx.createBuffer(1, Math.ceil(ctx.sampleRate * dur), ctx.sampleRate)
+  const d = buf.getChannelData(0)
+  for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1
+  const src = ctx.createBufferSource()
+  src.buffer = buf
+  const f = ctx.createBiquadFilter()
+  f.type = fType
+  f.frequency.value = fFreq
+  const g = ctx.createGain()
+  g.gain.setValueAtTime(gain, now)
+  g.gain.exponentialRampToValueAtTime(0.001, now + dur)
+  src.connect(f)
+  f.connect(g)
+  g.connect(ctx.destination)
+  src.start()
+}
+function _tone(freq: number, dur: number, gain: number, type: OscillatorType = "sine", freqEnd?: number) {
+  const ctx = _getCtx()
+  const now = ctx.currentTime
+  const osc = ctx.createOscillator()
+  osc.type = type
+  osc.frequency.setValueAtTime(freq, now)
+  if (freqEnd !== undefined) osc.frequency.linearRampToValueAtTime(freqEnd, now + dur)
+  const g = ctx.createGain()
+  g.gain.setValueAtTime(gain, now)
+  g.gain.exponentialRampToValueAtTime(0.001, now + dur)
+  osc.connect(g)
+  g.connect(ctx.destination)
+  osc.start()
+  osc.stop(now + dur)
+}
+
+const SOUNDS = {
+  pistol()   { _noise(0.12, 0.55, "bandpass", 1100); _tone(85,  0.10, 0.28, "sawtooth") },
+  shotgun()  { _noise(0.22, 0.80, "lowpass",  550);  _tone(55,  0.18, 0.38, "sawtooth") },
+  sniper()   { _noise(0.07, 0.45, "highpass", 2800); _tone(180, 0.32, 0.22, "sine") },
+  hit()      { _tone(950, 0.07, 0.28, "square"); _tone(620, 0.11, 0.18, "sine") },
+  damage()   { _noise(0.14, 0.50, "lowpass",  280);  _tone(110, 0.14, 0.32, "sawtooth") },
+  alert()    { _tone(440, 0.30, 0.18, "square", 900) },
+  clear() {
+    const ctx = _getCtx()
+    const now = ctx.currentTime
+    ;[523, 659, 784, 1047].forEach((hz, i) => {
+      const o = ctx.createOscillator(); o.type = "sine"; o.frequency.value = hz
+      const g = ctx.createGain()
+      g.gain.setValueAtTime(0.28, now + i * 0.18)
+      g.gain.exponentialRampToValueAtTime(0.001, now + i * 0.18 + 0.38)
+      o.connect(g); g.connect(ctx.destination); o.start(now + i * 0.18); o.stop(now + i * 0.18 + 0.38)
+    })
+  },
+  gameover() {
+    const ctx = _getCtx()
+    const now = ctx.currentTime
+    ;[440, 349, 277, 220].forEach((hz, i) => {
+      const o = ctx.createOscillator(); o.type = "sawtooth"; o.frequency.value = hz
+      const g = ctx.createGain()
+      g.gain.setValueAtTime(0.22, now + i * 0.24)
+      g.gain.exponentialRampToValueAtTime(0.001, now + i * 0.24 + 0.48)
+      o.connect(g); g.connect(ctx.destination); o.start(now + i * 0.24); o.stop(now + i * 0.24 + 0.48)
+    })
+  },
+}
 
 // ── Map wall definitions [x, z, width, depth] ──────────────────────────────────
 const WALL_DEFS: [number, number, number, number][] = [
@@ -367,11 +456,15 @@ export default function ThreeWorld() {
   const playerHpRef = useRef(PLAYER_MAX_HP)
   const gamePhaseRef = useRef<"playing" | "gameover" | "clear">("playing")
   const activeProblemRef = useRef<ActiveProblem | null>(null)
-  const ammoRef = useRef(MAX_AMMO)
+  const ammoRef = useRef(-1) // -1 = infinite (pistol default)
   const reloadingRef = useRef(false)
   const scoreRef = useRef(0)
   const muzzleFlashTimerRef = useRef(0)
   const earnedBlocksRef = useRef(0)
+  // Weapon refs
+  const currentWeaponIdxRef = useRef(0)
+  const weaponAmmoRef = useRef<[number, number, number]>([-1, 8, 5])
+  const pendingDmgRef = useRef(1)
 
   // UI state
   const [inventory, setInventory] = useState<InventoryItem[]>([])
@@ -390,7 +483,9 @@ export default function ThreeWorld() {
 
   // Combat state
   const [playerHp, setPlayerHp] = useState(PLAYER_MAX_HP)
-  const [ammo, setAmmo] = useState(MAX_AMMO)
+  const [ammo, setAmmo] = useState(-1) // -1 = infinite
+  const [currentWeaponIdx, setCurrentWeaponIdx] = useState(0)
+  const [unlockedWeapons, setUnlockedWeapons] = useState<Set<string>>(new Set(["pistol"]))
   const [score, setScore] = useState(0)
   const [gamePhase, setGamePhase] = useState<"playing" | "gameover" | "clear">("playing")
   const [activeProblem, setActiveProblem] = useState<ActiveProblem | null>(null)
@@ -408,7 +503,18 @@ export default function ThreeWorld() {
   }, [selectedBlock])
   useEffect(() => {
     setIsMobile(navigator.maxTouchPoints > 0)
+    try {
+      const stored = localStorage.getItem("fps_unlocked_weapons")
+      if (stored) {
+        const list = JSON.parse(stored) as string[]
+        setUnlockedWeapons(new Set(list))
+      }
+    } catch { /* ignore */ }
   }, [])
+  useEffect(() => {
+    if (gamePhase === "clear") SOUNDS.clear()
+    else if (gamePhase === "gameover") SOUNDS.gameover()
+  }, [gamePhase])
   // biome-ignore lint/correctness/useExhaustiveDependencies: chatEndRef is a stable ref, no need in deps
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" })
@@ -565,8 +671,8 @@ export default function ThreeWorld() {
         if (!refs) return
         const enemy = refs.enemies.find((e) => e.id === problem.enemyId)
         if (enemy && enemy.hp > 0) {
-          enemy.hp -= 1
-          scoreRef.current += 50
+          enemy.hp -= pendingDmgRef.current
+          scoreRef.current += 50 * pendingDmgRef.current
           setScore(scoreRef.current)
           if (enemy.hp <= 0) {
             refs.scene.remove(enemy.mesh)
@@ -591,6 +697,7 @@ export default function ThreeWorld() {
         playerHpRef.current = Math.max(0, playerHpRef.current - 20)
         setPlayerHp(playerHpRef.current)
         setDamageFlash(true)
+        SOUNDS.damage()
         setTimeout(() => setDamageFlash(false), 300)
         showNotification("不正解！ -20 HP")
         if (playerHpRef.current <= 0 && gamePhaseRef.current === "playing") {
@@ -901,80 +1008,96 @@ export default function ThreeWorld() {
         }
       }
 
-      // ── Create bullet ──────────────────────────────────────────────────────
-      function createBullet() {
-        const bulletGeo = new THREE.BoxGeometry(0.022, 0.022, 0.32)
-        const bulletMat = new THREE.MeshBasicMaterial({ color: 0xffff88, depthTest: false })
-        const bulletMesh = new THREE.Mesh(bulletGeo, bulletMat)
-        bulletMesh.renderOrder = 998
+      // ── Create bullet (weapon-aware) ───────────────────────────────────────
+      function createBullet(weapon: WeaponDef, spreadX = 0, spreadY = 0) {
         const fwd = new THREE.Vector3()
         camera.getWorldDirection(fwd)
+        if (spreadX !== 0 || spreadY !== 0) {
+          const right = new THREE.Vector3().crossVectors(fwd, new THREE.Vector3(0, 1, 0)).normalize()
+          const up = new THREE.Vector3().crossVectors(right, fwd).normalize()
+          fwd.addScaledVector(right, spreadX).addScaledVector(up, spreadY).normalize()
+        }
+        const bulletGeo = new THREE.BoxGeometry(0.022, 0.022, 0.28)
+        const bulletMat = new THREE.MeshBasicMaterial({ color: weapon.bulletColor, depthTest: false })
+        const bulletMesh = new THREE.Mesh(bulletGeo, bulletMat)
+        bulletMesh.renderOrder = 998
         bulletMesh.position.copy(camera.position).addScaledVector(fwd, 0.55)
-        bulletMesh.quaternion.copy(camera.quaternion)
+        bulletMesh.lookAt(bulletMesh.position.clone().add(fwd))
         scene.add(bulletMesh)
-        bullets.push({
-          mesh: bulletMesh,
-          velocity: fwd.clone().multiplyScalar(BULLET_SPEED),
-          life: BULLET_LIFETIME,
-        })
+        bullets.push({ mesh: bulletMesh, velocity: fwd.clone().multiplyScalar(BULLET_SPEED), life: weapon.bulletLifetime })
         muzzleFlashTimerRef.current = MUZZLE_FLASH_DURATION
+      }
+
+      // ── Reload helper ──────────────────────────────────────────────────────
+      function startReload(weapon: WeaponDef) {
+        if (reloadingRef.current || weapon.maxAmmo === -1) return
+        reloadingRef.current = true
+        setIsReloading(true)
+        showNotification(`RELOADING ${weapon.name}...`)
+        setTimeout(() => {
+          const idx = currentWeaponIdxRef.current
+          const reloadedWeapon = WEAPONS[idx]
+          if (!reloadedWeapon) return
+          weaponAmmoRef.current[idx] = reloadedWeapon.maxAmmo
+          ammoRef.current = reloadedWeapon.maxAmmo
+          setAmmo(reloadedWeapon.maxAmmo)
+          reloadingRef.current = false
+          setIsReloading(false)
+        }, weapon.reloadTime)
       }
 
       // ── Fire weapon ────────────────────────────────────────────────────────
       function fire() {
         if (gamePhaseRef.current !== "playing") return
         if (activeProblemRef.current !== null) return
-        if (ammoRef.current <= 0) {
-          if (!reloadingRef.current) {
-            reloadingRef.current = true
-            setIsReloading(true)
-            showNotification("RELOADING...")
-            setTimeout(() => {
-              ammoRef.current = MAX_AMMO
-              setAmmo(MAX_AMMO)
-              reloadingRef.current = false
-              setIsReloading(false)
-            }, RELOAD_TIME)
-          }
+        const weapon = WEAPONS[currentWeaponIdxRef.current]
+        if (!weapon) return
+        if (reloadingRef.current) return
+        if (weapon.maxAmmo !== -1 && ammoRef.current <= 0) {
+          startReload(weapon)
           return
         }
-        ammoRef.current -= 1
-        setAmmo(ammoRef.current)
-        recoilRef.current = RECOIL_STRENGTH
-        createBullet()
 
-        // Hit detection
+        // Consume ammo
+        if (weapon.maxAmmo !== -1) {
+          ammoRef.current -= 1
+          weaponAmmoRef.current[currentWeaponIdxRef.current] = ammoRef.current
+          setAmmo(ammoRef.current)
+        }
+
+        recoilRef.current = weapon.recoil
+        pendingDmgRef.current = weapon.hitDamage
+
+        // Spawn visual bullets (spread for shotgun)
+        for (let p = 0; p < weapon.pellets; p++) {
+          const sx = weapon.spread > 0 ? (Math.random() - 0.5) * weapon.spread * 2 : 0
+          const sy = weapon.spread > 0 ? (Math.random() - 0.5) * weapon.spread * 2 : 0
+          createBullet(weapon, sx, sy)
+        }
+
+        // Play shot sound
+        SOUNDS[weapon.id]()
+
+        // Center-ray hit detection
         pointer.set(0, 0)
         raycaster.setFromCamera(pointer, camera)
         const aliveEnemies = enemies.filter((e) => e.hp > 0)
-        const enemyHits = raycaster.intersectObjects(
-          aliveEnemies.map((e) => e.mesh),
-          false,
-        )
+        const enemyHits = raycaster.intersectObjects(aliveEnemies.map((e) => e.mesh), false)
         if (enemyHits.length > 0) {
           const hitEnemy = aliveEnemies.find((e) => e.mesh === enemyHits[0]?.object)
           if (hitEnemy) {
+            SOUNDS.hit()
             const probIdx = Math.floor(Math.random() * COMBAT_PROBLEMS.length)
             const def = COMBAT_PROBLEMS[probIdx]
             if (!def) return
-            const ap: ActiveProblem = { def, enemyId: hitEnemy.id }
-            activeProblemRef.current = ap
-            setActiveProblem(ap)
+            activeProblemRef.current = { def, enemyId: hitEnemy.id }
+            setActiveProblem({ def, enemyId: hitEnemy.id })
           }
         } else if (selectedBlockRef.current) {
           placeAtCenter()
         }
 
-        if (ammoRef.current <= 0 && !reloadingRef.current) {
-          reloadingRef.current = true
-          setIsReloading(true)
-          setTimeout(() => {
-            ammoRef.current = MAX_AMMO
-            setAmmo(MAX_AMMO)
-            reloadingRef.current = false
-            setIsReloading(false)
-          }, RELOAD_TIME)
-        }
+        if (weapon.maxAmmo !== -1 && ammoRef.current <= 0) startReload(weapon)
       }
 
       // ── PointerLock ────────────────────────────────────────────────────────
@@ -1151,6 +1274,7 @@ export default function ThreeWorld() {
                 const alertNow = Date.now()
                 if (alertNow - lastAlertTimeRef.current > 4000) {
                   lastAlertTimeRef.current = alertNow
+                  SOUNDS.alert()
                   showNotification("⚠ エネミーに発見された！")
                 }
               }
@@ -1186,6 +1310,7 @@ export default function ThreeWorld() {
                 playerHpRef.current = Math.max(0, playerHpRef.current - enemy.config.attackDamage)
                 setPlayerHp(playerHpRef.current)
                 setDamageFlash(true)
+                SOUNDS.damage()
                 setTimeout(() => setDamageFlash(false), 250)
                 if (playerHpRef.current <= 0 && gamePhaseRef.current === "playing") {
                   gamePhaseRef.current = "gameover"
@@ -1376,20 +1501,45 @@ export default function ThreeWorld() {
 
   // ── Keyboard events ────────────────────────────────────────────────────────
   useEffect(() => {
+    function switchWeapon(idx: number) {
+      const unlocked = unlockedWeapons
+      const weapon = WEAPONS[idx]
+      if (!weapon || !unlocked.has(weapon.id)) {
+        showNotification(`${WEAPONS[idx]?.name ?? ""} はロック中`)
+        return
+      }
+      if (reloadingRef.current) return
+      // Save current weapon ammo
+      weaponAmmoRef.current[currentWeaponIdxRef.current] = ammoRef.current
+      // Switch
+      currentWeaponIdxRef.current = idx
+      ammoRef.current = weaponAmmoRef.current[idx] ?? -1
+      setAmmo(ammoRef.current)
+      setCurrentWeaponIdx(idx)
+    }
+
     function onKeyDown(e: KeyboardEvent) {
       keysRef.current.add(e.key)
       if (e.key === "Escape") setSelectedBlock(null)
+      if (e.key === "1") switchWeapon(0)
+      if (e.key === "2") switchWeapon(1)
+      if (e.key === "3") switchWeapon(2)
       if (e.key === "r" || e.key === "R") {
-        if (!reloadingRef.current && ammoRef.current < MAX_AMMO) {
+        const weapon = WEAPONS[currentWeaponIdxRef.current]
+        if (weapon && weapon.maxAmmo !== -1 && !reloadingRef.current && ammoRef.current < weapon.maxAmmo) {
           reloadingRef.current = true
           setIsReloading(true)
-          showNotification("RELOADING...")
+          showNotification(`RELOADING ${weapon.name}...`)
           setTimeout(() => {
-            ammoRef.current = MAX_AMMO
-            setAmmo(MAX_AMMO)
+            const idx = currentWeaponIdxRef.current
+            const kbWeapon = WEAPONS[idx]
+            if (!kbWeapon) return
+            weaponAmmoRef.current[idx] = kbWeapon.maxAmmo
+            ammoRef.current = kbWeapon.maxAmmo
+            setAmmo(kbWeapon.maxAmmo)
             reloadingRef.current = false
             setIsReloading(false)
-          }, RELOAD_TIME)
+          }, weapon.reloadTime)
         }
       }
     }
@@ -1402,7 +1552,7 @@ export default function ThreeWorld() {
       window.removeEventListener("keydown", onKeyDown)
       window.removeEventListener("keyup", onKeyUp)
     }
-  }, [showNotification])
+  }, [showNotification, unlockedWeapons])
 
   // ── WebSocket ──────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -1593,7 +1743,9 @@ export default function ThreeWorld() {
   const { level, xpInLevel, xpForNext } = computeXpProgress(playerStats.xp)
   const xpPct = xpForNext > 0 ? Math.round((xpInLevel / xpForNext) * 100) : 0
   const hpPct = Math.round((playerHp / PLAYER_MAX_HP) * 100)
-  const ammoPct = Math.round((ammo / MAX_AMMO) * 100)
+  const currentWeapon: WeaponDef = WEAPONS[currentWeaponIdx] ?? WEAPONS[0] ?? { id: "pistol", name: "PISTOL", maxAmmo: -1, hitDamage: 1, reloadTime: 0, spread: 0, pellets: 1, bulletLifetime: 0.38, bulletColor: 0xffff88, recoil: 0.08 }
+  const ammoPct = currentWeapon.maxAmmo === -1 ? 100 : Math.round((ammo / currentWeapon.maxAmmo) * 100)
+  const ammoDisplay = currentWeapon.maxAmmo === -1 ? "∞" : `${ammo}/${currentWeapon.maxAmmo}`
   const hpColor = playerHp > 60 ? "#00ff41" : playerHp > 30 ? "#ffaa00" : "#ff3333"
   const aliveEnemies = enemyStatus.filter((e) => e.hp > 0).length
 
@@ -1685,35 +1837,21 @@ export default function ThreeWorld() {
           </div>
         </div>
 
-        {/* Ammo */}
+        {/* Weapon + Ammo */}
         <div style={{ display: "flex", alignItems: "center", gap: "0.35rem" }}>
-          <span style={{ color: "#8888ff", fontSize: "0.6rem", letterSpacing: "0.1em" }}>AMMO</span>
-          <div
-            style={{
-              width: "40px",
-              height: "5px",
-              background: "#001133",
-              border: "1px solid #223366",
-              overflow: "hidden",
-            }}
-          >
-            <div
-              style={{
-                height: "100%",
-                width: isReloading ? "100%" : `${ammoPct}%`,
-                background: isReloading ? "#ffaa00" : "#8888ff",
-                transition: isReloading ? `width ${RELOAD_TIME}ms linear` : "width 0.1s",
-              }}
-            />
+          <span style={{ color: "#8888ff", fontSize: "0.6rem", letterSpacing: "0.1em" }}>
+            {currentWeapon.name}
+          </span>
+          <div style={{ width: "36px", height: "5px", background: "#001133", border: "1px solid #223366", overflow: "hidden" }}>
+            <div style={{
+              height: "100%",
+              width: isReloading ? "100%" : `${ammoPct}%`,
+              background: isReloading ? "#ffaa00" : "#8888ff",
+              transition: isReloading ? `width ${currentWeapon.reloadTime}ms linear` : "width 0.1s",
+            }} />
           </div>
-          <span
-            style={{
-              color: isReloading ? "#ffaa00" : "#8888ff",
-              fontSize: "0.65rem",
-              minWidth: "32px",
-            }}
-          >
-            {isReloading ? "REL" : `${ammo}/${MAX_AMMO}`}
+          <span style={{ color: isReloading ? "#ffaa00" : "#8888ff", fontSize: "0.65rem", minWidth: "28px" }}>
+            {isReloading ? "REL" : ammoDisplay}
           </span>
         </div>
 
@@ -1920,7 +2058,7 @@ export default function ThreeWorld() {
               ENTER WORLD
             </div>
             <div style={{ color: "#005500", fontSize: "0.75rem", letterSpacing: "0.2em" }}>
-              CLICK TO LOCK MOUSE · WASD: MOVE · MOUSE: AIM · LMB: FIRE · RMB: DESTROY
+              CLICK TO LOCK MOUSE · WASD: MOVE · MOUSE: AIM · LMB: FIRE · 1/2/3: WEAPON
             </div>
           </button>
         )}
@@ -2048,6 +2186,62 @@ export default function ThreeWorld() {
               imageRendering: "pixelated",
             }}
           />
+        )}
+
+        {/* Weapon selector (bottom-right) */}
+        {!isLoading && !error && gamePhase === "playing" && (
+          <div style={{
+            position: "absolute",
+            bottom: isMobile ? "7.5rem" : "1rem",
+            right: isMobile ? "7.5rem" : "0.5rem",
+            zIndex: 20,
+            display: "flex",
+            flexDirection: "column",
+            gap: "3px",
+            fontFamily: "monospace",
+          }}>
+            {WEAPONS.map((w, i) => {
+              const isSelected = i === currentWeaponIdx
+              const isUnlocked = unlockedWeapons.has(w.id)
+              const wAmmo = i === currentWeaponIdx ? ammo : (weaponAmmoRef.current[i] ?? -1)
+              const wAmmoStr = w.maxAmmo === -1 ? "∞" : `${wAmmo}/${w.maxAmmo}`
+              return (
+                <button
+                  key={w.id}
+                  type="button"
+                  onClick={() => {
+                    if (!isUnlocked) { showNotification(`${w.name} はロック中`); return }
+                    if (reloadingRef.current) return
+                    weaponAmmoRef.current[currentWeaponIdxRef.current] = ammoRef.current
+                    currentWeaponIdxRef.current = i
+                    ammoRef.current = weaponAmmoRef.current[i] ?? -1
+                    setAmmo(ammoRef.current)
+                    setCurrentWeaponIdx(i)
+                  }}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "0.4rem",
+                    padding: "0.2rem 0.5rem",
+                    fontFamily: "monospace",
+                    fontSize: "0.62rem",
+                    letterSpacing: "0.08em",
+                    border: isSelected ? "1px solid #8888ff" : "1px solid #222233",
+                    background: isSelected ? "rgba(136,136,255,0.12)" : "rgba(0,0,0,0.75)",
+                    color: isUnlocked ? (isSelected ? "#aaaaff" : "#445566") : "#222233",
+                    cursor: isUnlocked ? "pointer" : "not-allowed",
+                    opacity: isUnlocked ? 1 : 0.5,
+                  }}
+                >
+                  <span style={{ color: isSelected ? "#8888ff" : "#334455" }}>[{i + 1}]</span>
+                  <span>{w.name}</span>
+                  <span style={{ color: isSelected ? "#aaaaff" : "#334455", marginLeft: "auto", paddingLeft: "0.4rem" }}>
+                    {isUnlocked ? wAmmoStr : "🔒"}
+                  </span>
+                </button>
+              )
+            })}
+          </div>
         )}
 
         {/* Move joystick */}
@@ -2556,7 +2750,7 @@ export default function ThreeWorld() {
             marginBottom: "0.3rem",
           }}
         >
-          LMB: FIRE / PLACE BLOCK · RMB: DESTROY · R: RELOAD · ESC: DESELECT
+          LMB: FIRE · RMB: DESTROY · R: RELOAD · 1/2/3: WEAPON · ESC: DESELECT
           <a
             href="/dungeon"
             style={{ color: "#00aa2a", marginLeft: "0.5rem", textDecoration: "underline" }}

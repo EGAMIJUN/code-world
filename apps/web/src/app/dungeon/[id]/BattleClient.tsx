@@ -422,6 +422,19 @@ export default function BattleClient({ dungeon }: { dungeon: DungeonWithRooms })
 
         if (newBossHp <= 0) {
           setPhase("victory")
+          // Unlock FPS weapons progressively by dungeon difficulty
+          try {
+            const current = JSON.parse(localStorage.getItem("fps_unlocked_weapons") ?? '["pistol"]') as string[]
+            const unlocked = new Set(current)
+            unlocked.add("pistol")
+            if (rooms.some((r) => r.roomType === "miniboss" || r.roomType === "boss")) {
+              unlocked.add("shotgun")
+            }
+            if (rooms.some((r) => r.roomType === "boss")) {
+              unlocked.add("sniper")
+            }
+            localStorage.setItem("fps_unlocked_weapons", JSON.stringify([...unlocked]))
+          } catch { /* ignore */ }
           return
         }
 
