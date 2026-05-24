@@ -3,12 +3,12 @@
 import { useParams, useRouter } from "next/navigation"
 import { useEffect, useState } from "react"
 
-const API_URL = process.env["NEXT_PUBLIC_API_URL"] ?? "http://localhost:3001"
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001"
 
 export default function DungeonJoinPage() {
   const params = useParams()
   const router = useRouter()
-  const token = String(params["token"] ?? "")
+  const token = String(params.token ?? "")
   const [status, setStatus] = useState<"joining" | "success" | "error">("joining")
   const [error, setError] = useState("")
   const [dungeonId, setDungeonId] = useState("")
@@ -53,13 +53,9 @@ export default function DungeonJoinPage() {
       }}
     >
       {status === "joining" && (
-        <>
-          <div
-            style={{ fontSize: "1.2rem", letterSpacing: "0.3em", textShadow: "0 0 20px #00ff41" }}
-          >
-            ⟳ JOINING DUNGEON...
-          </div>
-        </>
+        <div style={{ fontSize: "1.2rem", letterSpacing: "0.3em", textShadow: "0 0 20px #00ff41" }}>
+          ⟳ JOINING DUNGEON...
+        </div>
       )}
       {status === "success" && (
         <>

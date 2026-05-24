@@ -10,7 +10,7 @@ const MAP_SIZE = 32
 const ORIGIN_X = MAP_SIZE * (TILE_W / 2) // 1024 — horizontal center
 const ORIGIN_Y = 140
 
-const API_URL = process.env["NEXT_PUBLIC_API_URL"] ?? "http://localhost:3001"
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001"
 
 // ── Isometric math ─────────────────────────────────────────────────────────────
 function isoX(tx: number, ty: number): number {
@@ -31,16 +31,18 @@ function toTile(canvasX: number, canvasY: number): { tx: number; ty: number } {
 }
 
 // ── Zone definitions ───────────────────────────────────────────────────────────
+const ZONE_SQL = {
+  startTX: 0,
+  endTX: 9,
+  name: "SQL District",
+  baseColor: 0x0d2545,
+  altColor: 0x0a1d38,
+  treeColor: 0x1a3a70,
+  labelColor: "#6ab0ff",
+}
+
 const ZONES = [
-  {
-    startTX: 0,
-    endTX: 9,
-    name: "SQL District",
-    baseColor: 0x0d2545,
-    altColor: 0x0a1d38,
-    treeColor: 0x1a3a70,
-    labelColor: "#6ab0ff",
-  },
+  ZONE_SQL,
   {
     startTX: 10,
     endTX: 21,
@@ -62,7 +64,7 @@ const ZONES = [
 ]
 
 function getZone(tx: number) {
-  return ZONES.find((z) => tx >= z.startTX && tx <= z.endTX) ?? ZONES[0]!
+  return ZONES.find((z) => tx >= z.startTX && tx <= z.endTX) ?? ZONE_SQL
 }
 
 // ── Color helpers ──────────────────────────────────────────────────────────────
@@ -212,6 +214,7 @@ export default function PhaserGame() {
     setIsMobile("ontouchstart" in window || navigator.maxTouchPoints > 0)
   }, [])
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: chatMessages triggers scroll-to-bottom
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" })
   }, [chatMessages])
@@ -484,7 +487,8 @@ export default function PhaserGame() {
             .setDepth(1101)
 
           // ── Input ────────────────────────────────────────────────────────────
-          const kb = this.input.keyboard!
+          const kb = this.input.keyboard
+          if (!kb) throw new Error("Keyboard plugin not available")
           this.keys = {
             W: kb.addKey(Phaser.Input.Keyboard.KeyCodes.W),
             A: kb.addKey(Phaser.Input.Keyboard.KeyCodes.A),
@@ -780,8 +784,8 @@ export default function PhaserGame() {
             const [btx, bty] = key.split(",").map(Number)
             g.fillStyle(0xffffff, 0.6)
             g.fillRect(
-              mmX + btx! * sx,
-              mmY + bty! * sy,
+              mmX + (btx ?? 0) * sx,
+              mmY + (bty ?? 0) * sy,
               Math.max(1, sx - 0.5),
               Math.max(1, sy - 0.5),
             )
@@ -812,8 +816,8 @@ export default function PhaserGame() {
           if (this.keys.W.isDown || this.keys.UP.isDown) vy = -speed
           if (this.keys.S.isDown || this.keys.DOWN.isDown) vy = speed
           if (vx !== 0 && vy !== 0) {
-            vx *= 0.707
-            vy *= 0.707
+            vx *= Math.SQRT1_2
+            vy *= Math.SQRT1_2
           }
 
           // Joystick (touch) input — overrides keyboard when active
@@ -996,7 +1000,7 @@ export default function PhaserGame() {
   useEffect(() => {
     if (isLoading) return
 
-    const WS_URL = (process.env["NEXT_PUBLIC_API_URL"] ?? "http://localhost:3001").replace(
+    const WS_URL = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001").replace(
       /^http/,
       "ws",
     )

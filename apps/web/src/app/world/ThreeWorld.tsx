@@ -25,7 +25,7 @@ const ENEMY_RADIUS = 0.4
 interface WeaponDef {
   id: "pistol" | "shotgun" | "sniper"
   name: string
-  maxAmmo: number  // -1 = infinite
+  maxAmmo: number // -1 = infinite
   hitDamage: number
   reloadTime: number
   spread: number
@@ -36,9 +36,42 @@ interface WeaponDef {
 }
 
 const WEAPONS: WeaponDef[] = [
-  { id: "pistol",  name: "PISTOL",  maxAmmo: -1, hitDamage: 1, reloadTime: 0,    spread: 0,    pellets: 1, bulletLifetime: 0.38, bulletColor: 0xffff88, recoil: 0.08 },
-  { id: "shotgun", name: "SHOTGUN", maxAmmo: 8,  hitDamage: 2, reloadTime: 2500, spread: 0.09, pellets: 5, bulletLifetime: 0.14, bulletColor: 0xff8800, recoil: 0.20 },
-  { id: "sniper",  name: "SNIPER",  maxAmmo: 5,  hitDamage: 3, reloadTime: 3000, spread: 0,    pellets: 1, bulletLifetime: 1.60, bulletColor: 0x00ffff, recoil: 0.28 },
+  {
+    id: "pistol",
+    name: "PISTOL",
+    maxAmmo: -1,
+    hitDamage: 1,
+    reloadTime: 0,
+    spread: 0,
+    pellets: 1,
+    bulletLifetime: 0.38,
+    bulletColor: 0xffff88,
+    recoil: 0.08,
+  },
+  {
+    id: "shotgun",
+    name: "SHOTGUN",
+    maxAmmo: 8,
+    hitDamage: 2,
+    reloadTime: 2500,
+    spread: 0.09,
+    pellets: 5,
+    bulletLifetime: 0.14,
+    bulletColor: 0xff8800,
+    recoil: 0.2,
+  },
+  {
+    id: "sniper",
+    name: "SNIPER",
+    maxAmmo: 5,
+    hitDamage: 3,
+    reloadTime: 3000,
+    spread: 0,
+    pellets: 1,
+    bulletLifetime: 1.6,
+    bulletColor: 0x00ffff,
+    recoil: 0.28,
+  },
 ]
 
 // ── Sound system (Web Audio API) ───────────────────────────────────────────────
@@ -67,7 +100,13 @@ function _noise(dur: number, gain: number, fType: BiquadFilterType, fFreq: numbe
   g.connect(ctx.destination)
   src.start()
 }
-function _tone(freq: number, dur: number, gain: number, type: OscillatorType = "sine", freqEnd?: number) {
+function _tone(
+  freq: number,
+  dur: number,
+  gain: number,
+  type: OscillatorType = "sine",
+  freqEnd?: number,
+) {
   const ctx = _getCtx()
   const now = ctx.currentTime
   const osc = ctx.createOscillator()
@@ -84,45 +123,89 @@ function _tone(freq: number, dur: number, gain: number, type: OscillatorType = "
 }
 
 const SOUNDS = {
-  pistol()   { _noise(0.12, 0.55, "bandpass", 1100); _tone(85,  0.10, 0.28, "sawtooth") },
-  shotgun()  { _noise(0.22, 0.80, "lowpass",  550);  _tone(55,  0.18, 0.38, "sawtooth") },
-  sniper()   { _noise(0.07, 0.45, "highpass", 2800); _tone(180, 0.32, 0.22, "sine") },
-  hit()      { _tone(950, 0.07, 0.28, "square"); _tone(620, 0.11, 0.18, "sine") },
-  damage()   { _noise(0.14, 0.50, "lowpass",  280);  _tone(110, 0.14, 0.32, "sawtooth") },
-  alert()    { _tone(440, 0.30, 0.18, "square", 900) },
+  pistol() {
+    _noise(0.12, 0.55, "bandpass", 1100)
+    _tone(85, 0.1, 0.28, "sawtooth")
+  },
+  shotgun() {
+    _noise(0.22, 0.8, "lowpass", 550)
+    _tone(55, 0.18, 0.38, "sawtooth")
+  },
+  sniper() {
+    _noise(0.07, 0.45, "highpass", 2800)
+    _tone(180, 0.32, 0.22, "sine")
+  },
+  hit() {
+    _tone(950, 0.07, 0.28, "square")
+    _tone(620, 0.11, 0.18, "sine")
+  },
+  damage() {
+    _noise(0.14, 0.5, "lowpass", 280)
+    _tone(110, 0.14, 0.32, "sawtooth")
+  },
+  alert() {
+    _tone(440, 0.3, 0.18, "square", 900)
+  },
   clear() {
     const ctx = _getCtx()
     const now = ctx.currentTime
     ;[523, 659, 784, 1047].forEach((hz, i) => {
-      const o = ctx.createOscillator(); o.type = "sine"; o.frequency.value = hz
+      const o = ctx.createOscillator()
+      o.type = "sine"
+      o.frequency.value = hz
       const g = ctx.createGain()
       g.gain.setValueAtTime(0.28, now + i * 0.18)
       g.gain.exponentialRampToValueAtTime(0.001, now + i * 0.18 + 0.38)
-      o.connect(g); g.connect(ctx.destination); o.start(now + i * 0.18); o.stop(now + i * 0.18 + 0.38)
+      o.connect(g)
+      g.connect(ctx.destination)
+      o.start(now + i * 0.18)
+      o.stop(now + i * 0.18 + 0.38)
     })
   },
   gameover() {
     const ctx = _getCtx()
     const now = ctx.currentTime
     ;[440, 349, 277, 220].forEach((hz, i) => {
-      const o = ctx.createOscillator(); o.type = "sawtooth"; o.frequency.value = hz
+      const o = ctx.createOscillator()
+      o.type = "sawtooth"
+      o.frequency.value = hz
       const g = ctx.createGain()
       g.gain.setValueAtTime(0.22, now + i * 0.24)
       g.gain.exponentialRampToValueAtTime(0.001, now + i * 0.24 + 0.48)
-      o.connect(g); g.connect(ctx.destination); o.start(now + i * 0.24); o.stop(now + i * 0.24 + 0.48)
+      o.connect(g)
+      g.connect(ctx.destination)
+      o.start(now + i * 0.24)
+      o.stop(now + i * 0.24 + 0.48)
     })
   },
 }
 
 // ── Map wall definitions [x, z, width, depth] ──────────────────────────────────
 const WALL_DEFS: [number, number, number, number][] = [
-  [3, 3, 4, 4], [9, 1, 3, 5], [14, 8, 5, 4], [22, 3, 4, 6],
-  [5, 14, 2, 5], [20, 12, 4, 2], [7, 21, 4, 3], [17, 21, 5, 4],
-  [25, 18, 3, 6], [10, 26, 5, 3], [2, 26, 3, 3], [27, 8, 2, 5],
-  [5, 9, 1, 1], [12, 17, 1, 1], [18, 7, 1, 1], [24, 15, 1, 1],
+  [3, 3, 4, 4],
+  [9, 1, 3, 5],
+  [14, 8, 5, 4],
+  [22, 3, 4, 6],
+  [5, 14, 2, 5],
+  [20, 12, 4, 2],
+  [7, 21, 4, 3],
+  [17, 21, 5, 4],
+  [25, 18, 3, 6],
+  [10, 26, 5, 3],
+  [2, 26, 3, 3],
+  [27, 8, 2, 5],
+  [5, 9, 1, 1],
+  [12, 17, 1, 1],
+  [18, 7, 1, 1],
+  [24, 15, 1, 1],
 ]
 type WallAABB = { x1: number; z1: number; x2: number; z2: number }
-const WALL_AABBS: WallAABB[] = WALL_DEFS.map(([x, z, w, d]) => ({ x1: x, z1: z, x2: x + w, z2: z + d }))
+const WALL_AABBS: WallAABB[] = WALL_DEFS.map(([x, z, w, d]) => ({
+  x1: x,
+  z1: z,
+  x2: x + w,
+  z2: z + d,
+}))
 
 function collidesWithWall(px: number, pz: number, radius: number): boolean {
   if (px - radius < 0 || px + radius > MAP_SIZE || pz - radius < 0 || pz + radius > MAP_SIZE)
@@ -156,19 +239,49 @@ interface EnemyConfig {
 
 const ENEMY_CONFIGS: Record<EnemyType, EnemyConfig> = {
   grunt: {
-    hp: 3, speed: 2.0, attackDamage: 10, attackInterval: 2000, attackRange: 1.8,
-    color: 0xff2222, emissive: 0x330000, bodyW: 0.65, bodyH: 1.7,
-    sightRange: 12, fovAngle: Math.PI, score: 250, blockReward: 1,
+    hp: 3,
+    speed: 2.0,
+    attackDamage: 10,
+    attackInterval: 2000,
+    attackRange: 1.8,
+    color: 0xff2222,
+    emissive: 0x330000,
+    bodyW: 0.65,
+    bodyH: 1.7,
+    sightRange: 12,
+    fovAngle: Math.PI,
+    score: 250,
+    blockReward: 1,
   },
   miniboss: {
-    hp: 5, speed: 1.6, attackDamage: 20, attackInterval: 1500, attackRange: 2.0,
-    color: 0xff6600, emissive: 0x331100, bodyW: 0.85, bodyH: 2.1,
-    sightRange: 16, fovAngle: Math.PI * 0.9, score: 600, blockReward: 3,
+    hp: 5,
+    speed: 1.6,
+    attackDamage: 20,
+    attackInterval: 1500,
+    attackRange: 2.0,
+    color: 0xff6600,
+    emissive: 0x331100,
+    bodyW: 0.85,
+    bodyH: 2.1,
+    sightRange: 16,
+    fovAngle: Math.PI * 0.9,
+    score: 600,
+    blockReward: 3,
   },
   boss: {
-    hp: 8, speed: 1.2, attackDamage: 35, attackInterval: 2500, attackRange: 2.5,
-    color: 0xaa00ff, emissive: 0x220033, bodyW: 1.1, bodyH: 2.5,
-    sightRange: 22, fovAngle: Math.PI * 0.8, score: 1500, blockReward: 8,
+    hp: 8,
+    speed: 1.2,
+    attackDamage: 35,
+    attackInterval: 2500,
+    attackRange: 2.5,
+    color: 0xaa00ff,
+    emissive: 0x220033,
+    bodyW: 1.1,
+    bodyH: 2.5,
+    sightRange: 22,
+    fovAngle: Math.PI * 0.8,
+    score: 1500,
+    blockReward: 8,
   },
 }
 
@@ -180,19 +293,86 @@ interface EnemySpawnDef {
 }
 
 const ENEMY_SPAWN_DEFS: EnemySpawnDef[] = [
-  { x: 2, z: 2, type: "grunt", patrol: [{ x: 2, z: 2 }, { x: 2, z: 8 }, { x: 7, z: 8 }] },
-  { x: 13, z: 3, type: "grunt", patrol: [{ x: 13, z: 3 }, { x: 13, z: 7 }, { x: 8, z: 7 }] },
-  { x: 26, z: 2, type: "grunt", patrol: [{ x: 26, z: 2 }, { x: 26, z: 8 }, { x: 22, z: 8 }] },
-  { x: 1, z: 18, type: "grunt", patrol: [{ x: 1, z: 18 }, { x: 4, z: 18 }, { x: 4, z: 25 }] },
-  { x: 11, z: 20, type: "miniboss", patrol: [{ x: 11, z: 20 }, { x: 11, z: 25 }, { x: 16, z: 25 }] },
-  { x: 23, z: 24, type: "miniboss", patrol: [{ x: 23, z: 24 }, { x: 28, z: 24 }, { x: 28, z: 19 }] },
-  { x: 16, z: 14, type: "boss", patrol: [{ x: 16, z: 14 }, { x: 16, z: 20 }, { x: 20, z: 20 }, { x: 20, z: 14 }] },
+  {
+    x: 2,
+    z: 2,
+    type: "grunt",
+    patrol: [
+      { x: 2, z: 2 },
+      { x: 2, z: 8 },
+      { x: 7, z: 8 },
+    ],
+  },
+  {
+    x: 13,
+    z: 3,
+    type: "grunt",
+    patrol: [
+      { x: 13, z: 3 },
+      { x: 13, z: 7 },
+      { x: 8, z: 7 },
+    ],
+  },
+  {
+    x: 26,
+    z: 2,
+    type: "grunt",
+    patrol: [
+      { x: 26, z: 2 },
+      { x: 26, z: 8 },
+      { x: 22, z: 8 },
+    ],
+  },
+  {
+    x: 1,
+    z: 18,
+    type: "grunt",
+    patrol: [
+      { x: 1, z: 18 },
+      { x: 4, z: 18 },
+      { x: 4, z: 25 },
+    ],
+  },
+  {
+    x: 11,
+    z: 20,
+    type: "miniboss",
+    patrol: [
+      { x: 11, z: 20 },
+      { x: 11, z: 25 },
+      { x: 16, z: 25 },
+    ],
+  },
+  {
+    x: 23,
+    z: 24,
+    type: "miniboss",
+    patrol: [
+      { x: 23, z: 24 },
+      { x: 28, z: 24 },
+      { x: 28, z: 19 },
+    ],
+  },
+  {
+    x: 16,
+    z: 14,
+    type: "boss",
+    patrol: [
+      { x: 16, z: 14 },
+      { x: 16, z: 20 },
+      { x: 20, z: 20 },
+      { x: 20, z: 14 },
+    ],
+  },
 ]
 
 function enemyCanSee(
-  facingX: number, facingZ: number,
-  toDx: number, toDz: number,
-  dist: number, cfg: EnemyConfig,
+  facingX: number,
+  facingZ: number,
+  toDx: number,
+  toDz: number,
+  dist: number,
+  cfg: EnemyConfig,
 ): boolean {
   if (dist > cfg.sightRange) return false
   const fLen = Math.sqrt(facingX * facingX + facingZ * facingZ)
@@ -509,7 +689,9 @@ export default function ThreeWorld() {
         const list = JSON.parse(stored) as string[]
         setUnlockedWeapons(new Set(list))
       }
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   }, [])
   useEffect(() => {
     if (gamePhase === "clear") SOUNDS.clear()
@@ -681,8 +863,15 @@ export default function ThreeWorld() {
             setScore(scoreRef.current)
             earnedBlocksRef.current += enemy.config.blockReward
             setEarnedBlocks(earnedBlocksRef.current)
-            const tag = enemy.type === "boss" ? "BOSS撃破！" : enemy.type === "miniboss" ? "ミニボス撃破！" : "エネミー撃破！"
-            showNotification(`${tag} +${enemy.config.score}pt ブロック×${enemy.config.blockReward}獲得！`)
+            const tag =
+              enemy.type === "boss"
+                ? "BOSS撃破！"
+                : enemy.type === "miniboss"
+                  ? "ミニボス撃破！"
+                  : "エネミー撃破！"
+            showNotification(
+              `${tag} +${enemy.config.score}pt ブロック×${enemy.config.blockReward}獲得！`,
+            )
             const allDead = refs.enemies.every((e) => e.hp <= 0)
             if (allDead) {
               gamePhaseRef.current = "clear"
@@ -691,7 +880,9 @@ export default function ThreeWorld() {
           } else {
             showNotification(`正解！ダメージを与えた！(HP: ${enemy.hp}/${enemy.maxHp})`)
           }
-          setEnemyStatus(refs.enemies.map((e) => ({ id: e.id, hp: e.hp, maxHp: e.maxHp, type: e.type })))
+          setEnemyStatus(
+            refs.enemies.map((e) => ({ id: e.id, hp: e.hp, maxHp: e.maxHp, type: e.type })),
+          )
         }
       } else {
         playerHpRef.current = Math.max(0, playerHpRef.current - 20)
@@ -1013,18 +1204,27 @@ export default function ThreeWorld() {
         const fwd = new THREE.Vector3()
         camera.getWorldDirection(fwd)
         if (spreadX !== 0 || spreadY !== 0) {
-          const right = new THREE.Vector3().crossVectors(fwd, new THREE.Vector3(0, 1, 0)).normalize()
+          const right = new THREE.Vector3()
+            .crossVectors(fwd, new THREE.Vector3(0, 1, 0))
+            .normalize()
           const up = new THREE.Vector3().crossVectors(right, fwd).normalize()
           fwd.addScaledVector(right, spreadX).addScaledVector(up, spreadY).normalize()
         }
         const bulletGeo = new THREE.BoxGeometry(0.022, 0.022, 0.28)
-        const bulletMat = new THREE.MeshBasicMaterial({ color: weapon.bulletColor, depthTest: false })
+        const bulletMat = new THREE.MeshBasicMaterial({
+          color: weapon.bulletColor,
+          depthTest: false,
+        })
         const bulletMesh = new THREE.Mesh(bulletGeo, bulletMat)
         bulletMesh.renderOrder = 998
         bulletMesh.position.copy(camera.position).addScaledVector(fwd, 0.55)
         bulletMesh.lookAt(bulletMesh.position.clone().add(fwd))
         scene.add(bulletMesh)
-        bullets.push({ mesh: bulletMesh, velocity: fwd.clone().multiplyScalar(BULLET_SPEED), life: weapon.bulletLifetime })
+        bullets.push({
+          mesh: bulletMesh,
+          velocity: fwd.clone().multiplyScalar(BULLET_SPEED),
+          life: weapon.bulletLifetime,
+        })
         muzzleFlashTimerRef.current = MUZZLE_FLASH_DURATION
       }
 
@@ -1082,7 +1282,10 @@ export default function ThreeWorld() {
         pointer.set(0, 0)
         raycaster.setFromCamera(pointer, camera)
         const aliveEnemies = enemies.filter((e) => e.hp > 0)
-        const enemyHits = raycaster.intersectObjects(aliveEnemies.map((e) => e.mesh), false)
+        const enemyHits = raycaster.intersectObjects(
+          aliveEnemies.map((e) => e.mesh),
+          false,
+        )
         if (enemyHits.length > 0) {
           const hitEnemy = aliveEnemies.find((e) => e.mesh === enemyHits[0]?.object)
           if (hitEnemy) {
@@ -1268,7 +1471,9 @@ export default function ThreeWorld() {
                 }
               }
               enemy.mesh.rotation.y = Math.atan2(enemy.facing.x, enemy.facing.z)
-              if (enemyCanSee(enemy.facing.x, enemy.facing.z, toPx, toPz, distToPlayer, enemy.config)) {
+              if (
+                enemyCanSee(enemy.facing.x, enemy.facing.z, toPx, toPz, distToPlayer, enemy.config)
+              ) {
                 enemy.state = "alert"
                 enemy.lastSeenPlayer = { x: fp.x, z: fp.z }
                 const alertNow = Date.now()
@@ -1278,7 +1483,6 @@ export default function ThreeWorld() {
                   showNotification("⚠ エネミーに発見された！")
                 }
               }
-
             } else if (enemy.state === "alert") {
               enemy.lastSeenPlayer = { x: fp.x, z: fp.z }
               if (distToPlayer <= enemy.config.attackRange) {
@@ -1291,13 +1495,21 @@ export default function ThreeWorld() {
                 if (!collidesWithWall(ex, nz, ENEMY_RADIUS)) enemy.mesh.position.z = nz
                 enemy.facing.set(toPx / distToPlayer, 0, toPz / distToPlayer)
                 enemy.mesh.rotation.y = Math.atan2(enemy.facing.x, enemy.facing.z)
-                if (!enemyCanSee(enemy.facing.x, enemy.facing.z, toPx, toPz, distToPlayer, enemy.config)) {
+                if (
+                  !enemyCanSee(
+                    enemy.facing.x,
+                    enemy.facing.z,
+                    toPx,
+                    toPz,
+                    distToPlayer,
+                    enemy.config,
+                  )
+                ) {
                   enemy.state = "search"
                   enemy.searchTimer = 3.5
                 }
               }
               enemy.mesh.position.y = enemy.config.bodyH / 2 + Math.sin(now * 0.006) * 0.04
-
             } else if (enemy.state === "attack") {
               if (distToPlayer > 0.001) {
                 enemy.facing.set(toPx / distToPlayer, 0, toPz / distToPlayer)
@@ -1317,7 +1529,6 @@ export default function ThreeWorld() {
                   setGamePhase("gameover")
                 }
               }
-
             } else if (enemy.state === "search") {
               enemy.searchTimer -= dt
               if (enemy.searchTimer <= 0) {
@@ -1339,7 +1550,9 @@ export default function ThreeWorld() {
                   enemy.lastSeenPlayer = null
                 }
               }
-              if (enemyCanSee(enemy.facing.x, enemy.facing.z, toPx, toPz, distToPlayer, enemy.config)) {
+              if (
+                enemyCanSee(enemy.facing.x, enemy.facing.z, toPx, toPz, distToPlayer, enemy.config)
+              ) {
                 enemy.state = "alert"
                 enemy.lastSeenPlayer = { x: fp.x, z: fp.z }
               }
@@ -1424,9 +1637,13 @@ export default function ThreeWorld() {
             for (const enemy of refs.enemies) {
               if (enemy.hp <= 0) continue
               ctx.fillStyle =
-                enemy.type === "boss" ? "#cc44ff" :
-                enemy.type === "miniboss" ? "#ff8800" :
-                enemy.state === "alert" || enemy.state === "attack" ? "#ff2222" : "#ff6666"
+                enemy.type === "boss"
+                  ? "#cc44ff"
+                  : enemy.type === "miniboss"
+                    ? "#ff8800"
+                    : enemy.state === "alert" || enemy.state === "attack"
+                      ? "#ff2222"
+                      : "#ff6666"
               ctx.beginPath()
               ctx.arc(
                 enemy.mesh.position.x * SCALE,
@@ -1526,7 +1743,12 @@ export default function ThreeWorld() {
       if (e.key === "3") switchWeapon(2)
       if (e.key === "r" || e.key === "R") {
         const weapon = WEAPONS[currentWeaponIdxRef.current]
-        if (weapon && weapon.maxAmmo !== -1 && !reloadingRef.current && ammoRef.current < weapon.maxAmmo) {
+        if (
+          weapon &&
+          weapon.maxAmmo !== -1 &&
+          !reloadingRef.current &&
+          ammoRef.current < weapon.maxAmmo
+        ) {
           reloadingRef.current = true
           setIsReloading(true)
           showNotification(`RELOADING ${weapon.name}...`)
@@ -1743,8 +1965,21 @@ export default function ThreeWorld() {
   const { level, xpInLevel, xpForNext } = computeXpProgress(playerStats.xp)
   const xpPct = xpForNext > 0 ? Math.round((xpInLevel / xpForNext) * 100) : 0
   const hpPct = Math.round((playerHp / PLAYER_MAX_HP) * 100)
-  const currentWeapon: WeaponDef = WEAPONS[currentWeaponIdx] ?? WEAPONS[0] ?? { id: "pistol", name: "PISTOL", maxAmmo: -1, hitDamage: 1, reloadTime: 0, spread: 0, pellets: 1, bulletLifetime: 0.38, bulletColor: 0xffff88, recoil: 0.08 }
-  const ammoPct = currentWeapon.maxAmmo === -1 ? 100 : Math.round((ammo / currentWeapon.maxAmmo) * 100)
+  const currentWeapon: WeaponDef = WEAPONS[currentWeaponIdx] ??
+    WEAPONS[0] ?? {
+      id: "pistol",
+      name: "PISTOL",
+      maxAmmo: -1,
+      hitDamage: 1,
+      reloadTime: 0,
+      spread: 0,
+      pellets: 1,
+      bulletLifetime: 0.38,
+      bulletColor: 0xffff88,
+      recoil: 0.08,
+    }
+  const ammoPct =
+    currentWeapon.maxAmmo === -1 ? 100 : Math.round((ammo / currentWeapon.maxAmmo) * 100)
   const ammoDisplay = currentWeapon.maxAmmo === -1 ? "∞" : `${ammo}/${currentWeapon.maxAmmo}`
   const hpColor = playerHp > 60 ? "#00ff41" : playerHp > 30 ? "#ffaa00" : "#ff3333"
   const aliveEnemies = enemyStatus.filter((e) => e.hp > 0).length
@@ -1842,15 +2077,33 @@ export default function ThreeWorld() {
           <span style={{ color: "#8888ff", fontSize: "0.6rem", letterSpacing: "0.1em" }}>
             {currentWeapon.name}
           </span>
-          <div style={{ width: "36px", height: "5px", background: "#001133", border: "1px solid #223366", overflow: "hidden" }}>
-            <div style={{
-              height: "100%",
-              width: isReloading ? "100%" : `${ammoPct}%`,
-              background: isReloading ? "#ffaa00" : "#8888ff",
-              transition: isReloading ? `width ${currentWeapon.reloadTime}ms linear` : "width 0.1s",
-            }} />
+          <div
+            style={{
+              width: "36px",
+              height: "5px",
+              background: "#001133",
+              border: "1px solid #223366",
+              overflow: "hidden",
+            }}
+          >
+            <div
+              style={{
+                height: "100%",
+                width: isReloading ? "100%" : `${ammoPct}%`,
+                background: isReloading ? "#ffaa00" : "#8888ff",
+                transition: isReloading
+                  ? `width ${currentWeapon.reloadTime}ms linear`
+                  : "width 0.1s",
+              }}
+            />
           </div>
-          <span style={{ color: isReloading ? "#ffaa00" : "#8888ff", fontSize: "0.65rem", minWidth: "28px" }}>
+          <span
+            style={{
+              color: isReloading ? "#ffaa00" : "#8888ff",
+              fontSize: "0.65rem",
+              minWidth: "28px",
+            }}
+          >
             {isReloading ? "REL" : ammoDisplay}
           </span>
         </div>
@@ -2152,15 +2405,36 @@ export default function ThreeWorld() {
             }}
           >
             {enemyStatus.map((e, i) => {
-              const typeColor = e.type === "boss" ? "#cc44ff" : e.type === "miniboss" ? "#ff8800" : "#ff5555"
-              const hpBarColor = e.type === "boss" ? "#aa00ff" : e.type === "miniboss" ? "#ff6600" : "#ff2222"
-              const label = e.type === "boss" ? "BOSS" : e.type === "miniboss" ? "MINI" : `E${i + 1}`
+              const typeColor =
+                e.type === "boss" ? "#cc44ff" : e.type === "miniboss" ? "#ff8800" : "#ff5555"
+              const hpBarColor =
+                e.type === "boss" ? "#aa00ff" : e.type === "miniboss" ? "#ff6600" : "#ff2222"
+              const label =
+                e.type === "boss" ? "BOSS" : e.type === "miniboss" ? "MINI" : `E${i + 1}`
               const hpPctEnemy = e.maxHp > 0 ? Math.round((e.hp / e.maxHp) * 100) : 0
               return (
                 <div key={e.id} style={{ display: "flex", alignItems: "center", gap: "4px" }}>
-                  <span style={{ color: typeColor, fontSize: "0.55rem", minWidth: "26px" }}>{label}</span>
-                  <div style={{ width: "40px", height: "6px", background: "#1a0000", border: `1px solid ${typeColor}33`, overflow: "hidden" }}>
-                    <div style={{ height: "100%", width: `${hpPctEnemy}%`, background: hpBarColor, transition: "width 0.3s", boxShadow: e.hp > 0 ? `0 0 4px ${hpBarColor}` : "none" }} />
+                  <span style={{ color: typeColor, fontSize: "0.55rem", minWidth: "26px" }}>
+                    {label}
+                  </span>
+                  <div
+                    style={{
+                      width: "40px",
+                      height: "6px",
+                      background: "#1a0000",
+                      border: `1px solid ${typeColor}33`,
+                      overflow: "hidden",
+                    }}
+                  >
+                    <div
+                      style={{
+                        height: "100%",
+                        width: `${hpPctEnemy}%`,
+                        background: hpBarColor,
+                        transition: "width 0.3s",
+                        boxShadow: e.hp > 0 ? `0 0 4px ${hpBarColor}` : "none",
+                      }}
+                    />
                   </div>
                   <span style={{ color: typeColor, fontSize: "0.55rem", minWidth: "24px" }}>
                     {e.hp}/{e.maxHp}
@@ -2190,16 +2464,18 @@ export default function ThreeWorld() {
 
         {/* Weapon selector (bottom-right) */}
         {!isLoading && !error && gamePhase === "playing" && (
-          <div style={{
-            position: "absolute",
-            bottom: isMobile ? "7.5rem" : "1rem",
-            right: isMobile ? "7.5rem" : "0.5rem",
-            zIndex: 20,
-            display: "flex",
-            flexDirection: "column",
-            gap: "3px",
-            fontFamily: "monospace",
-          }}>
+          <div
+            style={{
+              position: "absolute",
+              bottom: isMobile ? "7.5rem" : "1rem",
+              right: isMobile ? "7.5rem" : "0.5rem",
+              zIndex: 20,
+              display: "flex",
+              flexDirection: "column",
+              gap: "3px",
+              fontFamily: "monospace",
+            }}
+          >
             {WEAPONS.map((w, i) => {
               const isSelected = i === currentWeaponIdx
               const isUnlocked = unlockedWeapons.has(w.id)
@@ -2210,7 +2486,10 @@ export default function ThreeWorld() {
                   key={w.id}
                   type="button"
                   onClick={() => {
-                    if (!isUnlocked) { showNotification(`${w.name} はロック中`); return }
+                    if (!isUnlocked) {
+                      showNotification(`${w.name} はロック中`)
+                      return
+                    }
                     if (reloadingRef.current) return
                     weaponAmmoRef.current[currentWeaponIdxRef.current] = ammoRef.current
                     currentWeaponIdxRef.current = i
@@ -2235,7 +2514,13 @@ export default function ThreeWorld() {
                 >
                   <span style={{ color: isSelected ? "#8888ff" : "#334455" }}>[{i + 1}]</span>
                   <span>{w.name}</span>
-                  <span style={{ color: isSelected ? "#aaaaff" : "#334455", marginLeft: "auto", paddingLeft: "0.4rem" }}>
+                  <span
+                    style={{
+                      color: isSelected ? "#aaaaff" : "#334455",
+                      marginLeft: "auto",
+                      paddingLeft: "0.4rem",
+                    }}
+                  >
                     {isUnlocked ? wAmmoStr : "🔒"}
                   </span>
                 </button>

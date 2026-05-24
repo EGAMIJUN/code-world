@@ -48,7 +48,7 @@ export default function ProblemEditor({ problem }: { problem: Problem }) {
   const [result, setResult] = useState<JudgeResultOrNull>(null)
   const [feedback, setFeedback] = useState<Record<string, unknown> | null>(null)
 
-  const apiUrl = process.env["NEXT_PUBLIC_API_URL"] ?? "http://localhost:3001"
+  const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001"
 
   const pollSubmission = useCallback(
     async (submissionId: string, retries = 0): Promise<void> => {
@@ -208,10 +208,7 @@ export default function ProblemEditor({ problem }: { problem: Problem }) {
             color: "#00cc33",
           }}
         >
-          <div
-            style={{ whiteSpace: "pre-wrap" }}
-            dangerouslySetInnerHTML={{ __html: problem.body.description.replace(/\n/g, "<br/>") }}
-          />
+          <div style={{ whiteSpace: "pre-wrap" }}>{problem.body.description}</div>
 
           {problem.body.hints && problem.body.hints.length > 0 && (
             <div style={{ marginTop: "1.5rem" }}>
@@ -325,9 +322,9 @@ export default function ProblemEditor({ problem }: { problem: Problem }) {
                 {result === "wrong_answer" && "✗ WRONG ANSWER — ACCESS DENIED"}
                 {result === "runtime_error" && "⚠ RUNTIME ERROR — SYSTEM COUNTERMEASURE"}
                 {result === "time_limit_exceeded" && "⏱ TIME LIMIT — CONNECTION TIMEOUT"}
-                {feedback && typeof feedback["message"] === "string" && (
+                {feedback && typeof feedback.message === "string" && (
                   <div style={{ marginTop: "0.25rem", fontSize: "0.7rem", opacity: 0.8 }}>
-                    {feedback["message"]}
+                    {feedback.message}
                   </div>
                 )}
               </div>

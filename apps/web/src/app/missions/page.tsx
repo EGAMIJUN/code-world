@@ -98,7 +98,7 @@ export default function MissionsPage() {
               marginBottom: "0.5rem",
             }}
           >
-            CODE WORLD // MISSION CONTROL
+            CODE WORLD {/* MISSION CONTROL */}
           </div>
           <h1
             style={{

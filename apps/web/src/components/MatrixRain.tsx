@@ -29,10 +29,11 @@ export default function MatrixRain() {
       ctx.fillStyle = "#00ff41"
       ctx.font = `${fontSize}px monospace`
       for (let i = 0; i < drops.length; i++) {
-        const char = chars[Math.floor(Math.random() * chars.length)]!
-        ctx.fillText(char, i * fontSize, drops[i]! * fontSize)
-        if (drops[i]! * fontSize > canvas.height && Math.random() > 0.975) drops[i] = 0
-        drops[i]!++
+        const char = chars[Math.floor(Math.random() * chars.length)] ?? ""
+        const drop = drops[i] ?? 0
+        ctx.fillText(char, i * fontSize, drop * fontSize)
+        if (drop * fontSize > canvas.height && Math.random() > 0.975) drops[i] = 0
+        drops[i] = (drops[i] ?? 0) + 1
       }
     }
 
