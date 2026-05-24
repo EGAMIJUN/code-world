@@ -1,11 +1,12 @@
 import type { Metadata } from "next"
 import MatrixRain from "../components/MatrixRain"
 import NavHeader from "../components/NavHeader"
+import { I18nProvider } from "../i18n"
 import "./globals.css"
 
 export const metadata: Metadata = {
   title: "CODE WORLD",
-  description: "学習型オープンワールドSEゲーム — コードを書いて、街を作れ。",
+  description: "純粋なオンラインFPS。— BATTLE · RANK · SURVIVE",
 }
 
 export default function RootLayout({
@@ -25,11 +26,15 @@ export default function RootLayout({
           fontFamily: "monospace",
         }}
       >
-        <MatrixRain />
-        <NavHeader />
-        <main style={{ flex: 1, overflow: "auto", minHeight: 0, position: "relative", zIndex: 1 }}>
-          {children}
-        </main>
+        <I18nProvider>
+          <MatrixRain />
+          <NavHeader />
+          <main
+            style={{ flex: 1, overflow: "auto", minHeight: 0, position: "relative", zIndex: 1 }}
+          >
+            {children}
+          </main>
+        </I18nProvider>
       </body>
     </html>
   )

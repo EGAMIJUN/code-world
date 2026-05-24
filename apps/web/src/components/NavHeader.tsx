@@ -2,15 +2,18 @@
 
 import Link from "next/link"
 import { usePathname } from "next/navigation"
-
-const NAV_LINKS = [
-  { href: "/world", label: "PLAY", exact: false },
-  { href: "/leaderboard", label: "RANKING", exact: false },
-  { href: "/profile", label: "PROFILE", exact: false },
-]
+import { useI18n } from "../i18n"
+import LocaleSwitcher from "./LocaleSwitcher"
 
 export default function NavHeader() {
   const pathname = usePathname()
+  const { t } = useI18n()
+
+  const links = [
+    { href: "/world", label: t.nav.play },
+    { href: "/leaderboard", label: t.nav.ranking },
+    { href: "/profile", label: t.nav.profile },
+  ]
 
   return (
     <header
@@ -53,10 +56,8 @@ export default function NavHeader() {
         </Link>
 
         <nav style={{ display: "flex", alignItems: "center", gap: "0.25rem", flex: 1 }}>
-          {NAV_LINKS.map((link) => {
-            const isActive = link.exact
-              ? pathname === link.href
-              : pathname.startsWith(link.href) && link.href !== "/"
+          {links.map((link) => {
+            const isActive = pathname.startsWith(link.href) && link.href !== "/"
             return (
               <Link
                 key={link.href}
@@ -78,6 +79,8 @@ export default function NavHeader() {
             )
           })}
         </nav>
+
+        <LocaleSwitcher />
       </div>
     </header>
   )

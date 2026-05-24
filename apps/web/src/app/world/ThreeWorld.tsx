@@ -614,6 +614,12 @@ interface RemotePlayer {
   username: string
   x: number
   y: number
+  team?: "red" | "blue" | "ffa"
+  hp?: number
+  alive?: boolean
+  kills?: number
+  deaths?: number
+  countryCode?: string | null
 }
 
 interface ChatMessage {
@@ -704,7 +710,17 @@ interface SceneRefs {
   goalMarkers: GoalMarker[]
 }
 
-export default function ThreeWorld() {
+export interface ThreeWorldProps {
+  mode?: "wave_defense" | "ffa" | "tdm"
+  mapId?: "urban" | "desert" | "snow"
+  onExit?: () => void
+}
+
+export default function ThreeWorld({
+  mode = "wave_defense",
+  mapId = "urban",
+  onExit,
+}: ThreeWorldProps = {}) {
   const mountRef = useRef<HTMLDivElement>(null)
   const sceneRef = useRef<SceneRefs | null>(null)
   const animFrameRef = useRef<number>(0)
@@ -759,6 +775,33 @@ export default function ThreeWorld() {
   const currentWeaponIdxRef = useRef(0)
   const weaponAmmoRef = useRef<[number, number, number]>([-1, 8, 5])
 
+  // Phase 3: extended stat refs
+  const maxKillstreakRef = useRef(0)
+  const headshotsRef = useRef(0)
+  const weaponKillsRef = useRef<Record<string, number>>({
+    pistol: 0,
+    shotgun: 0,
+    sniper: 0,
+    grenade: 0,
+  })
+  const matchStartRef = useRef(Date.now())
+  const spawnInvulnUntilRef = useRef(0)
+  const isAimingRef = useRef(false)
+  const [, setIsAiming] = useState(false)
+  const myTeamRef = useRef<"red" | "blue" | "ffa">("ffa")
+  const [myTeam, setMyTeam] = useState<"red" | "blue" | "ffa">("ffa")
+  const teamScoreRef = useRef<{ red: number; blue: number }>({ red: 0, blue: 0 })
+  const [teamScore, setTeamScore] = useState<{ red: number; blue: number }>({ red: 0, blue: 0 })
+  const [mvpName, setMvpName] = useState<string | null>(null)
+  const [grenadeCooldownMs, setGrenadeCooldownMs] = useState(0)
+  const lastGrenadeRef = useRef(0)
+  const requestGrenadeRef = useRef(false)
+  const modeRef = useRef(mode)
+  // initialize spawn invuln (3s grace at match start)
+  if (spawnInvulnUntilRef.current === 0) {
+    spawnInvulnUntilRef.current = Date.now() + 3000
+  }
+
   // UI state
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -789,7 +832,7 @@ export default function ThreeWorld() {
   const [killStreakMsg, setKillStreakMsg] = useState<string | null>(null)
   const [headshotMsg, setHeadshotMsg] = useState(false)
   // Mission / wave state
-  const [showMissionSelect, setShowMissionSelect] = useState(true)
+  const [showMissionSelect, setShowMissionSelect] = useState(mode === "wave_defense")
   const [selectedMission, setSelectedMission] = useState<MissionId | null>(null)
   const [currentWave, setCurrentWave] = useState(0)
   const [waveMessage, setWaveMessage] = useState<string | null>(null)
@@ -816,6 +859,19 @@ export default function ThreeWorld() {
   useEffect(() => {
     if (gamePhase === "gameover") {
       SOUNDS.gameover()
+      const durationSec = Math.max(0, Math.floor((Date.now() - matchStartRef.current) / 1000))
+      // Determine MVP: compare against remote players' scores
+      let bestName = usernameRef.current
+      let bestKills = killsRef.current
+      const remotes = remotePosRef.current
+      for (const r of Object.values(remotes)) {
+        const k = r.kills ?? 0
+        if (k > bestKills) {
+          bestKills = k
+          bestName = r.username
+        }
+      }
+      setMvpName(bestName)
       fetch(`${API_URL}/api/profile/stats`, {
         method: "POST",
         credentials: "include",
@@ -824,10 +880,17 @@ export default function ThreeWorld() {
           kills: killsRef.current,
           deaths: deathsRef.current,
           score: scoreRef.current,
+          killstreak: maxKillstreakRef.current,
+          headshots: headshotsRef.current,
+          durationSec,
+          mode,
+          mapId,
+          weaponKills: weaponKillsRef.current,
+          result: killsRef.current > deathsRef.current ? "victory" : "ended",
         }),
       }).catch(() => {})
     }
-  }, [gamePhase])
+  }, [gamePhase, mode, mapId])
   // biome-ignore lint/correctness/useExhaustiveDependencies: chatEndRef is a stable ref, no need in deps
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" })
@@ -861,6 +924,7 @@ export default function ThreeWorld() {
   }, [])
 
   // ── Three.js init ──────────────────────────────────────────────────────────
+  // biome-ignore lint/correctness/useExhaustiveDependencies: scene init reads mode/mapId on mount only
   useEffect(() => {
     let cancelled = false
 
@@ -874,8 +938,14 @@ export default function ThreeWorld() {
 
       // ── Scene ──────────────────────────────────────────────────────────────
       const scene = new THREE.Scene()
-      scene.background = new THREE.Color(0x87ceeb) // daytime sky blue
-      scene.fog = new THREE.Fog(0xc0d8f0, 80, 280)
+      const theme =
+        mapId === "desert"
+          ? { sky: 0xf0c887, fog: 0xe6c89a, ambient: 0xffe9c0, sun: 0xffd58a }
+          : mapId === "snow"
+            ? { sky: 0xb4d6f0, fog: 0xd6e8f5, ambient: 0xe8f0ff, sun: 0xffffff }
+            : { sky: 0x87ceeb, fog: 0xc0d8f0, ambient: 0xd4e8ff, sun: 0xfff4cc }
+      scene.background = new THREE.Color(theme.sky)
+      scene.fog = new THREE.Fog(theme.fog, 80, 280)
 
       // ── Camera (FPS) ───────────────────────────────────────────────────────
       const camera = new THREE.PerspectiveCamera(
@@ -896,8 +966,8 @@ export default function ThreeWorld() {
       rendererDomRef.current = renderer.domElement
 
       // ── Lights (daytime battlefield) ───────────────────────────────────────
-      scene.add(new THREE.AmbientLight(0xd4e8ff, 2.4)) // bright sky ambient
-      const sun = new THREE.DirectionalLight(0xfff4cc, 3.5) // warm sunlight
+      scene.add(new THREE.AmbientLight(theme.ambient, 2.4))
+      const sun = new THREE.DirectionalLight(theme.sun, 3.5)
       sun.position.set(60, 80, 40)
       sun.castShadow = true
       sun.shadow.mapSize.set(2048, 2048)
@@ -914,10 +984,25 @@ export default function ThreeWorld() {
       scene.add(fillLight)
 
       // ── Ground zones ───────────────────────────────────────────────────────
+      const zoneTint = (base: number): number => {
+        if (mapId === "desert") {
+          const r = ((base >> 16) & 0xff) * 0.6 + 0xb0 * 0.4
+          const g = ((base >> 8) & 0xff) * 0.55 + 0x85 * 0.45
+          const b = (base & 0xff) * 0.45 + 0x40 * 0.55
+          return ((r | 0) << 16) | ((g | 0) << 8) | (b | 0)
+        }
+        if (mapId === "snow") {
+          const r = ((base >> 16) & 0xff) * 0.35 + 0xe0 * 0.65
+          const g = ((base >> 8) & 0xff) * 0.35 + 0xe8 * 0.65
+          const b = (base & 0xff) * 0.4 + 0xf5 * 0.6
+          return ((r | 0) << 16) | ((g | 0) << 8) | (b | 0)
+        }
+        return base
+      }
       for (const zone of ZONES) {
         const zw = (zone.endTX - zone.startTX + 1) * TILE_UNIT
         const geo = new THREE.PlaneGeometry(zw, MAP_SIZE * TILE_UNIT)
-        const mat = new THREE.MeshLambertMaterial({ color: zone.color })
+        const mat = new THREE.MeshLambertMaterial({ color: zoneTint(zone.color) })
         const mesh = new THREE.Mesh(geo, mat)
         mesh.rotation.x = -Math.PI / 2
         mesh.position.set(
@@ -1933,6 +2018,40 @@ export default function ThreeWorld() {
           })
         }
         const enemyHits = raycaster.intersectObjects(allEnemyParts, false)
+
+        // PvP hit: check remote players
+        const sceneRefsLocal = sceneRef.current
+        if (sceneRefsLocal && (myTeamRef.current !== "ffa" || modeRef.current === "ffa")) {
+          const remoteMeshList: THREE.Object3D[] = []
+          const remoteIdMap = new Map<THREE.Object3D, string>()
+          for (const [rid, rmesh] of sceneRefsLocal.remoteMeshes) {
+            remoteMeshList.push(rmesh)
+            remoteIdMap.set(rmesh, rid)
+          }
+          if (remoteMeshList.length > 0) {
+            const pvpHits = raycaster.intersectObjects(remoteMeshList, false)
+            if (pvpHits.length > 0 && pvpHits[0]) {
+              const targetId = remoteIdMap.get(pvpHits[0].object)
+              if (targetId) {
+                const wpId = weapon.id
+                const dmg = weapon.hitDamage
+                const isHs = pvpHits[0].point.y > 0.8
+                wsRef.current?.send(
+                  JSON.stringify({
+                    type: "pvp_hit",
+                    targetId,
+                    dmg: isHs ? dmg * 2 : dmg,
+                    headshot: isHs,
+                    weapon: wpId,
+                  }),
+                )
+                SOUNDS.hit()
+                spawnBlood(pvpHits[0].point)
+              }
+            }
+          }
+        }
+
         if (enemyHits.length > 0) {
           const hitEnemyId = enemyHits[0]?.object.userData.enemyId as string | undefined
           const hitEnemy = aliveEnemies.find((e) => e.id === hitEnemyId)
@@ -1945,6 +2064,7 @@ export default function ThreeWorld() {
             const dmg = isHeadshot ? weapon.hitDamage * 2 : weapon.hitDamage
             if (isHeadshot) {
               setHeadshotMsg(true)
+              headshotsRef.current += 1
               setTimeout(() => setHeadshotMsg(false), 800)
             }
             hitEnemy.hp -= dmg
@@ -2005,13 +2125,30 @@ export default function ThreeWorld() {
                 consecutiveKillsRef.current = 1
               }
               lastKillTimeRef.current = nowKill
-              if (consecutiveKillsRef.current >= 3) {
+              maxKillstreakRef.current = Math.max(
+                maxKillstreakRef.current,
+                consecutiveKillsRef.current,
+              )
+              const cs = consecutiveKillsRef.current
+              if (cs >= 2) {
                 const streakMsg =
-                  consecutiveKillsRef.current >= 5 ? "KILLING SPREE!" : "TRIPLE KILL!"
+                  cs >= 10
+                    ? "GODLIKE!"
+                    : cs >= 7
+                      ? "UNSTOPPABLE!"
+                      : cs >= 5
+                        ? "RAMPAGE!"
+                        : cs >= 3
+                          ? "TRIPLE KILL!"
+                          : "DOUBLE KILL!"
                 if (killStreakTimerRef.current) clearTimeout(killStreakTimerRef.current)
                 setKillStreakMsg(streakMsg)
                 killStreakTimerRef.current = setTimeout(() => setKillStreakMsg(null), 2500)
               }
+              // Per-weapon kill tracking
+              const widx = currentWeaponIdxRef.current
+              const wkey = widx === 0 ? "pistol" : widx === 1 ? "shotgun" : "sniper"
+              weaponKillsRef.current[wkey] = (weaponKillsRef.current[wkey] ?? 0) + 1
             }
             setEnemyStatus(
               enemies.map((e) => ({
@@ -2046,10 +2183,17 @@ export default function ThreeWorld() {
         if (e.button === 0) {
           mouseDownRef.current = true
           fire()
+        } else if (e.button === 2) {
+          isAimingRef.current = true
+          setIsAiming(true)
         }
       }
       function onMouseUp(e: MouseEvent) {
         if (e.button === 0) mouseDownRef.current = false
+        if (e.button === 2) {
+          isAimingRef.current = false
+          setIsAiming(false)
+        }
       }
       function onContextMenu(e: MouseEvent) {
         e.preventDefault()
@@ -2100,6 +2244,48 @@ export default function ThreeWorld() {
         const dt = clock.getDelta()
         const refs = sceneRef.current
         if (!refs) return
+
+        // ADS FOV interpolation
+        const targetFov = isAimingRef.current ? (currentWeaponIdxRef.current === 2 ? 28 : 50) : 75
+        if (Math.abs(camera.fov - targetFov) > 0.3) {
+          camera.fov += (targetFov - camera.fov) * Math.min(1, dt * 12)
+          camera.updateProjectionMatrix()
+        }
+
+        // Grenade request: AOE explosion ahead of player
+        if (requestGrenadeRef.current) {
+          requestGrenadeRef.current = false
+          const fwd = new THREE.Vector3()
+          camera.getWorldDirection(fwd)
+          const origin = new THREE.Vector3(refs.focalPoint.x, EYE_HEIGHT, refs.focalPoint.z)
+          const explosionPos = origin.clone().add(fwd.multiplyScalar(8))
+          explosionPos.y = Math.max(0.5, explosionPos.y)
+          spawnExplosion(explosionPos)
+          for (const enemy of enemies) {
+            if (enemy.hp <= 0) continue
+            const dx = enemy.mesh.position.x - explosionPos.x
+            const dz = enemy.mesh.position.z - explosionPos.z
+            const d2 = dx * dx + dz * dz
+            const RADIUS = 5
+            if (d2 < RADIUS * RADIUS) {
+              const dist = Math.sqrt(d2)
+              const dmg = Math.max(20, Math.floor(120 * (1 - dist / RADIUS)))
+              enemy.hp = Math.max(0, enemy.hp - dmg)
+              if (enemy.hp === 0) {
+                killsRef.current += 1
+                setKills(killsRef.current)
+                scoreRef.current += enemy.config.score
+                setScore(scoreRef.current)
+                weaponKillsRef.current.grenade = (weaponKillsRef.current.grenade ?? 0) + 1
+                spawnExplosion(enemy.mesh.position.clone())
+                scene.remove(enemy.mesh)
+              }
+            }
+          }
+        }
+        // Tick grenade cooldown display (rounded to 100ms so React bails out)
+        const sinceG = Date.now() - lastGrenadeRef.current
+        setGrenadeCooldownMs(Math.max(0, Math.round((5000 - sinceG) / 100) * 100))
 
         // WASD + move joystick
         const joy = joystickRef.current
@@ -2199,7 +2385,7 @@ export default function ThreeWorld() {
               refs.scene.remove(b.mesh)
               b.mesh.geometry.dispose()
               refs.bullets.splice(i, 1)
-              if (gamePhaseRef.current === "playing") {
+              if (gamePhaseRef.current === "playing" && Date.now() > spawnInvulnUntilRef.current) {
                 playerHpRef.current = Math.max(0, playerHpRef.current - b.damage)
                 setPlayerHp(playerHpRef.current)
                 lastDamageTimeRef.current = Date.now()
@@ -2424,7 +2610,10 @@ export default function ThreeWorld() {
               }
               if (distToPlayer > enemy.config.attackRange * 1.5) {
                 enemy.state = "alert"
-              } else if (now - enemy.lastAttackTime > enemy.config.attackInterval) {
+              } else if (
+                now - enemy.lastAttackTime > enemy.config.attackInterval &&
+                Date.now() > spawnInvulnUntilRef.current
+              ) {
                 enemy.lastAttackTime = now
                 playerHpRef.current = Math.max(0, playerHpRef.current - enemy.config.attackDamage)
                 setPlayerHp(playerHpRef.current)
@@ -2639,12 +2828,15 @@ export default function ThreeWorld() {
           }
         }
 
-        // Tag coloring
+        // Tag + team coloring
         const tg = tagGameRef.current
         for (const [rmId, rmesh] of refs.remoteMeshes) {
           const rstate = remotePosRef.current[rmId]
           const rmat = rmesh.material as THREE.MeshLambertMaterial
-          const wantHex = tg?.running && rstate?.username === tg.itUsername ? 0xff3333 : 0xffcc00
+          let wantHex = 0xffcc00
+          if (tg?.running && rstate?.username === tg.itUsername) wantHex = 0xff3333
+          else if (rstate?.team === "red") wantHex = 0xff4444
+          else if (rstate?.team === "blue") wantHex = 0x4488ff
           if (rmat.color.getHex() !== wantHex) rmat.color.setHex(wantHex)
         }
 
@@ -2814,6 +3006,14 @@ export default function ThreeWorld() {
       if (e.key === "1") switchWeapon(0)
       if (e.key === "2") switchWeapon(1)
       if (e.key === "3") switchWeapon(2)
+      if (e.key === "g" || e.key === "G") {
+        const now = Date.now()
+        if (now - lastGrenadeRef.current > 5000) {
+          lastGrenadeRef.current = now
+          requestGrenadeRef.current = true
+          setGrenadeCooldownMs(5000)
+        }
+      }
       if (e.key === "r" || e.key === "R") {
         const weapon = WEAPONS[currentWeaponIdxRef.current]
         if (
@@ -2853,6 +3053,7 @@ export default function ThreeWorld() {
   }, [showNotification, unlockedWeapons])
 
   // ── WebSocket ──────────────────────────────────────────────────────────────
+  // biome-ignore lint/correctness/useExhaustiveDependencies: WS connects once with initial mode/mapId
   useEffect(() => {
     if (isLoading) return
     // biome-ignore lint/complexity/useLiteralKeys: bracket notation required per CLAUDE.md
@@ -2872,7 +3073,9 @@ export default function ThreeWorld() {
       ws.send(
         JSON.stringify({
           type: "join",
-          roomId: "global",
+          roomId: `${mode}-${mapId}`,
+          mode,
+          mapId,
           username: usernameRef.current,
           x,
           y,
@@ -2891,10 +3094,72 @@ export default function ThreeWorld() {
           remainingMs?: number
           scores?: { username: string; itMs: number }[]
           winner?: string
+          team?: "red" | "blue" | "ffa"
+          teamScore?: { red: number; blue: number }
+          killer?: string
+          victim?: string
+          weapon?: string
+          headshot?: boolean
+          killerTeam?: "red" | "blue" | "ffa"
+          dmg?: number
+          hp?: number
+          invulnMs?: number
         }
-        if (msg.type === "sync" && msg.players) {
+        if (msg.type === "joined") {
+          if (msg.team) {
+            myTeamRef.current = msg.team
+            setMyTeam(msg.team)
+          }
+          if (msg.teamScore) {
+            teamScoreRef.current = msg.teamScore
+            setTeamScore(msg.teamScore)
+          }
+          spawnInvulnUntilRef.current = Date.now() + 3000
+        } else if (msg.type === "sync" && msg.players) {
           remotePosRef.current = msg.players
           setOnlineCount(Object.keys(msg.players).length + 1)
+          if (msg.teamScore) {
+            teamScoreRef.current = msg.teamScore
+            setTeamScore(msg.teamScore)
+          }
+        } else if (msg.type === "pvp_damage") {
+          playerHpRef.current = msg.hp ?? playerHpRef.current
+          setPlayerHp(playerHpRef.current)
+          setDamageFlash(true)
+          setTimeout(() => setDamageFlash(false), 200)
+          if (playerHpRef.current <= 0 && gamePhaseRef.current === "playing") {
+            deathsRef.current++
+            setDeaths(deathsRef.current)
+            consecutiveKillsRef.current = 0
+            // wait for server respawn
+          }
+        } else if (msg.type === "pvp_respawn") {
+          playerHpRef.current = msg.hp ?? PLAYER_MAX_HP
+          setPlayerHp(playerHpRef.current)
+          spawnInvulnUntilRef.current = Date.now() + (msg.invulnMs ?? 3000)
+        } else if (msg.type === "pvp_kill") {
+          if (msg.killer && msg.victim) {
+            const headshotPrefix = msg.headshot ? "💥 " : ""
+            const text = `${headshotPrefix}${msg.killer} ▶ ${msg.victim}`
+            killFeedRef.current = [
+              ...killFeedRef.current,
+              {
+                id: Math.random(),
+                text,
+                color:
+                  msg.killerTeam === "red"
+                    ? "#ff4444"
+                    : msg.killerTeam === "blue"
+                      ? "#4488ff"
+                      : "#00ff41",
+              },
+            ].slice(-5)
+            setKillFeed(killFeedRef.current)
+          }
+          if (msg.teamScore) {
+            teamScoreRef.current = msg.teamScore
+            setTeamScore(msg.teamScore)
+          }
         } else if (msg.type === "chat" && msg.text) {
           const isSystem = msg.from === "SYSTEM"
           setChatMessages((prev) =>
@@ -3070,6 +3335,45 @@ export default function ThreeWorld() {
       {/* ── Canvas + COD-style overlays ───────────────────────────────────── */}
       <div style={{ position: "relative", flex: 1, overflow: "hidden" }}>
         <div ref={mountRef} style={{ width: "100%", height: "100%" }} />
+
+        {/* Team score (TDM) */}
+        {mode === "tdm" && !isLoading && !error && (
+          <div
+            style={{
+              position: "absolute",
+              top: "0.5rem",
+              left: "50%",
+              transform: "translateX(-50%)",
+              display: "flex",
+              gap: "0.6rem",
+              alignItems: "center",
+              padding: "0.3rem 0.8rem",
+              border: "1px solid #003300",
+              background: "rgba(0,0,0,0.6)",
+              backdropFilter: "blur(4px)",
+              zIndex: 30,
+              fontFamily: "monospace",
+              letterSpacing: "0.15em",
+            }}
+          >
+            <span style={{ color: "#ff4444", fontWeight: "bold", textShadow: "0 0 6px #ff4444" }}>
+              RED {teamScore.red}
+            </span>
+            <span style={{ color: "#555" }}>vs</span>
+            <span style={{ color: "#4488ff", fontWeight: "bold", textShadow: "0 0 6px #4488ff" }}>
+              {teamScore.blue} BLUE
+            </span>
+            <span
+              style={{
+                marginLeft: "0.5rem",
+                fontSize: "0.65rem",
+                color: myTeam === "red" ? "#ff4444" : "#4488ff",
+              }}
+            >
+              [YOU: {myTeam.toUpperCase()}]
+            </span>
+          </div>
+        )}
 
         {/* Permanent dark vignette */}
         {!isLoading && !error && (
@@ -4381,6 +4685,214 @@ export default function ThreeWorld() {
           </div>
         )}
 
+        {/* Mobile action buttons */}
+        {isMobile && !isLoading && !error && gamePhase === "playing" && (
+          <>
+            {/* Large FIRE button */}
+            <button
+              type="button"
+              onTouchStart={(e) => {
+                e.preventDefault()
+                mouseDownRef.current = true
+              }}
+              onTouchEnd={(e) => {
+                e.preventDefault()
+                mouseDownRef.current = false
+              }}
+              style={{
+                position: "absolute",
+                bottom: "5.5rem",
+                right: "1rem",
+                width: "84px",
+                height: "84px",
+                borderRadius: "50%",
+                background: "rgba(255,40,40,0.25)",
+                border: "3px solid rgba(255,80,80,0.8)",
+                color: "#ffdada",
+                fontFamily: "monospace",
+                fontSize: "1rem",
+                letterSpacing: "0.15em",
+                fontWeight: "bold",
+                textShadow: "0 0 8px #ff4040",
+                touchAction: "none",
+                userSelect: "none",
+                zIndex: 21,
+              }}
+            >
+              FIRE
+            </button>
+
+            {/* RELOAD button */}
+            <button
+              type="button"
+              onTouchStart={(e) => {
+                e.preventDefault()
+                const weapon = WEAPONS[currentWeaponIdxRef.current]
+                if (
+                  weapon &&
+                  weapon.maxAmmo !== -1 &&
+                  !reloadingRef.current &&
+                  ammoRef.current < weapon.maxAmmo
+                ) {
+                  reloadingRef.current = true
+                  setIsReloading(true)
+                  showNotification(`RELOADING ${weapon.name}...`)
+                  setTimeout(() => {
+                    const idx = currentWeaponIdxRef.current
+                    const kbWeapon = WEAPONS[idx]
+                    if (!kbWeapon) return
+                    weaponAmmoRef.current[idx] = kbWeapon.maxAmmo
+                    ammoRef.current = kbWeapon.maxAmmo
+                    setAmmo(kbWeapon.maxAmmo)
+                    reloadingRef.current = false
+                    setIsReloading(false)
+                  }, weapon.reloadTime)
+                }
+              }}
+              style={{
+                position: "absolute",
+                bottom: "1rem",
+                right: "13rem",
+                width: "62px",
+                height: "62px",
+                borderRadius: "50%",
+                background: "rgba(255,200,0,0.15)",
+                border: "2px solid rgba(255,200,0,0.5)",
+                color: "#ffdf66",
+                fontFamily: "monospace",
+                fontSize: "0.7rem",
+                letterSpacing: "0.1em",
+                touchAction: "none",
+                userSelect: "none",
+                zIndex: 21,
+              }}
+            >
+              ↻ RELOAD
+            </button>
+
+            {/* ADS button */}
+            <button
+              type="button"
+              onTouchStart={(e) => {
+                e.preventDefault()
+                isAimingRef.current = true
+                setIsAiming(true)
+              }}
+              onTouchEnd={(e) => {
+                e.preventDefault()
+                isAimingRef.current = false
+                setIsAiming(false)
+              }}
+              style={{
+                position: "absolute",
+                top: "5rem",
+                right: "1rem",
+                width: "56px",
+                height: "56px",
+                borderRadius: "50%",
+                background: "rgba(0,200,255,0.15)",
+                border: "2px solid rgba(0,200,255,0.5)",
+                color: "#88e0ff",
+                fontFamily: "monospace",
+                fontSize: "0.7rem",
+                touchAction: "none",
+                userSelect: "none",
+                zIndex: 21,
+              }}
+            >
+              ⊙ ADS
+            </button>
+
+            {/* GRENADE button */}
+            <button
+              type="button"
+              onTouchStart={(e) => {
+                e.preventDefault()
+                const now = Date.now()
+                if (now - lastGrenadeRef.current > 5000) {
+                  lastGrenadeRef.current = now
+                  requestGrenadeRef.current = true
+                  setGrenadeCooldownMs(5000)
+                }
+              }}
+              style={{
+                position: "absolute",
+                top: "12rem",
+                right: "1rem",
+                width: "56px",
+                height: "56px",
+                borderRadius: "50%",
+                background: grenadeCooldownMs > 0 ? "rgba(80,80,80,0.2)" : "rgba(255,80,0,0.2)",
+                border:
+                  grenadeCooldownMs > 0
+                    ? "2px solid rgba(120,120,120,0.5)"
+                    : "2px solid rgba(255,140,40,0.6)",
+                color: grenadeCooldownMs > 0 ? "#888" : "#ffaa66",
+                fontFamily: "monospace",
+                fontSize: "0.65rem",
+                touchAction: "none",
+                userSelect: "none",
+                zIndex: 21,
+              }}
+            >
+              {grenadeCooldownMs > 0 ? `${Math.ceil(grenadeCooldownMs / 1000)}s` : "🧨 G"}
+            </button>
+
+            {/* Weapon swap row [1][2][3] */}
+            <div
+              style={{
+                position: "absolute",
+                top: "1rem",
+                left: "50%",
+                transform: "translateX(-50%)",
+                display: "flex",
+                gap: "0.5rem",
+                zIndex: 21,
+              }}
+            >
+              {[0, 1, 2].map((idx) => {
+                const w = WEAPONS[idx]
+                if (!w) return null
+                const sel = currentWeaponIdxRef.current === idx
+                const locked = !unlockedWeapons.has(w.id)
+                return (
+                  <button
+                    type="button"
+                    key={idx}
+                    onTouchStart={(e) => {
+                      e.preventDefault()
+                      if (locked || reloadingRef.current) return
+                      weaponAmmoRef.current[currentWeaponIdxRef.current] = ammoRef.current
+                      currentWeaponIdxRef.current = idx
+                      ammoRef.current = weaponAmmoRef.current[idx] ?? -1
+                      setAmmo(ammoRef.current)
+                      setCurrentWeaponIdx(idx)
+                    }}
+                    style={{
+                      width: "52px",
+                      height: "52px",
+                      borderRadius: "8px",
+                      background: sel ? "rgba(0,255,65,0.18)" : "rgba(0,0,0,0.4)",
+                      border: `2px solid ${sel ? "#00ff41" : locked ? "#444" : "#003300"}`,
+                      color: locked ? "#666" : sel ? "#00ff41" : "#00aa2a",
+                      fontFamily: "monospace",
+                      fontSize: "0.7rem",
+                      letterSpacing: "0.1em",
+                      textShadow: sel ? "0 0 6px #00ff41" : "none",
+                      touchAction: "none",
+                      userSelect: "none",
+                    }}
+                  >
+                    [{idx + 1}]
+                    <br />
+                    {w.name.charAt(0)}
+                  </button>
+                )
+              })}
+            </div>
+          </>
+        )}
+
         {/* Chat */}
         {!isLoading && !error && (
           <div
@@ -4513,7 +5025,27 @@ export default function ThreeWorld() {
               <div style={{ color: "rgba(255,255,255,0.35)", fontSize: "0.7rem" }}>
                 KILLS: {kills} · DEATHS: {deaths}
               </div>
+              <div
+                style={{ color: "rgba(255,200,80,0.55)", fontSize: "0.65rem", marginTop: "0.4rem" }}
+              >
+                STREAK: {maxKillstreakRef.current} · HEADSHOTS: {headshotsRef.current}
+              </div>
             </div>
+            {mvpName && (
+              <div
+                style={{
+                  border: "1px solid #ffd700",
+                  padding: "0.7rem 2rem",
+                  background: "rgba(40,30,0,0.6)",
+                  color: "#ffd700",
+                  letterSpacing: "0.25em",
+                  textShadow: "0 0 12px #ffd700",
+                  fontSize: "1.1rem",
+                }}
+              >
+                ★ MVP: {mvpName} ★
+              </div>
+            )}
             <div style={{ display: "flex", gap: "1rem" }}>
               <button
                 type="button"
@@ -4531,6 +5063,24 @@ export default function ThreeWorld() {
               >
                 RESPAWN
               </button>
+              {onExit && (
+                <button
+                  type="button"
+                  onClick={onExit}
+                  style={{
+                    background: "rgba(0,40,0,0.5)",
+                    border: "1px solid rgba(0,255,65,0.6)",
+                    color: "#00ff41",
+                    fontFamily: "monospace",
+                    fontSize: "0.9rem",
+                    letterSpacing: "0.2em",
+                    padding: "0.6rem 1.8rem",
+                    cursor: "pointer",
+                  }}
+                >
+                  ◀ MODE SELECT
+                </button>
+              )}
             </div>
           </div>
         )}
