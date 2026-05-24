@@ -78,7 +78,8 @@ const seedProblems: SeedProblem[] = [
     category: "sql",
     difficulty: 0,
     body: {
-      description: `## 問題\n\n\`residents\` テーブルのすべての行を取得してください。\n\n### テーブル構造\n- \`id\` - 住民ID\n- \`name\` - 名前\n- \`age\` - 年齢\n- \`city\` - 都市\n- \`income\` - 月収（円）`,
+      description:
+        "## 問題\n\n`residents` テーブルのすべての行を取得してください。\n\n### テーブル構造\n- `id` - 住民ID\n- `name` - 名前\n- `age` - 年齢\n- `city` - 都市\n- `income` - 月収（円）",
       setup: SETUP_DDL,
       expectedOutput: [
         [1, "田中 太郎", 32, "東京", 450000],
@@ -124,7 +125,8 @@ const seedProblems: SeedProblem[] = [
     category: "sql",
     difficulty: 0,
     body: {
-      description: `## 問題\n\n\`residents\` テーブルの全住民を、\`income\`（月収）の高い順（降順）に並べて取得してください。`,
+      description:
+        "## 問題\n\n`residents` テーブルの全住民を、`income`（月収）の高い順（降順）に並べて取得してください。",
       setup: SETUP_DDL,
       expectedOutput: [
         [7, "山本 雄介", 45, "名古屋", 700000],
@@ -148,7 +150,8 @@ const seedProblems: SeedProblem[] = [
     category: "sql",
     difficulty: 1,
     body: {
-      description: `## 問題\n\n\`orders\` テーブルと \`residents\` テーブルを結合して、各注文の **注文ID**、**住民名**、**金額** を取得してください。\n\n結果は注文IDの昇順で並べてください。`,
+      description:
+        "## 問題\n\n`orders` テーブルと `residents` テーブルを結合して、各注文の **注文ID**、**住民名**、**金額** を取得してください。\n\n結果は注文IDの昇順で並べてください。",
       setup: SETUP_DDL,
       expectedOutput: [
         [1, "田中 太郎", 150000],
@@ -177,7 +180,8 @@ const seedProblems: SeedProblem[] = [
     category: "sql",
     difficulty: 1,
     body: {
-      description: `## 問題\n\n\`residents\` テーブルから、都市ごとの住民数を集計してください。\n\n結果のカラムは \`city\`、\`count\` とし、住民数の多い順に並べてください。`,
+      description:
+        "## 問題\n\n`residents` テーブルから、都市ごとの住民数を集計してください。\n\n結果のカラムは `city`、`count` とし、住民数の多い順に並べてください。",
       setup: SETUP_DDL,
       expectedOutput: [
         ["東京", 3],
@@ -198,7 +202,8 @@ const seedProblems: SeedProblem[] = [
     category: "sql",
     difficulty: 1,
     body: {
-      description: `## 問題\n\n\`buildings\` テーブルと \`orders\` テーブルを LEFT JOIN して、**建物名** と **注文件数** を取得してください。\n\n注文が0件の建物も含め、注文件数の多い順で表示してください。`,
+      description:
+        "## 問題\n\n`buildings` テーブルと `orders` テーブルを LEFT JOIN して、**建物名** と **注文件数** を取得してください。\n\n注文が0件の建物も含め、注文件数の多い順で表示してください。",
       setup: SETUP_DDL,
       expectedOutput: [
         ["なんばオフィスビル", 3],
@@ -225,7 +230,8 @@ const seedProblems: SeedProblem[] = [
     category: "sql",
     difficulty: 1,
     body: {
-      description: `## 問題\n\n\`orders\` テーブルから、**2件以上**注文した住民のIDと注文件数を取得してください。\n\n結果は注文件数の多い順で表示してください。`,
+      description:
+        "## 問題\n\n`orders` テーブルから、**2件以上**注文した住民のIDと注文件数を取得してください。\n\n結果は注文件数の多い順で表示してください。",
       setup: SETUP_DDL,
       expectedOutput: [
         [1, 2],
@@ -247,7 +253,8 @@ const seedProblems: SeedProblem[] = [
     category: "sql",
     difficulty: 3,
     body: {
-      description: `## 問題\n\n\`orders\` テーブルから、月ごとの注文件数をピボット形式で表示してください。\n\n結果のカラムは \`month\`、\`order_count\`、\`cumulative_count\`（累計件数）とし、月の昇順で表示してください。\n\n累計件数はウィンドウ関数 \`SUM() OVER\` を使って計算してください。`,
+      description:
+        "## 問題\n\n`orders` テーブルから、月ごとの注文件数をピボット形式で表示してください。\n\n結果のカラムは `month`、`order_count`、`cumulative_count`（累計件数）とし、月の昇順で表示してください。\n\n累計件数はウィンドウ関数 `SUM() OVER` を使って計算してください。",
       setup: SETUP_DDL,
       expectedOutput: [
         ["2024-01", 2, 2],
@@ -274,7 +281,8 @@ const seedProblems: SeedProblem[] = [
     category: "sql",
     difficulty: 3,
     body: {
-      description: `## 問題\n\n再帰CTE（WITH RECURSIVE）を使って、1〜10の連番と各数値の累計和を一度に求めてください。\n\n結果のカラムは \`n\`（1〜10）と \`cumulative_sum\`（1からnまでの合計）とし、nの昇順で表示してください。`,
+      description:
+        "## 問題\n\n再帰CTE（WITH RECURSIVE）を使って、1〜10の連番と各数値の累計和を一度に求めてください。\n\n結果のカラムは `n`（1〜10）と `cumulative_sum`（1からnまでの合計）とし、nの昇順で表示してください。",
       setup: "",
       expectedOutput: [
         [1, 1],
@@ -307,7 +315,8 @@ const seedProblems: SeedProblem[] = [
     category: "sql",
     difficulty: 2,
     body: {
-      description: `## 問題\n\n**大阪**にある建物に注文したことのある住民の名前を、サブクエリを使って取得してください。\n\n重複なし（DISTINCT）で名前のみ表示してください。`,
+      description:
+        "## 問題\n\n**大阪**にある建物に注文したことのある住民の名前を、サブクエリを使って取得してください。\n\n重複なし（DISTINCT）で名前のみ表示してください。",
       setup: SETUP_DDL,
       expectedOutput: [["鈴木 花子"], ["渡辺 健一"], ["中村 恵子"], ["佐藤 次郎"]],
       hints: [
@@ -328,7 +337,8 @@ const seedProblems: SeedProblem[] = [
     category: "sql",
     difficulty: 2,
     body: {
-      description: `## 問題\n\nウィンドウ関数 \`ROW_NUMBER()\` を使って、住民の収入ランキングを作成してください。\n\n結果のカラムは \`name\`、\`income\`、\`rank\` とし、収入の高い順にランキングをつけて表示してください。`,
+      description:
+        "## 問題\n\nウィンドウ関数 `ROW_NUMBER()` を使って、住民の収入ランキングを作成してください。\n\n結果のカラムは `name`、`income`、`rank` とし、収入の高い順にランキングをつけて表示してください。",
       setup: SETUP_DDL,
       expectedOutput: [
         ["山本 雄介", 700000, 1],
@@ -358,7 +368,8 @@ const seedProblems: SeedProblem[] = [
     category: "sql",
     difficulty: 2,
     body: {
-      description: `## 問題\n\nCTE（WITH句）を使って、都市ごとの平均収入を計算し、**平均収入が400,000円以上**の都市のみ表示してください。\n\n結果のカラムは \`city\`、\`avg_income\` とし、平均収入の高い順で表示してください。`,
+      description:
+        "## 問題\n\nCTE（WITH句）を使って、都市ごとの平均収入を計算し、**平均収入が400,000円以上**の都市のみ表示してください。\n\n結果のカラムは `city`、`avg_income` とし、平均収入の高い順で表示してください。",
       setup: SETUP_DDL,
       expectedOutput: [
         ["名古屋", 540000],
@@ -380,7 +391,8 @@ const seedProblems: SeedProblem[] = [
     category: "algorithm",
     difficulty: 1,
     body: {
-      description: `## 問題\n\nウィンドウ関数 \`LAG()\` を使って、月ごとの注文件数と**前月からの増減**を求めてください。\n\n結果のカラムは \`month\`、\`order_count\`、\`diff\`（前月比、初月はNULL）とし、月の昇順で表示してください。`,
+      description:
+        "## 問題\n\nウィンドウ関数 `LAG()` を使って、月ごとの注文件数と**前月からの増減**を求めてください。\n\n結果のカラムは `month`、`order_count`、`diff`（前月比、初月はNULL）とし、月の昇順で表示してください。",
       setup: SETUP_DDL,
       expectedOutput: [
         ["2024-01", 2, null],
@@ -413,7 +425,8 @@ const seedProblems: SeedProblem[] = [
     category: "algorithm",
     difficulty: 2,
     body: {
-      description: `## 問題\n\n各注文について、その日を含む過去3件の注文金額の**移動平均**を求めてください。\n\nウィンドウ関数 \`AVG() OVER\` を使い、結果のカラムは \`id\`、\`amount\`、\`moving_avg\`（小数点以下2桁）とし、注文IDの昇順で表示してください。`,
+      description:
+        "## 問題\n\n各注文について、その日を含む過去3件の注文金額の**移動平均**を求めてください。\n\nウィンドウ関数 `AVG() OVER` を使い、結果のカラムは `id`、`amount`、`moving_avg`（小数点以下2桁）とし、注文IDの昇順で表示してください。",
       setup: SETUP_DDL,
       expectedOutput: [
         [1, 150000, "150000.00"],
@@ -449,7 +462,8 @@ const seedProblems: SeedProblem[] = [
     category: "algorithm",
     difficulty: 3,
     body: {
-      description: `## 問題\n\n**アイランド問題**（Islands Problem）に挑戦しましょう。\n\n\`orders\` テーブルの \`ordered_at\` から、**連続した日付のグループ**（アイランド）ごとに、グループの開始日・終了日・日数を求めてください。\n\n結果のカラムは \`island_start\`、\`island_end\`、\`days\` とし、開始日の昇順で表示してください。\n\n※日付が1日でも空いたら別グループとします。`,
+      description:
+        "## 問題\n\n**アイランド問題**（Islands Problem）に挑戦しましょう。\n\n`orders` テーブルの `ordered_at` から、**連続した日付のグループ**（アイランド）ごとに、グループの開始日・終了日・日数を求めてください。\n\n結果のカラムは `island_start`、`island_end`、`days` とし、開始日の昇順で表示してください。\n\n※日付が1日でも空いたら別グループとします。",
       setup: SETUP_DDL,
       expectedOutput: [
         ["2024-01-15", "2024-01-20", 6],
@@ -482,7 +496,8 @@ const seedProblems: SeedProblem[] = [
     category: "design",
     difficulty: 2,
     body: {
-      description: `## 問題\n\n月間アクティブユーザー100万人のSNSサービスで、ユーザープロフィール取得APIが**秒間10,000リクエスト**のトラフィックを受けています。\n\n現在の構成はAPIサーバー → PostgreSQLの単純な構成で、DBが過負荷になっています。\n\n### 要件\n- プロフィール情報は1時間に1回程度しか更新されない\n- 読み取り:書き込み = 99:1\n- P99レイテンシを50ms以下にしたい\n- データ整合性は「結果整合性」で許容される\n\n### あなたのタスク\nキャッシュ戦略を含むシステム設計を記述してください。以下の観点を含めてください:\n1. キャッシュ層の設計（どこに何をキャッシュするか）\n2. キャッシュ無効化戦略\n3. キャッシュ階層（L1/L2など）\n4. 障害時のフォールバック`,
+      description:
+        "## 問題\n\n月間アクティブユーザー100万人のSNSサービスで、ユーザープロフィール取得APIが**秒間10,000リクエスト**のトラフィックを受けています。\n\n現在の構成はAPIサーバー → PostgreSQLの単純な構成で、DBが過負荷になっています。\n\n### 要件\n- プロフィール情報は1時間に1回程度しか更新されない\n- 読み取り:書き込み = 99:1\n- P99レイテンシを50ms以下にしたい\n- データ整合性は「結果整合性」で許容される\n\n### あなたのタスク\nキャッシュ戦略を含むシステム設計を記述してください。以下の観点を含めてください:\n1. キャッシュ層の設計（どこに何をキャッシュするか）\n2. キャッシュ無効化戦略\n3. キャッシュ階層（L1/L2など）\n4. 障害時のフォールバック",
       setup: "",
       expectedOutput: [],
       hints: [
@@ -510,7 +525,8 @@ const seedProblems: SeedProblem[] = [
     category: "design",
     difficulty: 3,
     body: {
-      description: `## 問題\n\nECサイトをモノリスからマイクロサービスへ移行します。以下のサービスが存在します:\n\n- **UserService**: 認証・認可、ユーザー管理\n- **ProductService**: 商品カタログ、在庫\n- **OrderService**: 注文処理、決済\n- **NotificationService**: メール・プッシュ通知\n\n### 課題\nフロントエンド（Web/アプリ）は複数サービスに分散したAPIを直接呼び出しており、以下の問題が発生しています:\n- 認証が各サービスで重複実装\n- フロントエンドのリクエスト数が多い（N+1問題）\n- レート制限が各サービスにバラバラ\n- サービス間の依存関係が複雑\n\n### タスク\nAPIゲートウェイを設計してください。以下を含めてください:\n1. ゲートウェイの責務（何を担当させるか）\n2. 認証・認可フロー\n3. リクエスト集約（BFF: Backends for Frontends）パターン\n4. レート制限とサーキットブレーカー\n5. 障害時の対策`,
+      description:
+        "## 問題\n\nECサイトをモノリスからマイクロサービスへ移行します。以下のサービスが存在します:\n\n- **UserService**: 認証・認可、ユーザー管理\n- **ProductService**: 商品カタログ、在庫\n- **OrderService**: 注文処理、決済\n- **NotificationService**: メール・プッシュ通知\n\n### 課題\nフロントエンド（Web/アプリ）は複数サービスに分散したAPIを直接呼び出しており、以下の問題が発生しています:\n- 認証が各サービスで重複実装\n- フロントエンドのリクエスト数が多い（N+1問題）\n- レート制限が各サービスにバラバラ\n- サービス間の依存関係が複雑\n\n### タスク\nAPIゲートウェイを設計してください。以下を含めてください:\n1. ゲートウェイの責務（何を担当させるか）\n2. 認証・認可フロー\n3. リクエスト集約（BFF: Backends for Frontends）パターン\n4. レート制限とサーキットブレーカー\n5. 障害時の対策",
       setup: "",
       expectedOutput: [],
       hints: [
@@ -595,7 +611,8 @@ const dungeonProblemDefs: SeedProblem[] = [
     category: "sql",
     difficulty: 0,
     body: {
-      description: `## MISSION: 侵入初期偵察\n\n企業のサーバー管理データベースに侵入した。\nまず全サーバーの情報を取得してシステム全体を把握せよ。\n\n\`servers\` テーブルの全データを取得せよ。`,
+      description:
+        "## MISSION: 侵入初期偵察\n\n企業のサーバー管理データベースに侵入した。\nまず全サーバーの情報を取得してシステム全体を把握せよ。\n\n`servers` テーブルの全データを取得せよ。",
       setup: DUNGEON_DDL,
       expectedOutput: [
         [1, "ALPHA-SRV", "192.168.1.1", "online", 500],
@@ -633,7 +650,8 @@ const dungeonProblemDefs: SeedProblem[] = [
     category: "sql",
     difficulty: 0,
     body: {
-      description: `## MISSION: 内部脅威の特定\n\n権限の高い内部エージェントを優先して特定する。\n\`employees\` テーブルを \`access_level\` の高い順に全件取得せよ。`,
+      description:
+        "## MISSION: 内部脅威の特定\n\n権限の高い内部エージェントを優先して特定する。\n`employees` テーブルを `access_level` の高い順に全件取得せよ。",
       setup: DUNGEON_DDL,
       expectedOutput: [
         [4, "Agent Smith", "Management", 10, 1500000],
@@ -656,7 +674,8 @@ const dungeonProblemDefs: SeedProblem[] = [
     category: "sql",
     difficulty: 1,
     body: {
-      description: `## MISSION: 組織構造解析\n\n企業の組織構造を把握するため、\n各部門の人員数を集計せよ。\n\n結果カラムは \`department\`, \`count\` とする。`,
+      description:
+        "## MISSION: 組織構造解析\n\n企業の組織構造を把握するため、\n各部門の人員数を集計せよ。\n\n結果カラムは `department`, `count` とする。",
       setup: DUNGEON_DDL,
       expectedOutput: [
         ["Infrastructure", 1],
@@ -679,7 +698,8 @@ const dungeonProblemDefs: SeedProblem[] = [
     category: "sql",
     difficulty: 1,
     body: {
-      description: `## MISSION: 侵入経路の追跡\n\nアクセスログから誰がどのアクションを実行したか追跡する。\n\`access_logs\` と \`employees\` を結合して\n**ログID**、**従業員名**、**実行アクション** を取得せよ。\nログIDの昇順で返すこと。`,
+      description:
+        "## MISSION: 侵入経路の追跡\n\nアクセスログから誰がどのアクションを実行したか追跡する。\n`access_logs` と `employees` を結合して\n**ログID**、**従業員名**、**実行アクション** を取得せよ。\nログIDの昇順で返すこと。",
       setup: DUNGEON_DDL,
       expectedOutput: [
         [1, "Agent Neo", "READ"],
@@ -710,7 +730,8 @@ const dungeonProblemDefs: SeedProblem[] = [
     category: "sql",
     difficulty: 2,
     body: {
-      description: `## MISSION: 資産調査\n\nウィンドウ関数を使って従業員の給与ランキングを生成せよ。\n\n結果カラムは \`name\`、\`salary\`、\`rank\` とし、給与の高い順にランキングをつけること。`,
+      description:
+        "## MISSION: 資産調査\n\nウィンドウ関数を使って従業員の給与ランキングを生成せよ。\n\n結果カラムは `name`、`salary`、`rank` とし、給与の高い順にランキングをつけること。",
       setup: DUNGEON_DDL,
       expectedOutput: [
         ["Agent Smith", 1500000, 1],
@@ -737,7 +758,8 @@ const dungeonProblemDefs: SeedProblem[] = [
     category: "sql",
     difficulty: 2,
     body: {
-      description: `## MISSION: 内部経済分析\n\nCTE（WITH句）を使って部門別の平均給与を計算し、\n**平均給与が900,000円以上** の部門のみ抽出せよ。\n\n結果カラムは \`department\`、\`avg_salary\` とし、平均給与の高い順で返すこと。`,
+      description:
+        "## MISSION: 内部経済分析\n\nCTE（WITH句）を使って部門別の平均給与を計算し、\n**平均給与が900,000円以上** の部門のみ抽出せよ。\n\n結果カラムは `department`、`avg_salary` とし、平均給与の高い順で返すこと。",
       setup: DUNGEON_DDL,
       expectedOutput: [
         ["Management", 1500000],
@@ -759,7 +781,8 @@ const dungeonProblemDefs: SeedProblem[] = [
     category: "sql",
     difficulty: 2,
     body: {
-      description: `## MISSION: アクセスパターン解析\n\nLEFT JOINを使って、アクセスがないサーバーも含め\n各サーバーのアクセス件数を集計せよ。\n\n結果カラムは \`hostname\`、\`access_count\` とし、アクセス件数の多い順で返すこと。`,
+      description:
+        "## MISSION: アクセスパターン解析\n\nLEFT JOINを使って、アクセスがないサーバーも含め\n各サーバーのアクセス件数を集計せよ。\n\n結果カラムは `hostname`、`access_count` とし、アクセス件数の多い順で返すこと。",
       setup: DUNGEON_DDL,
       expectedOutput: [
         ["BETA-SRV", 3],
@@ -786,7 +809,8 @@ const dungeonProblemDefs: SeedProblem[] = [
     category: "sql",
     difficulty: 2,
     body: {
-      description: `## MISSION: VIPターゲット追跡\n\nサブクエリを使って、\`access_level\` が **8以上** の従業員が\nアクセスしたことのある **サーバーのホスト名** を重複なしで取得せよ。`,
+      description:
+        "## MISSION: VIPターゲット追跡\n\nサブクエリを使って、`access_level` が **8以上** の従業員が\nアクセスしたことのある **サーバーのホスト名** を重複なしで取得せよ。",
       setup: DUNGEON_DDL,
       expectedOutput: [["BETA-SRV"], ["DELTA-SRV"], ["OMEGA-SRV"]],
       hints: [
@@ -807,7 +831,8 @@ const dungeonProblemDefs: SeedProblem[] = [
     category: "sql",
     difficulty: 2,
     body: {
-      description: `## MISSION: 不審行動パターン検出\n\n**2回以上** アクセスした従業員のIDとアクセス件数を取得せよ。\nアクセス件数の多い順で返すこと。`,
+      description:
+        "## MISSION: 不審行動パターン検出\n\n**2回以上** アクセスした従業員のIDとアクセス件数を取得せよ。\nアクセス件数の多い順で返すこと。",
       setup: DUNGEON_DDL,
       expectedOutput: [
         [1, 2],
@@ -832,7 +857,8 @@ const dungeonProblemDefs: SeedProblem[] = [
     category: "sql",
     difficulty: 3,
     body: {
-      description: `## MISSION: タイムライン再構築\n\nアクセスログを時系列で解析し、\n各ログの**累積アクセス件数**を求めよ。\n\n結果カラムは \`id\`、\`action\`、\`cumulative_count\` とし、ログIDの昇順で返すこと。`,
+      description:
+        "## MISSION: タイムライン再構築\n\nアクセスログを時系列で解析し、\n各ログの**累積アクセス件数**を求めよ。\n\n結果カラムは `id`、`action`、`cumulative_count` とし、ログIDの昇順で返すこと。",
       setup: DUNGEON_DDL,
       expectedOutput: [
         [1, "READ", 1],
@@ -864,7 +890,8 @@ const dungeonProblemDefs: SeedProblem[] = [
     category: "sql",
     difficulty: 3,
     body: {
-      description: `## MISSION: 組織内格差分析\n\nPARTITION BYを使って、**部門内での給与ランキング**を生成せよ。\n\n結果カラムは \`department\`、\`name\`、\`salary\`、\`dept_rank\` とし、\n部門の昇順、部門内では給与の高い順で返すこと。`,
+      description:
+        "## MISSION: 組織内格差分析\n\nPARTITION BYを使って、**部門内での給与ランキング**を生成せよ。\n\n結果カラムは `department`、`name`、`salary`、`dept_rank` とし、\n部門の昇順、部門内では給与の高い順で返すこと。",
       setup: DUNGEON_DDL,
       expectedOutput: [
         ["Infrastructure", "Tank", 780000, 1],
@@ -894,7 +921,8 @@ const dungeonProblemDefs: SeedProblem[] = [
     category: "sql",
     difficulty: 3,
     body: {
-      description: `## MISSION: 侵入ルート全解析\n\n再帰CTE（WITH RECURSIVE）を使って、1から10までの連番とその**累積和**を計算せよ。\n\n結果カラムは \`n\`（1〜10）と \`cumulative_sum\` とし、nの昇順で返すこと。`,
+      description:
+        "## MISSION: 侵入ルート全解析\n\n再帰CTE（WITH RECURSIVE）を使って、1から10までの連番とその**累積和**を計算せよ。\n\n結果カラムは `n`（1〜10）と `cumulative_sum` とし、nの昇順で返すこと。",
       setup: "",
       expectedOutput: [
         [1, 1],
@@ -925,7 +953,8 @@ const dungeonProblemDefs: SeedProblem[] = [
     category: "sql",
     difficulty: 3,
     body: {
-      description: `## MISSION: 行動プロファイリング\n\nCTEを使ってアクションごとのアクセス件数と\n**全体に占める割合（%、小数点1桁）**を計算せよ。\n\n結果カラムは \`action\`、\`count\`、\`percentage\` とし、件数の多い順で返すこと。`,
+      description:
+        "## MISSION: 行動プロファイリング\n\nCTEを使ってアクションごとのアクセス件数と\n**全体に占める割合（%、小数点1桁）**を計算せよ。\n\n結果カラムは `action`、`count`、`percentage` とし、件数の多い順で返すこと。",
       setup: DUNGEON_DDL,
       expectedOutput: [
         ["READ", 5, "50.0"],
@@ -949,7 +978,8 @@ const dungeonProblemDefs: SeedProblem[] = [
     category: "sql",
     difficulty: 3,
     body: {
-      description: `## MISSION: 異常アクセス間隔の検出\n\nLAG()ウィンドウ関数を使って、各アクセスログと**前のアクセスとの時間差（時間単位）**を計算せよ。\n\n結果カラムは \`id\`、\`accessed_at\`、\`hours_since_prev\`（前回からの時間差、初回はNULL）とし、IDの昇順で返すこと。`,
+      description:
+        "## MISSION: 異常アクセス間隔の検出\n\nLAG()ウィンドウ関数を使って、各アクセスログと**前のアクセスとの時間差（時間単位）**を計算せよ。\n\n結果カラムは `id`、`accessed_at`、`hours_since_prev`（前回からの時間差、初回はNULL）とし、IDの昇順で返すこと。",
       setup: DUNGEON_DDL,
       expectedOutput: [
         [1, "2024-01-15 09:00:00", null],
@@ -985,7 +1015,8 @@ const pythonProblemDefs: SeedProblem[] = [
     category: "algorithm",
     difficulty: 0,
     body: {
-      description: `## MISSION: 侵入ログ解析\n\nPythonスクリプトが動いている。ターゲットシステムの侵入ログを解析して攻撃経路を特定せよ。\n\n### タスク\nリストの基本操作を使って以下を実装せよ:\n\n1. **ソート**: \`access_times\` を昇順ソート（\`sorted()\` または \`.sort()\`）\n2. **スライス**: 最初の3件のみ取得（スライス記法: \`[0:3]\`）\n3. **リスト内包表記**: 偶数のみ抽出\n\n\`\`\`python\naccess_times = [1423, 892, 2891, 456, 1039, 2341, 78]\n\nsorted_times = sorted(access_times)\ntop3 = sorted_times[:3]\neven_times = [t for t in access_times if t % 2 == 0]\n\nprint(sorted_times)\nprint(top3)\nprint(even_times)\n\`\`\``,
+      description:
+        "## MISSION: 侵入ログ解析\n\nPythonスクリプトが動いている。ターゲットシステムの侵入ログを解析して攻撃経路を特定せよ。\n\n### タスク\nリストの基本操作を使って以下を実装せよ:\n\n1. **ソート**: `access_times` を昇順ソート（`sorted()` または `.sort()`）\n2. **スライス**: 最初の3件のみ取得（スライス記法: `[0:3]`）\n3. **リスト内包表記**: 偶数のみ抽出\n\n```python\naccess_times = [1423, 892, 2891, 456, 1039, 2341, 78]\n\nsorted_times = sorted(access_times)\ntop3 = sorted_times[:3]\neven_times = [t for t in access_times if t % 2 == 0]\n\nprint(sorted_times)\nprint(top3)\nprint(even_times)\n```",
       setup: "",
       expectedOutput: [],
       hints: [
@@ -1637,16 +1668,19 @@ export async function seed() {
     if (!tierProblems) continue
 
     for (let i = 0; i < tierProblems.length; i++) {
-      const title = tierProblems[i]!
+      const title = tierProblems[i]
+      if (title === undefined) continue
       const problemId = problemIdByTitle[title]
       if (!problemId) {
         console.warn(`[Seed] Problem not found: ${title}`)
         continue
       }
+      const roomType = roomTypes[i]
+      if (roomType === undefined) continue
       await db.insert(dungeonRooms).values({
         dungeonId: dungeon.id,
         problemId,
-        roomType: roomTypes[i]!,
+        roomType,
         roomOrder: i,
       })
     }
