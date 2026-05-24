@@ -1,7 +1,6 @@
 # ⚡ CODE WORLD
 
-> 「コードを書いて、街を作れ。」  
-> サイバーパンク世界を舞台にしたダンジョンRPG × 学習型オープンワールドゲーム
+> 純粋なオンライン FPS。 — BATTLE · RANK · SURVIVE
 
 🌐 **本番URL**: https://code-worldweb-production.up.railway.app
 
@@ -9,283 +8,120 @@
 
 ## 🎮 ゲーム概要
 
-SQLやPython・JavaScript・C#の問題を解いてAIボスと戦い、獲得したブロックでサイバーパンク風の街を建設するプログラミング学習ゲーム。
+ブラウザだけで動く Three.js 製のオープンワールド FPS。
 
-```
-ダンジョンに挑む → 問題を解く → ボスを倒す → ブロック獲得 → ワールドに建設 → 他プレイヤーと交流
-```
+- ヒューマノイド型エネミーを排除するシングルプレイ・ミッション 10 種
+- 赤チーム vs 青チームの **Team Deathmatch** / 全員バトルロイヤルの **Free For All** / 押し寄せる敵を捌く **Wave Defense**
+- 武器 3 種 (Pistol / Shotgun / Sniper) + 投擲グレネード
+- WebSocket でリアルタイム同期 (位置・PvP ヒット・キルフィード・チームスコア)
+- 6 言語対応 (JA / EN / ZH / KO / ES / FR), モバイル完全対応 (タッチジョイスティック + ボタン)
+- COD 風演出: ヘッドショット 2倍ダメージ / Double / Triple Kill / Rampage / Unstoppable / Godlike キルストリーク / 試合終了時 MVP 表示 / 3秒スポーン無敵
 
 ---
 
 ## 🏗️ システムアーキテクチャ
 
-```mermaid
-graph TD
-    Browser["🌐 ブラウザ\nNext.js 15 + Phaser 3\nMonaco Editor"]
-    API["⚙️ APIサーバー\nHono + Better Auth\nSocket.io"]
-    Executor["🔧 Executor\nBullMQ Worker\nJudge0 + Docker"]
-    PG["🐘 PostgreSQL\nNeon (Singapore)"]
-    Redis["⚡ Redis\nUpstash (Tokyo)"]
+```
+apps/web      Next.js 15 + React 19 + Three.js (FPS フロントエンド)            :3000
+apps/api      Hono on Bun + Drizzle + WebSocket (認証・ランキング・PvP同期)    :3001
+apps/executor BullMQ ワーカー (Phase1 でスタブ化、現状未使用)                   :3002
 
-    Browser -->|"HTTPS / WebSocket"| API
-    API -->|"BullMQ Job"| Executor
-    API -->|"Drizzle ORM"| PG
-    API -->|"Cache / PubSub"| Redis
-    Executor -->|"採点結果保存"| PG
-    Executor -->|"ジョブ管理"| Redis
+packages/db    Drizzle ORM スキーマ (users / sessions / matches)
+packages/types Zod スキーマ共有
+packages/ui    shadcn 風 UI コンポーネント
+packages/config 共通 tsconfig / biome 設定
 ```
 
 ---
 
-## 🎯 ゲームループ
-
-```mermaid
-flowchart LR
-    A["🏰 ダンジョン選択\nSQL/Python/JS/C#"] --> B["⚔️ 戦闘\n問題を解く"]
-    B -->|"正解 +50ダメージ"| C["🧱 ブロック獲得\n木材/石/ダイヤ/紫"]
-    B -->|"不正解 -10HP"| B
-    C --> D["🌆 ワールド建設\nブロックを配置"]
-    D --> E["🏆 ランキング\nXP・レベルアップ"]
-    E --> A
-```
-
----
-
-## 🏰 ダンジョン構造
-
-```mermaid
-graph TD
-    subgraph SQL["🔵 SQL SECTOR"]
-        S1["Data Vault\nLv0+ / 250HP"]
-        S2["Query Fortress\nLv3+ / 500HP"]
-        S3["Oracle Core\nLv5+ / 800HP"]
-    end
-    subgraph PY["🐍 PYTHON SECTOR"]
-        P1["Script Maze\nLv0+ / 250HP"]
-        P2["Algorithm Lab\nLv3+ / 500HP"]
-        P3["Neural Nest\nLv5+ / 800HP"]
-    end
-    subgraph JS["💛 JS SECTOR"]
-        J1["DOM Dungeon\nLv0+ / 250HP"]
-        J2["Async Abyss\nLv3+ / 500HP"]
-        J3["Runtime Rift\nLv5+ / 800HP"]
-    end
-    subgraph CS["🟣 C# SECTOR"]
-        C1["Syntax Citadel\nLv0+ / 250HP"]
-        C2["LINQ Labyrinth\nLv3+ / 500HP"]
-        C3["CLR Core\nLv5+ / 800HP"]
-    end
-
-    Room["各ダンジョン: 5部屋\n雑魚×3 → ミニボス → ボス"]
-    S1 & S2 & S3 & P1 & P2 & P3 & J1 & J2 & J3 & C1 & C2 & C3 --> Room
-```
-
----
-
-## 💻 コード実行パイプライン
-
-```mermaid
-sequenceDiagram
-    participant U as ユーザー
-    participant API as APIサーバー
-    participant Q as BullMQ
-    participant E as Executor
-    participant J as Judge0
-    participant DB as PostgreSQL
-
-    U->>API: コード提出 (POST /api/submissions)
-    API->>DB: pending レコード作成
-    API->>Q: ジョブ投入
-    API-->>U: { id, status: "pending" }
-    Q->>E: ジョブ取得
-    E->>J: コード実行 (Docker sandbox)
-    J-->>E: 実行結果
-    E->>DB: 結果保存 (accepted/wrong_answer/runtime_error)
-    E-->>U: Socket.io でリアルタイム通知
-```
-
----
-
-## 🗃️ データベース設計
-
-```mermaid
-erDiagram
-    users {
-        uuid id PK
-        string email
-        string username
-        int level
-        int xp
-        int hp
-    }
-    problems {
-        uuid id PK
-        string title
-        string category
-        int difficulty
-        jsonb body
-        string status
-    }
-    submissions {
-        uuid id PK
-        uuid player_id FK
-        uuid problem_id FK
-        text code
-        string result
-        int score
-        string language
-    }
-    worlds {
-        uuid id PK
-        uuid owner_id FK
-        string name
-    }
-    world_blocks {
-        uuid id PK
-        uuid world_id FK
-        string block_type
-        int tile_x
-        int tile_y
-    }
-    inventory {
-        uuid id PK
-        uuid player_id FK
-        string block_type
-        int quantity
-    }
-    dungeons {
-        uuid id PK
-        string name
-        string language
-        int level_required
-        int boss_hp
-    }
-    dungeon_rooms {
-        uuid id PK
-        uuid dungeon_id FK
-        uuid problem_id FK
-        int room_order
-        string room_type
-    }
-    achievements {
-        uuid id PK
-        uuid player_id FK
-        string type
-    }
-
-    users ||--o{ submissions : "提出する"
-    users ||--o{ worlds : "所有する"
-    users ||--o{ inventory : "所持する"
-    users ||--o{ achievements : "獲得する"
-    problems ||--o{ submissions : "解かれる"
-    problems ||--o{ dungeon_rooms : "使われる"
-    worlds ||--o{ world_blocks : "含む"
-    dungeons ||--o{ dungeon_rooms : "構成される"
-```
-
----
-
-## 📦 モノレポ構成
-
-```mermaid
-graph TD
-    Root["code-world (Turborepo + Bun)"]
-    Root --> Apps
-    Root --> Packages
-
-    subgraph Apps["apps/"]
-        Web["web/\nNext.js 15"]
-        Api["api/\nHono"]
-        Exec["executor/\nBullMQ Worker"]
-    end
-
-    subgraph Packages["packages/"]
-        DB["db/\nDrizzle ORM + Schema"]
-        Types["types/\nZod スキーマ共有"]
-        UI["ui/\nshadcn/ui"]
-        Config["config/\ntsconfig・biome"]
-    end
-
-    Web --> Types
-    Api --> Types
-    Api --> DB
-    Exec --> DB
-```
-
----
-
-## 🚀 デプロイ構成
-
-```mermaid
-graph LR
-    GitHub["GitHub\nEGAMIJUN/code-world"]
-    GitHub -->|"push → 自動デプロイ"| Railway
-
-    subgraph Railway["Railway"]
-        RW["web\nNext.js"]
-        RA["api\nHono"]
-        RE["executor\nBullMQ"]
-    end
-
-    Railway --> Neon["Neon\nPostgreSQL\nSingapore"]
-    Railway --> Upstash["Upstash\nRedis\nTokyo"]
-```
-
----
-
-## 🛠️ 技術スタック
-
-| レイヤー | 技術 | 用途 |
-|---------|------|------|
-| フロント | Next.js 15 + TypeScript | App Router + RSC |
-| ゲームエンジン | Phaser 3 | アイソメトリック2Dワールド |
-| コードエディタ | Monaco Editor | VS Codeと同じエンジン |
-| バックエンド | Hono | 型安全RPC API |
-| 認証 | Better Auth | GitHub OAuth + メール認証 |
-| ORM | Drizzle ORM | 型安全SQL |
-| キュー | BullMQ | コード採点ジョブ管理 |
-| コード実行 | Judge0 + Docker | セキュアサンドボックス |
-| DB | PostgreSQL (Neon) | 全データ永続化 |
-| キャッシュ | Redis (Upstash) | BullMQ + リーダーボード |
-| リアルタイム | Socket.io | マルチプレイヤー位置同期 |
-| パッケージ管理 | Bun | npm比10倍速 |
-| モノレポ | Turborepo | ビルドキャッシュ・並列実行 |
-| デプロイ | Railway | 全サービス自動デプロイ |
-
----
-
-## ⚔️ 戦闘バランス
-
-| パラメータ | 値 |
-|-----------|-----|
-| プレイヤー初期HP | 200 |
-| ボス攻撃間隔 | 15秒 |
-| ボス攻撃ダメージ | 5 |
-| 正解時ボスダメージ | 50 |
-| 不正解時ダメージ | 10 |
-| Lv.0問題XP | +50 |
-| Lv.1問題XP | +100 |
-| Lv.2問題XP | +150 |
-| Lv.3問題XP | +200 |
-
----
-
-## 🏃 ローカル開発
+## 🚀 開発セットアップ
 
 ```bash
-# 必要: Bun 1.3.14 + Docker Desktop
-
-git clone https://github.com/EGAMIJUN/code-world
-cd code-world
+# 環境変数
 cp .env.example .env
-docker compose up -d          # PostgreSQL(5434) + Redis(6379)
+
+# DB / Redis 起動 (Docker)
+docker compose up -d postgres redis
+
+# 依存インストール
 bun install
-cd packages/db && DATABASE_URL=... bunx drizzle-kit push
-DATABASE_URL=... bun src/seed.ts
-cd ../..
-bun run dev                   # web:3000 / api:3001 / executor
+
+# DB スキーマを反映
+DATABASE_URL=postgresql://postgres:postgres@localhost:5434/codeworld \
+  bunx --cwd packages/db drizzle-kit push
+
+# 全 app を並列起動
+bun run dev
+```
+
+| URL | 内容 |
+|---|---|
+| http://localhost:3000 | Web (Next.js) |
+| http://localhost:3001 | API (Hono + WebSocket) |
+| http://localhost:3002 | Executor (BullMQ ワーカー、現状未使用) |
+
+---
+
+## 🕹️ 操作
+
+### PC
+| キー | 動作 |
+|---|---|
+| W A S D / ↑↓←→ | 移動 |
+| Shift | ダッシュ |
+| マウス | 視点回転 |
+| 左クリック | 射撃 |
+| 右クリック | ADS (覗き込み) |
+| R | リロード |
+| 1 / 2 / 3 | 武器スワップ (Pistol / Shotgun / Sniper) |
+| G | グレネード (5秒クールダウン) |
+
+### モバイル
+- 左下: 移動ジョイスティック
+- 右下: 視点ジョイスティック + 大きな射撃ボタン
+- 右上: ADS / グレネード ボタン
+- 上部: 武器スワップ [1] [2] [3] / TDM 時はチームスコア
+
+---
+
+## 🎯 ゲームモード
+
+| モード | 内容 |
+|---|---|
+| **Wave Defense** | 10 種類のミッションから選択 (殲滅 / 防衛 / 狙撃 / 突破 / 救出 / 破壊 / 潜入 / 制圧 / ウェーブ防衛 / ボス) |
+| **Free For All** | 同じルームにいる全員が敵。最後まで生き残れ |
+| **Team Deathmatch** | 赤チーム vs 青チーム。サーバーが自動でチーム振り分け |
+
+マップは 3 種類: **URBAN** (市街地・青空) / **DESERT** (砂漠・砂色) / **SNOW** (雪山・白い空)
+
+---
+
+## 📡 主要 API
+
+| ルート | メソッド | 認証 | 用途 |
+|---|---|---|---|
+| `/api/auth/signup` | POST | × | 新規登録 |
+| `/api/auth/login` | POST | × | ログイン |
+| `/api/auth/me` | GET | ○ | 現在のユーザー取得 |
+| `/api/profile/me` | GET | ○ | 自分のプロフィール (武器別キル・最高ストリーク・国コード含む) |
+| `/api/profile/me/matches` | GET | ○ | 直近 10 試合 |
+| `/api/profile/stats` | POST | ○ | 試合終了時に通算 + matches テーブルへ追記 |
+| `/api/leaderboard` | GET | × | `window=all/week/month`, `sort=score/kills/kd` |
+| `/api/leaderboard/me-rank` | GET | × | userId クエリで自分の順位を取得 |
+| `/ws` | WebSocket | × | PvP ルーム同期 (join/move/chat/pvp_hit/vote_map) |
+
+---
+
+## 🛠️ 品質コマンド
+
+```bash
+bun run check   # biome lint + format 自動修正
+bun run build   # プロダクションビルド (全 app)
+bun run test    # Vitest (全パッケージ)
 ```
 
 ---
 
-*Built by EGAMIJUN with Claude Code (Sonnet 4.6)*
+## 📜 ライセンス
+
+private (内部開発)

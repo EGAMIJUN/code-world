@@ -1,4 +1,9 @@
+"use client"
+
+import { useI18n } from "../i18n"
+
 export default function HomePage() {
+  const { t } = useI18n()
   return (
     <div
       style={{
@@ -34,10 +39,10 @@ export default function HomePage() {
             marginBottom: "0.4rem",
           }}
         >
-          純粋なオンラインFPS。
+          {t.home.tagline}
         </div>
         <div style={{ color: "#005500", fontSize: "0.8rem", letterSpacing: "0.1em" }}>
-          BATTLE · RANK · SURVIVE
+          {t.home.sub}
         </div>
       </div>
 
@@ -56,7 +61,7 @@ export default function HomePage() {
             background: "rgba(0,255,65,0.05)",
           }}
         >
-          ▶ PLAY
+          {t.home.play}
         </a>
         <a
           href="/leaderboard"
@@ -70,7 +75,7 @@ export default function HomePage() {
             background: "rgba(0,20,0,0.5)",
           }}
         >
-          ▷ RANKING
+          {t.home.ranking}
         </a>
       </div>
 
@@ -90,7 +95,7 @@ export default function HomePage() {
             borderBottom: "1px dashed #003300",
           }}
         >
-          LOGIN
+          {t.home.login}
         </a>
         <a
           href="/signup"
@@ -100,7 +105,7 @@ export default function HomePage() {
             borderBottom: "1px dashed #003300",
           }}
         >
-          REGISTER
+          {t.home.register}
         </a>
       </div>
     </div>

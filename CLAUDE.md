@@ -3,8 +3,19 @@
 ## プロジェクト概要
 
 **CODE WORLD** は Turborepo + Bun モノレポで構成された純粋な FPS ゲーム。
-オープンワールドの戦場マップで人型兵士エネミーを排除するミッション型 FPS。
+オープンワールドの戦場マップで人型兵士エネミーを排除するミッション型 FPS + マルチプレイヤー PvP。
 （初期構想の「SQL・コード問題を解くサンドボックス学習ゲーム」は Phase 1 でコード要素を撤去し、現在は純 FPS に振り切っている。executor のジョブ実行はスタブ状態。）
+
+Phase 3 で追加:
+- 6 言語対応 (i18n: 日本語/英語/中国語/韓国語/スペイン語/フランス語)
+- ゲームモード選択: Wave Defense / Free For All / Team Deathmatch
+- マップ選択: 都市 / 砂漠 / 雪山
+- PvP マルチプレイヤー (チーム自動振り分け、ヒット同期、リスポーン)
+- 武器強化: 右クリック ADS / 反動パターン / グレネード (Gキー, 5秒CD)
+- モバイル対応: タッチジョイスティック + 射撃/リロード/武器/ADS/グレネードボタン
+- COD 風演出: ヘッドショット 2倍ダメージ、Double/Triple/Rampage/Unstoppable/Godlike キルストリーク、MVP リザルト、3秒スポーン無敵
+- 戦績強化: 試合履歴(直近10)、武器別キル数、最高キルストリーク、国旗
+- ランキング強化: 全期間/週間/月間タブ、スコア/キル/K/D ソート、30秒自動更新、自分の順位を下部固定
 
 ## モノレポ構成
 
@@ -69,15 +80,13 @@ bunx shadcn@latest add <component>
 
 ## DB スキーマ (packages/db)
 
-現在のスキーマは「FPS プレイヤープロフィール + セッション」のみ。
-旧仕様にあった problems / submissions / worlds / blocks / leaderboard テーブルは存在しない（leaderboard は API 側で users を totalScore で並べたビュー的扱い）。
-
 | テーブル | 主なカラム | 用途 |
 |---|---|---|
-| `users` | id (uuid pk), username (unique), passwordHash, totalKills, totalDeaths, totalScore, createdAt | プレイヤー情報・通算戦績 |
+| `users` | id (uuid pk), username (unique), passwordHash, totalKills, totalDeaths, totalScore, maxKillstreak, weaponKills (jsonb), countryCode (varchar 2), createdAt | プレイヤー情報・通算戦績 |
 | `sessions` | token (pk), userId (fk→users, cascade), expiresAt, createdAt | ログインセッション（30日有効） |
+| `matches` | id (uuid pk), userId (fk→users), mode, mapId, kills, deaths, score, killstreak, headshots, durationSec, result, createdAt | 試合履歴 (試合終了時に1行ずつ追加) |
 
-スキーマ変更: `packages/db/src/schema/` 配下のファイルを編集 → `bun run db:generate`
+スキーマ変更: `packages/db/src/schema/` 配下のファイルを編集 → `bun run db:push` で実DBに反映 (差分検出)
 
 ## API ルート (apps/api)
 
@@ -89,12 +98,15 @@ Hono ルーターで `/api/*` 配下にマウント。すべて JSON、共通エ
 | `/api/auth/login`  | POST | × | ログイン |
 | `/api/auth/logout` | POST | △ | セッション破棄 |
 | `/api/auth/me`     | GET  | ○ | 現在のユーザー取得 |
-| `/api/profile/me`  | GET  | ○ | 自分のプロフィール（K/D 算出付き） |
+| `/api/profile/me`  | GET  | ○ | 自分のプロフィール（K/D・武器別キル・最高キルストリーク・国コード含む） |
+| `/api/profile/me/matches` | GET | ○ | 自分の直近10試合 |
 | `/api/profile/:id` | GET  | × | 他プレイヤーのプロフィール |
-| `/api/profile/stats` | POST | ○ | ゲーム終了時の kills/deaths/score を加算 |
-| `/api/leaderboard` | GET  | × | totalScore 降順ランキング（最大100件） |
+| `/api/profile/:id/matches` | GET | × | 他プレイヤーの直近10試合 |
+| `/api/profile/stats` | POST | ○ | 試合終了時に通算 + match行を追加。bodyに mode/mapId/killstreak/headshots/weaponKills/durationSec/result も受け取り |
+| `/api/leaderboard` | GET  | × | window=all/week/month, sort=score/kills/kd, limit ≤100。週間/月間は matches を集計 |
+| `/api/leaderboard/me-rank` | GET | × | userId クエリで自分の順位を返す（フッターの sticky 表示用） |
 | `/api/health`      | GET  | × | ヘルスチェック |
-| `/ws`              | WS   | × | ルーム同期（位置情報を全員にブロードキャスト） |
+| `/ws`              | WS   | × | PvP対応のルーム同期。 join({roomId, mode, mapId, username}) → joined(team) を返す。move/chat/pvp_hit/vote_map を受信、sync/pvp_damage/pvp_kill/pvp_respawn/vote_tally をブロードキャスト。TDM 時は両チームの kill score を保持 |
 
 加えて、レート制限が全 `/api/*` に対して IP ベースで 60秒60回適用される（ヘルスチェックと `/ws` を除く）。
 
@@ -104,17 +116,21 @@ Hono ルーターで `/api/*` 配下にマウント。すべて JSON、共通エ
 |---|---|
 | `/` | ランディングページ |
 | `/login` / `/signup` | フォーム認証 UI |
-| `/world` | メインの FPS ゲーム。`WorldClient` → `ThreeWorld.tsx` (4,400行超) |
+| `/world` | メインの FPS ゲーム。`WorldClient` がモード/マップ選択画面 → `ThreeWorld.tsx` (5,000行超) |
 | `/leaderboard` | totalScore ランキング |
 | `/profile` / `/profile/[id]` | プロフィール表示 |
 
 `ThreeWorld.tsx` は単一巨大コンポーネント。主要要素:
 - 100×100 ユニットの戦場マップ（市街地 / 工業 / 屋外の3ゾーン）
+- マップテーマ: urban (青空) / desert (砂色) / snow (白い空)
 - ヒューマノイド型エネミー（grunt / sniper / heavy）
-- 10種類のミッション（殲滅・防衛・狙撃・突破・救出・破壊・潜入・制圧・ウェーブ防衛・ボス）
-- 武器3種（pistol 無限弾, shotgun 8発, sniper 5発）
+- 10種類のミッション (Wave Defense モード時のみ表示)
+- 武器3種（pistol 無限弾, shotgun 8発, sniper 5発）+ グレネード（Gキー, AOE, 5秒CD）
+- 右クリック (またはモバイル ADS ボタン) で ADS — Sniper は FOV 28、その他は 50 にズーム
 - WebAudio API で生成する効果音
-- WebSocket でルーム内位置同期
+- WebSocket でルーム内位置同期 + PvP ヒット同期
+- モバイル: 左ジョイスティック (移動) + 右ジョイスティック (視点) + FIRE/RELOAD/ADS/GRENADE/武器スワップ ボタン
+- COD 風演出: ヘッドショット (2倍ダメージ + 表示) / Double/Triple Kill / Rampage / Unstoppable / Godlike キルストリーク / MVP リザルト / 3秒スポーン無敵
 
 ## Executor (apps/executor)
 
