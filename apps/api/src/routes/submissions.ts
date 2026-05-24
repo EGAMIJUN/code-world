@@ -53,7 +53,12 @@ async function getOrCreateGameUser(authUser: {
 
 // POST /submissions — submit code for a problem
 submissionsRouter.post("/", zValidator("json", CreateSubmissionSchema), async (c) => {
-  const session = await auth.api.getSession({ headers: c.req.raw.headers })
+  let session: Awaited<ReturnType<typeof auth.api.getSession>> | null = null
+  try {
+    session = await auth.api.getSession({ headers: c.req.raw.headers })
+  } catch {
+    return c.json({ error: "Unauthorized" }, 401)
+  }
   if (!session) return c.json({ error: "Unauthorized" }, 401)
 
   const user = await getOrCreateGameUser(session.user)
@@ -76,24 +81,27 @@ submissionsRouter.post("/", zValidator("json", CreateSubmissionSchema), async (c
   }
 
   // Enqueue to BullMQ for execution
-  // SQL gets 30s; non-SQL stubs return immediately so 10s is ample
-  const jobTimeoutMs = body.language === "sql" ? 30_000 : 10_000
-  await codeExecutionQueue.add(
-    "code-execution",
-    {
-      submissionId: row.id,
-      problemId: body.problemId,
-      code: body.code,
-      language: body.language,
-    },
-    {
-      attempts: 2,
-      backoff: { type: "fixed", delay: 2_000 },
-      removeOnComplete: { count: 500 },
-      removeOnFail: { count: 100 },
-      timeout: jobTimeoutMs,
-    },
-  )
+  try {
+    await codeExecutionQueue.add(
+      "code-execution",
+      {
+        submissionId: row.id,
+        problemId: body.problemId,
+        code: body.code,
+        language: body.language,
+      },
+      {
+        attempts: 2,
+        backoff: { type: "fixed", delay: 2_000 },
+        removeOnComplete: { count: 500 },
+        removeOnFail: { count: 100 },
+        jobId: row.id,
+      },
+    )
+  } catch (err) {
+    console.error("[Queue Error] Failed to enqueue submission", row.id, err)
+    // Return the submission ID even if queuing fails; the executor can pick it up on retry
+  }
 
   return c.json({ id: row.id, status: "pending" }, 202)
 })

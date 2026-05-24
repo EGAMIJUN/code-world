@@ -56,7 +56,12 @@ dungeonsRouter.get("/:id", async (c) => {
 
 // POST /dungeons/runs — start a new dungeon run
 dungeonsRouter.post("/runs", zValidator("json", StartDungeonRunSchema), async (c) => {
-  const session = await auth.api.getSession({ headers: c.req.raw.headers })
+  let session: Awaited<ReturnType<typeof auth.api.getSession>> | null = null
+  try {
+    session = await auth.api.getSession({ headers: c.req.raw.headers })
+  } catch {
+    return c.json({ error: "Unauthorized" }, 401)
+  }
   if (!session) return c.json({ error: "Unauthorized" }, 401)
 
   const { dungeonId } = c.req.valid("json")
@@ -66,10 +71,40 @@ dungeonsRouter.post("/runs", zValidator("json", StartDungeonRunSchema), async (c
   })
   if (!dungeon) return c.json({ error: "Dungeon not found" }, 404)
 
-  const user = await db.query.users.findFirst({
+  // Find or auto-create the game user from the auth session
+  let user = await db.query.users.findFirst({
     where: (u, { eq: eqFn }) => eqFn(u.email, session.user.email),
   })
-  if (!user) return c.json({ error: "Player not found" }, 404)
+  if (!user) {
+    const base =
+      (session.user.name ?? "player")
+        .replace(/[^a-zA-Z0-9]/g, "_")
+        .replace(/_+/g, "_")
+        .replace(/^_|_$/g, "")
+        .toLowerCase()
+        .slice(0, 20) || "player"
+    let username = base
+    let attempt = 0
+    for (;;) {
+      const taken = await db.query.users.findFirst({
+        where: (u, { eq: eqFn }) => eqFn(u.username, username),
+      })
+      if (!taken) break
+      attempt++
+      username = `${base}_${attempt}`
+    }
+    const [created] = await db
+      .insert(users)
+      .values({
+        email: session.user.email,
+        username,
+        displayName: session.user.name ?? username,
+        avatarUrl: session.user.image ?? null,
+      })
+      .returning()
+    if (!created) return c.json({ error: "Failed to create player" }, 500)
+    user = created
+  }
 
   if (user.level < dungeon.levelRequired) {
     return c.json({ error: `Level ${dungeon.levelRequired} required` }, 403)
