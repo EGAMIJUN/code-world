@@ -20,7 +20,7 @@ const RECOIL_RECOVER = 8
 const MUZZLE_FLASH_DURATION = 0.07
 const PLAYER_RADIUS = 0.35
 const ENEMY_RADIUS = 0.4
-const ENEMY_RESPAWN_SEC = 30
+const ENEMY_NO_RESPAWN = 9999
 const PARTICLE_COUNT = 10
 const PARTICLE_LIFETIME = 0.5
 const SPRINT_MULTIPLIER = 1.5
@@ -273,140 +273,85 @@ interface EnemyConfig {
 
 const ENEMY_CONFIGS: Record<EnemyType, EnemyConfig> = {
   grunt: {
-    hp: 30,
+    hp: 60,
     speed: 1.6,
-    attackDamage: 5,
+    attackDamage: 8,
     attackInterval: 2500,
     attackRange: 1.8,
     fireRange: 10,
     fireInterval: 2500,
-    fireDamage: 5,
-    color: 0xff2222,
-    emissive: 0x330000,
+    fireDamage: 8,
+    color: 0x0a0a1e,
+    emissive: 0x220000,
     bodyW: 0.65,
-    bodyH: 1.7,
-    sightRange: 12,
+    bodyH: 1.4,
+    sightRange: 14,
     fovAngle: Math.PI,
     score: 100,
     blockReward: 1,
   },
   miniboss: {
-    hp: 80,
+    hp: 150,
     speed: 1.28,
-    attackDamage: 5,
+    attackDamage: 12,
     attackInterval: 2500,
     attackRange: 2.0,
     fireRange: 14,
-    fireInterval: 2500,
-    fireDamage: 5,
-    color: 0xff6600,
-    emissive: 0x331100,
+    fireInterval: 2200,
+    fireDamage: 12,
+    color: 0x0a1428,
+    emissive: 0x001133,
     bodyW: 0.85,
     bodyH: 2.1,
-    sightRange: 16,
+    sightRange: 18,
     fovAngle: Math.PI * 0.9,
     score: 300,
     blockReward: 3,
   },
   boss: {
-    hp: 200,
+    hp: 400,
     speed: 0.96,
-    attackDamage: 5,
+    attackDamage: 20,
     attackInterval: 2500,
     attackRange: 2.5,
     fireRange: 20,
-    fireInterval: 2500,
-    fireDamage: 5,
-    color: 0xaa00ff,
-    emissive: 0x220033,
+    fireInterval: 2000,
+    fireDamage: 20,
+    color: 0x1a0030,
+    emissive: 0x330055,
     bodyW: 1.1,
     bodyH: 2.5,
-    sightRange: 22,
+    sightRange: 24,
     fovAngle: Math.PI * 0.8,
     score: 500,
     blockReward: 8,
   },
 }
 
-interface EnemySpawnDef {
-  x: number
-  z: number
-  type: EnemyType
-  patrol: { x: number; z: number }[]
+// ── Wave system ────────────────────────────────────────────────────────────────
+interface WaveDef {
+  grunt: number
+  miniboss: number
+  boss: number
 }
-
-const ENEMY_SPAWN_DEFS: EnemySpawnDef[] = [
-  {
-    x: 2,
-    z: 2,
-    type: "grunt",
-    patrol: [
-      { x: 2, z: 2 },
-      { x: 2, z: 8 },
-      { x: 7, z: 8 },
-    ],
-  },
-  {
-    x: 13,
-    z: 3,
-    type: "grunt",
-    patrol: [
-      { x: 13, z: 3 },
-      { x: 13, z: 7 },
-      { x: 8, z: 7 },
-    ],
-  },
-  {
-    x: 26,
-    z: 2,
-    type: "grunt",
-    patrol: [
-      { x: 26, z: 2 },
-      { x: 26, z: 8 },
-      { x: 22, z: 8 },
-    ],
-  },
-  {
-    x: 1,
-    z: 18,
-    type: "grunt",
-    patrol: [
-      { x: 1, z: 18 },
-      { x: 4, z: 18 },
-      { x: 4, z: 25 },
-    ],
-  },
-  {
-    x: 11,
-    z: 20,
-    type: "miniboss",
-    patrol: [
-      { x: 11, z: 20 },
-      { x: 11, z: 25 },
-      { x: 16, z: 25 },
-    ],
-  },
-  {
-    x: 23,
-    z: 24,
-    type: "miniboss",
-    patrol: [
-      { x: 23, z: 24 },
-      { x: 28, z: 24 },
-      { x: 28, z: 19 },
-    ],
-  },
-  {
-    x: 16,
-    z: 14,
-    type: "boss",
-    patrol: [
-      { x: 16, z: 14 },
-      { x: 16, z: 20 },
-      { x: 20, z: 20 },
-      { x: 20, z: 14 },
-    ],
-  },
+const WAVE_DEFS: WaveDef[] = [
+  { grunt: 5, miniboss: 0, boss: 0 },
+  { grunt: 5, miniboss: 2, boss: 0 },
+  { grunt: 3, miniboss: 2, boss: 1 },
+]
+const SPAWN_POINTS = [
+  { x: 1.5, z: 1.5 },
+  { x: 16, z: 1.5 },
+  { x: 30, z: 1.5 },
+  { x: 30, z: 16 },
+  { x: 30, z: 30 },
+  { x: 16, z: 30 },
+  { x: 1.5, z: 30 },
+  { x: 1.5, z: 16 },
+  { x: 8, z: 8 },
+  { x: 24, z: 8 },
+  { x: 8, z: 24 },
+  { x: 24, z: 24 },
 ]
 
 function enemyCanSee(
@@ -449,9 +394,9 @@ function canvasToTile(x: number, y: number) {
 
 // ── Zone definitions ───────────────────────────────────────────────────────────
 const ZONES = [
-  { startTX: 0, endTX: 9, color: 0x0d2545 },
-  { startTX: 10, endTX: 21, color: 0x0d2e13 },
-  { startTX: 22, endTX: 31, color: 0x1a0d38 },
+  { startTX: 0, endTX: 9, color: 0x05080f },
+  { startTX: 10, endTX: 21, color: 0x080808 },
+  { startTX: 22, endTX: 31, color: 0x0a0514 },
 ]
 
 // ── Block colors ───────────────────────────────────────────────────────────────
@@ -548,6 +493,14 @@ interface BloodParticle {
   maxLife: number
 }
 
+interface ExplosionParticle {
+  mesh: THREE.Mesh
+  velocity: THREE.Vector3
+  life: number
+  maxLife: number
+  isSpark: boolean
+}
+
 // ── XP helper ─────────────────────────────────────────────────────────────────
 function computeXpProgress(totalXp: number) {
   let level = 0
@@ -581,6 +534,7 @@ interface SceneRefs {
   bloodParticles: BloodParticle[]
   muzzleLight: THREE.PointLight
   aimedEnemyId: string | null
+  explosionParticles: ExplosionParticle[]
 }
 
 export default function ThreeWorld() {
@@ -613,6 +567,11 @@ export default function ThreeWorld() {
   const lastKillTimeRef = useRef(0)
   const killStreakTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const reloadStartTimeRef = useRef<number | null>(null)
+  // Wave system refs
+  const currentWaveRef = useRef(-1)
+  const waveActiveRef = useRef(false)
+  const missionCompleteRef = useRef(false)
+  const spawnWaveRef = useRef<((waveIdx: number) => void) | null>(null)
 
   // Combat refs
   const recoilRef = useRef(0)
@@ -662,6 +621,11 @@ export default function ThreeWorld() {
   const [damageFlash, setDamageFlash] = useState(false)
   const [killStreakMsg, setKillStreakMsg] = useState<string | null>(null)
   const [headshotMsg, setHeadshotMsg] = useState(false)
+  // Cyberpunk / wave state
+  const [showBriefing, setShowBriefing] = useState(true)
+  const [currentWave, setCurrentWave] = useState(0)
+  const [waveMessage, setWaveMessage] = useState<string | null>(null)
+  const [missionComplete, setMissionComplete] = useState(false)
 
   useEffect(() => {
     selectedBlockRef.current = selectedBlock
@@ -855,8 +819,8 @@ export default function ThreeWorld() {
 
       // ── Scene ──────────────────────────────────────────────────────────────
       const scene = new THREE.Scene()
-      scene.background = new THREE.Color(0x050510)
-      scene.fog = new THREE.Fog(0x050510, 30, 80)
+      scene.background = new THREE.Color(0x020208)
+      scene.fog = new THREE.Fog(0x020208, 25, 70)
 
       // ── Camera (FPS) ───────────────────────────────────────────────────────
       const camera = new THREE.PerspectiveCamera(
@@ -918,29 +882,42 @@ export default function ThreeWorld() {
       groundPlane.position.set((MAP_SIZE / 2) * TILE_UNIT, 0, (MAP_SIZE / 2) * TILE_UNIT)
       scene.add(groundPlane)
 
-      // ── Map walls ──────────────────────────────────────────────────────────────
+      // ── Cyberpunk ruins / buildings ────────────────────────────────────────
       const wallMeshes: THREE.Mesh[] = []
-      const wallMat = new THREE.MeshLambertMaterial({ color: 0x445566 })
-      const wallMatAccent = new THREE.MeshLambertMaterial({ color: 0x334455 })
+      const wallMatRuin = new THREE.MeshLambertMaterial({ color: 0x111118, emissive: 0x000011 })
+      const wallMatServer = new THREE.MeshLambertMaterial({ color: 0x0a1020, emissive: 0x001122 })
+      const wallMatPillar = new THREE.MeshLambertMaterial({ color: 0x150a22, emissive: 0x110033 })
       for (const [wx, wz, ww, wd] of WALL_DEFS) {
-        const wallH = ww === 1 && wd === 1 ? 1.2 : 3.0
+        const isPillar = ww === 1 && wd === 1
+        const isServerRack = ww * wd <= 6 && !isPillar
+        const wallH = isPillar ? 2.0 : ww * wd > 8 ? 4.5 : 3.2
+        const mat = isPillar ? wallMatPillar : isServerRack ? wallMatServer : wallMatRuin
         const geo = new THREE.BoxGeometry(ww, wallH, wd)
-        const mesh = new THREE.Mesh(geo, ww * wd > 4 ? wallMat : wallMatAccent)
+        const mesh = new THREE.Mesh(geo, mat)
         mesh.position.set(wx + ww / 2, wallH / 2, wz + wd / 2)
         mesh.castShadow = true
         mesh.receiveShadow = true
         scene.add(mesh)
         wallMeshes.push(mesh)
+        // Neon trim strip on large buildings
+        if (!isPillar && ww * wd > 4) {
+          const trimColor = isServerRack ? 0x0088ff : 0x00ffaa
+          const trimGeo = new THREE.BoxGeometry(ww + 0.02, 0.06, wd + 0.02)
+          const trimMat = new THREE.MeshBasicMaterial({ color: trimColor })
+          const trim = new THREE.Mesh(trimGeo, trimMat)
+          trim.position.set(wx + ww / 2, wallH - 0.03, wz + wd / 2)
+          scene.add(trim)
+        }
       }
 
-      // ── Cover objects (crates, barriers, cars) ─────────────────────────────
-      const crateMatCover = new THREE.MeshLambertMaterial({ color: 0x8b5a2b })
-      const barrierMat = new THREE.MeshLambertMaterial({ color: 0x556677 })
-      const carMat = new THREE.MeshLambertMaterial({ color: 0x3a4a3a })
+      // ── Cyberpunk cover: server racks / wrecked vehicles / barriers ────────
+      const serverRackMat = new THREE.MeshLambertMaterial({ color: 0x0a0f1a, emissive: 0x001133 })
+      const vehicleMat = new THREE.MeshLambertMaterial({ color: 0x1a1008, emissive: 0x110500 })
+      const barrierMat = new THREE.MeshLambertMaterial({ color: 0x0d1520, emissive: 0x002233 })
       for (const [cx, cz, cw, cd, ch] of COVER_DEFS) {
         const isCar = cw >= 1.5 || cd >= 1.5
         const isBarrier = (cw >= 2.0 || cd >= 2.0) && ch < 0.9
-        const coverMeshMat = isCar ? carMat : isBarrier ? barrierMat : crateMatCover
+        const coverMeshMat = isCar ? vehicleMat : isBarrier ? barrierMat : serverRackMat
         const geo = new THREE.BoxGeometry(cw, ch, cd)
         const mesh = new THREE.Mesh(geo, coverMeshMat)
         mesh.position.set(cx + cw / 2, ch / 2, cz + cd / 2)
@@ -948,6 +925,14 @@ export default function ThreeWorld() {
         mesh.receiveShadow = true
         scene.add(mesh)
         wallMeshes.push(mesh)
+        // Server rack: LED indicator strip
+        if (!isCar && !isBarrier) {
+          const ledGeo = new THREE.BoxGeometry(cw * 0.6, 0.04, 0.02)
+          const ledMat = new THREE.MeshBasicMaterial({ color: 0x00ff88 })
+          const led = new THREE.Mesh(ledGeo, ledMat)
+          led.position.set(cx + cw / 2, ch * 0.8, cz + cd + 0.01)
+          scene.add(led)
+        }
       }
 
       // ── FPS camera state ───────────────────────────────────────────────────
@@ -1006,44 +991,148 @@ export default function ThreeWorld() {
       const muzzleLight = new THREE.PointLight(0xffee44, 0, 5)
       scene.add(muzzleLight)
 
-      // ── AI Enemies ─────────────────────────────────────────────────────────
-      const enemies: CombatEnemy[] = ENEMY_SPAWN_DEFS.map((def, i) => {
-        const cfg = ENEMY_CONFIGS[def.type]
-        const geo = new THREE.BoxGeometry(cfg.bodyW, cfg.bodyH, cfg.bodyW)
-        const mat = new THREE.MeshLambertMaterial({ color: cfg.color, emissive: cfg.emissive })
-        const mesh = new THREE.Mesh(geo, mat)
-        mesh.position.set(def.x, cfg.bodyH / 2, def.z)
+      // ── Cyberpunk enemy factory ────────────────────────────────────────────
+      let enemyIdCounter = 0
+      function makeEnemy(type: EnemyType, x: number, z: number): CombatEnemy {
+        const cfg = ENEMY_CONFIGS[type]
+        const bodyDepth = type === "grunt" ? cfg.bodyW * 0.55 : cfg.bodyW
+        const bodyGeo = new THREE.BoxGeometry(cfg.bodyW, cfg.bodyH, bodyDepth)
+        const bodyMat = new THREE.MeshLambertMaterial({ color: cfg.color, emissive: cfg.emissive })
+        const mesh = new THREE.Mesh(bodyGeo, bodyMat)
+        mesh.position.set(x, cfg.bodyH / 2, z)
         mesh.castShadow = true
         scene.add(mesh)
-        const eyeGeo = new THREE.BoxGeometry(cfg.bodyW * 0.44, cfg.bodyH * 0.036, 0.05)
-        const eyeMat = new THREE.MeshBasicMaterial({ color: 0xff8800 })
-        const eyes = new THREE.Mesh(eyeGeo, eyeMat)
-        eyes.position.set(0, cfg.bodyH * 0.27, cfg.bodyW / 2 + 0.01)
-        mesh.add(eyes)
+
+        if (type === "grunt") {
+          // AI Drone: 4 legs + red LED eye
+          const legMat = new THREE.MeshLambertMaterial({ color: 0x080810, emissive: 0x110000 })
+          for (let li = 0; li < 4; li++) {
+            const legGeo = new THREE.BoxGeometry(0.04, 0.42, 0.04)
+            const leg = new THREE.Mesh(legGeo, legMat)
+            leg.position.set(
+              (li < 2 ? -1 : 1) * 0.22,
+              -cfg.bodyH * 0.4,
+              (li % 2 === 0 ? 1 : -1) * 0.14,
+            )
+            mesh.add(leg)
+          }
+          const eyeGeo = new THREE.BoxGeometry(cfg.bodyW * 0.68, 0.05, 0.03)
+          const eyeMat = new THREE.MeshBasicMaterial({ color: 0xff0000 })
+          const eye = new THREE.Mesh(eyeGeo, eyeMat)
+          eye.position.set(0, cfg.bodyH * 0.23, bodyDepth / 2 + 0.02)
+          mesh.add(eye)
+          const glow = new THREE.PointLight(0xff0000, 0.5, 2.5)
+          mesh.add(glow)
+        } else if (type === "miniboss") {
+          // Heavy Robot: shoulder pads + blue visor
+          const shoulderMat = new THREE.MeshLambertMaterial({ color: 0x1a2535, emissive: 0x001133 })
+          for (const sx of [-cfg.bodyW * 0.62, cfg.bodyW * 0.62]) {
+            const s = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.28, 0.5), shoulderMat)
+            s.position.set(sx, cfg.bodyH * 0.28, 0)
+            mesh.add(s)
+          }
+          const visor = new THREE.Mesh(
+            new THREE.BoxGeometry(cfg.bodyW * 0.72, 0.07, 0.03),
+            new THREE.MeshBasicMaterial({ color: 0x00aaff }),
+          )
+          visor.position.set(0, cfg.bodyH * 0.27, cfg.bodyW / 2 + 0.02)
+          mesh.add(visor)
+          const glow = new THREE.PointLight(0x0066ff, 0.7, 4)
+          mesh.add(glow)
+        } else {
+          // Boss: AI Core with tentacle arms + spine shards + magenta eye
+          const armMat = new THREE.MeshLambertMaterial({ color: 0x2a0050, emissive: 0x220044 })
+          for (let ai = 0; ai < 4; ai++) {
+            const angle = (ai / 4) * Math.PI * 2
+            const arm = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.14, 0.95), armMat)
+            arm.position.set(Math.cos(angle) * 0.75, cfg.bodyH * 0.06, Math.sin(angle) * 0.75)
+            arm.rotation.y = angle
+            mesh.add(arm)
+          }
+          const spineMat = new THREE.MeshLambertMaterial({ color: 0x440088, emissive: 0x330066 })
+          for (let si = 0; si < 4; si++) {
+            const angle = (si / 4) * Math.PI * 2 + Math.PI / 4
+            const spine = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.38, 0.1), spineMat)
+            spine.position.set(Math.cos(angle) * 0.5, cfg.bodyH * 0.26, Math.sin(angle) * 0.5)
+            mesh.add(spine)
+          }
+          const eye = new THREE.Mesh(
+            new THREE.BoxGeometry(cfg.bodyW * 0.52, 0.07, 0.03),
+            new THREE.MeshBasicMaterial({ color: 0xff00ff }),
+          )
+          eye.position.set(0, cfg.bodyH * 0.18, cfg.bodyW / 2 + 0.02)
+          mesh.add(eye)
+          const glow = new THREE.PointLight(0xaa00ff, 1.2, 6)
+          mesh.add(glow)
+        }
+
+        const patrol = [
+          { x, z },
+          {
+            x: Math.max(2, Math.min(MAP_SIZE - 2, x + 5)),
+            z: Math.max(2, Math.min(MAP_SIZE - 2, z + 5)),
+          },
+          {
+            x: Math.max(2, Math.min(MAP_SIZE - 2, x - 5)),
+            z: Math.max(2, Math.min(MAP_SIZE - 2, z + 5)),
+          },
+          {
+            x: Math.max(2, Math.min(MAP_SIZE - 2, x - 5)),
+            z: Math.max(2, Math.min(MAP_SIZE - 2, z - 5)),
+          },
+        ]
         return {
-          id: `enemy_${i}`,
+          id: `enemy_${enemyIdCounter++}`,
           mesh,
           hp: cfg.hp,
           maxHp: cfg.hp,
-          type: def.type,
+          type,
           config: cfg,
           state: "patrol" as EnemyState,
-          patrolWaypoints: def.patrol,
+          patrolWaypoints: patrol,
           patrolIndex: 0,
           lastAttackTime: 0,
           lastFireTime: 0,
           facing: new THREE.Vector3(0, 0, 1),
           lastSeenPlayer: null,
           searchTimer: 0,
-          respawnTimer: 0,
-          spawnX: def.x,
-          spawnZ: def.z,
+          respawnTimer: ENEMY_NO_RESPAWN,
+          spawnX: x,
+          spawnZ: z,
           dyingTimer: -1,
         }
-      })
+      }
+
+      // ── Wave spawner ───────────────────────────────────────────────────────
+      const enemies: CombatEnemy[] = []
+      function spawnWave(waveIdx: number) {
+        for (const e of enemies) scene.remove(e.mesh)
+        enemies.length = 0
+        const def = WAVE_DEFS[waveIdx]
+        if (!def) return
+        const types: EnemyType[] = [
+          ...Array<EnemyType>(def.grunt).fill("grunt"),
+          ...Array<EnemyType>(def.miniboss).fill("miniboss"),
+          ...Array<EnemyType>(def.boss).fill("boss"),
+        ]
+        const shuffled = [...SPAWN_POINTS].sort(() => Math.random() - 0.5)
+        for (let i = 0; i < types.length; i++) {
+          const sp = shuffled[i % shuffled.length] ?? shuffled[0]
+          if (!sp) continue
+          const type = types[i] ?? "grunt"
+          const x = Math.max(1.5, Math.min(MAP_SIZE - 1.5, sp.x + (Math.random() - 0.5) * 2))
+          const z = Math.max(1.5, Math.min(MAP_SIZE - 1.5, sp.z + (Math.random() - 0.5) * 2))
+          enemies.push(makeEnemy(type, x, z))
+        }
+        setEnemyStatus(
+          enemies.map((e) => ({ id: e.id, hp: e.hp, maxHp: e.maxHp, type: e.type, alive: true })),
+        )
+      }
+      spawnWaveRef.current = spawnWave
 
       const bullets: Bullet[] = []
       const bloodParticles: BloodParticle[] = []
+      const explosionParticles: ExplosionParticle[] = []
 
       sceneRef.current = {
         scene,
@@ -1064,11 +1153,10 @@ export default function ThreeWorld() {
         bloodParticles,
         muzzleLight,
         aimedEnemyId: null,
+        explosionParticles,
       }
 
-      setEnemyStatus(
-        enemies.map((e) => ({ id: e.id, hp: e.hp, maxHp: e.maxHp, type: e.type, alive: true })),
-      )
+      setEnemyStatus([])
 
       fetch(`${API_URL}/api/me`, { credentials: "include" })
         .then((r) => r.json() as Promise<{ data?: { user?: { id?: string } } }>)
@@ -1201,6 +1289,36 @@ export default function ThreeWorld() {
             velocity: vel,
             life: PARTICLE_LIFETIME,
             maxLife: PARTICLE_LIFETIME,
+          })
+        }
+      }
+
+      // ── Spawn explosion / spark particles ─────────────────────────────────
+      function spawnExplosion(pos: THREE.Vector3, isSpark = false) {
+        const refs = sceneRef.current
+        if (!refs) return
+        const count = isSpark ? 6 : 18
+        const lifetime = isSpark ? 0.28 : 0.75
+        const speed = isSpark ? 5 : 3.5
+        for (let i = 0; i < count; i++) {
+          const size = isSpark ? 0.03 : 0.06 + Math.random() * 0.1
+          const color = isSpark ? 0xffaa00 : i % 2 === 0 ? 0xff6600 : 0xffcc00
+          const geo = new THREE.BoxGeometry(size, size, size)
+          const mat = new THREE.MeshBasicMaterial({ color })
+          const mesh = new THREE.Mesh(geo, mat)
+          mesh.position.copy(pos)
+          scene.add(mesh)
+          const vel = new THREE.Vector3(
+            (Math.random() - 0.5) * speed * 2,
+            Math.random() * speed + 1,
+            (Math.random() - 0.5) * speed * 2,
+          )
+          refs.explosionParticles.push({
+            mesh,
+            velocity: vel,
+            life: lifetime * (0.5 + Math.random() * 0.5),
+            maxLife: lifetime,
+            isSpark,
           })
         }
       }
@@ -1508,9 +1626,29 @@ export default function ThreeWorld() {
             }
           }
           if (b.life <= 0) {
+            if (!b.isEnemy) spawnExplosion(b.mesh.position.clone(), true)
             refs.scene.remove(b.mesh)
             b.mesh.geometry.dispose()
             refs.bullets.splice(i, 1)
+          }
+        }
+
+        // ── Explosion particles ────────────────────────────────────────────
+        for (let i = refs.explosionParticles.length - 1; i >= 0; i--) {
+          const p = refs.explosionParticles[i]
+          if (!p) continue
+          p.velocity.y -= 12 * dt
+          p.mesh.position.addScaledVector(p.velocity, dt)
+          p.life -= dt
+          const alpha = Math.max(0, p.life / p.maxLife)
+          const mat = p.mesh.material as THREE.MeshBasicMaterial
+          mat.transparent = true
+          mat.opacity = alpha
+          if (!p.isSpark) p.mesh.scale.setScalar(0.4 + (1 - alpha) * 1.2)
+          if (p.life <= 0) {
+            refs.scene.remove(p.mesh)
+            p.mesh.geometry.dispose()
+            refs.explosionParticles.splice(i, 1)
           }
         }
 
@@ -1546,35 +1684,28 @@ export default function ThreeWorld() {
                 enemy.mesh.position.y =
                   (enemy.config.bodyH / 2) * Math.cos((progress * Math.PI) / 2)
                 const opacity = enemy.dyingTimer < 1.0 ? enemy.dyingTimer : 1.0
-                const mat = enemy.mesh.material as THREE.MeshLambertMaterial
-                mat.transparent = true
-                mat.opacity = opacity
+                enemy.mesh.traverse((child) => {
+                  if (child instanceof THREE.Mesh) {
+                    const m = child.material as THREE.MeshLambertMaterial | THREE.MeshBasicMaterial
+                    m.transparent = true
+                    m.opacity = opacity
+                  }
+                })
                 if (enemy.dyingTimer <= 0) {
+                  spawnExplosion(enemy.mesh.position.clone())
                   enemy.dyingTimer = -1
                   enemy.mesh.visible = false
-                  mat.opacity = 1
-                  mat.transparent = false
+                  enemy.mesh.traverse((child) => {
+                    if (child instanceof THREE.Mesh) {
+                      const m = child.material as
+                        | THREE.MeshLambertMaterial
+                        | THREE.MeshBasicMaterial
+                      m.opacity = 1
+                      m.transparent = false
+                    }
+                  })
                   enemy.mesh.rotation.x = 0
-                  enemy.respawnTimer = ENEMY_RESPAWN_SEC
-                }
-              } else {
-                enemy.respawnTimer -= dt
-                if (enemy.respawnTimer <= 0) {
-                  enemy.hp = enemy.maxHp
-                  enemy.mesh.visible = true
-                  enemy.mesh.position.set(enemy.spawnX, enemy.config.bodyH / 2, enemy.spawnZ)
-                  enemy.mesh.rotation.x = 0
-                  enemy.state = "patrol"
-                  enemy.patrolIndex = 0
-                  setEnemyStatus(
-                    refs.enemies.map((e) => ({
-                      id: e.id,
-                      hp: e.hp,
-                      maxHp: e.maxHp,
-                      type: e.type,
-                      alive: e.hp > 0,
-                    })),
-                  )
+                  enemy.respawnTimer = ENEMY_NO_RESPAWN
                 }
               }
               continue
@@ -1658,8 +1789,8 @@ export default function ThreeWorld() {
               ) {
                 enemy.lastFireTime = now
                 const fwd = new THREE.Vector3(toPx / distToPlayer, 0, toPz / distToPlayer)
-                fwd.x += (Math.random() - 0.5) * 0.12
-                fwd.z += (Math.random() - 0.5) * 0.12
+                fwd.x += (Math.random() - 0.5) * 0.06
+                fwd.z += (Math.random() - 0.5) * 0.06
                 fwd.normalize()
                 const bGeo = new THREE.BoxGeometry(0.04, 0.04, 0.22)
                 const bMat = new THREE.MeshBasicMaterial({ color: 0xff4400 })
@@ -1705,7 +1836,7 @@ export default function ThreeWorld() {
               ) {
                 enemy.lastFireTime = now
                 const fwd = new THREE.Vector3(toPx / distToPlayer, 0, toPz / distToPlayer)
-                const spread = 0.06
+                const spread = 0.03
                 fwd.x += (Math.random() - 0.5) * spread
                 fwd.z += (Math.random() - 0.5) * spread
                 fwd.normalize()
@@ -1766,6 +1897,29 @@ export default function ThreeWorld() {
           if (newAimed !== refs.aimedEnemyId) {
             refs.aimedEnemyId = newAimed
             setAimedEnemyId(newAimed)
+          }
+        }
+
+        // ── Wave completion check ──────────────────────────────────────────
+        if (waveActiveRef.current && !missionCompleteRef.current && refs.enemies.length > 0) {
+          const allDead = refs.enemies.every((e) => e.hp <= 0 && e.dyingTimer < 0)
+          if (allDead) {
+            waveActiveRef.current = false
+            const nextIdx = currentWaveRef.current + 1
+            if (nextIdx >= WAVE_DEFS.length) {
+              missionCompleteRef.current = true
+              setMissionComplete(true)
+              SOUNDS.clear()
+            } else {
+              currentWaveRef.current = nextIdx
+              setCurrentWave(nextIdx + 1)
+              setWaveMessage(`WAVE ${nextIdx + 1} INCOMING`)
+              setTimeout(() => {
+                setWaveMessage(null)
+                spawnWaveRef.current?.(nextIdx)
+                waveActiveRef.current = true
+              }, 3000)
+            }
           }
         }
 
@@ -3043,53 +3197,311 @@ export default function ThreeWorld() {
           </div>
         )}
 
-        {/* CLICK TO PLAY overlay */}
-        {!isMobile && !isLoading && !error && !isPointerLocked && gamePhase !== "gameover" && (
-          <button
-            type="button"
-            onClick={() => rendererDomRef.current?.requestPointerLock()}
+        {/* CRT scanline overlay */}
+        {!isLoading && !error && (
+          <div
             style={{
               position: "absolute",
               inset: 0,
-              width: "100%",
-              height: "100%",
+              backgroundImage:
+                "repeating-linear-gradient(0deg, transparent, transparent 3px, rgba(0,0,0,0.18) 3px, rgba(0,0,0,0.18) 4px)",
+              pointerEvents: "none",
+              zIndex: 4,
+            }}
+          />
+        )}
+
+        {/* Briefing screen */}
+        {showBriefing && !isLoading && !error && (
+          <div
+            style={{
+              position: "absolute",
+              inset: 0,
+              background: "rgba(0,0,0,0.92)",
               display: "flex",
               flexDirection: "column",
               alignItems: "center",
               justifyContent: "center",
-              gap: "1rem",
-              background: "rgba(0,0,0,0.62)",
-              cursor: "pointer",
-              border: "none",
+              gap: "1.6rem",
+              zIndex: 50,
               fontFamily: "monospace",
-              zIndex: 40,
+            }}
+          >
+            <div
+              style={{ color: "#00ffaa", fontSize: "0.7rem", letterSpacing: "0.4em", opacity: 0.7 }}
+            >
+              CLASSIFIED {/* RESISTANCE OPS */}
+            </div>
+            <div
+              style={{
+                color: "#ff3333",
+                fontSize: "1.8rem",
+                fontWeight: "bold",
+                letterSpacing: "0.3em",
+                textShadow: "0 0 30px rgba(255,0,80,0.8)",
+              }}
+            >
+              MISSION BRIEFING
+            </div>
+            <div
+              style={{
+                maxWidth: "480px",
+                textAlign: "center",
+                lineHeight: 2,
+                color: "rgba(255,255,255,0.82)",
+                fontSize: "0.82rem",
+                letterSpacing: "0.06em",
+                border: "1px solid rgba(0,255,170,0.2)",
+                padding: "1.2rem 1.8rem",
+                background: "rgba(0,255,170,0.03)",
+              }}
+            >
+              <span style={{ color: "#00ffaa" }}>2087年。</span>巨大企業 AI
+              コーポレーションが世界を支配している。
+              <br />
+              あなたはレジスタンスの特殊工作員。
+              <br />
+              AI コーポレーションの軍事 AI ドローンを撃破し、
+              <br />
+              <span style={{ color: "#ff3333" }}>データセンターを解放せよ。</span>
+            </div>
+            <div
+              style={{
+                color: "rgba(255,255,255,0.35)",
+                fontSize: "0.62rem",
+                letterSpacing: "0.15em",
+              }}
+            >
+              WAVE 1 → grunt ×5 &nbsp;|&nbsp; WAVE 2 → grunt ×5 + miniboss ×2 &nbsp;|&nbsp; WAVE 3 →
+              grunt ×3 + miniboss ×2 + boss ×1
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                rendererDomRef.current?.requestPointerLock()
+                setShowBriefing(false)
+                currentWaveRef.current = 0
+                setCurrentWave(1)
+                setWaveMessage("WAVE 1 INCOMING")
+                setTimeout(() => {
+                  setWaveMessage(null)
+                  spawnWaveRef.current?.(0)
+                  waveActiveRef.current = true
+                }, 3000)
+              }}
+              style={{
+                background: "rgba(255,0,80,0.12)",
+                border: "1px solid rgba(255,0,80,0.7)",
+                color: "#ff3355",
+                fontFamily: "monospace",
+                fontSize: "1rem",
+                letterSpacing: "0.3em",
+                padding: "0.7rem 2.5rem",
+                cursor: "pointer",
+                textShadow: "0 0 12px rgba(255,0,80,0.6)",
+              }}
+            >
+              BEGIN MISSION
+            </button>
+            <div
+              style={{
+                color: "rgba(255,255,255,0.2)",
+                fontSize: "0.58rem",
+                letterSpacing: "0.12em",
+              }}
+            >
+              WASD: MOVE · SHIFT: SPRINT · LMB: FIRE · R: RELOAD · 1/2/3: WEAPON
+            </div>
+          </div>
+        )}
+
+        {/* CLICK TO PLAY overlay (after briefing dismissed, pointer not locked) */}
+        {!isMobile &&
+          !isLoading &&
+          !error &&
+          !isPointerLocked &&
+          !showBriefing &&
+          gamePhase !== "gameover" &&
+          !missionComplete && (
+            <button
+              type="button"
+              onClick={() => rendererDomRef.current?.requestPointerLock()}
+              style={{
+                position: "absolute",
+                inset: 0,
+                width: "100%",
+                height: "100%",
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: "1rem",
+                background: "rgba(0,0,0,0.62)",
+                cursor: "pointer",
+                border: "none",
+                fontFamily: "monospace",
+                zIndex: 40,
+              }}
+            >
+              <div
+                style={{
+                  color: "#00ffaa",
+                  fontSize: "1.6rem",
+                  fontWeight: "bold",
+                  letterSpacing: "0.4em",
+                  textShadow: "0 0 20px rgba(0,255,170,0.6)",
+                }}
+              >
+                CLICK TO RESUME
+              </div>
+              <div
+                style={{
+                  color: "rgba(255,255,255,0.35)",
+                  fontSize: "0.62rem",
+                  letterSpacing: "0.15em",
+                }}
+              >
+                WAVE {currentWave} / {WAVE_DEFS.length}
+              </div>
+            </button>
+          )}
+
+        {/* Wave message */}
+        {waveMessage && (
+          <div
+            style={{
+              position: "absolute",
+              top: "38%",
+              left: "50%",
+              transform: "translateX(-50%)",
+              zIndex: 45,
+              pointerEvents: "none",
+              fontFamily: "monospace",
+              fontSize: "2.4rem",
+              fontWeight: "bold",
+              color: "#ff3333",
+              letterSpacing: "0.25em",
+              textShadow: "0 0 30px rgba(255,0,0,0.9), 0 0 60px rgba(255,0,0,0.4)",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {waveMessage}
+          </div>
+        )}
+
+        {/* Current wave indicator (top-center, small) */}
+        {!isLoading && !error && !showBriefing && gamePhase === "playing" && currentWave > 0 && (
+          <div
+            style={{
+              position: "absolute",
+              top: "0.4rem",
+              left: "50%",
+              transform: "translateX(-50%)",
+              zIndex: 22,
+              pointerEvents: "none",
+              fontFamily: "monospace",
+              fontSize: "0.6rem",
+              letterSpacing: "0.2em",
+              color: "rgba(255,50,50,0.6)",
+            }}
+          >
+            WAVE {currentWave} / {WAVE_DEFS.length}
+          </div>
+        )}
+
+        {/* Mission Complete */}
+        {missionComplete && (
+          <div
+            style={{
+              position: "absolute",
+              inset: 0,
+              background: "rgba(0,0,0,0.92)",
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: "1.5rem",
+              zIndex: 60,
+              fontFamily: "monospace",
             }}
           >
             <div
               style={{
-                color: "white",
-                fontSize: "2rem",
+                color: "#00ffaa",
+                fontSize: "3rem",
                 fontWeight: "bold",
-                letterSpacing: "0.4em",
-                textShadow: "0 0 30px rgba(255,255,255,0.7)",
+                letterSpacing: "0.3em",
+                textShadow: "0 0 40px rgba(0,255,170,0.8)",
               }}
             >
-              CLICK TO PLAY
+              MISSION COMPLETE
             </div>
             <div
               style={{
-                color: "rgba(255,255,255,0.45)",
-                fontSize: "0.68rem",
-                letterSpacing: "0.18em",
-                textAlign: "center",
-                lineHeight: 1.8,
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                gap: "0.4rem",
+                border: "1px solid rgba(0,255,170,0.3)",
+                padding: "1rem 2.5rem",
               }}
             >
-              WASD: MOVE · SHIFT: SPRINT · MOUSE: AIM
-              <br />
-              LMB: FIRE · R: RELOAD · 1/2/3: WEAPON · RMB: DESTROY BLOCK
+              <div
+                style={{
+                  color: "rgba(0,255,170,0.7)",
+                  fontSize: "0.72rem",
+                  letterSpacing: "0.22em",
+                }}
+              >
+                FINAL SCORE
+              </div>
+              <div
+                style={{
+                  color: "#ffcc00",
+                  fontSize: "2.8rem",
+                  fontWeight: "bold",
+                  letterSpacing: "0.15em",
+                }}
+              >
+                {score.toString().padStart(6, "0")}
+              </div>
+              <div style={{ color: "rgba(255,255,255,0.35)", fontSize: "0.7rem" }}>
+                KILLS: {kills} · WAVES CLEARED: {WAVE_DEFS.length}
+              </div>
             </div>
-          </button>
+            <div style={{ display: "flex", gap: "1rem" }}>
+              <button
+                type="button"
+                onClick={() => window.location.reload()}
+                style={{
+                  background: "rgba(0,255,170,0.1)",
+                  border: "1px solid rgba(0,255,170,0.6)",
+                  color: "#00ffaa",
+                  fontFamily: "monospace",
+                  fontSize: "0.9rem",
+                  letterSpacing: "0.2em",
+                  padding: "0.6rem 1.8rem",
+                  cursor: "pointer",
+                }}
+              >
+                PLAY AGAIN
+              </button>
+              <a
+                href="/dungeon"
+                style={{
+                  border: "1px solid rgba(255,255,255,0.15)",
+                  color: "rgba(255,255,255,0.38)",
+                  fontFamily: "monospace",
+                  fontSize: "0.9rem",
+                  letterSpacing: "0.2em",
+                  padding: "0.6rem 1.8rem",
+                  textDecoration: "none",
+                }}
+              >
+                DUNGEON
+              </a>
+            </div>
+          </div>
         )}
 
         {/* Crosshair */}
