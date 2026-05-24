@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import * as THREE from "three"
 
 // ── Constants ──────────────────────────────────────────────────────────────────
-const MAP_SIZE = 96
+const MAP_SIZE = 100
 const TILE_UNIT = 1
 const EYE_HEIGHT = 1.6
 const MOVE_SPEED = 6
@@ -282,6 +282,36 @@ const MAP_OBJECTS: [number, number, number, number, number][] = [
   [73, 78, 1, 1, 4],
   [81, 80, 1, 1, 4],
   [88, 76, 1, 1, 4],
+  // ── Additional cover (phase2 expansion to 100x100) ─────────────────────────
+  // Outer perimeter ruins
+  [90, 6, 4, 5, 0],
+  [90, 24, 5, 4, 0],
+  [91, 42, 4, 6, 0],
+  [90, 60, 5, 5, 0],
+  [91, 78, 4, 6, 0],
+  [92, 91, 5, 5, 0],
+  // Additional sandbag barricades
+  [38, 25, 4, 0.5, 2],
+  [50, 38, 0.5, 4, 2],
+  [38, 50, 4, 0.5, 2],
+  [50, 62, 0.5, 4, 2],
+  [40, 75, 4, 0.5, 2],
+  // Extra tanks and pipes in industrial
+  [54, 16, 1.5, 1.5, 3],
+  [54, 50, 1.5, 1.5, 3],
+  [54, 80, 1.5, 1.5, 3],
+  // Additional trenches in outdoor zone
+  [72, 92, 14, 1, 5],
+  [76, 76, 1, 8, 5],
+  // Wrecked vehicles scattered
+  [40, 28, 2, 1, 1],
+  [55, 50, 1, 2, 1],
+  [70, 30, 2, 1, 1],
+  [80, 55, 1, 2, 1],
+  // Extra rubble buildings outer ring
+  [3, 90, 8, 6, 0],
+  [15, 91, 7, 5, 0],
+  [25, 92, 6, 5, 0],
 ]
 
 // WALL_DEFS for backward compat (minimap, cover AI)
@@ -311,7 +341,7 @@ function collidesWithWall(px: number, pz: number, radius: number): boolean {
 }
 
 // ── Enemy type system ──────────────────────────────────────────────────────────
-type EnemyType = "grunt" | "miniboss" | "boss"
+type EnemyType = "grunt" | "sniper" | "heavy"
 type EnemyState = "patrol" | "alert" | "attack" | "search"
 
 interface EnemyConfig {
@@ -352,74 +382,74 @@ const ENEMY_CONFIGS: Record<EnemyType, EnemyConfig> = {
     score: 100,
     blockReward: 1,
   },
-  miniboss: {
-    hp: 150,
-    speed: 1.5,
-    attackDamage: 18,
-    attackInterval: 2000,
-    attackRange: 2.0,
-    fireRange: 20,
-    fireInterval: 1800,
-    fireDamage: 18,
-    color: 0x222222, // dark armored
-    emissive: 0x050505,
-    bodyW: 0.65,
-    bodyH: 2.0,
-    sightRange: 22,
-    fovAngle: Math.PI * 0.9,
-    score: 300,
-    blockReward: 3,
+  sniper: {
+    hp: 90,
+    speed: 1.6,
+    attackDamage: 15,
+    attackInterval: 2200,
+    attackRange: 1.8,
+    fireRange: 38,
+    fireInterval: 2800,
+    fireDamage: 32,
+    color: 0x4a5532, // camo green-brown
+    emissive: 0x080a05,
+    bodyW: 0.55,
+    bodyH: 1.85,
+    sightRange: 36,
+    fovAngle: Math.PI * 0.7,
+    score: 220,
+    blockReward: 2,
   },
-  boss: {
-    hp: 400,
-    speed: 1.2,
-    attackDamage: 25,
-    attackInterval: 2000,
-    attackRange: 2.5,
-    fireRange: 26,
-    fireInterval: 1600,
-    fireDamage: 25,
-    color: 0x8b0000, // dark red
-    emissive: 0x200000,
-    bodyW: 0.85,
-    bodyH: 2.4,
-    sightRange: 30,
-    fovAngle: Math.PI * 0.8,
-    score: 500,
-    blockReward: 8,
+  heavy: {
+    hp: 320,
+    speed: 1.0,
+    attackDamage: 28,
+    attackInterval: 2200,
+    attackRange: 2.4,
+    fireRange: 22,
+    fireInterval: 1500,
+    fireDamage: 22,
+    color: 0x1a1a1a, // matte black
+    emissive: 0x040404,
+    bodyW: 0.8,
+    bodyH: 2.1,
+    sightRange: 24,
+    fovAngle: Math.PI * 0.85,
+    score: 480,
+    blockReward: 6,
   },
 }
 
 // ── Wave system ────────────────────────────────────────────────────────────────
 interface WaveDef {
   grunt: number
-  miniboss: number
-  boss: number
+  sniper: number
+  heavy: number
 }
 const WAVE_DEFS: WaveDef[] = [
-  { grunt: 6, miniboss: 0, boss: 0 },
-  { grunt: 6, miniboss: 2, boss: 0 },
-  { grunt: 4, miniboss: 2, boss: 0 },
-  { grunt: 4, miniboss: 3, boss: 0 },
-  { grunt: 3, miniboss: 2, boss: 1 },
+  { grunt: 6, sniper: 0, heavy: 0 },
+  { grunt: 6, sniper: 2, heavy: 0 },
+  { grunt: 4, sniper: 2, heavy: 0 },
+  { grunt: 4, sniper: 3, heavy: 0 },
+  { grunt: 3, sniper: 2, heavy: 1 },
 ]
 const SPAWN_POINTS = [
-  { x: 2, z: 2 },
-  { x: 48, z: 2 },
-  { x: 93, z: 2 },
-  { x: 93, z: 48 },
-  { x: 93, z: 93 },
-  { x: 48, z: 93 },
-  { x: 2, z: 93 },
-  { x: 2, z: 48 },
-  { x: 16, z: 16 },
-  { x: 48, z: 16 },
-  { x: 80, z: 16 },
-  { x: 16, z: 48 },
-  { x: 80, z: 48 },
-  { x: 16, z: 80 },
-  { x: 48, z: 80 },
-  { x: 80, z: 80 },
+  { x: 3, z: 3 },
+  { x: 50, z: 3 },
+  { x: 97, z: 3 },
+  { x: 97, z: 50 },
+  { x: 97, z: 97 },
+  { x: 50, z: 97 },
+  { x: 3, z: 97 },
+  { x: 3, z: 50 },
+  { x: 18, z: 18 },
+  { x: 50, z: 18 },
+  { x: 82, z: 18 },
+  { x: 18, z: 50 },
+  { x: 82, z: 50 },
+  { x: 18, z: 82 },
+  { x: 50, z: 82 },
+  { x: 82, z: 82 },
 ]
 
 // ── Mission system ─────────────────────────────────────────────────────────────
@@ -451,7 +481,7 @@ const MISSION_DEFS: MissionDef[] = [
     description: "エリアの全敵を排除せよ",
     objective: "全敵を排除",
     goalCount: 15,
-    spawnConfig: { grunt: 12, miniboss: 3, boss: 0 },
+    spawnConfig: { grunt: 12, sniper: 3, heavy: 0 },
   },
   {
     id: "defense",
@@ -459,7 +489,7 @@ const MISSION_DEFS: MissionDef[] = [
     description: "60秒間拠点を守れ",
     objective: "拠点を守る: {timer}秒",
     goalCount: 60,
-    spawnConfig: { grunt: 10, miniboss: 3, boss: 0 },
+    spawnConfig: { grunt: 10, sniper: 3, heavy: 0 },
   },
   {
     id: "sniper",
@@ -467,7 +497,7 @@ const MISSION_DEFS: MissionDef[] = [
     description: "スナイパーで敵5体を遠距離撃破",
     objective: "スナイパーキル: {progress}/5",
     goalCount: 5,
-    spawnConfig: { grunt: 10, miniboss: 0, boss: 0 },
+    spawnConfig: { grunt: 10, sniper: 0, heavy: 0 },
   },
   {
     id: "breakthrough",
@@ -475,7 +505,7 @@ const MISSION_DEFS: MissionDef[] = [
     description: "敵の包囲を突破してゴールへ到達",
     objective: "ゴールマーカーに到達せよ",
     goalCount: 1,
-    spawnConfig: { grunt: 8, miniboss: 2, boss: 0 },
+    spawnConfig: { grunt: 8, sniper: 2, heavy: 0 },
   },
   {
     id: "rescue",
@@ -483,7 +513,7 @@ const MISSION_DEFS: MissionDef[] = [
     description: "捕虜マーカーを3箇所回収",
     objective: "捕虜回収: {progress}/3",
     goalCount: 3,
-    spawnConfig: { grunt: 8, miniboss: 1, boss: 0 },
+    spawnConfig: { grunt: 8, sniper: 1, heavy: 0 },
   },
   {
     id: "destroy",
@@ -491,7 +521,7 @@ const MISSION_DEFS: MissionDef[] = [
     description: "敵司令官を3名排除",
     objective: "司令官排除: {progress}/3",
     goalCount: 3,
-    spawnConfig: { grunt: 6, miniboss: 3, boss: 0 },
+    spawnConfig: { grunt: 6, sniper: 3, heavy: 0 },
   },
   {
     id: "stealth",
@@ -499,7 +529,7 @@ const MISSION_DEFS: MissionDef[] = [
     description: "発見されずにゴールへ到達",
     objective: "ステルス侵入中 — 発見禁止",
     goalCount: 1,
-    spawnConfig: { grunt: 8, miniboss: 0, boss: 0 },
+    spawnConfig: { grunt: 8, sniper: 0, heavy: 0 },
   },
   {
     id: "capture",
@@ -507,7 +537,7 @@ const MISSION_DEFS: MissionDef[] = [
     description: "3箇所のチェックポイントを順番に制圧",
     objective: "制圧: {progress}/3",
     goalCount: 3,
-    spawnConfig: { grunt: 6, miniboss: 2, boss: 0 },
+    spawnConfig: { grunt: 6, sniper: 2, heavy: 0 },
   },
   {
     id: "wave",
@@ -515,15 +545,15 @@ const MISSION_DEFS: MissionDef[] = [
     description: "5ウェーブを生き延びろ",
     objective: "WAVE {progress}/{goal}",
     goalCount: 5,
-    spawnConfig: { grunt: 0, miniboss: 0, boss: 0 },
+    spawnConfig: { grunt: 0, sniper: 0, heavy: 0 },
   },
   {
     id: "boss",
     name: "10. ボス討伐",
     description: "ボスを単独で討伐せよ",
-    objective: "ボスを排除せよ",
+    objective: "ボス（重装兵）を排除せよ",
     goalCount: 1,
-    spawnConfig: { grunt: 5, miniboss: 0, boss: 1 },
+    spawnConfig: { grunt: 5, sniper: 0, heavy: 1 },
   },
 ]
 
@@ -567,9 +597,9 @@ function canvasToTile(x: number, y: number) {
 
 // ── Zone definitions (daytime battlefield) ─────────────────────────────────────
 const ZONES = [
-  { startTX: 0, endTX: 31, color: 0x6a7a4a }, // urban: olive ground
-  { startTX: 32, endTX: 63, color: 0x7a7a6a }, // industrial: gray concrete
-  { startTX: 64, endTX: 95, color: 0x8b7a5a }, // outdoor: sandy earth
+  { startTX: 0, endTX: 32, color: 0x6a7a4a }, // urban: olive ground
+  { startTX: 33, endTX: 65, color: 0x7a7a6a }, // industrial: gray concrete
+  { startTX: 66, endTX: 99, color: 0x8b7a5a }, // outdoor: sandy earth
 ]
 
 // ── Types ──────────────────────────────────────────────────────────────────────
@@ -1179,19 +1209,19 @@ export default function ThreeWorld() {
       let enemyIdCounter = 0
       function makeEnemy(type: EnemyType, x: number, z: number, isCommander = false): CombatEnemy {
         const cfg = ENEMY_CONFIGS[type]
-        const scale = type === "boss" ? 1.25 : type === "miniboss" ? 1.05 : 1.0
+        const scale = type === "heavy" ? 1.22 : type === "sniper" ? 1.02 : 1.0
         const bodyColor = isCommander ? 0xff6600 : cfg.color
 
         const group = new THREE.Group()
         group.position.set(x, 0, z)
         scene.add(group)
 
-        const skinMat = new THREE.MeshLambertMaterial({ color: bodyColor, emissive: cfg.emissive })
-        const darkMat = new THREE.MeshLambertMaterial({
-          color: type === "grunt" ? 0x4a5240 : type === "miniboss" ? 0x111111 : 0x5a0000,
-        })
+        const bodyMat = new THREE.MeshLambertMaterial({ color: bodyColor, emissive: cfg.emissive })
+        const darkColor = type === "grunt" ? 0x3a4030 : type === "sniper" ? 0x2a3a1f : 0x0a0a0a
+        const darkMat = new THREE.MeshLambertMaterial({ color: darkColor })
+        const skinMat = new THREE.MeshLambertMaterial({ color: 0xc8a878 })
+        const gloveMat = new THREE.MeshLambertMaterial({ color: 0x1a1a1a })
 
-        // Helper to tag each part with enemyId for raycasting
         function makePart(
           geo: THREE.BufferGeometry,
           mat: THREE.Material,
@@ -1208,193 +1238,327 @@ export default function ThreeWorld() {
           return m
         }
 
-        // Legs (animated groups, pivot at hip joint)
+        // ── Legs (CylinderGeometry thighs + shins, BoxGeometry feet) ─────────
+        const hipY = 0.8
+        const legSpread = type === "heavy" ? 0.16 : 0.13
+
         const leftLegGrp = new THREE.Group()
-        leftLegGrp.position.set(-0.12 * scale, 0.72 * scale, 0)
+        leftLegGrp.position.set(-legSpread * scale, hipY * scale, 0)
         group.add(leftLegGrp)
-        // thigh
         makePart(
-          new THREE.BoxGeometry(0.14 * scale, 0.34 * scale, 0.13 * scale),
-          skinMat,
+          new THREE.CylinderGeometry(0.085 * scale, 0.075 * scale, 0.36 * scale, 8),
+          bodyMat,
           0,
-          -0.17,
+          -0.18,
           0,
           leftLegGrp,
         )
-        // shin
         makePart(
-          new THREE.BoxGeometry(0.11 * scale, 0.32 * scale, 0.11 * scale),
-          skinMat,
-          0,
-          -0.49,
-          0,
-          leftLegGrp,
-        )
-        // boot
-        makePart(
-          new THREE.BoxGeometry(0.13 * scale, 0.1 * scale, 0.18 * scale),
+          new THREE.CylinderGeometry(0.07 * scale, 0.063 * scale, 0.34 * scale, 8),
           darkMat,
           0,
-          -0.67,
-          0.03,
+          -0.53,
+          0,
+          leftLegGrp,
+        )
+        makePart(
+          new THREE.BoxGeometry(0.14 * scale, 0.09 * scale, 0.22 * scale),
+          darkMat,
+          0,
+          -0.75,
+          0.04,
           leftLegGrp,
         )
 
         const rightLegGrp = new THREE.Group()
-        rightLegGrp.position.set(0.12 * scale, 0.72 * scale, 0)
+        rightLegGrp.position.set(legSpread * scale, hipY * scale, 0)
         group.add(rightLegGrp)
         makePart(
-          new THREE.BoxGeometry(0.14 * scale, 0.34 * scale, 0.13 * scale),
-          skinMat,
+          new THREE.CylinderGeometry(0.085 * scale, 0.075 * scale, 0.36 * scale, 8),
+          bodyMat,
           0,
-          -0.17,
-          0,
-          rightLegGrp,
-        )
-        makePart(
-          new THREE.BoxGeometry(0.11 * scale, 0.32 * scale, 0.11 * scale),
-          skinMat,
-          0,
-          -0.49,
+          -0.18,
           0,
           rightLegGrp,
         )
         makePart(
-          new THREE.BoxGeometry(0.13 * scale, 0.1 * scale, 0.18 * scale),
+          new THREE.CylinderGeometry(0.07 * scale, 0.063 * scale, 0.34 * scale, 8),
           darkMat,
           0,
-          -0.67,
-          0.03,
+          -0.53,
+          0,
+          rightLegGrp,
+        )
+        makePart(
+          new THREE.BoxGeometry(0.14 * scale, 0.09 * scale, 0.22 * scale),
+          darkMat,
+          0,
+          -0.75,
+          0.04,
           rightLegGrp,
         )
 
-        // Waist
+        // ── Hips / Waist (BoxGeometry) ───────────────────────────────────────
         makePart(
-          new THREE.BoxGeometry(0.38 * scale, 0.16 * scale, 0.22 * scale),
+          new THREE.BoxGeometry(0.42 * scale, 0.18 * scale, 0.26 * scale),
           darkMat,
           0,
-          0.8,
+          0.92,
           0,
         )
 
-        // Torso (with vest or plate carrier)
+        // ── Torso (BoxGeometry with plate carrier vest) ──────────────────────
+        const torsoW = type === "heavy" ? 0.56 : 0.48
+        const torsoD = type === "heavy" ? 0.32 : 0.28
         makePart(
-          new THREE.BoxGeometry(0.44 * scale, 0.52 * scale, 0.24 * scale),
-          skinMat,
+          new THREE.BoxGeometry(torsoW * scale, 0.54 * scale, torsoD * scale),
+          bodyMat,
           0,
-          1.14,
+          1.28,
           0,
         )
-        // Vest / armor plate
+        // Vest plate
         makePart(
-          new THREE.BoxGeometry(0.46 * scale, 0.46 * scale, 0.06 * scale),
+          new THREE.BoxGeometry((torsoW + 0.02) * scale, 0.46 * scale, 0.06 * scale),
           darkMat,
           0,
-          1.14,
-          -0.15,
+          1.3,
+          -(torsoD / 2 + 0.02),
+        )
+        // Vest pouches
+        makePart(
+          new THREE.BoxGeometry(0.12 * scale, 0.1 * scale, 0.06 * scale),
+          darkMat,
+          -0.14,
+          1.16,
+          -(torsoD / 2 + 0.04),
+        )
+        makePart(
+          new THREE.BoxGeometry(0.12 * scale, 0.1 * scale, 0.06 * scale),
+          darkMat,
+          0.14,
+          1.16,
+          -(torsoD / 2 + 0.04),
         )
 
-        // Arms (animated groups, pivot at shoulder)
+        // ── Shoulders (SphereGeometry x2) ────────────────────────────────────
+        const shoulderX = type === "heavy" ? 0.34 : 0.28
+        const shoulderR = type === "heavy" ? 0.14 : 0.12
+        makePart(new THREE.SphereGeometry(shoulderR * scale, 8, 6), bodyMat, -shoulderX, 1.5, 0)
+        makePart(new THREE.SphereGeometry(shoulderR * scale, 8, 6), bodyMat, shoulderX, 1.5, 0)
+
+        // Heavy: angled shoulder armor pads
+        if (type === "heavy") {
+          makePart(
+            new THREE.BoxGeometry(0.22 * scale, 0.16 * scale, 0.3 * scale),
+            darkMat,
+            -0.36,
+            1.58,
+            0,
+          )
+          makePart(
+            new THREE.BoxGeometry(0.22 * scale, 0.16 * scale, 0.3 * scale),
+            darkMat,
+            0.36,
+            1.58,
+            0,
+          )
+        }
+
+        // ── Arms (CylinderGeometry upper + lower, BoxGeometry hands) ─────────
+        const armSpread = shoulderX
         const leftArmGrp = new THREE.Group()
-        leftArmGrp.position.set(-0.27 * scale, 1.32 * scale, 0)
+        leftArmGrp.position.set(-armSpread * scale, 1.5 * scale, 0)
         group.add(leftArmGrp)
         makePart(
-          new THREE.BoxGeometry(0.12 * scale, 0.3 * scale, 0.12 * scale),
-          skinMat,
+          new THREE.CylinderGeometry(0.07 * scale, 0.062 * scale, 0.3 * scale, 8),
+          bodyMat,
           0,
-          -0.15,
+          -0.16,
           0,
           leftArmGrp,
         )
         makePart(
-          new THREE.BoxGeometry(0.1 * scale, 0.27 * scale, 0.1 * scale),
-          skinMat,
+          new THREE.CylinderGeometry(0.06 * scale, 0.055 * scale, 0.28 * scale, 8),
+          bodyMat,
           0,
-          -0.42,
+          -0.45,
           0,
           leftArmGrp,
         )
-        // hand
         makePart(
           new THREE.BoxGeometry(0.09 * scale, 0.1 * scale, 0.09 * scale),
-          darkMat,
+          gloveMat,
           0,
-          -0.58,
+          -0.63,
           0,
           leftArmGrp,
         )
 
         const rightArmGrp = new THREE.Group()
-        rightArmGrp.position.set(0.27 * scale, 1.32 * scale, 0)
+        rightArmGrp.position.set(armSpread * scale, 1.5 * scale, 0)
         group.add(rightArmGrp)
         makePart(
-          new THREE.BoxGeometry(0.12 * scale, 0.3 * scale, 0.12 * scale),
-          skinMat,
+          new THREE.CylinderGeometry(0.07 * scale, 0.062 * scale, 0.3 * scale, 8),
+          bodyMat,
           0,
-          -0.15,
+          -0.16,
           0,
           rightArmGrp,
         )
         makePart(
-          new THREE.BoxGeometry(0.1 * scale, 0.27 * scale, 0.1 * scale),
-          skinMat,
+          new THREE.CylinderGeometry(0.06 * scale, 0.055 * scale, 0.28 * scale, 8),
+          bodyMat,
           0,
-          -0.42,
+          -0.45,
           0,
           rightArmGrp,
         )
         makePart(
           new THREE.BoxGeometry(0.09 * scale, 0.1 * scale, 0.09 * scale),
-          darkMat,
+          gloveMat,
           0,
-          -0.58,
+          -0.63,
           0,
           rightArmGrp,
         )
 
-        // Shoulder pads (miniboss/boss only)
-        if (type !== "grunt") {
-          makePart(
-            new THREE.BoxGeometry(0.2 * scale, 0.16 * scale, 0.28 * scale),
-            darkMat,
-            -0.28,
-            1.38,
-            0,
+        // ── Rifle (held in right hand) ───────────────────────────────────────
+        const rifleMat = new THREE.MeshLambertMaterial({
+          color: type === "sniper" ? 0x1a1812 : 0x2a2a2a,
+        })
+        const rifleLen = type === "sniper" ? 0.95 : type === "heavy" ? 0.7 : 0.55
+        const rifleBody = new THREE.Mesh(
+          new THREE.BoxGeometry(0.06 * scale, 0.08 * scale, rifleLen * scale),
+          rifleMat,
+        )
+        rifleBody.position.set(0.04 * scale, -0.66 * scale, -rifleLen * 0.35 * scale)
+        rifleBody.castShadow = true
+        rightArmGrp.add(rifleBody)
+        const rifleBarrel = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.022 * scale, 0.022 * scale, rifleLen * 0.5 * scale, 6),
+          rifleMat,
+        )
+        rifleBarrel.rotation.x = Math.PI / 2
+        rifleBarrel.position.set(0.04 * scale, -0.64 * scale, -rifleLen * 0.78 * scale)
+        rightArmGrp.add(rifleBarrel)
+        // Magazine
+        const rifleMag = new THREE.Mesh(
+          new THREE.BoxGeometry(0.05 * scale, 0.12 * scale, 0.08 * scale),
+          rifleMat,
+        )
+        rifleMag.position.set(0.04 * scale, -0.76 * scale, -rifleLen * 0.25 * scale)
+        rightArmGrp.add(rifleMag)
+        // Sniper scope
+        if (type === "sniper") {
+          const scopeMat = new THREE.MeshLambertMaterial({ color: 0x080808 })
+          const scope = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.04 * scale, 0.04 * scale, 0.18 * scale, 8),
+            scopeMat,
           )
-          makePart(
-            new THREE.BoxGeometry(0.2 * scale, 0.16 * scale, 0.28 * scale),
-            darkMat,
-            0.28,
-            1.38,
-            0,
+          scope.rotation.x = Math.PI / 2
+          scope.position.set(0.04 * scale, -0.56 * scale, -rifleLen * 0.32 * scale)
+          rightArmGrp.add(scope)
+          // Bipod
+          const bipodMat = new THREE.MeshLambertMaterial({ color: 0x2a2a2a })
+          const bipodL = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.012 * scale, 0.012 * scale, 0.15 * scale, 6),
+            bipodMat,
           )
+          bipodL.rotation.z = 0.3
+          bipodL.position.set(-0.02 * scale, -0.76 * scale, -rifleLen * 0.7 * scale)
+          rightArmGrp.add(bipodL)
+          const bipodR = bipodL.clone()
+          bipodR.rotation.z = -0.3
+          bipodR.position.set(0.1 * scale, -0.76 * scale, -rifleLen * 0.7 * scale)
+          rightArmGrp.add(bipodR)
+        }
+        // Heavy: foregrip + drum mag accent
+        if (type === "heavy") {
+          const drumMag = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.07 * scale, 0.07 * scale, 0.06 * scale, 10),
+            rifleMat,
+          )
+          drumMag.position.set(0.04 * scale, -0.76 * scale, -rifleLen * 0.18 * scale)
+          rightArmGrp.add(drumMag)
         }
 
-        // Neck
-        makePart(new THREE.BoxGeometry(0.1 * scale, 0.12 * scale, 0.1 * scale), skinMat, 0, 1.46, 0)
+        // ── Neck (CylinderGeometry) ──────────────────────────────────────────
+        makePart(
+          new THREE.CylinderGeometry(0.06 * scale, 0.072 * scale, 0.13 * scale, 8),
+          skinMat,
+          0,
+          1.64,
+          0,
+        )
 
-        // Head
-        const headGeo = new THREE.SphereGeometry(0.165 * scale, 8, 7)
-        const headMat = new THREE.MeshLambertMaterial({
-          color: type === "boss" ? 0x700000 : 0xc8a878,
-          emissive: cfg.emissive,
-        })
-        const headMesh = new THREE.Mesh(headGeo, headMat)
-        headMesh.position.set(0, 1.635 * scale, 0)
+        // ── Head (SphereGeometry) ────────────────────────────────────────────
+        const headMesh = new THREE.Mesh(new THREE.SphereGeometry(0.17 * scale, 10, 8), skinMat)
+        headMesh.position.set(0, 1.82 * scale, 0)
         headMesh.castShadow = true
         headMesh.userData.enemyId = `enemy_${enemyIdCounter}`
         group.add(headMesh)
 
-        // Helmet (grunt/miniboss)
-        if (type === "grunt") {
-          const helmetMat = new THREE.MeshLambertMaterial({ color: 0x3a4230 })
+        // ── Helmet (BoxGeometry / SphereGeometry cap per type) ───────────────
+        const helmetColor = type === "grunt" ? 0x3a4230 : type === "sniper" ? 0x4a5535 : 0x0a0a0a
+        const helmetMat = new THREE.MeshLambertMaterial({ color: helmetColor })
+        if (type === "heavy") {
+          // Heavy: full tactical helmet (box + visor)
           const helmet = new THREE.Mesh(
-            new THREE.SphereGeometry(0.19 * scale, 8, 6, 0, Math.PI * 2, 0, Math.PI * 0.55),
+            new THREE.BoxGeometry(0.36 * scale, 0.24 * scale, 0.34 * scale),
             helmetMat,
           )
-          helmet.position.set(0, 1.66 * scale, 0)
+          helmet.position.set(0, 1.88 * scale, 0)
+          helmet.castShadow = true
           helmet.userData.enemyId = `enemy_${enemyIdCounter}`
           group.add(helmet)
+          const visor = new THREE.Mesh(
+            new THREE.BoxGeometry(0.3 * scale, 0.06 * scale, 0.04 * scale),
+            new THREE.MeshLambertMaterial({
+              color: 0xff2222,
+              emissive: 0x661111,
+              emissiveIntensity: 0.8,
+            }),
+          )
+          visor.position.set(0, 1.84 * scale, -0.18 * scale)
+          group.add(visor)
+        } else {
+          const helmet = new THREE.Mesh(
+            new THREE.SphereGeometry(0.2 * scale, 10, 6, 0, Math.PI * 2, 0, Math.PI * 0.55),
+            helmetMat,
+          )
+          helmet.position.set(0, 1.85 * scale, 0)
+          helmet.castShadow = true
+          helmet.userData.enemyId = `enemy_${enemyIdCounter}`
+          group.add(helmet)
+          // Helmet brim
+          const brim = new THREE.Mesh(
+            new THREE.BoxGeometry(0.36 * scale, 0.04 * scale, 0.08 * scale),
+            helmetMat,
+          )
+          brim.position.set(0, 1.81 * scale, -0.17 * scale)
+          group.add(brim)
+        }
+
+        // Sniper: ghillie strips on torso
+        if (type === "sniper") {
+          for (let i = 0; i < 8; i++) {
+            const stripMat = new THREE.MeshLambertMaterial({
+              color: i % 3 === 0 ? 0x5a6a3a : i % 3 === 1 ? 0x7a6a4a : 0x3a4a25,
+            })
+            const strip = new THREE.Mesh(
+              new THREE.BoxGeometry(0.06 * scale, 0.22 * scale, 0.03 * scale),
+              stripMat,
+            )
+            const colIdx = i % 4
+            const rowIdx = Math.floor(i / 4)
+            strip.position.set(
+              (colIdx - 1.5) * 0.09 * scale,
+              (1.36 - rowIdx * 0.18) * scale,
+              (torsoD / 2 + 0.04) * scale,
+            )
+            group.add(strip)
+          }
         }
 
         // Commander indicator (orange glowing halo)
@@ -1470,8 +1634,8 @@ export default function ThreeWorld() {
       function spawnEnemiesFromDef(def: WaveDef, commanderCount = 0) {
         const types: EnemyType[] = [
           ...Array<EnemyType>(def.grunt).fill("grunt"),
-          ...Array<EnemyType>(def.miniboss).fill("miniboss"),
-          ...Array<EnemyType>(def.boss).fill("boss"),
+          ...Array<EnemyType>(def.sniper).fill("sniper"),
+          ...Array<EnemyType>(def.heavy).fill("heavy"),
         ]
         const shuffled = [...SPAWN_POINTS].sort(() => Math.random() - 0.5)
         let commandersSpawned = 0
@@ -1481,7 +1645,7 @@ export default function ThreeWorld() {
           const type = types[i] ?? "grunt"
           const ex = Math.max(2, Math.min(MAP_SIZE - 2, sp.x + (Math.random() - 0.5) * 3))
           const ez = Math.max(2, Math.min(MAP_SIZE - 2, sp.z + (Math.random() - 0.5) * 3))
-          const isCmd = commandersSpawned < commanderCount && type === "miniboss"
+          const isCmd = commandersSpawned < commanderCount && type === "sniper"
           if (isCmd) commandersSpawned++
           enemies.push(makeEnemy(type, ex, ez, isCmd))
         }
@@ -1547,7 +1711,7 @@ export default function ThreeWorld() {
           setCurrentWave(1)
           setWaveMessage("WAVE 1 INCOMING")
           waveActiveRef.current = false
-          spawnEnemiesFromDef(WAVE_DEFS[0] ?? { grunt: 6, miniboss: 0, boss: 0 })
+          spawnEnemiesFromDef(WAVE_DEFS[0] ?? { grunt: 6, sniper: 0, heavy: 0 })
           setTimeout(() => {
             setWaveMessage(null)
             waveActiveRef.current = true
@@ -1795,20 +1959,20 @@ export default function ThreeWorld() {
               scoreRef.current += hitEnemy.config.score
               setScore(scoreRef.current)
               const tag =
-                hitEnemy.type === "boss"
-                  ? "BOSS ELIMINATED"
-                  : hitEnemy.type === "miniboss"
-                    ? "MINIBOSS ELIMINATED"
+                hitEnemy.type === "heavy"
+                  ? "HEAVY ELIMINATED"
+                  : hitEnemy.type === "sniper"
+                    ? "SNIPER ELIMINATED"
                     : hitEnemy.isCommander
                       ? "COMMANDER ELIMINATED"
                       : "GRUNT ELIMINATED"
               showNotification(`${tag} +${hitEnemy.config.score}pt`)
               // Kill feed
               const feedColor =
-                hitEnemy.type === "boss"
+                hitEnemy.type === "heavy"
                   ? "#cc44ff"
-                  : hitEnemy.type === "miniboss"
-                    ? "#ff8800"
+                  : hitEnemy.type === "sniper"
+                    ? "#88cc44"
                     : "#ff5555"
               const feedEntry = { id: Date.now(), text: tag, color: feedColor }
               killFeedRef.current = [...killFeedRef.current, feedEntry].slice(-6)
@@ -1826,7 +1990,7 @@ export default function ThreeWorld() {
               } else if (mission === "destroy" && hitEnemy.isCommander) {
                 missionProgressRef.current += 1
                 setMissionProgress(missionProgressRef.current)
-              } else if (mission === "boss" && hitEnemy.type === "boss") {
+              } else if (mission === "boss" && hitEnemy.type === "heavy") {
                 missionProgressRef.current = 1
                 setMissionProgress(1)
               }
@@ -2283,24 +2447,38 @@ export default function ThreeWorld() {
               ) {
                 enemy.lastFireTime = now
                 const fwd = new THREE.Vector3(toPx / distToPlayer, 0, toPz / distToPlayer)
-                const spread = 0.03
+                const spread = enemy.type === "sniper" ? 0.005 : 0.03
                 fwd.x += (Math.random() - 0.5) * spread
                 fwd.z += (Math.random() - 0.5) * spread
                 fwd.normalize()
-                const bGeo = new THREE.BoxGeometry(0.04, 0.04, 0.22)
-                const bMat = new THREE.MeshBasicMaterial({ color: 0xff4400 })
+                const isSniper = enemy.type === "sniper"
+                const bGeo = isSniper
+                  ? new THREE.BoxGeometry(0.05, 0.05, 0.36)
+                  : new THREE.BoxGeometry(0.04, 0.04, 0.22)
+                const bMat = new THREE.MeshBasicMaterial({
+                  color: isSniper ? 0x00ffcc : 0xff4400,
+                })
                 const bMesh = new THREE.Mesh(bGeo, bMat)
                 bMesh.position.set(enemy.mesh.position.x, EYE_HEIGHT * 0.7, enemy.mesh.position.z)
                 bMesh.lookAt(bMesh.position.clone().add(fwd))
                 refs.scene.add(bMesh)
                 refs.bullets.push({
                   mesh: bMesh,
-                  velocity: fwd.clone().multiplyScalar(ENEMY_BULLET_SPEED),
-                  life: 2.2,
+                  velocity: fwd
+                    .clone()
+                    .multiplyScalar(isSniper ? ENEMY_BULLET_SPEED * 2.2 : ENEMY_BULLET_SPEED),
+                  life: isSniper ? 2.8 : 2.2,
                   isEnemy: true,
                   damage: enemy.config.fireDamage,
                 })
               }
+              // Shooting/ready pose: rifle braced forward with recoil kick
+              const timeSinceFire = (now - enemy.lastFireTime) / 1000
+              const recoilKick = Math.max(0, 0.25 - timeSinceFire * 4)
+              if (enemy.rightArm) enemy.rightArm.rotation.x = -1.2 - recoilKick
+              if (enemy.leftArm) enemy.leftArm.rotation.x = -0.9 - recoilKick * 0.5
+              if (enemy.leftLeg) enemy.leftLeg.rotation.x = 0
+              if (enemy.rightLeg) enemy.rightLeg.rotation.x = 0
             } else if (enemy.state === "search") {
               enemy.searchTimer -= dt
               if (enemy.searchTimer <= 0) {
@@ -2482,11 +2660,11 @@ export default function ThreeWorld() {
             // Draw walls on minimap
             // Zone colors on minimap
             ctx.fillStyle = "#3a4a2a"
-            ctx.fillRect(0, 0, 32 * SCALE, W)
+            ctx.fillRect(0, 0, 33 * SCALE, W)
             ctx.fillStyle = "#3a3a2a"
-            ctx.fillRect(32 * SCALE, 0, 32 * SCALE, W)
+            ctx.fillRect(33 * SCALE, 0, 33 * SCALE, W)
             ctx.fillStyle = "#4a3a1a"
-            ctx.fillRect(64 * SCALE, 0, 32 * SCALE, W)
+            ctx.fillRect(66 * SCALE, 0, 34 * SCALE, W)
             ctx.fillStyle = "#555545"
             for (const [wx, wz, ww, wd] of WALL_DEFS) {
               ctx.fillRect(wx * SCALE, wz * SCALE, Math.max(1, ww * SCALE), Math.max(1, wd * SCALE))
@@ -2503,10 +2681,10 @@ export default function ThreeWorld() {
             for (const enemy of refs.enemies) {
               if (enemy.hp <= 0) continue
               ctx.fillStyle =
-                enemy.type === "boss"
+                enemy.type === "heavy"
                   ? "#cc44ff"
-                  : enemy.type === "miniboss"
-                    ? "#ff8800"
+                  : enemy.type === "sniper"
+                    ? "#88cc44"
                     : enemy.state === "alert" || enemy.state === "attack"
                       ? "#ff2222"
                       : "#ff6666"
@@ -3958,11 +4136,10 @@ export default function ThreeWorld() {
           >
             {enemyStatus.map((e, i) => {
               const typeColor =
-                e.type === "boss" ? "#cc44ff" : e.type === "miniboss" ? "#ff8800" : "#ff5555"
+                e.type === "heavy" ? "#cc44ff" : e.type === "sniper" ? "#88cc44" : "#ff5555"
               const hpBarColor =
-                e.type === "boss" ? "#aa00ff" : e.type === "miniboss" ? "#ff6600" : "#ff2222"
-              const label =
-                e.type === "boss" ? "BOSS" : e.type === "miniboss" ? "MINI" : `E${i + 1}`
+                e.type === "heavy" ? "#aa00ff" : e.type === "sniper" ? "#5fa030" : "#ff2222"
+              const label = e.type === "heavy" ? "HVY" : e.type === "sniper" ? "SNP" : `E${i + 1}`
               const hpPctEnemy = e.maxHp > 0 ? Math.round((e.hp / e.maxHp) * 100) : 0
               return (
                 <div
