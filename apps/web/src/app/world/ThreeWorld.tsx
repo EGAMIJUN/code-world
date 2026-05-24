@@ -2780,8 +2780,37 @@ export default function ThreeWorld() {
       setCurrentWeaponIdx(idx)
     }
 
+    function isTypingInInput(): boolean {
+      const a = document.activeElement
+      if (!a) return false
+      if (a instanceof HTMLInputElement || a instanceof HTMLTextAreaElement) return true
+      if (a instanceof HTMLElement && a.isContentEditable) return true
+      return false
+    }
+
+    const MOVEMENT_KEYS = new Set([
+      "ArrowUp",
+      "ArrowDown",
+      "ArrowLeft",
+      "ArrowRight",
+      "w",
+      "a",
+      "s",
+      "d",
+      "W",
+      "A",
+      "S",
+      "D",
+      " ",
+    ])
+
     function onKeyDown(e: KeyboardEvent) {
-      keysRef.current.add(e.key)
+      if (isTypingInInput()) return
+      // Prevent browser default (scroll / focus shift) for movement keys
+      if (MOVEMENT_KEYS.has(e.key)) e.preventDefault()
+      // Normalize so Shift+WASD still triggers movement
+      const stored = e.key.length === 1 ? e.key.toLowerCase() : e.key
+      keysRef.current.add(stored)
       if (e.key === "1") switchWeapon(0)
       if (e.key === "2") switchWeapon(1)
       if (e.key === "3") switchWeapon(2)
@@ -2810,6 +2839,9 @@ export default function ThreeWorld() {
       }
     }
     function onKeyUp(e: KeyboardEvent) {
+      const stored = e.key.length === 1 ? e.key.toLowerCase() : e.key
+      keysRef.current.delete(stored)
+      // Also drop the un-normalized variant in case it was added before this PR's normalization
       keysRef.current.delete(e.key)
     }
     window.addEventListener("keydown", onKeyDown)
