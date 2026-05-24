@@ -49,7 +49,8 @@ async function getOrCreateGameUser(authUser: AuthUser) {
     })
     .returning()
 
-  return user!
+  if (!user) throw new Error("Failed to create game user")
+  return user
 }
 
 const SYSTEM_EMAIL = "system@code-world.internal"
@@ -64,18 +65,20 @@ async function getOrCreateSharedWorld() {
       .insert(users)
       .values({ email: SYSTEM_EMAIL, username: SYSTEM_USERNAME, displayName: "CODE WORLD" })
       .returning()
-    sysUser = inserted!
+    if (!inserted) throw new Error("Failed to create system user")
+    sysUser = inserted
   }
 
   let world = await db.query.worlds.findFirst({
-    where: (w, { eq: eqFn }) => eqFn(w.ownerId, sysUser!.id),
+    where: (w, { eq: eqFn }) => eqFn(w.ownerId, sysUser?.id),
   })
   if (!world) {
     const [newWorld] = await db
       .insert(worlds)
-      .values({ ownerId: sysUser!.id, name: "CODE WORLD — Shared", isPublic: true })
+      .values({ ownerId: sysUser?.id, name: "CODE WORLD — Shared", isPublic: true })
       .returning()
-    world = newWorld!
+    if (!newWorld) throw new Error("Failed to create shared world")
+    world = newWorld
   }
 
   return world
@@ -131,7 +134,8 @@ worldsRouter.get("/my", async (c) => {
         name: `${user.displayName ?? user.username}'s World`,
       })
       .returning()
-    world = newWorld!
+    if (!newWorld) throw new Error("Failed to create world")
+    world = newWorld
   }
 
   return c.json({ data: world })
@@ -190,7 +194,8 @@ worldsRouter.post("/:id/blocks", zValidator("json", PlaceGameBlockSchema), async
       .set({ quantity: invItem.quantity - 1, updatedAt: new Date() })
       .where(and(eq(inventory.playerId, user.id), eq(inventory.blockType, body.blockType)))
 
-    return placed!
+    if (!placed) throw new Error("Failed to place block")
+    return placed
   })
 
   return c.json({ data: block }, 201)

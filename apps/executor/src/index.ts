@@ -2,7 +2,7 @@ import IORedis from "ioredis"
 import { createQueues } from "./queues"
 import { createCodeExecutionWorker } from "./workers/codeExecution"
 
-const REDIS_URL = process.env["REDIS_URL"] ?? "redis://localhost:6379"
+const REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379"
 
 // ── Redis connection ──────────────────────────────────────────────────────────
 const connection = new IORedis(REDIS_URL, {

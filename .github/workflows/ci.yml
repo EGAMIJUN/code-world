@@ -8,8 +8,23 @@ on:
 
 jobs:
   ci:
-    name: Build & Lint
+    name: Build, Lint & Test
     runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: codeworld
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
 
     steps:
       - name: Checkout
@@ -29,7 +44,6 @@ jobs:
       - name: Build
         run: bun run build
         env:
-          # Dummy values so Next.js build doesn't fail on missing env
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/codeworld
           REDIS_URL: redis://localhost:6379
           BETTER_AUTH_SECRET: ci-dummy-secret-at-least-32-characters-long
@@ -37,3 +51,17 @@ jobs:
           NEXT_PUBLIC_API_URL: http://localhost:3001
           GITHUB_CLIENT_ID: dummy
           GITHUB_CLIENT_SECRET: dummy
+
+      - name: Apply DB schema
+        working-directory: packages/db
+        run: bunx drizzle-kit push --force
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/codeworld
+
+      - name: Test
+        run: bunx turbo run test --filter=@code-world/api
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/codeworld
+          BETTER_AUTH_SECRET: ci-dummy-secret-at-least-32-characters-long
+          BETTER_AUTH_URL: http://localhost:3001
+          NEXT_PUBLIC_API_URL: http://localhost:3001

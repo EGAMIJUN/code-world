@@ -45,7 +45,8 @@ async function getOrCreateGameUser(authUser: {
     })
     .returning()
 
-  return user!
+  if (!user) throw new Error("Failed to create game user")
+  return user
 }
 
 // GET /inventory — return authenticated player's block inventory

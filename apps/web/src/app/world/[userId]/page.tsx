@@ -2,7 +2,7 @@ import type { Metadata } from "next"
 import { notFound } from "next/navigation"
 import ReadonlyWorldClient from "./ReadonlyWorldClient"
 
-const API_URL = process.env["NEXT_PUBLIC_API_URL"] ?? "http://localhost:3001"
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001"
 
 interface WorldOwner {
   id: string

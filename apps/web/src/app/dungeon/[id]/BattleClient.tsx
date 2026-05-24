@@ -181,7 +181,7 @@ export default function BattleClient({ dungeon }: { dungeon: DungeonWithRooms })
   const runIdRef = useRef<string | null>(null)
 
   const playerMaxHp = 200
-  const apiUrl = process.env["NEXT_PUBLIC_API_URL"] ?? API_URL_DEFAULT
+  const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? API_URL_DEFAULT
 
   useEffect(() => {
     setIsMobile(navigator.maxTouchPoints > 0)
@@ -198,6 +198,7 @@ export default function BattleClient({ dungeon }: { dungeon: DungeonWithRooms })
   }, [phase])
 
   // Start a dungeon run to get runId for co-op
+  // biome-ignore lint/correctness/useExhaustiveDependencies: run once on mount
   useEffect(() => {
     async function startRun() {
       try {
@@ -223,10 +224,10 @@ export default function BattleClient({ dungeon }: { dungeon: DungeonWithRooms })
       }
     }
     startRun()
-    // biome-ignore lint/correctness/useExhaustiveDependencies: run once on mount
   }, [])
 
   // Co-op WebSocket connection
+  // biome-ignore lint/correctness/useExhaustiveDependencies: only re-run when runId changes
   useEffect(() => {
     if (!coop.runId) return
 
@@ -276,7 +277,6 @@ export default function BattleClient({ dungeon }: { dungeon: DungeonWithRooms })
       ws.close()
       coopWsRef.current = null
     }
-    // biome-ignore lint/correctness/useExhaustiveDependencies: only re-run when runId changes
   }, [coop.runId])
 
   const generateInvite = useCallback(async () => {
@@ -366,7 +366,7 @@ export default function BattleClient({ dungeon }: { dungeon: DungeonWithRooms })
         return { result: "runtime_error", message: "Network error" }
       }
     },
-    [apiUrl, pollInterval, maxRetries],
+    [apiUrl, pollInterval],
   )
 
   const handleSubmit = useCallback(async () => {
@@ -424,7 +424,9 @@ export default function BattleClient({ dungeon }: { dungeon: DungeonWithRooms })
           setPhase("victory")
           // Unlock FPS weapons progressively by dungeon difficulty
           try {
-            const current = JSON.parse(localStorage.getItem("fps_unlocked_weapons") ?? '["pistol"]') as string[]
+            const current = JSON.parse(
+              localStorage.getItem("fps_unlocked_weapons") ?? '["pistol"]',
+            ) as string[]
             const unlocked = new Set(current)
             unlocked.add("pistol")
             if (rooms.some((r) => r.roomType === "miniboss" || r.roomType === "boss")) {
@@ -434,7 +436,9 @@ export default function BattleClient({ dungeon }: { dungeon: DungeonWithRooms })
               unlocked.add("sniper")
             }
             localStorage.setItem("fps_unlocked_weapons", JSON.stringify([...unlocked]))
-          } catch { /* ignore */ }
+          } catch {
+            /* ignore */
+          }
           return
         }
 
@@ -466,7 +470,6 @@ export default function BattleClient({ dungeon }: { dungeon: DungeonWithRooms })
       setLastResult("runtime_error")
       setTimeout(() => setSubmitStatus("idle"), 1500)
     }
-    // biome-ignore lint/correctness/useExhaustiveDependencies: coopWsRef and initialCode are refs/constants
   }, [
     phase,
     submitStatus,
@@ -477,6 +480,8 @@ export default function BattleClient({ dungeon }: { dungeon: DungeonWithRooms })
     pollSubmission,
     triggerFlash,
     totalRooms,
+    dungeon.language,
+    initialCode,
   ])
 
   const currentRoom = rooms[roomIndex]

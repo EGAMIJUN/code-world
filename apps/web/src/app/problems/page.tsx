@@ -20,7 +20,7 @@ const DIFFICULTY_LABEL: Record<number, string> = {
 }
 
 async function fetchProblems(difficulty?: string): Promise<ProblemRow[]> {
-  const apiUrl = process.env["NEXT_PUBLIC_API_URL"] ?? "http://localhost:3001"
+  const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001"
   const params = new URLSearchParams()
   if (difficulty) params.set("difficulty", difficulty)
   const url = `${apiUrl}/api/problems${params.size > 0 ? `?${params.toString()}` : ""}`

@@ -15,7 +15,7 @@ interface Problem {
 
 export default async function ProblemPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
-  const apiUrl = process.env["NEXT_PUBLIC_API_URL"] ?? "http://localhost:3001"
+  const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001"
 
   let problem: Problem | null = null
   try {

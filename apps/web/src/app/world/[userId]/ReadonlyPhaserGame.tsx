@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react"
 
 const TILE_SIZE = 32
 const MAP_SIZE = 32
-const API_URL = process.env["NEXT_PUBLIC_API_URL"] ?? "http://localhost:3001"
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001"
 
 const BLOCK_COLORS: Record<string, number> = {
   wood_block: 0xa0522d,

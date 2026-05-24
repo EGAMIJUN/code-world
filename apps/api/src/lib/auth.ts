@@ -3,7 +3,7 @@ import { betterAuth } from "better-auth"
 import { drizzleAdapter } from "better-auth/adapters/drizzle"
 
 export const auth = betterAuth({
-  secret: process.env["BETTER_AUTH_SECRET"] ?? "change-this-to-a-long-random-secret",
+  secret: process.env.BETTER_AUTH_SECRET ?? "change-this-to-a-long-random-secret",
   database: drizzleAdapter(db, {
     provider: "pg",
     // Map Better Auth model names to our schema exports
@@ -16,8 +16,8 @@ export const auth = betterAuth({
   }),
   trustedOrigins: [
     "https://code-worldweb-production.up.railway.app",
-    process.env["BETTER_AUTH_URL"] ?? "http://localhost:3001",
-    process.env["WEB_URL"] ?? "http://localhost:3000",
+    process.env.BETTER_AUTH_URL ?? "http://localhost:3001",
+    process.env.WEB_URL ?? "http://localhost:3000",
     "http://localhost:3000",
   ],
   advanced: {
@@ -34,8 +34,8 @@ export const auth = betterAuth({
   },
   socialProviders: {
     github: {
-      clientId: process.env["GITHUB_CLIENT_ID"] ?? "",
-      clientSecret: process.env["GITHUB_CLIENT_SECRET"] ?? "",
+      clientId: process.env.GITHUB_CLIENT_ID ?? "",
+      clientSecret: process.env.GITHUB_CLIENT_SECRET ?? "",
     },
   },
 })

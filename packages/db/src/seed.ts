@@ -1668,16 +1668,19 @@ export async function seed() {
     if (!tierProblems) continue
 
     for (let i = 0; i < tierProblems.length; i++) {
-      const title = tierProblems[i]!
+      const title = tierProblems[i]
+      if (title === undefined) continue
       const problemId = problemIdByTitle[title]
       if (!problemId) {
         console.warn(`[Seed] Problem not found: ${title}`)
         continue
       }
+      const roomType = roomTypes[i]
+      if (roomType === undefined) continue
       await db.insert(dungeonRooms).values({
         dungeonId: dungeon.id,
         problemId,
-        roomType: roomTypes[i]!,
+        roomType,
         roomOrder: i,
       })
     }

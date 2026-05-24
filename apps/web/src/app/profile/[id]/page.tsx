@@ -3,7 +3,7 @@
 import { useParams } from "next/navigation"
 import { useEffect, useState } from "react"
 
-const API_URL = process.env["NEXT_PUBLIC_API_URL"] ?? "http://localhost:3001"
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001"
 
 interface ProfileData {
   id: string
@@ -32,7 +32,7 @@ function computeXpProgress(totalXp: number) {
 
 export default function PlayerProfilePage() {
   const params = useParams()
-  const profileId = String(params["id"] ?? "")
+  const profileId = String(params.id ?? "")
 
   const [profile, setProfile] = useState<ProfileData | null>(null)
   const [myId, setMyId] = useState<string | null>(null)
