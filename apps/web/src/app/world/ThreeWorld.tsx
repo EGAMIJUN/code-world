@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import * as THREE from "three"
 
 // ── Constants ──────────────────────────────────────────────────────────────────
-const MAP_SIZE = 32
+const MAP_SIZE = 96
 const TILE_UNIT = 1
 const BLOCK_HEIGHT = 0.5
 const EYE_HEIGHT = 1.6
@@ -14,14 +14,14 @@ const API_URL = process.env["NEXT_PUBLIC_API_URL"] ?? "http://localhost:3001"
 
 // ── Combat constants ───────────────────────────────────────────────────────────
 const PLAYER_MAX_HP = 100
-const BULLET_SPEED = 35
-const ENEMY_BULLET_SPEED = 14
+const BULLET_SPEED = 40
+const ENEMY_BULLET_SPEED = 16
 const RECOIL_RECOVER = 8
 const MUZZLE_FLASH_DURATION = 0.07
 const PLAYER_RADIUS = 0.35
-const ENEMY_RADIUS = 0.4
+const ENEMY_RADIUS = 0.45
 const ENEMY_NO_RESPAWN = 9999
-const PARTICLE_COUNT = 10
+const PARTICLE_COUNT = 12
 const PARTICLE_LIFETIME = 0.5
 const SPRINT_MULTIPLIER = 1.5
 const AUTO_RECOVER_DELAY = 5
@@ -187,25 +187,108 @@ const SOUNDS = {
   },
 }
 
-// ── Map wall definitions [x, z, width, depth] ──────────────────────────────────
-const WALL_DEFS: [number, number, number, number][] = [
-  [3, 3, 4, 4],
-  [9, 1, 3, 5],
-  [14, 8, 5, 4],
-  [22, 3, 4, 6],
-  [5, 14, 2, 5],
-  [20, 12, 4, 2],
-  [7, 21, 4, 3],
-  [17, 21, 5, 4],
-  [25, 18, 3, 6],
-  [10, 26, 5, 3],
-  [2, 26, 3, 3],
-  [27, 8, 2, 5],
-  [5, 9, 1, 1],
-  [12, 17, 1, 1],
-  [18, 7, 1, 1],
-  [24, 15, 1, 1],
+// ── Map object definitions [x, z, width, depth, type]
+// type: 0=building, 1=car, 2=barricade, 3=tank/pipe, 4=tree, 5=trench
+const MAP_OBJECTS: [number, number, number, number, number][] = [
+  // ── Urban zone (x: 3–28) ─────────────────────────────────────────────────
+  // Buildings
+  [3, 3, 7, 8, 0],
+  [14, 3, 8, 6, 0],
+  [3, 14, 6, 7, 0],
+  [13, 13, 7, 6, 0],
+  [24, 5, 5, 6, 0],
+  [22, 14, 5, 7, 0],
+  [3, 24, 7, 8, 0],
+  [14, 24, 6, 7, 0],
+  [24, 26, 5, 5, 0],
+  [3, 35, 8, 6, 0],
+  [15, 35, 7, 5, 0],
+  [25, 35, 4, 8, 0],
+  [3, 45, 6, 7, 0],
+  [13, 44, 8, 6, 0],
+  [24, 46, 5, 6, 0],
+  [3, 56, 7, 8, 0],
+  [14, 56, 6, 7, 0],
+  [24, 58, 5, 5, 0],
+  [3, 68, 8, 6, 0],
+  [15, 68, 7, 5, 0],
+  [3, 77, 7, 8, 0],
+  [14, 78, 6, 6, 0],
+  [24, 76, 5, 7, 0],
+  // Cars
+  [12, 11, 2, 1, 1],
+  [20, 21, 2, 1, 1],
+  [11, 32, 2, 1, 1],
+  [23, 43, 1, 2, 1],
+  [12, 54, 2, 1, 1],
+  [22, 65, 2, 1, 1],
+  // Barricades (low wide)
+  [25, 22, 3, 0.4, 2],
+  [10, 42, 3, 0.4, 2],
+  [22, 52, 0.4, 3, 2],
+  [10, 62, 3, 0.4, 2],
+  [25, 72, 3, 0.4, 2],
+  // ── Industrial zone (x: 33–64) ───────────────────────────────────────────
+  // Warehouses / factory buildings
+  [33, 5, 10, 9, 0],
+  [47, 5, 12, 8, 0],
+  [33, 18, 9, 10, 0],
+  [46, 18, 11, 9, 0],
+  [33, 32, 10, 8, 0],
+  [47, 32, 10, 9, 0],
+  [33, 44, 9, 10, 0],
+  [46, 45, 11, 8, 0],
+  [33, 58, 10, 9, 0],
+  [47, 58, 10, 8, 0],
+  [33, 71, 9, 8, 0],
+  [46, 72, 11, 7, 0],
+  // Tanks & pipes
+  [60, 5, 2, 2, 3],
+  [63, 10, 1, 10, 3],
+  [60, 24, 2, 2, 3],
+  [63, 28, 8, 1, 3],
+  [60, 42, 2, 2, 3],
+  [63, 46, 1, 10, 3],
+  [60, 60, 2, 2, 3],
+  [63, 65, 8, 1, 3],
+  // ── Outdoor zone (x: 68–92) ──────────────────────────────────────────────
+  // Trenches (long and thin)
+  [68, 5, 16, 1, 5],
+  [68, 13, 1, 12, 5],
+  [83, 8, 1, 12, 5],
+  [68, 28, 16, 1, 5],
+  [68, 40, 1, 14, 5],
+  [83, 34, 1, 14, 5],
+  [68, 57, 16, 1, 5],
+  [68, 68, 1, 14, 5],
+  [83, 62, 1, 14, 5],
+  [68, 85, 16, 1, 5],
+  // Trees
+  [70, 7, 1, 1, 4],
+  [76, 9, 1, 1, 4],
+  [82, 6, 1, 1, 4],
+  [88, 9, 1, 1, 4],
+  [72, 20, 1, 1, 4],
+  [79, 22, 1, 1, 4],
+  [87, 19, 1, 1, 4],
+  [71, 35, 1, 1, 4],
+  [80, 37, 1, 1, 4],
+  [88, 32, 1, 1, 4],
+  [73, 50, 1, 1, 4],
+  [80, 52, 1, 1, 4],
+  [87, 48, 1, 1, 4],
+  [71, 65, 1, 1, 4],
+  [78, 67, 1, 1, 4],
+  [86, 63, 1, 1, 4],
+  [73, 78, 1, 1, 4],
+  [81, 80, 1, 1, 4],
+  [88, 76, 1, 1, 4],
 ]
+
+// WALL_DEFS for backward compat (minimap, cover AI)
+const WALL_DEFS: [number, number, number, number][] = MAP_OBJECTS.map(
+  ([x, z, w, d]) => [x, z, w, d],
+)
 type WallAABB = { x1: number; z1: number; x2: number; z2: number }
 const WALL_AABBS: WallAABB[] = WALL_DEFS.map(([x, z, w, d]) => ({
   x1: x,
@@ -213,30 +296,7 @@ const WALL_AABBS: WallAABB[] = WALL_DEFS.map(([x, z, w, d]) => ({
   x2: x + w,
   z2: z + d,
 }))
-
-// ── Cover objects [x, z, width, depth, height] ─────────────────────────────────
-const COVER_DEFS: [number, number, number, number, number][] = [
-  // Wooden crates
-  [6.0, 5.5, 1.0, 1.0, 0.9],
-  [8.5, 12.0, 1.0, 1.0, 0.9],
-  [13.0, 11.0, 1.0, 1.0, 0.9],
-  [19.5, 4.5, 1.0, 1.0, 0.9],
-  // Metal barriers (long low walls)
-  [21.0, 10.0, 2.8, 0.4, 0.85],
-  [15.0, 19.0, 0.4, 2.8, 0.85],
-  [9.0, 17.0, 2.5, 0.4, 0.85],
-  // Car-like hulks (wider, lower)
-  [11.0, 5.0, 1.8, 0.9, 0.75],
-  [24.0, 20.0, 1.8, 0.9, 0.75],
-  [4.5, 20.5, 0.9, 1.8, 0.75],
-]
-const COVER_AABBS: WallAABB[] = COVER_DEFS.map(([x, z, w, d]) => ({
-  x1: x,
-  z1: z,
-  x2: x + w,
-  z2: z + d,
-}))
-const ALL_AABBS: WallAABB[] = [...WALL_AABBS, ...COVER_AABBS]
+const ALL_AABBS: WallAABB[] = WALL_AABBS
 
 function collidesWithWall(px: number, pz: number, radius: number): boolean {
   if (px - radius < 0 || px + radius > MAP_SIZE || pz - radius < 0 || pz + radius > MAP_SIZE)
@@ -274,54 +334,54 @@ interface EnemyConfig {
 const ENEMY_CONFIGS: Record<EnemyType, EnemyConfig> = {
   grunt: {
     hp: 60,
-    speed: 1.6,
-    attackDamage: 8,
-    attackInterval: 2500,
+    speed: 2.0,
+    attackDamage: 10,
+    attackInterval: 2000,
     attackRange: 1.8,
-    fireRange: 10,
-    fireInterval: 2500,
-    fireDamage: 8,
-    color: 0x0a0a1e,
-    emissive: 0x220000,
-    bodyW: 0.65,
-    bodyH: 1.4,
-    sightRange: 14,
+    fireRange: 16,
+    fireInterval: 2000,
+    fireDamage: 10,
+    color: 0x78704a, // khaki
+    emissive: 0x0a0a00,
+    bodyW: 0.55,
+    bodyH: 1.8,
+    sightRange: 18,
     fovAngle: Math.PI,
     score: 100,
     blockReward: 1,
   },
   miniboss: {
     hp: 150,
-    speed: 1.28,
-    attackDamage: 12,
-    attackInterval: 2500,
+    speed: 1.5,
+    attackDamage: 18,
+    attackInterval: 2000,
     attackRange: 2.0,
-    fireRange: 14,
-    fireInterval: 2200,
-    fireDamage: 12,
-    color: 0x0a1428,
-    emissive: 0x001133,
-    bodyW: 0.85,
-    bodyH: 2.1,
-    sightRange: 18,
+    fireRange: 20,
+    fireInterval: 1800,
+    fireDamage: 18,
+    color: 0x222222, // dark armored
+    emissive: 0x050505,
+    bodyW: 0.65,
+    bodyH: 2.0,
+    sightRange: 22,
     fovAngle: Math.PI * 0.9,
     score: 300,
     blockReward: 3,
   },
   boss: {
     hp: 400,
-    speed: 0.96,
-    attackDamage: 20,
-    attackInterval: 2500,
+    speed: 1.2,
+    attackDamage: 25,
+    attackInterval: 2000,
     attackRange: 2.5,
-    fireRange: 20,
-    fireInterval: 2000,
-    fireDamage: 20,
-    color: 0x1a0030,
-    emissive: 0x330055,
-    bodyW: 1.1,
-    bodyH: 2.5,
-    sightRange: 24,
+    fireRange: 26,
+    fireInterval: 1600,
+    fireDamage: 25,
+    color: 0x8b0000, // dark red
+    emissive: 0x200000,
+    bodyW: 0.85,
+    bodyH: 2.4,
+    sightRange: 30,
     fovAngle: Math.PI * 0.8,
     score: 500,
     blockReward: 8,
@@ -335,23 +395,134 @@ interface WaveDef {
   boss: number
 }
 const WAVE_DEFS: WaveDef[] = [
-  { grunt: 5, miniboss: 0, boss: 0 },
-  { grunt: 5, miniboss: 2, boss: 0 },
+  { grunt: 6, miniboss: 0, boss: 0 },
+  { grunt: 6, miniboss: 2, boss: 0 },
+  { grunt: 4, miniboss: 2, boss: 0 },
+  { grunt: 4, miniboss: 3, boss: 0 },
   { grunt: 3, miniboss: 2, boss: 1 },
 ]
 const SPAWN_POINTS = [
-  { x: 1.5, z: 1.5 },
-  { x: 16, z: 1.5 },
-  { x: 30, z: 1.5 },
-  { x: 30, z: 16 },
-  { x: 30, z: 30 },
-  { x: 16, z: 30 },
-  { x: 1.5, z: 30 },
-  { x: 1.5, z: 16 },
-  { x: 8, z: 8 },
-  { x: 24, z: 8 },
-  { x: 8, z: 24 },
-  { x: 24, z: 24 },
+  { x: 2, z: 2 },
+  { x: 48, z: 2 },
+  { x: 93, z: 2 },
+  { x: 93, z: 48 },
+  { x: 93, z: 93 },
+  { x: 48, z: 93 },
+  { x: 2, z: 93 },
+  { x: 2, z: 48 },
+  { x: 16, z: 16 },
+  { x: 48, z: 16 },
+  { x: 80, z: 16 },
+  { x: 16, z: 48 },
+  { x: 80, z: 48 },
+  { x: 16, z: 80 },
+  { x: 48, z: 80 },
+  { x: 80, z: 80 },
+]
+
+// ── Mission system ─────────────────────────────────────────────────────────────
+type MissionId =
+  | "elimination"
+  | "defense"
+  | "sniper"
+  | "breakthrough"
+  | "rescue"
+  | "destroy"
+  | "stealth"
+  | "capture"
+  | "wave"
+  | "boss"
+
+interface MissionDef {
+  id: MissionId
+  name: string
+  description: string
+  objective: string
+  goalCount: number
+  spawnConfig: WaveDef
+}
+
+const MISSION_DEFS: MissionDef[] = [
+  {
+    id: "elimination",
+    name: "01. 殲滅",
+    description: "エリアの全敵を排除せよ",
+    objective: "全敵を排除",
+    goalCount: 15,
+    spawnConfig: { grunt: 12, miniboss: 3, boss: 0 },
+  },
+  {
+    id: "defense",
+    name: "02. 防衛",
+    description: "60秒間拠点を守れ",
+    objective: "拠点を守る: {timer}秒",
+    goalCount: 60,
+    spawnConfig: { grunt: 10, miniboss: 3, boss: 0 },
+  },
+  {
+    id: "sniper",
+    name: "03. 狙撃",
+    description: "スナイパーで敵5体を遠距離撃破",
+    objective: "スナイパーキル: {progress}/5",
+    goalCount: 5,
+    spawnConfig: { grunt: 10, miniboss: 0, boss: 0 },
+  },
+  {
+    id: "breakthrough",
+    name: "04. 突破",
+    description: "敵の包囲を突破してゴールへ到達",
+    objective: "ゴールマーカーに到達せよ",
+    goalCount: 1,
+    spawnConfig: { grunt: 8, miniboss: 2, boss: 0 },
+  },
+  {
+    id: "rescue",
+    name: "05. 救出",
+    description: "捕虜マーカーを3箇所回収",
+    objective: "捕虜回収: {progress}/3",
+    goalCount: 3,
+    spawnConfig: { grunt: 8, miniboss: 1, boss: 0 },
+  },
+  {
+    id: "destroy",
+    name: "06. 破壊",
+    description: "敵司令官を3名排除",
+    objective: "司令官排除: {progress}/3",
+    goalCount: 3,
+    spawnConfig: { grunt: 6, miniboss: 3, boss: 0 },
+  },
+  {
+    id: "stealth",
+    name: "07. 潜入",
+    description: "発見されずにゴールへ到達",
+    objective: "ステルス侵入中 — 発見禁止",
+    goalCount: 1,
+    spawnConfig: { grunt: 8, miniboss: 0, boss: 0 },
+  },
+  {
+    id: "capture",
+    name: "08. 制圧",
+    description: "3箇所のチェックポイントを順番に制圧",
+    objective: "制圧: {progress}/3",
+    goalCount: 3,
+    spawnConfig: { grunt: 6, miniboss: 2, boss: 0 },
+  },
+  {
+    id: "wave",
+    name: "09. ウェーブ防衛",
+    description: "5ウェーブを生き延びろ",
+    objective: "WAVE {progress}/{goal}",
+    goalCount: 5,
+    spawnConfig: { grunt: 0, miniboss: 0, boss: 0 },
+  },
+  {
+    id: "boss",
+    name: "10. ボス討伐",
+    description: "ボスを単独で討伐せよ",
+    objective: "ボスを排除せよ",
+    goalCount: 1,
+    spawnConfig: { grunt: 5, miniboss: 0, boss: 1 },
+  },
 ]
 
 function enemyCanSee(
@@ -392,11 +563,11 @@ function canvasToTile(x: number, y: number) {
   }
 }
 
-// ── Zone definitions ───────────────────────────────────────────────────────────
+// ── Zone definitions (daytime battlefield) ─────────────────────────────────────
 const ZONES = [
-  { startTX: 0, endTX: 9, color: 0x05080f },
-  { startTX: 10, endTX: 21, color: 0x080808 },
-  { startTX: 22, endTX: 31, color: 0x0a0514 },
+  { startTX: 0, endTX: 31, color: 0x6a7a4a },  // urban: olive ground
+  { startTX: 32, endTX: 63, color: 0x7a7a6a },  // industrial: gray concrete
+  { startTX: 64, endTX: 95, color: 0x8b7a5a },  // outdoor: sandy earth
 ]
 
 // ── Block colors ───────────────────────────────────────────────────────────────
@@ -460,7 +631,7 @@ interface ChatMessage {
 
 interface CombatEnemy {
   id: string
-  mesh: THREE.Mesh
+  mesh: THREE.Group  // humanoid root group
   hp: number
   maxHp: number
   type: EnemyType
@@ -476,7 +647,13 @@ interface CombatEnemy {
   respawnTimer: number
   spawnX: number
   spawnZ: number
-  dyingTimer: number // 2→0 during death anim, -1 when fully dead
+  dyingTimer: number
+  animTime: number  // walking animation phase
+  leftArm: THREE.Object3D | null
+  rightArm: THREE.Object3D | null
+  leftLeg: THREE.Object3D | null
+  rightLeg: THREE.Object3D | null
+  isCommander: boolean  // for destroy mission
 }
 
 interface Bullet {
@@ -484,6 +661,16 @@ interface Bullet {
   velocity: THREE.Vector3
   life: number
   isEnemy: boolean
+  damage: number
+}
+
+interface GoalMarker {
+  id: string
+  mesh: THREE.Mesh
+  x: number
+  z: number
+  collected: boolean
+  order: number
 }
 
 interface BloodParticle {
@@ -535,6 +722,7 @@ interface SceneRefs {
   muzzleLight: THREE.PointLight
   aimedEnemyId: string | null
   explosionParticles: ExplosionParticle[]
+  goalMarkers: GoalMarker[]
 }
 
 export default function ThreeWorld() {
@@ -567,11 +755,19 @@ export default function ThreeWorld() {
   const lastKillTimeRef = useRef(0)
   const killStreakTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const reloadStartTimeRef = useRef<number | null>(null)
-  // Wave system refs
+  // Wave / mission refs
   const currentWaveRef = useRef(-1)
   const waveActiveRef = useRef(false)
   const missionCompleteRef = useRef(false)
   const spawnWaveRef = useRef<((waveIdx: number) => void) | null>(null)
+  const selectedMissionRef = useRef<MissionId | null>(null)
+  const missionProgressRef = useRef(0)
+  const defenseTimerRef = useRef(60)
+  const sniperKillsRef = useRef(0)
+  const stealthDetectedRef = useRef(false)
+  const killFeedRef = useRef<{ id: number; text: string; color: string }[]>([])
+  const damageDirectionRef = useRef<number | null>(null)
+  const spawnMissionRef = useRef<((missionId: MissionId) => void) | null>(null)
 
   // Combat refs
   const recoilRef = useRef(0)
@@ -621,11 +817,20 @@ export default function ThreeWorld() {
   const [damageFlash, setDamageFlash] = useState(false)
   const [killStreakMsg, setKillStreakMsg] = useState<string | null>(null)
   const [headshotMsg, setHeadshotMsg] = useState(false)
-  // Cyberpunk / wave state
-  const [showBriefing, setShowBriefing] = useState(true)
+  // Mission / wave state
+  const [showMissionSelect, setShowMissionSelect] = useState(true)
+  const [selectedMission, setSelectedMission] = useState<MissionId | null>(null)
   const [currentWave, setCurrentWave] = useState(0)
   const [waveMessage, setWaveMessage] = useState<string | null>(null)
   const [missionComplete, setMissionComplete] = useState(false)
+  const [missionObjective, setMissionObjective] = useState("")
+  const [missionProgress, setMissionProgress] = useState(0)
+  const [missionGoal, setMissionGoal] = useState(0)
+  const [defenseTimer, setDefenseTimer] = useState(60)
+  const [killFeed, setKillFeed] = useState<{ id: number; text: string; color: string }[]>([])
+  const [totalEnemyCount, setTotalEnemyCount] = useState(0)
+  const [aliveEnemyCount, setAliveEnemyCount] = useState(0)
+  const [damageDirection, setDamageDirection] = useState<number | null>(null)
 
   useEffect(() => {
     selectedBlockRef.current = selectedBlock
@@ -819,15 +1024,15 @@ export default function ThreeWorld() {
 
       // ── Scene ──────────────────────────────────────────────────────────────
       const scene = new THREE.Scene()
-      scene.background = new THREE.Color(0x020208)
-      scene.fog = new THREE.Fog(0x020208, 25, 70)
+      scene.background = new THREE.Color(0x87ceeb) // daytime sky blue
+      scene.fog = new THREE.Fog(0xc0d8f0, 80, 280)
 
       // ── Camera (FPS) ───────────────────────────────────────────────────────
       const camera = new THREE.PerspectiveCamera(
         75,
         container.clientWidth / container.clientHeight,
         0.1,
-        200,
+        300,
       )
       camera.rotation.order = "YXZ"
 
@@ -840,26 +1045,28 @@ export default function ThreeWorld() {
       container.appendChild(renderer.domElement)
       rendererDomRef.current = renderer.domElement
 
-      // ── Lights ─────────────────────────────────────────────────────────────
-      scene.add(new THREE.AmbientLight(0x334466, 0.8))
-      const sun = new THREE.DirectionalLight(0xffffff, 1.2)
-      sun.position.set(20, 40, 10)
+      // ── Lights (daytime battlefield) ───────────────────────────────────────
+      scene.add(new THREE.AmbientLight(0xd4e8ff, 2.4)) // bright sky ambient
+      const sun = new THREE.DirectionalLight(0xfff4cc, 3.5) // warm sunlight
+      sun.position.set(60, 80, 40)
       sun.castShadow = true
       sun.shadow.mapSize.set(2048, 2048)
       sun.shadow.camera.near = 0.5
-      sun.shadow.camera.far = 100
-      ;[-40, 40, -40, 40].forEach((v, i) => {
-        if (i === 0) sun.shadow.camera.left = v
-        else if (i === 1) sun.shadow.camera.right = v
-        else if (i === 2) sun.shadow.camera.bottom = v
-        else sun.shadow.camera.top = v
-      })
+      sun.shadow.camera.far = 200
+      sun.shadow.camera.left = -80
+      sun.shadow.camera.right = 80
+      sun.shadow.camera.bottom = -80
+      sun.shadow.camera.top = 80
       scene.add(sun)
+      // Fill light from opposite side
+      const fillLight = new THREE.DirectionalLight(0xb0c8ff, 0.8)
+      fillLight.position.set(-40, 30, -20)
+      scene.add(fillLight)
 
       // ── Ground zones ───────────────────────────────────────────────────────
       for (const zone of ZONES) {
-        const w = (zone.endTX - zone.startTX + 1) * TILE_UNIT
-        const geo = new THREE.PlaneGeometry(w, MAP_SIZE * TILE_UNIT)
+        const zw = (zone.endTX - zone.startTX + 1) * TILE_UNIT
+        const geo = new THREE.PlaneGeometry(zw, MAP_SIZE * TILE_UNIT)
         const mat = new THREE.MeshLambertMaterial({ color: zone.color })
         const mesh = new THREE.Mesh(geo, mat)
         mesh.rotation.x = -Math.PI / 2
@@ -871,9 +1078,6 @@ export default function ThreeWorld() {
         mesh.receiveShadow = true
         scene.add(mesh)
       }
-      const gridHelper = new THREE.GridHelper(MAP_SIZE, MAP_SIZE, 0x112233, 0x112233)
-      gridHelper.position.set((MAP_SIZE / 2) * TILE_UNIT, 0.01, (MAP_SIZE / 2) * TILE_UNIT)
-      scene.add(gridHelper)
 
       const groundGeo = new THREE.PlaneGeometry(MAP_SIZE * TILE_UNIT, MAP_SIZE * TILE_UNIT)
       const groundMat = new THREE.MeshBasicMaterial({ visible: false })
@@ -882,66 +1086,243 @@ export default function ThreeWorld() {
       groundPlane.position.set((MAP_SIZE / 2) * TILE_UNIT, 0, (MAP_SIZE / 2) * TILE_UNIT)
       scene.add(groundPlane)
 
-      // ── Cyberpunk ruins / buildings ────────────────────────────────────────
+      // ── War-zone buildings / obstacles ─────────────────────────────────────
       const wallMeshes: THREE.Mesh[] = []
-      const wallMatRuin = new THREE.MeshLambertMaterial({ color: 0x111118, emissive: 0x000011 })
-      const wallMatServer = new THREE.MeshLambertMaterial({ color: 0x0a1020, emissive: 0x001122 })
-      const wallMatPillar = new THREE.MeshLambertMaterial({ color: 0x150a22, emissive: 0x110033 })
-      for (const [wx, wz, ww, wd] of WALL_DEFS) {
-        const isPillar = ww === 1 && wd === 1
-        const isServerRack = ww * wd <= 6 && !isPillar
-        const wallH = isPillar ? 2.0 : ww * wd > 8 ? 4.5 : 3.2
-        const mat = isPillar ? wallMatPillar : isServerRack ? wallMatServer : wallMatRuin
-        const geo = new THREE.BoxGeometry(ww, wallH, wd)
-        const mesh = new THREE.Mesh(geo, mat)
-        mesh.position.set(wx + ww / 2, wallH / 2, wz + wd / 2)
-        mesh.castShadow = true
-        mesh.receiveShadow = true
-        scene.add(mesh)
-        wallMeshes.push(mesh)
-        // Neon trim strip on large buildings
-        if (!isPillar && ww * wd > 4) {
-          const trimColor = isServerRack ? 0x0088ff : 0x00ffaa
-          const trimGeo = new THREE.BoxGeometry(ww + 0.02, 0.06, wd + 0.02)
-          const trimMat = new THREE.MeshBasicMaterial({ color: trimColor })
-          const trim = new THREE.Mesh(trimGeo, trimMat)
-          trim.position.set(wx + ww / 2, wallH - 0.03, wz + wd / 2)
-          scene.add(trim)
-        }
-      }
 
-      // ── Cyberpunk cover: server racks / wrecked vehicles / barriers ────────
-      const serverRackMat = new THREE.MeshLambertMaterial({ color: 0x0a0f1a, emissive: 0x001133 })
-      const vehicleMat = new THREE.MeshLambertMaterial({ color: 0x1a1008, emissive: 0x110500 })
-      const barrierMat = new THREE.MeshLambertMaterial({ color: 0x0d1520, emissive: 0x002233 })
-      for (const [cx, cz, cw, cd, ch] of COVER_DEFS) {
-        const isCar = cw >= 1.5 || cd >= 1.5
-        const isBarrier = (cw >= 2.0 || cd >= 2.0) && ch < 0.9
-        const coverMeshMat = isCar ? vehicleMat : isBarrier ? barrierMat : serverRackMat
-        const geo = new THREE.BoxGeometry(cw, ch, cd)
-        const mesh = new THREE.Mesh(geo, coverMeshMat)
-        mesh.position.set(cx + cw / 2, ch / 2, cz + cd / 2)
-        mesh.castShadow = true
-        mesh.receiveShadow = true
-        scene.add(mesh)
-        wallMeshes.push(mesh)
-        // Server rack: LED indicator strip
-        if (!isCar && !isBarrier) {
-          const ledGeo = new THREE.BoxGeometry(cw * 0.6, 0.04, 0.02)
-          const ledMat = new THREE.MeshBasicMaterial({ color: 0x00ff88 })
-          const led = new THREE.Mesh(ledGeo, ledMat)
-          led.position.set(cx + cw / 2, ch * 0.8, cz + cd + 0.01)
-          scene.add(led)
+      // Shared materials
+      const concreteMat = new THREE.MeshLambertMaterial({ color: 0x8a8878 })
+      const concreteRoofMat = new THREE.MeshLambertMaterial({ color: 0x7a7868 })
+      const industrialMat = new THREE.MeshLambertMaterial({ color: 0x787878 })
+      const industrialRoofMat = new THREE.MeshLambertMaterial({ color: 0x686868 })
+      const windowMat = new THREE.MeshLambertMaterial({ color: 0x1a2833, emissive: 0x050a10 })
+      const barricadeMat = new THREE.MeshLambertMaterial({ color: 0x888870 })
+      const tankMat = new THREE.MeshLambertMaterial({ color: 0x6a7060 })
+      const pipeMat = new THREE.MeshLambertMaterial({ color: 0x888878 })
+      const trenchMat = new THREE.MeshLambertMaterial({ color: 0x706050 })
+      const trunkMat = new THREE.MeshLambertMaterial({ color: 0x6b4226 })
+      const leavesMat = new THREE.MeshLambertMaterial({ color: 0x2d5a1b })
+      const carColors = [0x4a6a8a, 0x8a6a4a, 0x4a6a4a, 0x6a4a4a]
+
+      for (const [ox, oz, ow, od, otype] of MAP_OBJECTS) {
+        const cx = ox + ow / 2
+        const cz = oz + od / 2
+        const area = ow * od
+        const isUrban = ox < 32
+        const isIndustrial = ox >= 32 && ox < 66
+
+        if (otype === 4) {
+          // Tree: trunk + leaves
+          const trunk = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.15, 0.22, 2.0, 6),
+            trunkMat,
+          )
+          trunk.position.set(cx, 1.0, cz)
+          trunk.castShadow = true
+          scene.add(trunk)
+          const leaves = new THREE.Mesh(new THREE.SphereGeometry(1.1, 7, 6), leavesMat)
+          leaves.position.set(cx, 3.1, cz)
+          leaves.castShadow = true
+          scene.add(leaves)
+          const leaves2 = new THREE.Mesh(
+            new THREE.SphereGeometry(0.75, 6, 5),
+            new THREE.MeshLambertMaterial({ color: 0x3a7a22 }),
+          )
+          leaves2.position.set(cx + 0.5, 3.5, cz - 0.3)
+          scene.add(leaves2)
+          continue
+        }
+
+        if (otype === 5) {
+          // Trench / sandbag fortification
+          const trenchH = 0.85
+          const geo = new THREE.BoxGeometry(ow, trenchH, od)
+          const mesh = new THREE.Mesh(geo, trenchMat)
+          mesh.position.set(cx, trenchH / 2, cz)
+          mesh.castShadow = true
+          mesh.receiveShadow = true
+          scene.add(mesh)
+          wallMeshes.push(mesh)
+          // Sandbag texture strips
+          const bagGeo = new THREE.BoxGeometry(ow * 0.9, 0.22, od * 0.9)
+          const bagMat = new THREE.MeshLambertMaterial({ color: 0x9a8a6a })
+          for (let bi = 0; bi < 2; bi++) {
+            const bag = new THREE.Mesh(bagGeo, bagMat)
+            bag.position.set(cx, trenchH - 0.11 - bi * 0.24, cz)
+            scene.add(bag)
+          }
+          continue
+        }
+
+        if (otype === 1) {
+          // Car: body + windshield + tires
+          const carColor = carColors[Math.floor((ox + oz) % carColors.length)] ?? 0x4a6a8a
+          const carBodyMat = new THREE.MeshLambertMaterial({ color: carColor })
+          const carH = 0.75
+          const body = new THREE.Mesh(new THREE.BoxGeometry(ow, carH, od), carBodyMat)
+          body.position.set(cx, carH / 2, cz)
+          body.castShadow = true
+          body.receiveShadow = true
+          scene.add(body)
+          wallMeshes.push(body)
+          // Windshield
+          const windshield = new THREE.Mesh(
+            new THREE.BoxGeometry(ow * 0.6, 0.38, 0.05),
+            windowMat,
+          )
+          windshield.position.set(cx, carH * 0.85, oz + od * 0.3)
+          scene.add(windshield)
+          // Tires (4 wheels)
+          const tireMat = new THREE.MeshLambertMaterial({ color: 0x1a1a1a })
+          const tireR = 0.22
+          const tirePositions: [number, number][] =
+            ow >= od
+              ? [
+                  [ox + ow * 0.2, oz],
+                  [ox + ow * 0.8, oz],
+                  [ox + ow * 0.2, oz + od],
+                  [ox + ow * 0.8, oz + od],
+                ]
+              : [
+                  [ox, oz + od * 0.2],
+                  [ox + ow, oz + od * 0.2],
+                  [ox, oz + od * 0.8],
+                  [ox + ow, oz + od * 0.8],
+                ]
+          for (const [tx2, tz2] of tirePositions) {
+            const tire = new THREE.Mesh(
+              new THREE.CylinderGeometry(tireR, tireR, 0.14, 8),
+              tireMat,
+            )
+            tire.position.set(tx2, tireR, tz2)
+            tire.rotation.z = Math.PI / 2
+            scene.add(tire)
+          }
+          continue
+        }
+
+        if (otype === 2) {
+          // Barricade (concrete barrier / jersey barrier)
+          const bH = 0.85
+          const bGeo = new THREE.BoxGeometry(ow, bH, od)
+          const mesh = new THREE.Mesh(bGeo, barricadeMat)
+          mesh.position.set(cx, bH / 2, cz)
+          mesh.castShadow = true
+          mesh.receiveShadow = true
+          scene.add(mesh)
+          wallMeshes.push(mesh)
+          // Stripe markings
+          const stripeMat = new THREE.MeshLambertMaterial({ color: 0xffaa00 })
+          const stripeGeo = new THREE.BoxGeometry(ow, 0.08, od + 0.02)
+          const stripe = new THREE.Mesh(stripeGeo, stripeMat)
+          stripe.position.set(cx, bH * 0.6, cz)
+          scene.add(stripe)
+          continue
+        }
+
+        if (otype === 3) {
+          // Tank or pipe
+          const isTank = ow >= 2 && od >= 2
+          if (isTank) {
+            const tankH = 3.0
+            const tankBody = new THREE.Mesh(
+              new THREE.CylinderGeometry(1.1, 1.2, tankH, 10),
+              tankMat,
+            )
+            tankBody.position.set(cx, tankH / 2, cz)
+            tankBody.castShadow = true
+            scene.add(tankBody)
+            wallMeshes.push(
+              new THREE.Mesh(new THREE.BoxGeometry(ow, tankH, od), tankMat),
+            )
+            // Top dome
+            const dome = new THREE.Mesh(
+              new THREE.SphereGeometry(1.1, 8, 5, 0, Math.PI * 2, 0, Math.PI / 2),
+              tankMat,
+            )
+            dome.position.set(cx, tankH, cz)
+            scene.add(dome)
+          } else {
+            // Pipe
+            const pipeH = ow > od ? 0.45 : od * 0.7
+            const pipeGeo = new THREE.BoxGeometry(ow, pipeH > 0 ? pipeH : 0.45, od)
+            const pipe = new THREE.Mesh(pipeGeo, pipeMat)
+            pipe.position.set(cx, pipeH / 2 + 0.4, cz)
+            pipe.castShadow = true
+            scene.add(pipe)
+            wallMeshes.push(pipe)
+          }
+          continue
+        }
+
+        // otype === 0: Building
+        const wallH = area > 60 ? 7.0 : area > 35 ? 5.5 : area > 12 ? 3.8 : 2.5
+        const bldMat = isUrban ? concreteMat : isIndustrial ? industrialMat : concreteMat
+        const roofBldMat = isUrban ? concreteRoofMat : industrialRoofMat
+
+        // Main body
+        const bodyGeo = new THREE.BoxGeometry(ow, wallH, od)
+        const bodyMesh = new THREE.Mesh(bodyGeo, bldMat)
+        bodyMesh.position.set(cx, wallH / 2, cz)
+        bodyMesh.castShadow = true
+        bodyMesh.receiveShadow = true
+        scene.add(bodyMesh)
+        wallMeshes.push(bodyMesh)
+
+        // Roof
+        const roofGeo = new THREE.BoxGeometry(ow + 0.2, 0.2, od + 0.2)
+        const roof = new THREE.Mesh(roofGeo, roofBldMat)
+        roof.position.set(cx, wallH + 0.1, cz)
+        roof.castShadow = true
+        scene.add(roof)
+
+        // Windows on large buildings
+        if (wallH >= 3.8 && ow >= 4) {
+          const wCols = Math.max(1, Math.floor(ow / 2.5))
+          const wRows = Math.max(1, Math.floor((wallH - 1.0) / 1.8))
+          for (let wRow = 0; wRow < wRows; wRow++) {
+            for (let wCol = 0; wCol < wCols; wCol++) {
+              const winX = ox + (wCol + 0.5) * (ow / wCols)
+              const winY = 1.0 + wRow * ((wallH - 1.0) / wRows)
+              const winGeo = new THREE.BoxGeometry((ow / wCols) * 0.5, 0.7, 0.06)
+              const winF = new THREE.Mesh(winGeo, windowMat)
+              winF.position.set(winX, winY, oz - 0.04)
+              scene.add(winF)
+              const winB = winF.clone()
+              winB.position.set(winX, winY, oz + od + 0.04)
+              scene.add(winB)
+            }
+          }
+        }
+
+        // Rubble around base for urban ruins effect
+        if (isUrban && wallH >= 3.0 && (ox + oz) % 3 === 0) {
+          const rubbleMat2 = new THREE.MeshLambertMaterial({ color: 0x7a7a6a })
+          for (let ri = 0; ri < 4; ri++) {
+            const angle = (ri / 4) * Math.PI * 2
+            const dist = 0.8 + (ri % 2) * 0.5
+            const rubble = new THREE.Mesh(
+              new THREE.BoxGeometry(
+                0.3 + (ri * 0.1),
+                0.2 + (ri % 2) * 0.15,
+                0.3 + ((ri + 1) % 2) * 0.2,
+              ),
+              rubbleMat2,
+            )
+            rubble.position.set(
+              cx + Math.cos(angle) * dist,
+              0.1,
+              cz + Math.sin(angle) * dist,
+            )
+            rubble.rotation.y = angle
+            scene.add(rubble)
+          }
         }
       }
 
       // ── FPS camera state ───────────────────────────────────────────────────
-      const focalPoint = new THREE.Vector3(
-        (MAP_SIZE / 2) * TILE_UNIT,
-        0,
-        (MAP_SIZE / 2) * TILE_UNIT,
-      )
-      const camState = { yaw: Math.PI, pitch: 0 }
+      // Start in urban zone (x=8, z=48), facing east toward the battlefield
+      const focalPoint = new THREE.Vector3(8, 0, 48)
+      const camState = { yaw: -Math.PI / 2, pitch: 0 } // facing +X (east)
 
       function clampPitch(p: number) {
         return Math.max(-Math.PI / 2 + 0.05, Math.min(Math.PI / 2 - 0.05, p))
@@ -991,99 +1372,148 @@ export default function ThreeWorld() {
       const muzzleLight = new THREE.PointLight(0xffee44, 0, 5)
       scene.add(muzzleLight)
 
-      // ── Cyberpunk enemy factory ────────────────────────────────────────────
+      // ── Humanoid enemy factory ─────────────────────────────────────────────
       let enemyIdCounter = 0
-      function makeEnemy(type: EnemyType, x: number, z: number): CombatEnemy {
+      function makeEnemy(
+        type: EnemyType,
+        x: number,
+        z: number,
+        isCommander = false,
+      ): CombatEnemy {
         const cfg = ENEMY_CONFIGS[type]
-        const bodyDepth = type === "grunt" ? cfg.bodyW * 0.55 : cfg.bodyW
-        const bodyGeo = new THREE.BoxGeometry(cfg.bodyW, cfg.bodyH, bodyDepth)
-        const bodyMat = new THREE.MeshLambertMaterial({ color: cfg.color, emissive: cfg.emissive })
-        const mesh = new THREE.Mesh(bodyGeo, bodyMat)
-        mesh.position.set(x, cfg.bodyH / 2, z)
-        mesh.castShadow = true
-        scene.add(mesh)
+        const scale = type === "boss" ? 1.25 : type === "miniboss" ? 1.05 : 1.0
+        const bodyColor = isCommander ? 0xff6600 : cfg.color
 
+        const group = new THREE.Group()
+        group.position.set(x, 0, z)
+        scene.add(group)
+
+        const skinMat = new THREE.MeshLambertMaterial({ color: bodyColor, emissive: cfg.emissive })
+        const darkMat = new THREE.MeshLambertMaterial({
+          color: type === "grunt" ? 0x4a5240 : type === "miniboss" ? 0x111111 : 0x5a0000,
+        })
+
+        // Helper to tag each part with enemyId for raycasting
+        function makePart(
+          geo: THREE.BufferGeometry,
+          mat: THREE.Material,
+          px: number,
+          py: number,
+          pz: number,
+          parent: THREE.Object3D = group,
+        ): THREE.Mesh {
+          const m = new THREE.Mesh(geo, mat)
+          m.position.set(px * scale, py * scale, pz * scale)
+          m.castShadow = true
+          m.userData["enemyId"] = `enemy_${enemyIdCounter}`
+          parent.add(m)
+          return m
+        }
+
+        // Legs (animated groups, pivot at hip joint)
+        const leftLegGrp = new THREE.Group()
+        leftLegGrp.position.set(-0.12 * scale, 0.72 * scale, 0)
+        group.add(leftLegGrp)
+        // thigh
+        makePart(new THREE.BoxGeometry(0.14 * scale, 0.34 * scale, 0.13 * scale), skinMat, 0, -0.17, 0, leftLegGrp)
+        // shin
+        makePart(new THREE.BoxGeometry(0.11 * scale, 0.32 * scale, 0.11 * scale), skinMat, 0, -0.49, 0, leftLegGrp)
+        // boot
+        makePart(new THREE.BoxGeometry(0.13 * scale, 0.1 * scale, 0.18 * scale), darkMat, 0, -0.67, 0.03, leftLegGrp)
+
+        const rightLegGrp = new THREE.Group()
+        rightLegGrp.position.set(0.12 * scale, 0.72 * scale, 0)
+        group.add(rightLegGrp)
+        makePart(new THREE.BoxGeometry(0.14 * scale, 0.34 * scale, 0.13 * scale), skinMat, 0, -0.17, 0, rightLegGrp)
+        makePart(new THREE.BoxGeometry(0.11 * scale, 0.32 * scale, 0.11 * scale), skinMat, 0, -0.49, 0, rightLegGrp)
+        makePart(new THREE.BoxGeometry(0.13 * scale, 0.1 * scale, 0.18 * scale), darkMat, 0, -0.67, 0.03, rightLegGrp)
+
+        // Waist
+        makePart(new THREE.BoxGeometry(0.38 * scale, 0.16 * scale, 0.22 * scale), darkMat, 0, 0.8, 0)
+
+        // Torso (with vest or plate carrier)
+        makePart(new THREE.BoxGeometry(0.44 * scale, 0.52 * scale, 0.24 * scale), skinMat, 0, 1.14, 0)
+        // Vest / armor plate
+        makePart(
+          new THREE.BoxGeometry(0.46 * scale, 0.46 * scale, 0.06 * scale),
+          darkMat,
+          0,
+          1.14,
+          -0.15,
+        )
+
+        // Arms (animated groups, pivot at shoulder)
+        const leftArmGrp = new THREE.Group()
+        leftArmGrp.position.set(-0.27 * scale, 1.32 * scale, 0)
+        group.add(leftArmGrp)
+        makePart(new THREE.BoxGeometry(0.12 * scale, 0.3 * scale, 0.12 * scale), skinMat, 0, -0.15, 0, leftArmGrp)
+        makePart(new THREE.BoxGeometry(0.1 * scale, 0.27 * scale, 0.1 * scale), skinMat, 0, -0.42, 0, leftArmGrp)
+        // hand
+        makePart(new THREE.BoxGeometry(0.09 * scale, 0.1 * scale, 0.09 * scale), darkMat, 0, -0.58, 0, leftArmGrp)
+
+        const rightArmGrp = new THREE.Group()
+        rightArmGrp.position.set(0.27 * scale, 1.32 * scale, 0)
+        group.add(rightArmGrp)
+        makePart(new THREE.BoxGeometry(0.12 * scale, 0.3 * scale, 0.12 * scale), skinMat, 0, -0.15, 0, rightArmGrp)
+        makePart(new THREE.BoxGeometry(0.1 * scale, 0.27 * scale, 0.1 * scale), skinMat, 0, -0.42, 0, rightArmGrp)
+        makePart(new THREE.BoxGeometry(0.09 * scale, 0.1 * scale, 0.09 * scale), darkMat, 0, -0.58, 0, rightArmGrp)
+
+        // Shoulder pads (miniboss/boss only)
+        if (type !== "grunt") {
+          makePart(new THREE.BoxGeometry(0.2 * scale, 0.16 * scale, 0.28 * scale), darkMat, -0.28, 1.38, 0)
+          makePart(new THREE.BoxGeometry(0.2 * scale, 0.16 * scale, 0.28 * scale), darkMat, 0.28, 1.38, 0)
+        }
+
+        // Neck
+        makePart(new THREE.BoxGeometry(0.1 * scale, 0.12 * scale, 0.1 * scale), skinMat, 0, 1.46, 0)
+
+        // Head
+        const headGeo = new THREE.SphereGeometry(0.165 * scale, 8, 7)
+        const headMat = new THREE.MeshLambertMaterial({
+          color: type === "boss" ? 0x700000 : 0xc8a878,
+          emissive: cfg.emissive,
+        })
+        const headMesh = new THREE.Mesh(headGeo, headMat)
+        headMesh.position.set(0, 1.635 * scale, 0)
+        headMesh.castShadow = true
+        headMesh.userData["enemyId"] = `enemy_${enemyIdCounter}`
+        group.add(headMesh)
+
+        // Helmet (grunt/miniboss)
         if (type === "grunt") {
-          // AI Drone: 4 legs + red LED eye
-          const legMat = new THREE.MeshLambertMaterial({ color: 0x080810, emissive: 0x110000 })
-          for (let li = 0; li < 4; li++) {
-            const legGeo = new THREE.BoxGeometry(0.04, 0.42, 0.04)
-            const leg = new THREE.Mesh(legGeo, legMat)
-            leg.position.set(
-              (li < 2 ? -1 : 1) * 0.22,
-              -cfg.bodyH * 0.4,
-              (li % 2 === 0 ? 1 : -1) * 0.14,
-            )
-            mesh.add(leg)
-          }
-          const eyeGeo = new THREE.BoxGeometry(cfg.bodyW * 0.68, 0.05, 0.03)
-          const eyeMat = new THREE.MeshBasicMaterial({ color: 0xff0000 })
-          const eye = new THREE.Mesh(eyeGeo, eyeMat)
-          eye.position.set(0, cfg.bodyH * 0.23, bodyDepth / 2 + 0.02)
-          mesh.add(eye)
-          const glow = new THREE.PointLight(0xff0000, 0.5, 2.5)
-          mesh.add(glow)
-        } else if (type === "miniboss") {
-          // Heavy Robot: shoulder pads + blue visor
-          const shoulderMat = new THREE.MeshLambertMaterial({ color: 0x1a2535, emissive: 0x001133 })
-          for (const sx of [-cfg.bodyW * 0.62, cfg.bodyW * 0.62]) {
-            const s = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.28, 0.5), shoulderMat)
-            s.position.set(sx, cfg.bodyH * 0.28, 0)
-            mesh.add(s)
-          }
-          const visor = new THREE.Mesh(
-            new THREE.BoxGeometry(cfg.bodyW * 0.72, 0.07, 0.03),
-            new THREE.MeshBasicMaterial({ color: 0x00aaff }),
+          const helmetMat = new THREE.MeshLambertMaterial({ color: 0x3a4230 })
+          const helmet = new THREE.Mesh(
+            new THREE.SphereGeometry(0.19 * scale, 8, 6, 0, Math.PI * 2, 0, Math.PI * 0.55),
+            helmetMat,
           )
-          visor.position.set(0, cfg.bodyH * 0.27, cfg.bodyW / 2 + 0.02)
-          mesh.add(visor)
-          const glow = new THREE.PointLight(0x0066ff, 0.7, 4)
-          mesh.add(glow)
-        } else {
-          // Boss: AI Core with tentacle arms + spine shards + magenta eye
-          const armMat = new THREE.MeshLambertMaterial({ color: 0x2a0050, emissive: 0x220044 })
-          for (let ai = 0; ai < 4; ai++) {
-            const angle = (ai / 4) * Math.PI * 2
-            const arm = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.14, 0.95), armMat)
-            arm.position.set(Math.cos(angle) * 0.75, cfg.bodyH * 0.06, Math.sin(angle) * 0.75)
-            arm.rotation.y = angle
-            mesh.add(arm)
-          }
-          const spineMat = new THREE.MeshLambertMaterial({ color: 0x440088, emissive: 0x330066 })
-          for (let si = 0; si < 4; si++) {
-            const angle = (si / 4) * Math.PI * 2 + Math.PI / 4
-            const spine = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.38, 0.1), spineMat)
-            spine.position.set(Math.cos(angle) * 0.5, cfg.bodyH * 0.26, Math.sin(angle) * 0.5)
-            mesh.add(spine)
-          }
-          const eye = new THREE.Mesh(
-            new THREE.BoxGeometry(cfg.bodyW * 0.52, 0.07, 0.03),
-            new THREE.MeshBasicMaterial({ color: 0xff00ff }),
-          )
-          eye.position.set(0, cfg.bodyH * 0.18, cfg.bodyW / 2 + 0.02)
-          mesh.add(eye)
-          const glow = new THREE.PointLight(0xaa00ff, 1.2, 6)
-          mesh.add(glow)
+          helmet.position.set(0, 1.66 * scale, 0)
+          helmet.userData["enemyId"] = `enemy_${enemyIdCounter}`
+          group.add(helmet)
+        }
+
+        // Commander indicator (orange glowing halo)
+        if (isCommander) {
+          const haloGeo = new THREE.TorusGeometry(0.3 * scale, 0.04 * scale, 6, 12)
+          const haloMat = new THREE.MeshBasicMaterial({ color: 0xff6600 })
+          const halo = new THREE.Mesh(haloGeo, haloMat)
+          halo.position.set(0, 2.1 * scale, 0)
+          halo.userData["enemyId"] = `enemy_${enemyIdCounter}`
+          group.add(halo)
+          const glow = new THREE.PointLight(0xff6600, 1.0, 4)
+          glow.position.set(0, 2.0 * scale, 0)
+          group.add(glow)
         }
 
         const patrol = [
           { x, z },
-          {
-            x: Math.max(2, Math.min(MAP_SIZE - 2, x + 5)),
-            z: Math.max(2, Math.min(MAP_SIZE - 2, z + 5)),
-          },
-          {
-            x: Math.max(2, Math.min(MAP_SIZE - 2, x - 5)),
-            z: Math.max(2, Math.min(MAP_SIZE - 2, z + 5)),
-          },
-          {
-            x: Math.max(2, Math.min(MAP_SIZE - 2, x - 5)),
-            z: Math.max(2, Math.min(MAP_SIZE - 2, z - 5)),
-          },
+          { x: Math.max(2, Math.min(MAP_SIZE - 2, x + 8)), z: Math.max(2, Math.min(MAP_SIZE - 2, z + 8)) },
+          { x: Math.max(2, Math.min(MAP_SIZE - 2, x - 8)), z: Math.max(2, Math.min(MAP_SIZE - 2, z + 8)) },
+          { x: Math.max(2, Math.min(MAP_SIZE - 2, x - 8)), z: Math.max(2, Math.min(MAP_SIZE - 2, z - 8)) },
         ]
+        const eid = enemyIdCounter++
         return {
-          id: `enemy_${enemyIdCounter++}`,
-          mesh,
+          id: `enemy_${eid}`,
+          mesh: group,
           hp: cfg.hp,
           maxHp: cfg.hp,
           type,
@@ -1100,33 +1530,136 @@ export default function ThreeWorld() {
           spawnX: x,
           spawnZ: z,
           dyingTimer: -1,
+          animTime: Math.random() * Math.PI * 2,
+          leftArm: leftArmGrp,
+          rightArm: rightArmGrp,
+          leftLeg: leftLegGrp,
+          rightLeg: rightLegGrp,
+          isCommander,
         }
       }
 
-      // ── Wave spawner ───────────────────────────────────────────────────────
+      // ── Wave / mission spawner ─────────────────────────────────────────────
       const enemies: CombatEnemy[] = []
-      function spawnWave(waveIdx: number) {
+      const goalMarkers: GoalMarker[] = []
+
+      function clearEnemies() {
         for (const e of enemies) scene.remove(e.mesh)
         enemies.length = 0
-        const def = WAVE_DEFS[waveIdx]
-        if (!def) return
+      }
+      function clearGoalMarkers() {
+        for (const m of goalMarkers) scene.remove(m.mesh)
+        goalMarkers.length = 0
+      }
+
+      function spawnEnemiesFromDef(def: WaveDef, commanderCount = 0) {
         const types: EnemyType[] = [
           ...Array<EnemyType>(def.grunt).fill("grunt"),
           ...Array<EnemyType>(def.miniboss).fill("miniboss"),
           ...Array<EnemyType>(def.boss).fill("boss"),
         ]
         const shuffled = [...SPAWN_POINTS].sort(() => Math.random() - 0.5)
+        let commandersSpawned = 0
         for (let i = 0; i < types.length; i++) {
           const sp = shuffled[i % shuffled.length] ?? shuffled[0]
           if (!sp) continue
           const type = types[i] ?? "grunt"
-          const x = Math.max(1.5, Math.min(MAP_SIZE - 1.5, sp.x + (Math.random() - 0.5) * 2))
-          const z = Math.max(1.5, Math.min(MAP_SIZE - 1.5, sp.z + (Math.random() - 0.5) * 2))
-          enemies.push(makeEnemy(type, x, z))
+          const ex = Math.max(2, Math.min(MAP_SIZE - 2, sp.x + (Math.random() - 0.5) * 3))
+          const ez = Math.max(2, Math.min(MAP_SIZE - 2, sp.z + (Math.random() - 0.5) * 3))
+          const isCmd = commandersSpawned < commanderCount && type === "miniboss"
+          if (isCmd) commandersSpawned++
+          enemies.push(makeEnemy(type, ex, ez, isCmd))
         }
+        setTotalEnemyCount(enemies.length)
+        setAliveEnemyCount(enemies.length)
         setEnemyStatus(
           enemies.map((e) => ({ id: e.id, hp: e.hp, maxHp: e.maxHp, type: e.type, alive: true })),
         )
+      }
+
+      function placeGoalMarker(
+        mx: number,
+        mz: number,
+        markerOrder: number,
+        color: number = 0xffcc00,
+      ) {
+        const markerMat = new THREE.MeshLambertMaterial({ color, emissive: color, emissiveIntensity: 0.5 })
+        const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, 3.0, 6), markerMat)
+        pole.position.set(mx, 1.5, mz)
+        scene.add(pole)
+        const top = new THREE.Mesh(new THREE.SphereGeometry(0.3, 8, 6), markerMat)
+        top.position.set(mx, 3.2, mz)
+        scene.add(top)
+        const light = new THREE.PointLight(color, 1.5, 8)
+        light.position.set(mx, 3.2, mz)
+        scene.add(light)
+        // Use pole as the combined mesh for simplicity
+        const marker: GoalMarker = { id: `marker_${markerOrder}`, mesh: pole, x: mx, z: mz, collected: false, order: markerOrder }
+        goalMarkers.push(marker)
+        // Attach top as child for visibility toggling
+        pole.add(top)
+        return marker
+      }
+
+      function spawnMission(missionId: MissionId) {
+        clearEnemies()
+        clearGoalMarkers()
+        selectedMissionRef.current = missionId
+        missionProgressRef.current = 0
+        sniperKillsRef.current = 0
+        stealthDetectedRef.current = false
+        missionCompleteRef.current = false
+        setMissionComplete(false)
+        setMissionProgress(0)
+
+        const mdef = MISSION_DEFS.find((m) => m.id === missionId)
+        if (!mdef) return
+        setMissionGoal(mdef.goalCount)
+        setMissionObjective(mdef.objective.replace("{progress}", "0").replace("{goal}", String(mdef.goalCount)).replace("{timer}", "60"))
+
+        if (missionId === "wave") {
+          currentWaveRef.current = 0
+          setCurrentWave(1)
+          setWaveMessage("WAVE 1 INCOMING")
+          waveActiveRef.current = false
+          spawnEnemiesFromDef(WAVE_DEFS[0] ?? { grunt: 6, miniboss: 0, boss: 0 })
+          setTimeout(() => { setWaveMessage(null); waveActiveRef.current = true }, 3000)
+          return
+        }
+
+        if (missionId === "defense") {
+          defenseTimerRef.current = 60
+          setDefenseTimer(60)
+        }
+
+        if (missionId === "breakthrough" || missionId === "stealth") {
+          placeGoalMarker(90, 48, 0, 0x00ff88)
+        }
+
+        if (missionId === "rescue") {
+          placeGoalMarker(48, 20, 0, 0xffcc00)
+          placeGoalMarker(80, 60, 1, 0xffcc00)
+          placeGoalMarker(40, 80, 2, 0xffcc00)
+        }
+
+        if (missionId === "capture") {
+          placeGoalMarker(30, 48, 0, 0x44aaff)
+          placeGoalMarker(60, 48, 1, 0x44aaff)
+          placeGoalMarker(88, 48, 2, 0x44aaff)
+        }
+
+        const isCommander = missionId === "destroy"
+        spawnEnemiesFromDef(mdef.spawnConfig, isCommander ? 3 : 0)
+        waveActiveRef.current = true
+      }
+
+      spawnMissionRef.current = spawnMission
+
+      function spawnWave(waveIdx: number) {
+        clearEnemies()
+        const def = WAVE_DEFS[waveIdx]
+        if (!def) return
+        spawnEnemiesFromDef(def)
       }
       spawnWaveRef.current = spawnWave
 
@@ -1154,6 +1687,7 @@ export default function ThreeWorld() {
         muzzleLight,
         aimedEnemyId: null,
         explosionParticles,
+        goalMarkers,
       }
 
       setEnemyStatus([])
@@ -1247,6 +1781,7 @@ export default function ThreeWorld() {
           velocity: fwd.clone().multiplyScalar(BULLET_SPEED),
           life: weapon.bulletLifetime,
           isEnemy: false,
+          damage: weapon.hitDamage,
         })
         muzzleFlashTimerRef.current = MUZZLE_FLASH_DURATION
       }
@@ -1358,16 +1893,22 @@ export default function ThreeWorld() {
         // Play shot sound
         SOUNDS[weapon.id]()
 
-        // Center-ray hit detection
+        // Center-ray hit detection (recursive through humanoid groups)
         pointer.set(0, 0)
         raycaster.setFromCamera(pointer, camera)
         const aliveEnemies = enemies.filter((e) => e.hp > 0)
-        const enemyHits = raycaster.intersectObjects(
-          aliveEnemies.map((e) => e.mesh),
-          false,
-        )
+        const allEnemyParts: THREE.Object3D[] = []
+        for (const e of aliveEnemies) {
+          e.mesh.traverse((child) => {
+            if (child instanceof THREE.Mesh && child.userData["enemyId"]) {
+              allEnemyParts.push(child)
+            }
+          })
+        }
+        const enemyHits = raycaster.intersectObjects(allEnemyParts, false)
         if (enemyHits.length > 0) {
-          const hitEnemy = aliveEnemies.find((e) => e.mesh === enemyHits[0]?.object)
+          const hitEnemyId = enemyHits[0]?.object.userData["enemyId"] as string | undefined
+          const hitEnemy = aliveEnemies.find((e) => e.id === hitEnemyId)
           if (hitEnemy && enemyHits[0]) {
             SOUNDS.hit()
             spawnBlood(enemyHits[0].point)
@@ -1392,11 +1933,38 @@ export default function ThreeWorld() {
               setScore(scoreRef.current)
               const tag =
                 hitEnemy.type === "boss"
-                  ? "BOSS撃破！"
+                  ? "BOSS ELIMINATED"
                   : hitEnemy.type === "miniboss"
-                    ? "ミニボス撃破！"
-                    : "KILL!"
+                    ? "MINIBOSS ELIMINATED"
+                    : hitEnemy.isCommander
+                      ? "COMMANDER ELIMINATED"
+                      : "GRUNT ELIMINATED"
               showNotification(`${tag} +${hitEnemy.config.score}pt`)
+              // Kill feed
+              const feedColor = hitEnemy.type === "boss" ? "#cc44ff" : hitEnemy.type === "miniboss" ? "#ff8800" : "#ff5555"
+              const feedEntry = { id: Date.now(), text: tag, color: feedColor }
+              killFeedRef.current = [...killFeedRef.current, feedEntry].slice(-6)
+              setKillFeed([...killFeedRef.current])
+              setTimeout(() => {
+                killFeedRef.current = killFeedRef.current.filter((e) => e.id !== feedEntry.id)
+                setKillFeed([...killFeedRef.current])
+              }, 4000)
+              // Mission-specific progress
+              const mission = selectedMissionRef.current
+              if (mission === "sniper" && weapon.id === "sniper") {
+                sniperKillsRef.current += 1
+                missionProgressRef.current = sniperKillsRef.current
+                setMissionProgress(sniperKillsRef.current)
+              } else if (mission === "destroy" && hitEnemy.isCommander) {
+                missionProgressRef.current += 1
+                setMissionProgress(missionProgressRef.current)
+              } else if (mission === "boss" && hitEnemy.type === "boss") {
+                missionProgressRef.current = 1
+                setMissionProgress(1)
+              }
+              // Check alive enemy count
+              const stillAlive = enemies.filter((e) => e.hp > 0).length
+              setAliveEnemyCount(stillAlive)
               // Kill streak tracking
               const nowKill = Date.now()
               if (nowKill - lastKillTimeRef.current < 4000) {
@@ -1608,7 +2176,7 @@ export default function ThreeWorld() {
               b.mesh.geometry.dispose()
               refs.bullets.splice(i, 1)
               if (gamePhaseRef.current === "playing") {
-                playerHpRef.current = Math.max(0, playerHpRef.current - 5)
+                playerHpRef.current = Math.max(0, playerHpRef.current - b.damage)
                 setPlayerHp(playerHpRef.current)
                 lastDamageTimeRef.current = Date.now()
                 cameraShakeRef.current.intensity = 4
@@ -1734,11 +2302,23 @@ export default function ThreeWorld() {
                 }
               }
               enemy.mesh.rotation.y = Math.atan2(enemy.facing.x, enemy.facing.z)
+              // Patrol walking animation
+              enemy.animTime += dt * 5
+              const swingP = Math.sin(enemy.animTime) * 0.3
+              if (enemy.leftArm) enemy.leftArm.rotation.x = swingP
+              if (enemy.rightArm) enemy.rightArm.rotation.x = -swingP
+              if (enemy.leftLeg) enemy.leftLeg.rotation.x = -swingP * 0.8
+              if (enemy.rightLeg) enemy.rightLeg.rotation.x = swingP * 0.8
               if (
                 enemyCanSee(enemy.facing.x, enemy.facing.z, toPx, toPz, distToPlayer, enemy.config)
               ) {
                 enemy.state = "alert"
                 enemy.lastSeenPlayer = { x: fp.x, z: fp.z }
+                // Stealth mission: detected = fail
+                if (selectedMissionRef.current === "stealth" && !stealthDetectedRef.current) {
+                  stealthDetectedRef.current = true
+                  showNotification("⚠ 発見された！ミッション失敗")
+                }
                 const alertNow = Date.now()
                 if (alertNow - lastAlertTimeRef.current > 4000) {
                   lastAlertTimeRef.current = alertNow
@@ -1801,11 +2381,18 @@ export default function ThreeWorld() {
                 refs.bullets.push({
                   mesh: bMesh,
                   velocity: fwd.clone().multiplyScalar(ENEMY_BULLET_SPEED),
-                  life: 1.8,
+                  life: 2.2,
                   isEnemy: true,
+                  damage: enemy.config.fireDamage,
                 })
               }
-              enemy.mesh.position.y = enemy.config.bodyH / 2 + Math.sin(now * 0.006) * 0.04
+              // Walking animation while alerting
+              enemy.animTime += dt * 7
+              const swingA = Math.sin(enemy.animTime) * 0.4
+              if (enemy.leftArm) enemy.leftArm.rotation.x = swingA
+              if (enemy.rightArm) enemy.rightArm.rotation.x = -swingA
+              if (enemy.leftLeg) enemy.leftLeg.rotation.x = -swingA * 0.7
+              if (enemy.rightLeg) enemy.rightLeg.rotation.x = swingA * 0.7
             } else if (enemy.state === "attack") {
               if (distToPlayer > 0.001) {
                 enemy.facing.set(toPx / distToPlayer, 0, toPz / distToPlayer)
@@ -1849,8 +2436,9 @@ export default function ThreeWorld() {
                 refs.bullets.push({
                   mesh: bMesh,
                   velocity: fwd.clone().multiplyScalar(ENEMY_BULLET_SPEED),
-                  life: 1.8,
+                  life: 2.2,
                   isEnemy: true,
+                  damage: enemy.config.fireDamage,
                 })
               }
             } else if (enemy.state === "search") {
@@ -1884,42 +2472,100 @@ export default function ThreeWorld() {
           }
         }
 
-        // ── Aimed enemy detection (crosshair highlight) ────────────────────
+        // ── Aimed enemy detection (crosshair highlight, recursive) ──────────
         {
           pointer.set(0, 0)
           raycaster.setFromCamera(pointer, camera)
-          const aliveEnemyMeshes = refs.enemies.filter((e) => e.hp > 0).map((e) => e.mesh)
-          const aimHits = raycaster.intersectObjects(aliveEnemyMeshes, false)
-          const newAimed =
-            aimHits.length > 0
-              ? (refs.enemies.find((e) => e.mesh === aimHits[0]?.object)?.id ?? null)
-              : null
+          const aimParts: THREE.Object3D[] = []
+          for (const e of refs.enemies.filter((e2) => e2.hp > 0)) {
+            e.mesh.traverse((child) => {
+              if (child instanceof THREE.Mesh && child.userData["enemyId"]) aimParts.push(child)
+            })
+          }
+          const aimHits = raycaster.intersectObjects(aimParts, false)
+          const newAimed = aimHits.length > 0
+            ? (aimHits[0]?.object.userData["enemyId"] as string | null ?? null)
+            : null
           if (newAimed !== refs.aimedEnemyId) {
             refs.aimedEnemyId = newAimed
             setAimedEnemyId(newAimed)
           }
         }
 
-        // ── Wave completion check ──────────────────────────────────────────
-        if (waveActiveRef.current && !missionCompleteRef.current && refs.enemies.length > 0) {
-          const allDead = refs.enemies.every((e) => e.hp <= 0 && e.dyingTimer < 0)
-          if (allDead) {
-            waveActiveRef.current = false
-            const nextIdx = currentWaveRef.current + 1
-            if (nextIdx >= WAVE_DEFS.length) {
-              missionCompleteRef.current = true
-              setMissionComplete(true)
-              SOUNDS.clear()
-            } else {
-              currentWaveRef.current = nextIdx
-              setCurrentWave(nextIdx + 1)
-              setWaveMessage(`WAVE ${nextIdx + 1} INCOMING`)
-              setTimeout(() => {
-                setWaveMessage(null)
-                spawnWaveRef.current?.(nextIdx)
-                waveActiveRef.current = true
-              }, 3000)
+        // ── Goal marker collection ─────────────────────────────────────────
+        if (waveActiveRef.current && !missionCompleteRef.current) {
+          for (const marker of refs.goalMarkers) {
+            if (marker.collected) continue
+            const mdx = refs.focalPoint.x - marker.x
+            const mdz = refs.focalPoint.z - marker.z
+            if (Math.sqrt(mdx * mdx + mdz * mdz) < 2.5) {
+              const mission = selectedMissionRef.current
+              // Check ordering for capture mission
+              if (mission === "capture") {
+                const collected = refs.goalMarkers.filter((m) => m.collected).length
+                if (marker.order !== collected) continue // must collect in order
+              }
+              marker.collected = true
+              marker.mesh.visible = false
+              missionProgressRef.current += 1
+              setMissionProgress(missionProgressRef.current)
+              const remaining = refs.goalMarkers.filter((m) => !m.collected).length
+              showNotification(remaining > 0 ? `マーカー回収！残り${remaining}` : "全マーカー回収！")
             }
+          }
+        }
+
+        // ── Mission completion checks ─────────────────────────────────────
+        if (waveActiveRef.current && !missionCompleteRef.current) {
+          const mission = selectedMissionRef.current
+          let complete = false
+          if (mission === "wave") {
+            const allDead = refs.enemies.every((e) => e.hp <= 0 && e.dyingTimer < 0)
+            if (allDead) {
+              waveActiveRef.current = false
+              const nextWaveIdx = currentWaveRef.current + 1
+              if (nextWaveIdx >= WAVE_DEFS.length) {
+                complete = true
+              } else {
+                currentWaveRef.current = nextWaveIdx
+                setCurrentWave(nextWaveIdx + 1)
+                setMissionProgress(nextWaveIdx + 1)
+                setWaveMessage(`WAVE ${nextWaveIdx + 1} INCOMING`)
+                setTimeout(() => {
+                  setWaveMessage(null)
+                  spawnWaveRef.current?.(nextWaveIdx)
+                  waveActiveRef.current = true
+                }, 3000)
+              }
+            }
+          } else if (mission === "elimination") {
+            const allDead = refs.enemies.every((e) => e.hp <= 0 && e.dyingTimer < 0)
+            if (allDead) complete = true
+          } else if (mission === "sniper") {
+            if (sniperKillsRef.current >= 5) complete = true
+          } else if (mission === "destroy") {
+            if (missionProgressRef.current >= 3) complete = true
+          } else if (mission === "boss") {
+            if (missionProgressRef.current >= 1) complete = true
+          } else if (mission === "breakthrough" || mission === "stealth") {
+            if (refs.goalMarkers.every((m) => m.collected)) complete = true
+            if (mission === "stealth" && stealthDetectedRef.current) {
+              // stealth fail: game over
+              gamePhaseRef.current = "gameover"
+              setGamePhase("gameover")
+            }
+          } else if (mission === "rescue" || mission === "capture") {
+            if (refs.goalMarkers.every((m) => m.collected)) complete = true
+          } else if (mission === "defense") {
+            defenseTimerRef.current -= dt
+            const secs = Math.max(0, Math.ceil(defenseTimerRef.current))
+            setDefenseTimer(secs)
+            if (defenseTimerRef.current <= 0) complete = true
+          }
+          if (complete && !missionCompleteRef.current) {
+            missionCompleteRef.current = true
+            setMissionComplete(true)
+            SOUNDS.clear()
           }
         }
 
@@ -1976,9 +2622,24 @@ export default function ThreeWorld() {
               ctx.fillRect(Number(p[0]) * SCALE * TILE_UNIT, Number(p[1]) * SCALE * TILE_UNIT, 2, 2)
             }
             // Draw walls on minimap
-            ctx.fillStyle = "#334455"
+            // Zone colors on minimap
+            ctx.fillStyle = "#3a4a2a"
+            ctx.fillRect(0, 0, 32 * SCALE, W)
+            ctx.fillStyle = "#3a3a2a"
+            ctx.fillRect(32 * SCALE, 0, 32 * SCALE, W)
+            ctx.fillStyle = "#4a3a1a"
+            ctx.fillRect(64 * SCALE, 0, 32 * SCALE, W)
+            ctx.fillStyle = "#555545"
             for (const [wx, wz, ww, wd] of WALL_DEFS) {
-              ctx.fillRect(wx * SCALE, wz * SCALE, ww * SCALE, wd * SCALE)
+              ctx.fillRect(wx * SCALE, wz * SCALE, Math.max(1, ww * SCALE), Math.max(1, wd * SCALE))
+            }
+            // Goal markers
+            for (const marker of refs.goalMarkers) {
+              if (marker.collected) continue
+              ctx.fillStyle = "#00ff88"
+              ctx.beginPath()
+              ctx.arc(marker.x * SCALE, marker.z * SCALE, 4, 0, Math.PI * 2)
+              ctx.fill()
             }
             // Draw enemies on minimap (color by type/state)
             for (const enemy of refs.enemies) {
@@ -2998,72 +3659,98 @@ export default function ThreeWorld() {
           </div>
         )}
 
-        {/* Enemy status (top-left, compact) */}
-        {!isLoading && !error && gamePhase === "playing" && (
+        {/* ── Mission objective (top-left, COD style) ──────────────────── */}
+        {!isLoading && !error && gamePhase === "playing" && selectedMission && !showMissionSelect && (
           <div
             style={{
               position: "absolute",
               top: "1rem",
               left: "1rem",
               zIndex: 20,
-              display: "flex",
-              flexDirection: "column",
-              gap: "3px",
-              fontFamily: "monospace",
               pointerEvents: "none",
+              fontFamily: "monospace",
             }}
           >
-            {enemyStatus.map((e, i) => {
-              const typeColor =
-                e.type === "boss" ? "#cc44ff" : e.type === "miniboss" ? "#ff8800" : "#ff5555"
-              const label =
-                e.type === "boss" ? "BOSS" : e.type === "miniboss" ? "MINI" : `E${i + 1}`
-              const hpPctEnemy = e.maxHp > 0 ? Math.round((e.hp / e.maxHp) * 100) : 0
-              return (
-                <div
-                  key={e.id}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "4px",
-                    opacity: e.alive ? 1 : 0.3,
-                  }}
-                >
-                  <span
-                    style={{
-                      color: e.alive ? typeColor : "#444",
-                      fontSize: "0.5rem",
-                      minWidth: "24px",
-                    }}
-                  >
-                    {label}
-                  </span>
-                  <div
-                    style={{
-                      width: "34px",
-                      height: "4px",
-                      background: "rgba(0,0,0,0.6)",
-                      border: `1px solid ${e.alive ? typeColor : "#333"}44`,
-                      overflow: "hidden",
-                      borderRadius: "1px",
-                    }}
-                  >
-                    <div
-                      style={{
-                        height: "100%",
-                        width: `${hpPctEnemy}%`,
-                        background: e.alive ? typeColor : "#333",
-                        transition: "width 0.3s",
-                        borderRadius: "1px",
-                      }}
-                    />
-                  </div>
-                  <span style={{ color: e.alive ? typeColor : "#444", fontSize: "0.48rem" }}>
-                    {e.alive ? e.hp : "↺"}
-                  </span>
+            <div style={{ color: "#88aaff", fontSize: "0.55rem", letterSpacing: "0.18em", marginBottom: "0.2rem" }}>
+              MISSION OBJECTIVE
+            </div>
+            <div style={{ color: "white", fontSize: "0.72rem", fontWeight: "bold", letterSpacing: "0.06em", marginBottom: "0.3rem" }}>
+              {missionObjective
+                .replace("{progress}", String(missionProgress))
+                .replace("{goal}", String(missionGoal))
+                .replace("{timer}", String(defenseTimer))}
+            </div>
+            {selectedMission === "defense" && (
+              <div style={{ color: defenseTimer < 10 ? "#ff3333" : "#ffcc00", fontSize: "1.4rem", fontWeight: "bold" }}>
+                {defenseTimer}s
+              </div>
+            )}
+            {selectedMission !== "defense" && missionGoal > 1 && (
+              <div style={{ display: "flex", alignItems: "center", gap: "0.3rem" }}>
+                <div style={{ height: "4px", width: "120px", background: "rgba(255,255,255,0.15)", borderRadius: "2px", overflow: "hidden" }}>
+                  <div style={{ height: "100%", width: `${Math.min(100, (missionProgress / missionGoal) * 100)}%`, background: "#88aaff", transition: "width 0.3s" }} />
                 </div>
-              )
-            })}
+                <span style={{ color: "#88aaff", fontSize: "0.55rem" }}>{missionProgress}/{missionGoal}</span>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ── Enemy count (top-center) ────────────────────────────────── */}
+        {!isLoading && !error && gamePhase === "playing" && !showMissionSelect && (
+          <div
+            style={{
+              position: "absolute",
+              top: "0.6rem",
+              left: "50%",
+              transform: "translateX(-50%)",
+              zIndex: 20,
+              pointerEvents: "none",
+              fontFamily: "monospace",
+              textAlign: "center",
+            }}
+          >
+            <div style={{ color: "rgba(255,80,80,0.85)", fontSize: "0.62rem", letterSpacing: "0.2em" }}>
+              ENEMIES REMAINING
+            </div>
+            <div style={{ color: "#ff5555", fontSize: "1.4rem", fontWeight: "bold", lineHeight: 1 }}>
+              {aliveEnemyCount}
+            </div>
+          </div>
+        )}
+
+        {/* ── Kill feed (right side) ──────────────────────────────────── */}
+        {!isLoading && !error && killFeed.length > 0 && (
+          <div
+            style={{
+              position: "absolute",
+              top: "8rem",
+              right: "1rem",
+              zIndex: 20,
+              pointerEvents: "none",
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "flex-end",
+              gap: "3px",
+              fontFamily: "monospace",
+            }}
+          >
+            {killFeed.map((entry) => (
+              <div
+                key={entry.id}
+                style={{
+                  color: entry.color,
+                  fontSize: "0.62rem",
+                  fontWeight: "bold",
+                  letterSpacing: "0.08em",
+                  background: "rgba(0,0,0,0.5)",
+                  padding: "2px 6px",
+                  borderLeft: `2px solid ${entry.color}`,
+                }}
+              >
+                {entry.text}
+              </div>
+            ))}
           </div>
         )}
 
@@ -3211,103 +3898,101 @@ export default function ThreeWorld() {
           />
         )}
 
-        {/* Briefing screen */}
-        {showBriefing && !isLoading && !error && (
+        {/* Mission selection screen */}
+        {showMissionSelect && !isLoading && !error && (
           <div
             style={{
               position: "absolute",
               inset: 0,
-              background: "rgba(0,0,0,0.92)",
+              background: "rgba(0,5,15,0.96)",
               display: "flex",
               flexDirection: "column",
               alignItems: "center",
-              justifyContent: "center",
-              gap: "1.6rem",
+              justifyContent: "flex-start",
+              paddingTop: "2rem",
+              gap: "1rem",
               zIndex: 50,
               fontFamily: "monospace",
+              overflowY: "auto",
             }}
           >
-            <div
-              style={{ color: "#00ffaa", fontSize: "0.7rem", letterSpacing: "0.4em", opacity: 0.7 }}
-            >
-              CLASSIFIED {/* RESISTANCE OPS */}
+            <div style={{ color: "#88aacc", fontSize: "0.65rem", letterSpacing: "0.4em" }}>
+              MODERN WARFARE
             </div>
             <div
               style={{
-                color: "#ff3333",
-                fontSize: "1.8rem",
+                color: "#ffffff",
+                fontSize: "2rem",
                 fontWeight: "bold",
                 letterSpacing: "0.3em",
-                textShadow: "0 0 30px rgba(255,0,80,0.8)",
+                textShadow: "0 2px 20px rgba(100,180,255,0.6)",
               }}
             >
-              MISSION BRIEFING
+              SELECT MISSION
             </div>
             <div
               style={{
-                maxWidth: "480px",
-                textAlign: "center",
-                lineHeight: 2,
-                color: "rgba(255,255,255,0.82)",
-                fontSize: "0.82rem",
-                letterSpacing: "0.06em",
-                border: "1px solid rgba(0,255,170,0.2)",
-                padding: "1.2rem 1.8rem",
-                background: "rgba(0,255,170,0.03)",
+                display: "grid",
+                gridTemplateColumns: "repeat(2, 1fr)",
+                gap: "0.5rem",
+                maxWidth: "680px",
+                width: "100%",
+                padding: "0 1rem",
               }}
             >
-              <span style={{ color: "#00ffaa" }}>2087年。</span>巨大企業 AI
-              コーポレーションが世界を支配している。
-              <br />
-              あなたはレジスタンスの特殊工作員。
-              <br />
-              AI コーポレーションの軍事 AI ドローンを撃破し、
-              <br />
-              <span style={{ color: "#ff3333" }}>データセンターを解放せよ。</span>
+              {MISSION_DEFS.map((m) => (
+                <button
+                  key={m.id}
+                  type="button"
+                  onClick={() => {
+                    setSelectedMission(m.id)
+                    setShowMissionSelect(false)
+                    rendererDomRef.current?.requestPointerLock()
+                    setMissionGoal(m.goalCount)
+                    spawnMissionRef.current?.(m.id)
+                  }}
+                  style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    alignItems: "flex-start",
+                    gap: "0.2rem",
+                    padding: "0.65rem 0.9rem",
+                    background: "rgba(255,255,255,0.04)",
+                    border: "1px solid rgba(255,255,255,0.15)",
+                    color: "white",
+                    fontFamily: "monospace",
+                    cursor: "pointer",
+                    textAlign: "left",
+                    transition: "background 0.15s",
+                  }}
+                  onMouseEnter={(e) => {
+                    ;(e.currentTarget as HTMLButtonElement).style.background =
+                      "rgba(100,180,255,0.12)"
+                    ;(e.currentTarget as HTMLButtonElement).style.borderColor =
+                      "rgba(100,180,255,0.5)"
+                  }}
+                  onMouseLeave={(e) => {
+                    ;(e.currentTarget as HTMLButtonElement).style.background =
+                      "rgba(255,255,255,0.04)"
+                    ;(e.currentTarget as HTMLButtonElement).style.borderColor =
+                      "rgba(255,255,255,0.15)"
+                  }}
+                >
+                  <span style={{ fontSize: "0.72rem", fontWeight: "bold", color: "#88aaff" }}>
+                    {m.name}
+                  </span>
+                  <span style={{ fontSize: "0.6rem", color: "rgba(255,255,255,0.55)" }}>
+                    {m.description}
+                  </span>
+                </button>
+              ))}
             </div>
-            <div
-              style={{
-                color: "rgba(255,255,255,0.35)",
-                fontSize: "0.62rem",
-                letterSpacing: "0.15em",
-              }}
-            >
-              WAVE 1 → grunt ×5 &nbsp;|&nbsp; WAVE 2 → grunt ×5 + miniboss ×2 &nbsp;|&nbsp; WAVE 3 →
-              grunt ×3 + miniboss ×2 + boss ×1
-            </div>
-            <button
-              type="button"
-              onClick={() => {
-                rendererDomRef.current?.requestPointerLock()
-                setShowBriefing(false)
-                currentWaveRef.current = 0
-                setCurrentWave(1)
-                setWaveMessage("WAVE 1 INCOMING")
-                setTimeout(() => {
-                  setWaveMessage(null)
-                  spawnWaveRef.current?.(0)
-                  waveActiveRef.current = true
-                }, 3000)
-              }}
-              style={{
-                background: "rgba(255,0,80,0.12)",
-                border: "1px solid rgba(255,0,80,0.7)",
-                color: "#ff3355",
-                fontFamily: "monospace",
-                fontSize: "1rem",
-                letterSpacing: "0.3em",
-                padding: "0.7rem 2.5rem",
-                cursor: "pointer",
-                textShadow: "0 0 12px rgba(255,0,80,0.6)",
-              }}
-            >
-              BEGIN MISSION
-            </button>
             <div
               style={{
                 color: "rgba(255,255,255,0.2)",
                 fontSize: "0.58rem",
                 letterSpacing: "0.12em",
+                marginTop: "0.5rem",
               }}
             >
               WASD: MOVE · SHIFT: SPRINT · LMB: FIRE · R: RELOAD · 1/2/3: WEAPON
@@ -3315,12 +4000,12 @@ export default function ThreeWorld() {
           </div>
         )}
 
-        {/* CLICK TO PLAY overlay (after briefing dismissed, pointer not locked) */}
+        {/* CLICK TO PLAY overlay (after mission selected, pointer not locked) */}
         {!isMobile &&
           !isLoading &&
           !error &&
           !isPointerLocked &&
-          !showBriefing &&
+          !showMissionSelect &&
           gamePhase !== "gameover" &&
           !missionComplete && (
             <button
@@ -3390,7 +4075,7 @@ export default function ThreeWorld() {
         )}
 
         {/* Current wave indicator (top-center, small) */}
-        {!isLoading && !error && !showBriefing && gamePhase === "playing" && currentWave > 0 && (
+        {!isLoading && !error && !showMissionSelect && gamePhase === "playing" && currentWave > 0 && (
           <div
             style={{
               position: "absolute",
