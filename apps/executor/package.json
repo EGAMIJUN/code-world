@@ -13,7 +13,7 @@
     "@code-world/db": "workspace:*",
     "@code-world/types": "workspace:*",
     "bullmq": "^5.34.6",
-    "drizzle-orm": "^0.38.3",
+    "drizzle-orm": "^0.45.2",
     "ioredis": "^5.4.2",
     "postgres": "^3.4.5"
   },
