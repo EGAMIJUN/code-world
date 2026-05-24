@@ -22,7 +22,7 @@ const rateLimitStore = new Map<string, { count: number; resetAt: number }>()
 
 function getClientIp(req: Request): string {
   const fwd = req.headers.get("x-forwarded-for")
-  if (fwd) return fwd.split(",")[0]!.trim()
+  if (fwd) return fwd.split(",")[0]?.trim()
   return "unknown"
 }
 
@@ -241,8 +241,8 @@ app.use(
   cors({
     origin: [
       "https://code-worldweb-production.up.railway.app",
-      process.env["NEXT_PUBLIC_WEB_URL"] ?? "http://localhost:3000",
-      process.env["WEB_URL"] ?? "http://localhost:3000",
+      process.env.NEXT_PUBLIC_WEB_URL ?? "http://localhost:3000",
+      process.env.WEB_URL ?? "http://localhost:3000",
     ],
     credentials: true,
   }),
@@ -289,15 +289,15 @@ app.get(
           return
         }
 
-        if (msg["type"] === "join") {
-          const worldId = String(msg["worldId"] ?? "")
-          const username = String(msg["username"] ?? "Player")
-          const x = Number(msg["x"] ?? 0)
-          const y = Number(msg["y"] ?? 0)
+        if (msg.type === "join") {
+          const worldId = String(msg.worldId ?? "")
+          const username = String(msg.username ?? "Player")
+          const x = Number(msg.x ?? 0)
+          const y = Number(msg.y ?? 0)
 
           meta.worldId = worldId
           if (!worldRooms.has(worldId)) worldRooms.set(worldId, new Map())
-          worldRooms.get(worldId)!.set(socketId, { username, x, y })
+          worldRooms.get(worldId)?.set(socketId, { username, x, y })
           broadcastRoom(worldId)
 
           // Notify existing players of new arrival
@@ -321,24 +321,24 @@ app.get(
             if (!tagGame.itTotals.has(socketId)) tagGame.itTotals.set(socketId, 0)
             broadcastTagState(worldId)
           }
-        } else if (msg["type"] === "move") {
+        } else if (msg.type === "move") {
           const { worldId } = meta
           if (!worldId) return
           const room = worldRooms.get(worldId)
           const state = room?.get(socketId)
           if (!state) return
-          state.x = Number(msg["x"] ?? state.x)
-          state.y = Number(msg["y"] ?? state.y)
+          state.x = Number(msg.x ?? state.x)
+          state.y = Number(msg.y ?? state.y)
           broadcastRoom(worldId)
           checkTag(worldId, socketId)
-        } else if (msg["type"] === "chat") {
+        } else if (msg.type === "chat") {
           const { worldId } = meta
           if (!worldId) return
-          const text = String(msg["text"] ?? "")
+          const text = String(msg.text ?? "")
             .slice(0, 200)
             .trim()
           if (!text) return
-          const from = String(msg["from"] ?? "Player")
+          const from = String(msg.from ?? "Player")
           const packet = JSON.stringify({ type: "chat", from, text })
           for (const [, m] of socketMeta) {
             if (m.worldId !== worldId) continue
@@ -348,7 +348,7 @@ app.get(
               // ignore closed socket
             }
           }
-        } else if (msg["type"] === "tag_start") {
+        } else if (msg.type === "tag_start") {
           const { worldId } = meta
           if (!worldId) return
           if (tagGames.has(worldId)) return // already running
@@ -373,11 +373,11 @@ app.get(
           })
 
           broadcastTagState(worldId)
-        } else if (msg["type"] === "dungeon_join") {
-          const runId = String(msg["runId"] ?? "")
-          const userId = String(msg["userId"] ?? "")
-          const initialBossHp = Number(msg["bossHp"] ?? 250)
-          const initialPlayerHp = Number(msg["playerHp"] ?? 200)
+        } else if (msg.type === "dungeon_join") {
+          const runId = String(msg.runId ?? "")
+          const userId = String(msg.userId ?? "")
+          const initialBossHp = Number(msg.bossHp ?? 250)
+          const initialPlayerHp = Number(msg.playerHp ?? 200)
           if (!runId) return
 
           socketDungeonRoom.set(socketId, runId)
@@ -389,24 +389,25 @@ app.get(
               status: "fighting",
             })
           }
-          const dungeonRoom = dungeonCoopRooms.get(runId)!
+          const dungeonRoom = dungeonCoopRooms.get(runId)
+          if (!dungeonRoom) return
           dungeonRoom.sockets.set(socketId, { userId, hp: initialPlayerHp })
           broadcastDungeonRoom(runId)
-        } else if (msg["type"] === "dungeon_hit") {
+        } else if (msg.type === "dungeon_hit") {
           const runId = socketDungeonRoom.get(socketId)
           if (!runId) return
           const dungeonRoom = dungeonCoopRooms.get(runId)
           if (!dungeonRoom || dungeonRoom.status !== "fighting") return
-          const dmg = Number(msg["dmg"] ?? 50)
+          const dmg = Number(msg.dmg ?? 50)
           dungeonRoom.bossHp = Math.max(0, dungeonRoom.bossHp - dmg)
           if (dungeonRoom.bossHp <= 0) dungeonRoom.status = "victory"
           broadcastDungeonRoom(runId)
-        } else if (msg["type"] === "dungeon_damage") {
+        } else if (msg.type === "dungeon_damage") {
           const runId = socketDungeonRoom.get(socketId)
           if (!runId) return
           const dungeonRoom = dungeonCoopRooms.get(runId)
           if (!dungeonRoom || dungeonRoom.status !== "fighting") return
-          const dmg = Number(msg["dmg"] ?? 10)
+          const dmg = Number(msg.dmg ?? 10)
           // Deal damage to ALL players in room
           for (const [sid, player] of dungeonRoom.sockets) {
             player.hp = Math.max(0, player.hp - dmg)
@@ -454,7 +455,8 @@ app.get(
 
             const candidates = room ? [...room.keys()].filter((s) => s !== socketId) : []
             if (candidates.length > 0) {
-              const nextSid = candidates[0]!
+              const nextSid = candidates[0]
+              if (nextSid === undefined) return
               if (!tagGame.itTotals.has(nextSid)) tagGame.itTotals.set(nextSid, 0)
               tagGame.itSocketId = nextSid
               tagGame.currentItStart = now
@@ -526,7 +528,7 @@ app.onError((err, c) => {
 app.notFound((c) => c.json({ error: "Not found" }, 404))
 
 // ── Start server — Bun native export with WebSocket support ──────────────────
-const port = Number(process.env["API_PORT"] ?? 3001)
+const port = Number(process.env.API_PORT ?? 3001)
 console.log(`🚀 API server running at http://localhost:${port}`)
 
 export default {

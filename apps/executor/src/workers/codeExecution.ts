@@ -34,15 +34,15 @@ function normalizeProblemBody(raw: unknown): ProblemBody {
   if (typeof raw !== "object" || raw === null) return { description: "" }
   const obj = raw as Record<string, unknown>
   return {
-    description: typeof obj["description"] === "string" ? obj["description"] : "",
-    setup: typeof obj["setup"] === "string" ? obj["setup"] : undefined,
-    expectedOutput: Array.isArray(obj["expectedOutput"])
-      ? (obj["expectedOutput"] as unknown[][])
+    description: typeof obj.description === "string" ? obj.description : "",
+    setup: typeof obj.setup === "string" ? obj.setup : undefined,
+    expectedOutput: Array.isArray(obj.expectedOutput)
+      ? (obj.expectedOutput as unknown[][])
       : undefined,
-    hints: Array.isArray(obj["hints"])
-      ? (obj["hints"] as Array<{ level: number; text: string }>)
+    hints: Array.isArray(obj.hints)
+      ? (obj.hints as Array<{ level: number; text: string }>)
       : undefined,
-    explanation: typeof obj["explanation"] === "string" ? obj["explanation"] : undefined,
+    explanation: typeof obj.explanation === "string" ? obj.explanation : undefined,
   }
 }
 
@@ -172,8 +172,8 @@ async function updateLeaderboard(playerId: string, score: number): Promise<void>
   }
 }
 
-const JUDGE0_URL = process.env["JUDGE0_API_URL"] ?? ""
-const JUDGE0_KEY = process.env["JUDGE0_API_KEY"] ?? ""
+const JUDGE0_URL = process.env.JUDGE0_API_URL ?? ""
+const JUDGE0_KEY = process.env.JUDGE0_API_KEY ?? ""
 
 const LANGUAGE_IDS: Record<string, number> = {
   python: 71,
@@ -343,7 +343,7 @@ async function executeSql(job: Job<CodeExecutionJobData>): Promise<CodeExecution
   const body = normalizeProblemBody(problem.body)
 
   const connectionString =
-    process.env["DATABASE_URL"] ?? "postgresql://postgres:postgres@localhost:5432/codeworld"
+    process.env.DATABASE_URL ?? "postgresql://postgres:postgres@localhost:5432/codeworld"
   const sandboxSql = postgres(connectionString, { prepare: false, max: 1 })
 
   const sandboxSchema = `sandbox_${submissionId.replace(/-/g, "_").slice(0, 40)}`
