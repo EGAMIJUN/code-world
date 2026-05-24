@@ -1,14 +1,13 @@
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001"
+// biome-ignore lint/complexity/useLiteralKeys: bracket notation required per CLAUDE.md
+const API_URL = process.env["NEXT_PUBLIC_API_URL"] ?? "http://localhost:3001"
 
 interface LeaderboardEntry {
   rank: number
-  playerId: string
+  id: string
   username: string
-  displayName: string | null
-  avatarUrl: string | null
-  level: number
+  totalKills: number
+  totalDeaths: number
   totalScore: number
-  problemsSolved: number
 }
 
 async function getLeaderboard(): Promise<LeaderboardEntry[]> {
@@ -48,7 +47,7 @@ export default async function LeaderboardPage() {
             ▓ GLOBAL RANKING ▓
           </div>
           <div style={{ fontSize: "0.75rem", color: "#00aa2a", letterSpacing: "0.2em" }}>
-            TOP HACKERS — RANKED BY SYSTEM ACCESS SCORE
+            TOP SOLDIERS — RANKED BY TOTAL SCORE
           </div>
         </div>
 
@@ -64,10 +63,10 @@ export default async function LeaderboardPage() {
           >
             <div style={{ marginBottom: "1rem" }}>NO DATA — RANKING EMPTY</div>
             <a
-              href="/problems"
+              href="/world"
               style={{ color: "#00aa2a", textDecoration: "none", fontSize: "0.8rem" }}
             >
-              ▶ SOLVE MISSIONS TO RANK →
+              ▶ PLAY TO RANK →
             </a>
           </div>
         ) : (
@@ -90,10 +89,15 @@ export default async function LeaderboardPage() {
                     : entry.rank === 3
                       ? "#cd7f32"
                       : "#00aa2a"
+              const kd =
+                entry.totalDeaths > 0
+                  ? (entry.totalKills / entry.totalDeaths).toFixed(2)
+                  : entry.totalKills.toString()
 
               return (
-                <div
-                  key={entry.playerId}
+                <a
+                  key={entry.id}
+                  href={`/profile/${entry.id}`}
                   style={{
                     display: "flex",
                     alignItems: "center",
@@ -102,9 +106,10 @@ export default async function LeaderboardPage() {
                     padding: "0.75rem 1rem",
                     background: isTop3 ? "rgba(0,15,0,0.8)" : "rgba(0,8,0,0.6)",
                     boxShadow: isTop3 ? `0 0 10px ${rankColor}22` : "none",
+                    textDecoration: "none",
+                    color: "inherit",
                   }}
                 >
-                  {/* Rank */}
                   <div
                     style={{
                       width: "3.5rem",
@@ -120,7 +125,6 @@ export default async function LeaderboardPage() {
                     {rankLabel}
                   </div>
 
-                  {/* Avatar */}
                   <div
                     style={{
                       height: "36px",
@@ -133,22 +137,11 @@ export default async function LeaderboardPage() {
                       fontSize: "0.85rem",
                       fontWeight: "bold",
                       color: "#00aa2a",
-                      overflow: "hidden",
                     }}
                   >
-                    {entry.avatarUrl ? (
-                      // eslint-disable-next-line @next/next/no-img-element
-                      <img
-                        src={entry.avatarUrl}
-                        alt=""
-                        style={{ height: "100%", width: "100%", objectFit: "cover" }}
-                      />
-                    ) : (
-                      (entry.displayName ?? entry.username).charAt(0).toUpperCase()
-                    )}
+                    {entry.username.charAt(0).toUpperCase()}
                   </div>
 
-                  {/* Name */}
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div
                       style={{
@@ -160,14 +153,13 @@ export default async function LeaderboardPage() {
                         whiteSpace: "nowrap",
                       }}
                     >
-                      {entry.displayName ?? entry.username}
+                      {entry.username}
                     </div>
                     <div style={{ fontSize: "0.65rem", color: "#005500", letterSpacing: "0.05em" }}>
-                      @{entry.username}
+                      K/D {kd}
                     </div>
                   </div>
 
-                  {/* Level */}
                   <div
                     style={{
                       flexShrink: 0,
@@ -178,10 +170,9 @@ export default async function LeaderboardPage() {
                       letterSpacing: "0.1em",
                     }}
                   >
-                    LV.{entry.level}
+                    K {entry.totalKills}
                   </div>
 
-                  {/* Score */}
                   <div style={{ flexShrink: 0, textAlign: "right" }}>
                     <div
                       style={{
@@ -195,10 +186,10 @@ export default async function LeaderboardPage() {
                       {entry.totalScore.toLocaleString()} PT
                     </div>
                     <div style={{ fontSize: "0.65rem", color: "#005500" }}>
-                      {entry.problemsSolved} SOLVED
+                      {entry.totalDeaths} DEATHS
                     </div>
                   </div>
-                </div>
+                </a>
               )
             })}
           </div>

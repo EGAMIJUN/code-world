@@ -1,37 +1,23 @@
-import { db, leaderboard, users } from "@code-world/db"
-import { desc, eq } from "drizzle-orm"
+import { db, users } from "@code-world/db"
+import { desc } from "drizzle-orm"
 import { Hono } from "hono"
 
 export const leaderboardRouter = new Hono()
 
-// GET /leaderboard — top 10 players by total score
 leaderboardRouter.get("/", async (c) => {
+  const limit = Math.min(Number(c.req.query("limit") ?? "50") || 50, 100)
   const rows = await db
     .select({
-      playerId: leaderboard.playerId,
-      totalScore: leaderboard.totalScore,
-      problemsSolved: leaderboard.problemsSolved,
-      updatedAt: leaderboard.updatedAt,
+      id: users.id,
       username: users.username,
-      displayName: users.displayName,
-      avatarUrl: users.avatarUrl,
-      level: users.level,
+      totalKills: users.totalKills,
+      totalDeaths: users.totalDeaths,
+      totalScore: users.totalScore,
     })
-    .from(leaderboard)
-    .innerJoin(users, eq(leaderboard.playerId, users.id))
-    .orderBy(desc(leaderboard.totalScore))
-    .limit(10)
+    .from(users)
+    .orderBy(desc(users.totalScore), desc(users.totalKills))
+    .limit(limit)
 
-  const entries = rows.map((row, i) => ({
-    rank: i + 1,
-    playerId: row.playerId,
-    username: row.username,
-    displayName: row.displayName,
-    avatarUrl: row.avatarUrl,
-    level: row.level,
-    totalScore: row.totalScore,
-    problemsSolved: row.problemsSolved,
-  }))
-
+  const entries = rows.map((row, i) => ({ rank: i + 1, ...row }))
   return c.json({ data: { entries, updatedAt: new Date() } })
 })

@@ -14,7 +14,6 @@
     "@code-world/types": "workspace:*",
     "@hono/zod-validator": "^0.4.2",
     "@sentry/node": "^10.53.1",
-    "better-auth": "^1.2.0",
     "bullmq": "^5.34.6",
     "drizzle-orm": "^0.45.2",
     "hono": "^4.6.20",
