@@ -43,9 +43,42 @@ interface WeaponDef {
 }
 
 const WEAPONS: WeaponDef[] = [
-  { id: "pistol",  name: "PISTOL",  maxAmmo: -1, hitDamage: 20,  reloadTime: 0,    spread: 0,    pellets: 1, bulletLifetime: 0.38, bulletColor: 0xffff88, recoil: 0.08 },
-  { id: "shotgun", name: "SHOTGUN", maxAmmo: 8,  hitDamage: 55,  reloadTime: 2500, spread: 0.09, pellets: 5, bulletLifetime: 0.14, bulletColor: 0xff8800, recoil: 0.20 },
-  { id: "sniper",  name: "SNIPER",  maxAmmo: 5,  hitDamage: 120, reloadTime: 3000, spread: 0,    pellets: 1, bulletLifetime: 1.60, bulletColor: 0x00ffff, recoil: 0.28 },
+  {
+    id: "pistol",
+    name: "PISTOL",
+    maxAmmo: -1,
+    hitDamage: 20,
+    reloadTime: 0,
+    spread: 0,
+    pellets: 1,
+    bulletLifetime: 0.38,
+    bulletColor: 0xffff88,
+    recoil: 0.08,
+  },
+  {
+    id: "shotgun",
+    name: "SHOTGUN",
+    maxAmmo: 8,
+    hitDamage: 55,
+    reloadTime: 2500,
+    spread: 0.09,
+    pellets: 5,
+    bulletLifetime: 0.14,
+    bulletColor: 0xff8800,
+    recoil: 0.2,
+  },
+  {
+    id: "sniper",
+    name: "SNIPER",
+    maxAmmo: 5,
+    hitDamage: 120,
+    reloadTime: 3000,
+    spread: 0,
+    pellets: 1,
+    bulletLifetime: 1.6,
+    bulletColor: 0x00ffff,
+    recoil: 0.28,
+  },
 ]
 
 // ── Sound system (Web Audio API) ───────────────────────────────────────────────
@@ -191,13 +224,18 @@ const COVER_DEFS: [number, number, number, number, number][] = [
   // Metal barriers (long low walls)
   [21.0, 10.0, 2.8, 0.4, 0.85],
   [15.0, 19.0, 0.4, 2.8, 0.85],
-  [9.0,  17.0, 2.5, 0.4, 0.85],
+  [9.0, 17.0, 2.5, 0.4, 0.85],
   // Car-like hulks (wider, lower)
-  [11.0, 5.0,  1.8, 0.9, 0.75],
+  [11.0, 5.0, 1.8, 0.9, 0.75],
   [24.0, 20.0, 1.8, 0.9, 0.75],
-  [4.5,  20.5, 0.9, 1.8, 0.75],
+  [4.5, 20.5, 0.9, 1.8, 0.75],
 ]
-const COVER_AABBS: WallAABB[] = COVER_DEFS.map(([x, z, w, d]) => ({ x1: x, z1: z, x2: x + w, z2: z + d }))
+const COVER_AABBS: WallAABB[] = COVER_DEFS.map(([x, z, w, d]) => ({
+  x1: x,
+  z1: z,
+  x2: x + w,
+  z2: z + d,
+}))
 const ALL_AABBS: WallAABB[] = [...WALL_AABBS, ...COVER_AABBS]
 
 function collidesWithWall(px: number, pz: number, radius: number): boolean {
@@ -235,22 +273,58 @@ interface EnemyConfig {
 
 const ENEMY_CONFIGS: Record<EnemyType, EnemyConfig> = {
   grunt: {
-    hp: 30, speed: 1.6, attackDamage: 5, attackInterval: 2500, attackRange: 1.8,
-    fireRange: 10, fireInterval: 2500, fireDamage: 5,
-    color: 0xff2222, emissive: 0x330000, bodyW: 0.65, bodyH: 1.7,
-    sightRange: 12, fovAngle: Math.PI, score: 100, blockReward: 1,
+    hp: 30,
+    speed: 1.6,
+    attackDamage: 5,
+    attackInterval: 2500,
+    attackRange: 1.8,
+    fireRange: 10,
+    fireInterval: 2500,
+    fireDamage: 5,
+    color: 0xff2222,
+    emissive: 0x330000,
+    bodyW: 0.65,
+    bodyH: 1.7,
+    sightRange: 12,
+    fovAngle: Math.PI,
+    score: 100,
+    blockReward: 1,
   },
   miniboss: {
-    hp: 80, speed: 1.28, attackDamage: 5, attackInterval: 2500, attackRange: 2.0,
-    fireRange: 14, fireInterval: 2500, fireDamage: 5,
-    color: 0xff6600, emissive: 0x331100, bodyW: 0.85, bodyH: 2.1,
-    sightRange: 16, fovAngle: Math.PI * 0.9, score: 300, blockReward: 3,
+    hp: 80,
+    speed: 1.28,
+    attackDamage: 5,
+    attackInterval: 2500,
+    attackRange: 2.0,
+    fireRange: 14,
+    fireInterval: 2500,
+    fireDamage: 5,
+    color: 0xff6600,
+    emissive: 0x331100,
+    bodyW: 0.85,
+    bodyH: 2.1,
+    sightRange: 16,
+    fovAngle: Math.PI * 0.9,
+    score: 300,
+    blockReward: 3,
   },
   boss: {
-    hp: 200, speed: 0.96, attackDamage: 5, attackInterval: 2500, attackRange: 2.5,
-    fireRange: 20, fireInterval: 2500, fireDamage: 5,
-    color: 0xaa00ff, emissive: 0x220033, bodyW: 1.1, bodyH: 2.5,
-    sightRange: 22, fovAngle: Math.PI * 0.8, score: 500, blockReward: 8,
+    hp: 200,
+    speed: 0.96,
+    attackDamage: 5,
+    attackInterval: 2500,
+    attackRange: 2.5,
+    fireRange: 20,
+    fireInterval: 2500,
+    fireDamage: 5,
+    color: 0xaa00ff,
+    emissive: 0x220033,
+    bodyW: 1.1,
+    bodyH: 2.5,
+    sightRange: 22,
+    fovAngle: Math.PI * 0.8,
+    score: 500,
+    blockReward: 8,
   },
 }
 
@@ -393,7 +467,6 @@ const BLOCK_INFO: Record<string, { label: string; color: string }> = {
   diamond_block: { label: "ダイヤブロック", color: "#00cfff" },
 }
 
-
 // ── Types ──────────────────────────────────────────────────────────────────────
 interface InventoryItem {
   blockType: string
@@ -458,7 +531,7 @@ interface CombatEnemy {
   respawnTimer: number
   spawnX: number
   spawnZ: number
-  dyingTimer: number  // 2→0 during death anim, -1 when fully dead
+  dyingTimer: number // 2→0 during death anim, -1 when fully dead
 }
 
 interface Bullet {
@@ -751,7 +824,6 @@ export default function ThreeWorld() {
     [showNotification],
   )
 
-
   // ── Three.js init ──────────────────────────────────────────────────────────
   useEffect(() => {
     let cancelled = false
@@ -994,7 +1066,9 @@ export default function ThreeWorld() {
         aimedEnemyId: null,
       }
 
-      setEnemyStatus(enemies.map((e) => ({ id: e.id, hp: e.hp, maxHp: e.maxHp, type: e.type, alive: true })))
+      setEnemyStatus(
+        enemies.map((e) => ({ id: e.id, hp: e.hp, maxHp: e.maxHp, type: e.type, alive: true })),
+      )
 
       fetch(`${API_URL}/api/me`, { credentials: "include" })
         .then((r) => r.json() as Promise<{ data?: { user?: { id?: string } } }>)
@@ -1080,7 +1154,12 @@ export default function ThreeWorld() {
         bulletMesh.position.copy(camera.position).addScaledVector(fwd, 0.55)
         bulletMesh.lookAt(bulletMesh.position.clone().add(fwd))
         scene.add(bulletMesh)
-        bullets.push({ mesh: bulletMesh, velocity: fwd.clone().multiplyScalar(BULLET_SPEED), life: weapon.bulletLifetime, isEnemy: false })
+        bullets.push({
+          mesh: bulletMesh,
+          velocity: fwd.clone().multiplyScalar(BULLET_SPEED),
+          life: weapon.bulletLifetime,
+          isEnemy: false,
+        })
         muzzleFlashTimerRef.current = MUZZLE_FLASH_DURATION
       }
 
@@ -1117,7 +1196,12 @@ export default function ThreeWorld() {
             Math.random() * 3 + 1,
             (Math.random() - 0.5) * 4,
           )
-          bloodParticles.push({ mesh, velocity: vel, life: PARTICLE_LIFETIME, maxLife: PARTICLE_LIFETIME })
+          bloodParticles.push({
+            mesh,
+            velocity: vel,
+            life: PARTICLE_LIFETIME,
+            maxLife: PARTICLE_LIFETIME,
+          })
         }
       }
 
@@ -1188,7 +1272,12 @@ export default function ThreeWorld() {
               setKills(killsRef.current)
               scoreRef.current += hitEnemy.config.score
               setScore(scoreRef.current)
-              const tag = hitEnemy.type === "boss" ? "BOSS撃破！" : hitEnemy.type === "miniboss" ? "ミニボス撃破！" : "KILL!"
+              const tag =
+                hitEnemy.type === "boss"
+                  ? "BOSS撃破！"
+                  : hitEnemy.type === "miniboss"
+                    ? "ミニボス撃破！"
+                    : "KILL!"
               showNotification(`${tag} +${hitEnemy.config.score}pt`)
               // Kill streak tracking
               const nowKill = Date.now()
@@ -1199,13 +1288,22 @@ export default function ThreeWorld() {
               }
               lastKillTimeRef.current = nowKill
               if (consecutiveKillsRef.current >= 3) {
-                const streakMsg = consecutiveKillsRef.current >= 5 ? "KILLING SPREE!" : "TRIPLE KILL!"
+                const streakMsg =
+                  consecutiveKillsRef.current >= 5 ? "KILLING SPREE!" : "TRIPLE KILL!"
                 if (killStreakTimerRef.current) clearTimeout(killStreakTimerRef.current)
                 setKillStreakMsg(streakMsg)
                 killStreakTimerRef.current = setTimeout(() => setKillStreakMsg(null), 2500)
               }
             }
-            setEnemyStatus(enemies.map((e) => ({ id: e.id, hp: e.hp, maxHp: e.maxHp, type: e.type, alive: e.hp > 0 })))
+            setEnemyStatus(
+              enemies.map((e) => ({
+                id: e.id,
+                hp: e.hp,
+                maxHp: e.maxHp,
+                type: e.type,
+                alive: e.hp > 0,
+              })),
+            )
           }
         } else if (selectedBlockRef.current) {
           placeAtCenter()
@@ -1229,8 +1327,10 @@ export default function ThreeWorld() {
           renderer.domElement.requestPointerLock()
           return
         }
-        if (e.button === 0) { mouseDownRef.current = true; fire() }
-        else if (e.button === 2) destroyAtCenter()
+        if (e.button === 0) {
+          mouseDownRef.current = true
+          fire()
+        } else if (e.button === 2) destroyAtCenter()
       }
       function onMouseUp(e: MouseEvent) {
         if (e.button === 0) mouseDownRef.current = false
@@ -1443,7 +1543,8 @@ export default function ThreeWorld() {
                 enemy.dyingTimer -= dt
                 const progress = Math.max(0, 1 - enemy.dyingTimer / 2.0)
                 enemy.mesh.rotation.x = progress * (Math.PI / 2)
-                enemy.mesh.position.y = enemy.config.bodyH / 2 * Math.cos(progress * Math.PI / 2)
+                enemy.mesh.position.y =
+                  (enemy.config.bodyH / 2) * Math.cos((progress * Math.PI) / 2)
                 const opacity = enemy.dyingTimer < 1.0 ? enemy.dyingTimer : 1.0
                 const mat = enemy.mesh.material as THREE.MeshLambertMaterial
                 mat.transparent = true
@@ -1465,7 +1566,15 @@ export default function ThreeWorld() {
                   enemy.mesh.rotation.x = 0
                   enemy.state = "patrol"
                   enemy.patrolIndex = 0
-                  setEnemyStatus(refs.enemies.map((e) => ({ id: e.id, hp: e.hp, maxHp: e.maxHp, type: e.type, alive: e.hp > 0 })))
+                  setEnemyStatus(
+                    refs.enemies.map((e) => ({
+                      id: e.id,
+                      hp: e.hp,
+                      maxHp: e.maxHp,
+                      type: e.type,
+                      alive: e.hp > 0,
+                    })),
+                  )
                 }
               }
               continue
@@ -1543,7 +1652,10 @@ export default function ThreeWorld() {
                 }
               }
               // Shoot while chasing (alert range fire)
-              if (distToPlayer <= enemy.config.fireRange && now - enemy.lastFireTime > enemy.config.fireInterval * 1.5) {
+              if (
+                distToPlayer <= enemy.config.fireRange &&
+                now - enemy.lastFireTime > enemy.config.fireInterval * 1.5
+              ) {
                 enemy.lastFireTime = now
                 const fwd = new THREE.Vector3(toPx / distToPlayer, 0, toPz / distToPlayer)
                 fwd.x += (Math.random() - 0.5) * 0.12
@@ -1555,7 +1667,12 @@ export default function ThreeWorld() {
                 bMesh.position.set(enemy.mesh.position.x, EYE_HEIGHT * 0.7, enemy.mesh.position.z)
                 bMesh.lookAt(bMesh.position.clone().add(fwd))
                 refs.scene.add(bMesh)
-                refs.bullets.push({ mesh: bMesh, velocity: fwd.clone().multiplyScalar(ENEMY_BULLET_SPEED), life: 1.8, isEnemy: true })
+                refs.bullets.push({
+                  mesh: bMesh,
+                  velocity: fwd.clone().multiplyScalar(ENEMY_BULLET_SPEED),
+                  life: 1.8,
+                  isEnemy: true,
+                })
               }
               enemy.mesh.position.y = enemy.config.bodyH / 2 + Math.sin(now * 0.006) * 0.04
             } else if (enemy.state === "attack") {
@@ -1582,7 +1699,10 @@ export default function ThreeWorld() {
                 }
               }
               // Enemy ranged fire
-              if (distToPlayer <= enemy.config.fireRange && now - enemy.lastFireTime > enemy.config.fireInterval) {
+              if (
+                distToPlayer <= enemy.config.fireRange &&
+                now - enemy.lastFireTime > enemy.config.fireInterval
+              ) {
                 enemy.lastFireTime = now
                 const fwd = new THREE.Vector3(toPx / distToPlayer, 0, toPz / distToPlayer)
                 const spread = 0.06
@@ -1595,9 +1715,13 @@ export default function ThreeWorld() {
                 bMesh.position.set(enemy.mesh.position.x, EYE_HEIGHT * 0.7, enemy.mesh.position.z)
                 bMesh.lookAt(bMesh.position.clone().add(fwd))
                 refs.scene.add(bMesh)
-                refs.bullets.push({ mesh: bMesh, velocity: fwd.clone().multiplyScalar(ENEMY_BULLET_SPEED), life: 1.8, isEnemy: true })
+                refs.bullets.push({
+                  mesh: bMesh,
+                  velocity: fwd.clone().multiplyScalar(ENEMY_BULLET_SPEED),
+                  life: 1.8,
+                  isEnemy: true,
+                })
               }
-
             } else if (enemy.state === "search") {
               enemy.searchTimer -= dt
               if (enemy.searchTimer <= 0) {
@@ -2035,8 +2159,21 @@ export default function ThreeWorld() {
   const { level, xpInLevel, xpForNext } = computeXpProgress(playerStats.xp)
   const xpPct = xpForNext > 0 ? Math.round((xpInLevel / xpForNext) * 100) : 0
   const hpPct = Math.round((playerHp / PLAYER_MAX_HP) * 100)
-  const currentWeapon: WeaponDef = WEAPONS[currentWeaponIdx] ?? WEAPONS[0] ?? { id: "pistol", name: "PISTOL", maxAmmo: -1, hitDamage: 20, reloadTime: 0, spread: 0, pellets: 1, bulletLifetime: 0.38, bulletColor: 0xffff88, recoil: 0.08 }
-  const ammoPct = currentWeapon.maxAmmo === -1 ? 100 : Math.round((ammo / currentWeapon.maxAmmo) * 100)
+  const currentWeapon: WeaponDef = WEAPONS[currentWeaponIdx] ??
+    WEAPONS[0] ?? {
+      id: "pistol",
+      name: "PISTOL",
+      maxAmmo: -1,
+      hitDamage: 20,
+      reloadTime: 0,
+      spread: 0,
+      pellets: 1,
+      bulletLifetime: 0.38,
+      bulletColor: 0xffff88,
+      recoil: 0.08,
+    }
+  const ammoPct =
+    currentWeapon.maxAmmo === -1 ? 100 : Math.round((ammo / currentWeapon.maxAmmo) * 100)
   const ammoDisplay = currentWeapon.maxAmmo === -1 ? "∞" : `${ammo}/${currentWeapon.maxAmmo}`
   const hpColor = playerHp > 60 ? "#00ff41" : playerHp > 30 ? "#ffaa00" : "#ff3333"
 
@@ -2233,7 +2370,6 @@ export default function ThreeWorld() {
               TAG
             </button>
           ))}
-
       </div>
 
       {/* ── Canvas + COD-style overlays ───────────────────────────────────── */}
@@ -2242,115 +2378,149 @@ export default function ThreeWorld() {
 
         {/* Permanent dark vignette */}
         {!isLoading && !error && (
-          <div style={{
-            position: "absolute",
-            inset: 0,
-            background: "radial-gradient(ellipse at center, transparent 55%, rgba(0,0,0,0.6) 100%)",
-            pointerEvents: "none",
-            zIndex: 5,
-          }} />
+          <div
+            style={{
+              position: "absolute",
+              inset: 0,
+              background:
+                "radial-gradient(ellipse at center, transparent 55%, rgba(0,0,0,0.6) 100%)",
+              pointerEvents: "none",
+              zIndex: 5,
+            }}
+          />
         )}
 
         {/* Damage vignette (red flash on hit) */}
         {damageFlash && (
-          <div style={{
-            position: "absolute",
-            inset: 0,
-            background: "radial-gradient(ellipse at center, transparent 35%, rgba(220,0,0,0.72) 100%)",
-            pointerEvents: "none",
-            zIndex: 6,
-          }} />
+          <div
+            style={{
+              position: "absolute",
+              inset: 0,
+              background:
+                "radial-gradient(ellipse at center, transparent 35%, rgba(220,0,0,0.72) 100%)",
+              pointerEvents: "none",
+              zIndex: 6,
+            }}
+          />
         )}
 
         {/* ── Top-center: Score / Kills ─────────────────────────────────── */}
         {!isLoading && !error && gamePhase === "playing" && (
-          <div style={{
-            position: "absolute",
-            top: "1rem",
-            left: "50%",
-            transform: "translateX(-50%)",
-            zIndex: 20,
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "center",
-            gap: "0.2rem",
-            pointerEvents: "none",
-          }}>
-            <div style={{
-              color: "#ffcc00",
-              fontSize: "1.8rem",
-              fontWeight: "bold",
-              letterSpacing: "0.12em",
-              textShadow: "0 2px 12px rgba(255,180,0,0.7)",
-              lineHeight: 1,
-            }}>
+          <div
+            style={{
+              position: "absolute",
+              top: "1rem",
+              left: "50%",
+              transform: "translateX(-50%)",
+              zIndex: 20,
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              gap: "0.2rem",
+              pointerEvents: "none",
+            }}
+          >
+            <div
+              style={{
+                color: "#ffcc00",
+                fontSize: "1.8rem",
+                fontWeight: "bold",
+                letterSpacing: "0.12em",
+                textShadow: "0 2px 12px rgba(255,180,0,0.7)",
+                lineHeight: 1,
+              }}
+            >
               {score.toString().padStart(6, "0")}
             </div>
-            <div style={{ display: "flex", gap: "1.2rem", fontSize: "0.72rem", color: "rgba(255,255,255,0.75)", letterSpacing: "0.1em" }}>
-              <span>KILLS <span style={{ color: "#ff5555", fontWeight: "bold", marginLeft: "0.2rem" }}>{kills}</span></span>
-              <span>DEATHS <span style={{ color: "#aaa", fontWeight: "bold", marginLeft: "0.2rem" }}>{deaths}</span></span>
+            <div
+              style={{
+                display: "flex",
+                gap: "1.2rem",
+                fontSize: "0.72rem",
+                color: "rgba(255,255,255,0.75)",
+                letterSpacing: "0.1em",
+              }}
+            >
+              <span>
+                KILLS{" "}
+                <span style={{ color: "#ff5555", fontWeight: "bold", marginLeft: "0.2rem" }}>
+                  {kills}
+                </span>
+              </span>
+              <span>
+                DEATHS{" "}
+                <span style={{ color: "#aaa", fontWeight: "bold", marginLeft: "0.2rem" }}>
+                  {deaths}
+                </span>
+              </span>
             </div>
           </div>
         )}
 
         {/* Headshot message */}
         {headshotMsg && (
-          <div style={{
-            position: "absolute",
-            top: "36%",
-            left: "50%",
-            transform: "translateX(-50%)",
-            zIndex: 36,
-            pointerEvents: "none",
-            fontSize: "1.6rem",
-            fontWeight: "bold",
-            color: "#ff4444",
-            letterSpacing: "0.2em",
-            textShadow: "0 0 18px rgba(255,0,0,0.9)",
-            whiteSpace: "nowrap",
-          }}>
+          <div
+            style={{
+              position: "absolute",
+              top: "36%",
+              left: "50%",
+              transform: "translateX(-50%)",
+              zIndex: 36,
+              pointerEvents: "none",
+              fontSize: "1.6rem",
+              fontWeight: "bold",
+              color: "#ff4444",
+              letterSpacing: "0.2em",
+              textShadow: "0 0 18px rgba(255,0,0,0.9)",
+              whiteSpace: "nowrap",
+            }}
+          >
             HEADSHOT!
           </div>
         )}
 
         {/* Kill streak message (center screen) */}
         {killStreakMsg && (
-          <div style={{
-            position: "absolute",
-            top: "28%",
-            left: "50%",
-            transform: "translateX(-50%)",
-            zIndex: 35,
-            pointerEvents: "none",
-            fontSize: "2.2rem",
-            fontWeight: "bold",
-            color: "#ffcc00",
-            letterSpacing: "0.25em",
-            textShadow: "0 0 24px rgba(255,200,0,0.9), 0 0 48px rgba(255,80,0,0.5)",
-            whiteSpace: "nowrap",
-          }}>
+          <div
+            style={{
+              position: "absolute",
+              top: "28%",
+              left: "50%",
+              transform: "translateX(-50%)",
+              zIndex: 35,
+              pointerEvents: "none",
+              fontSize: "2.2rem",
+              fontWeight: "bold",
+              color: "#ffcc00",
+              letterSpacing: "0.25em",
+              textShadow: "0 0 24px rgba(255,200,0,0.9), 0 0 48px rgba(255,80,0,0.5)",
+              whiteSpace: "nowrap",
+            }}
+          >
             {killStreakMsg}
           </div>
         )}
 
         {/* Notification */}
         {notification && (
-          <div style={{
-            position: "absolute",
-            top: "5.5rem",
-            left: "50%",
-            transform: "translateX(-50%)",
-            zIndex: 25,
-            pointerEvents: "none",
-            fontSize: "0.78rem",
-            color: "#fff",
-            background: "rgba(0,0,0,0.72)",
-            border: "1px solid rgba(255,255,255,0.2)",
-            padding: "0.25rem 0.8rem",
-            letterSpacing: "0.08em",
-            whiteSpace: "nowrap",
-            borderRadius: "2px",
-          }}>
+          <div
+            style={{
+              position: "absolute",
+              top: "5.5rem",
+              left: "50%",
+              transform: "translateX(-50%)",
+              zIndex: 25,
+              pointerEvents: "none",
+              fontSize: "0.78rem",
+              color: "#fff",
+              background: "rgba(0,0,0,0.72)",
+              border: "1px solid rgba(255,255,255,0.2)",
+              padding: "0.25rem 0.8rem",
+              letterSpacing: "0.08em",
+              whiteSpace: "nowrap",
+              borderRadius: "2px",
+            }}
+          >
             {notification}
           </div>
         )}
@@ -2372,61 +2542,128 @@ export default function ThreeWorld() {
             }}
           >
             <title>crosshair</title>
-            <line x1="9" y1="1" x2="9" y2="6" stroke={aimedEnemyId ? "#ff2222" : "rgba(255,255,255,0.92)"} strokeWidth="1.5" />
-            <line x1="9" y1="12" x2="9" y2="17" stroke={aimedEnemyId ? "#ff2222" : "rgba(255,255,255,0.92)"} strokeWidth="1.5" />
-            <line x1="1" y1="9" x2="6" y2="9" stroke={aimedEnemyId ? "#ff2222" : "rgba(255,255,255,0.92)"} strokeWidth="1.5" />
-            <line x1="12" y1="9" x2="17" y2="9" stroke={aimedEnemyId ? "#ff2222" : "rgba(255,255,255,0.92)"} strokeWidth="1.5" />
+            <line
+              x1="9"
+              y1="1"
+              x2="9"
+              y2="6"
+              stroke={aimedEnemyId ? "#ff2222" : "rgba(255,255,255,0.92)"}
+              strokeWidth="1.5"
+            />
+            <line
+              x1="9"
+              y1="12"
+              x2="9"
+              y2="17"
+              stroke={aimedEnemyId ? "#ff2222" : "rgba(255,255,255,0.92)"}
+              strokeWidth="1.5"
+            />
+            <line
+              x1="1"
+              y1="9"
+              x2="6"
+              y2="9"
+              stroke={aimedEnemyId ? "#ff2222" : "rgba(255,255,255,0.92)"}
+              strokeWidth="1.5"
+            />
+            <line
+              x1="12"
+              y1="9"
+              x2="17"
+              y2="9"
+              stroke={aimedEnemyId ? "#ff2222" : "rgba(255,255,255,0.92)"}
+              strokeWidth="1.5"
+            />
           </svg>
         )}
 
         {/* ── Bottom-left: HP bar (COD style) ──────────────────────────── */}
         {!isLoading && !error && gamePhase === "playing" && (
-          <div style={{
-            position: "absolute",
-            bottom: "1.4rem",
-            left: "1.4rem",
-            zIndex: 20,
-            width: "230px",
-            pointerEvents: "none",
-          }}>
-            <div style={{ display: "flex", alignItems: "baseline", gap: "0.4rem", marginBottom: "0.3rem" }}>
-              <span style={{ color: "rgba(255,255,255,0.45)", fontSize: "0.68rem", letterSpacing: "0.18em" }}>HP</span>
-              <span style={{
-                color: hpColor,
-                fontSize: "2.4rem",
-                fontWeight: "bold",
-                lineHeight: 1,
-                textShadow: `0 0 14px ${hpColor}80`,
-              }}>{playerHp}</span>
+          <div
+            style={{
+              position: "absolute",
+              bottom: "1.4rem",
+              left: "1.4rem",
+              zIndex: 20,
+              width: "230px",
+              pointerEvents: "none",
+            }}
+          >
+            <div
+              style={{
+                display: "flex",
+                alignItems: "baseline",
+                gap: "0.4rem",
+                marginBottom: "0.3rem",
+              }}
+            >
+              <span
+                style={{
+                  color: "rgba(255,255,255,0.45)",
+                  fontSize: "0.68rem",
+                  letterSpacing: "0.18em",
+                }}
+              >
+                HP
+              </span>
+              <span
+                style={{
+                  color: hpColor,
+                  fontSize: "2.4rem",
+                  fontWeight: "bold",
+                  lineHeight: 1,
+                  textShadow: `0 0 14px ${hpColor}80`,
+                }}
+              >
+                {playerHp}
+              </span>
               <span style={{ color: "rgba(255,255,255,0.25)", fontSize: "0.72rem" }}>/ 100</span>
             </div>
-            <div style={{
-              height: "8px",
-              background: "rgba(0,0,0,0.55)",
-              border: "1px solid rgba(255,255,255,0.18)",
-              borderRadius: "2px",
-              overflow: "hidden",
-            }}>
-              <div style={{
-                height: "100%",
-                width: `${hpPct}%`,
-                background: hpColor,
-                boxShadow: `0 0 8px ${hpColor}88`,
-                transition: "width 0.3s ease, background 0.3s",
-                borderRadius: "2px",
-              }} />
-            </div>
-            <div style={{ display: "flex", alignItems: "center", gap: "0.4rem", marginTop: "0.35rem" }}>
-              <span style={{ color: "rgba(255,255,255,0.3)", fontSize: "0.58rem" }}>LV.{level}</span>
-              <div style={{
-                flex: 1,
-                height: "3px",
-                background: "rgba(0,0,0,0.5)",
-                border: "1px solid rgba(0,255,65,0.18)",
+            <div
+              style={{
+                height: "8px",
+                background: "rgba(0,0,0,0.55)",
+                border: "1px solid rgba(255,255,255,0.18)",
                 borderRadius: "2px",
                 overflow: "hidden",
-              }}>
-                <div style={{ height: "100%", width: `${xpPct}%`, background: "#00ff41", transition: "width 0.7s", borderRadius: "2px" }} />
+              }}
+            >
+              <div
+                style={{
+                  height: "100%",
+                  width: `${hpPct}%`,
+                  background: hpColor,
+                  boxShadow: `0 0 8px ${hpColor}88`,
+                  transition: "width 0.3s ease, background 0.3s",
+                  borderRadius: "2px",
+                }}
+              />
+            </div>
+            <div
+              style={{ display: "flex", alignItems: "center", gap: "0.4rem", marginTop: "0.35rem" }}
+            >
+              <span style={{ color: "rgba(255,255,255,0.3)", fontSize: "0.58rem" }}>
+                LV.{level}
+              </span>
+              <div
+                style={{
+                  flex: 1,
+                  height: "3px",
+                  background: "rgba(0,0,0,0.5)",
+                  border: "1px solid rgba(0,255,65,0.18)",
+                  borderRadius: "2px",
+                  overflow: "hidden",
+                }}
+              >
+                <div
+                  style={{
+                    height: "100%",
+                    width: `${xpPct}%`,
+                    background: "#00ff41",
+                    transition: "width 0.7s",
+                    borderRadius: "2px",
+                  }}
+                />
               </div>
             </div>
           </div>
@@ -2434,54 +2671,77 @@ export default function ThreeWorld() {
 
         {/* ── Bottom-right: Ammo display (COD style) ───────────────────── */}
         {!isLoading && !error && gamePhase === "playing" && (
-          <div style={{
-            position: "absolute",
-            bottom: "1.4rem",
-            right: "1.4rem",
-            zIndex: 20,
-            textAlign: "right",
-            pointerEvents: "none",
-          }}>
-            <div style={{
-              color: "rgba(255,255,255,0.45)",
-              fontSize: "0.65rem",
-              letterSpacing: "0.2em",
-              marginBottom: "0.15rem",
-            }}>
+          <div
+            style={{
+              position: "absolute",
+              bottom: "1.4rem",
+              right: "1.4rem",
+              zIndex: 20,
+              textAlign: "right",
+              pointerEvents: "none",
+            }}
+          >
+            <div
+              style={{
+                color: "rgba(255,255,255,0.45)",
+                fontSize: "0.65rem",
+                letterSpacing: "0.2em",
+                marginBottom: "0.15rem",
+              }}
+            >
               {currentWeapon.name}
-              {isReloading && <span style={{ color: "#ffaa00", marginLeft: "0.5rem" }}>RELOADING</span>}
+              {isReloading && (
+                <span style={{ color: "#ffaa00", marginLeft: "0.5rem" }}>RELOADING</span>
+              )}
             </div>
-            <div style={{ display: "flex", alignItems: "baseline", gap: "0.25rem", justifyContent: "flex-end" }}>
-              <span style={{
-                color: (currentWeapon.maxAmmo !== -1 && ammo === 0) ? "#ff3333" : "white",
-                fontSize: "3rem",
-                fontWeight: "bold",
-                lineHeight: 1,
-                letterSpacing: "0.04em",
-                textShadow: "0 0 10px rgba(255,255,255,0.25)",
-              }}>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "baseline",
+                gap: "0.25rem",
+                justifyContent: "flex-end",
+              }}
+            >
+              <span
+                style={{
+                  color: currentWeapon.maxAmmo !== -1 && ammo === 0 ? "#ff3333" : "white",
+                  fontSize: "3rem",
+                  fontWeight: "bold",
+                  lineHeight: 1,
+                  letterSpacing: "0.04em",
+                  textShadow: "0 0 10px rgba(255,255,255,0.25)",
+                }}
+              >
                 {currentWeapon.maxAmmo === -1 ? "∞" : ammo}
               </span>
-              <span style={{ color: "rgba(255,255,255,0.35)", fontSize: "1.3rem", fontWeight: "bold" }}>
+              <span
+                style={{ color: "rgba(255,255,255,0.35)", fontSize: "1.3rem", fontWeight: "bold" }}
+              >
                 / {currentWeapon.maxAmmo === -1 ? "∞" : currentWeapon.maxAmmo}
               </span>
             </div>
             {currentWeapon.maxAmmo !== -1 && (
-              <div style={{
-                height: "3px",
-                background: "rgba(0,0,0,0.55)",
-                border: "1px solid rgba(255,255,255,0.15)",
-                borderRadius: "2px",
-                overflow: "hidden",
-                marginTop: "0.25rem",
-              }}>
-                <div style={{
-                  height: "100%",
-                  width: isReloading ? "100%" : `${ammoPct}%`,
-                  background: isReloading ? "#ffaa00" : "rgba(255,255,255,0.7)",
-                  transition: isReloading ? `width ${currentWeapon.reloadTime}ms linear` : "width 0.1s",
+              <div
+                style={{
+                  height: "3px",
+                  background: "rgba(0,0,0,0.55)",
+                  border: "1px solid rgba(255,255,255,0.15)",
                   borderRadius: "2px",
-                }} />
+                  overflow: "hidden",
+                  marginTop: "0.25rem",
+                }}
+              >
+                <div
+                  style={{
+                    height: "100%",
+                    width: isReloading ? "100%" : `${ammoPct}%`,
+                    background: isReloading ? "#ffaa00" : "rgba(255,255,255,0.7)",
+                    transition: isReloading
+                      ? `width ${currentWeapon.reloadTime}ms linear`
+                      : "width 0.1s",
+                    borderRadius: "2px",
+                  }}
+                />
               </div>
             )}
           </div>
@@ -2489,18 +2749,20 @@ export default function ThreeWorld() {
 
         {/* ── Circular Minimap (top-right) ─────────────────────────────── */}
         {!isLoading && !error && (
-          <div style={{
-            position: "absolute",
-            top: "1rem",
-            right: "1rem",
-            zIndex: 20,
-            width: "92px",
-            height: "92px",
-            borderRadius: "50%",
-            overflow: "hidden",
-            border: "2px solid rgba(255,255,255,0.28)",
-            boxShadow: "0 0 12px rgba(0,0,0,0.7)",
-          }}>
+          <div
+            style={{
+              position: "absolute",
+              top: "1rem",
+              right: "1rem",
+              zIndex: 20,
+              width: "92px",
+              height: "92px",
+              borderRadius: "50%",
+              overflow: "hidden",
+              border: "2px solid rgba(255,255,255,0.28)",
+              boxShadow: "0 0 12px rgba(0,0,0,0.7)",
+            }}
+          >
             <canvas
               ref={minimapRef}
               width={92}
@@ -2512,29 +2774,69 @@ export default function ThreeWorld() {
 
         {/* Online count + tag (below minimap) */}
         {!isLoading && !error && (
-          <div style={{
-            position: "absolute",
-            top: "6.5rem",
-            right: "1rem",
-            zIndex: 20,
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "flex-end",
-            gap: "0.25rem",
-          }}>
-            <div style={{ display: "flex", alignItems: "center", gap: "0.3rem", fontSize: "0.58rem", color: "rgba(255,255,255,0.35)", fontFamily: "monospace" }}>
-              <span style={{ width: "5px", height: "5px", borderRadius: "50%", background: "#00ff41", display: "inline-block" }} />
+          <div
+            style={{
+              position: "absolute",
+              top: "6.5rem",
+              right: "1rem",
+              zIndex: 20,
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "flex-end",
+              gap: "0.25rem",
+            }}
+          >
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "0.3rem",
+                fontSize: "0.58rem",
+                color: "rgba(255,255,255,0.35)",
+                fontFamily: "monospace",
+              }}
+            >
+              <span
+                style={{
+                  width: "5px",
+                  height: "5px",
+                  borderRadius: "50%",
+                  background: "#00ff41",
+                  display: "inline-block",
+                }}
+              />
               {onlineCount} ONLINE
             </div>
             {tagGame?.running ? (
-              <div style={{ color: "#ff4444", fontSize: "0.58rem", fontFamily: "monospace", background: "rgba(0,0,0,0.65)", border: "1px solid rgba(255,0,0,0.3)", padding: "0.15rem 0.35rem" }}>
+              <div
+                style={{
+                  color: "#ff4444",
+                  fontSize: "0.58rem",
+                  fontFamily: "monospace",
+                  background: "rgba(0,0,0,0.65)",
+                  border: "1px solid rgba(255,0,0,0.3)",
+                  padding: "0.15rem 0.35rem",
+                }}
+              >
                 IT: {tagGame.itUsername} · {Math.ceil(tagGame.remainingMs / 1000)}s
               </div>
             ) : (
               <button
                 type="button"
-                onClick={() => wsRef.current?.readyState === WebSocket.OPEN && wsRef.current.send(JSON.stringify({ type: "tag_start" }))}
-                style={{ background: "rgba(0,0,0,0.55)", border: "1px solid rgba(255,255,255,0.1)", color: "rgba(255,255,255,0.25)", fontFamily: "monospace", fontSize: "0.55rem", padding: "0.15rem 0.35rem", cursor: "pointer", letterSpacing: "0.05em" }}
+                onClick={() =>
+                  wsRef.current?.readyState === WebSocket.OPEN &&
+                  wsRef.current.send(JSON.stringify({ type: "tag_start" }))
+                }
+                style={{
+                  background: "rgba(0,0,0,0.55)",
+                  border: "1px solid rgba(255,255,255,0.1)",
+                  color: "rgba(255,255,255,0.25)",
+                  fontFamily: "monospace",
+                  fontSize: "0.55rem",
+                  padding: "0.15rem 0.35rem",
+                  cursor: "pointer",
+                  letterSpacing: "0.05em",
+                }}
               >
                 TAG GAME
               </button>
@@ -2544,28 +2846,67 @@ export default function ThreeWorld() {
 
         {/* Enemy status (top-left, compact) */}
         {!isLoading && !error && gamePhase === "playing" && (
-          <div style={{
-            position: "absolute",
-            top: "1rem",
-            left: "1rem",
-            zIndex: 20,
-            display: "flex",
-            flexDirection: "column",
-            gap: "3px",
-            fontFamily: "monospace",
-            pointerEvents: "none",
-          }}>
+          <div
+            style={{
+              position: "absolute",
+              top: "1rem",
+              left: "1rem",
+              zIndex: 20,
+              display: "flex",
+              flexDirection: "column",
+              gap: "3px",
+              fontFamily: "monospace",
+              pointerEvents: "none",
+            }}
+          >
             {enemyStatus.map((e, i) => {
-              const typeColor = e.type === "boss" ? "#cc44ff" : e.type === "miniboss" ? "#ff8800" : "#ff5555"
-              const label = e.type === "boss" ? "BOSS" : e.type === "miniboss" ? "MINI" : `E${i + 1}`
+              const typeColor =
+                e.type === "boss" ? "#cc44ff" : e.type === "miniboss" ? "#ff8800" : "#ff5555"
+              const label =
+                e.type === "boss" ? "BOSS" : e.type === "miniboss" ? "MINI" : `E${i + 1}`
               const hpPctEnemy = e.maxHp > 0 ? Math.round((e.hp / e.maxHp) * 100) : 0
               return (
-                <div key={e.id} style={{ display: "flex", alignItems: "center", gap: "4px", opacity: e.alive ? 1 : 0.3 }}>
-                  <span style={{ color: e.alive ? typeColor : "#444", fontSize: "0.5rem", minWidth: "24px" }}>{label}</span>
-                  <div style={{ width: "34px", height: "4px", background: "rgba(0,0,0,0.6)", border: `1px solid ${e.alive ? typeColor : "#333"}44`, overflow: "hidden", borderRadius: "1px" }}>
-                    <div style={{ height: "100%", width: `${hpPctEnemy}%`, background: e.alive ? typeColor : "#333", transition: "width 0.3s", borderRadius: "1px" }} />
+                <div
+                  key={e.id}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "4px",
+                    opacity: e.alive ? 1 : 0.3,
+                  }}
+                >
+                  <span
+                    style={{
+                      color: e.alive ? typeColor : "#444",
+                      fontSize: "0.5rem",
+                      minWidth: "24px",
+                    }}
+                  >
+                    {label}
+                  </span>
+                  <div
+                    style={{
+                      width: "34px",
+                      height: "4px",
+                      background: "rgba(0,0,0,0.6)",
+                      border: `1px solid ${e.alive ? typeColor : "#333"}44`,
+                      overflow: "hidden",
+                      borderRadius: "1px",
+                    }}
+                  >
+                    <div
+                      style={{
+                        height: "100%",
+                        width: `${hpPctEnemy}%`,
+                        background: e.alive ? typeColor : "#333",
+                        transition: "width 0.3s",
+                        borderRadius: "1px",
+                      }}
+                    />
                   </div>
-                  <span style={{ color: e.alive ? typeColor : "#444", fontSize: "0.48rem" }}>{e.alive ? e.hp : "↺"}</span>
+                  <span style={{ color: e.alive ? typeColor : "#444", fontSize: "0.48rem" }}>
+                    {e.alive ? e.hp : "↺"}
+                  </span>
                 </div>
               )
             })}
@@ -2574,16 +2915,18 @@ export default function ThreeWorld() {
 
         {/* Weapon selector (compact, bottom-center-right) */}
         {!isLoading && !error && gamePhase === "playing" && (
-          <div style={{
-            position: "absolute",
-            bottom: isMobile ? "7.5rem" : "5.2rem",
-            right: isMobile ? "7.5rem" : "1.4rem",
-            zIndex: 20,
-            display: "flex",
-            flexDirection: "column",
-            gap: "2px",
-            fontFamily: "monospace",
-          }}>
+          <div
+            style={{
+              position: "absolute",
+              bottom: isMobile ? "7.5rem" : "5.2rem",
+              right: isMobile ? "7.5rem" : "1.4rem",
+              zIndex: 20,
+              display: "flex",
+              flexDirection: "column",
+              gap: "2px",
+              fontFamily: "monospace",
+            }}
+          >
             {WEAPONS.map((w, i) => {
               const isSelected = i === currentWeaponIdx
               const isUnlocked = unlockedWeapons.has(w.id)
@@ -2592,7 +2935,10 @@ export default function ThreeWorld() {
                   key={w.id}
                   type="button"
                   onClick={() => {
-                    if (!isUnlocked) { showNotification(`${w.name} はロック中`); return }
+                    if (!isUnlocked) {
+                      showNotification(`${w.name} はロック中`)
+                      return
+                    }
                     if (reloadingRef.current) return
                     weaponAmmoRef.current[currentWeaponIdxRef.current] = ammoRef.current
                     currentWeaponIdxRef.current = i
@@ -2608,13 +2954,25 @@ export default function ThreeWorld() {
                     fontFamily: "monospace",
                     fontSize: "0.58rem",
                     letterSpacing: "0.07em",
-                    border: isSelected ? "1px solid rgba(255,255,255,0.55)" : "1px solid rgba(255,255,255,0.12)",
+                    border: isSelected
+                      ? "1px solid rgba(255,255,255,0.55)"
+                      : "1px solid rgba(255,255,255,0.12)",
                     background: isSelected ? "rgba(255,255,255,0.12)" : "rgba(0,0,0,0.62)",
-                    color: isUnlocked ? (isSelected ? "white" : "rgba(255,255,255,0.38)") : "rgba(255,255,255,0.12)",
+                    color: isUnlocked
+                      ? isSelected
+                        ? "white"
+                        : "rgba(255,255,255,0.38)"
+                      : "rgba(255,255,255,0.12)",
                     cursor: isUnlocked ? "pointer" : "not-allowed",
                   }}
                 >
-                  <span style={{ color: isSelected ? "rgba(255,255,255,0.5)" : "rgba(255,255,255,0.25)" }}>[{i + 1}]</span>
+                  <span
+                    style={{
+                      color: isSelected ? "rgba(255,255,255,0.5)" : "rgba(255,255,255,0.25)",
+                    }}
+                  >
+                    [{i + 1}]
+                  </span>
                   <span>{w.name}</span>
                   {!isUnlocked && <span style={{ fontSize: "0.5rem" }}>🔒</span>}
                 </button>
@@ -2625,11 +2983,28 @@ export default function ThreeWorld() {
 
         {/* Loading */}
         {isLoading && !error && (
-          <div style={{
-            position: "absolute", inset: 0, display: "flex", flexDirection: "column",
-            alignItems: "center", justifyContent: "center", gap: "1.5rem", background: "#000", zIndex: 50,
-          }}>
-            <div style={{ color: "#fff", fontSize: "1rem", letterSpacing: "0.4em", fontFamily: "monospace", opacity: 0.8 }}>
+          <div
+            style={{
+              position: "absolute",
+              inset: 0,
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: "1.5rem",
+              background: "#000",
+              zIndex: 50,
+            }}
+          >
+            <div
+              style={{
+                color: "#fff",
+                fontSize: "1rem",
+                letterSpacing: "0.4em",
+                fontFamily: "monospace",
+                opacity: 0.8,
+              }}
+            >
               LOADING...
             </div>
           </div>
@@ -2637,12 +3012,32 @@ export default function ThreeWorld() {
 
         {/* Error */}
         {error && (
-          <div style={{
-            position: "absolute", inset: 0, display: "flex", flexDirection: "column",
-            alignItems: "center", justifyContent: "center", gap: "1.5rem", background: "#000", zIndex: 50, fontFamily: "monospace",
-          }}>
+          <div
+            style={{
+              position: "absolute",
+              inset: 0,
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: "1.5rem",
+              background: "#000",
+              zIndex: 50,
+              fontFamily: "monospace",
+            }}
+          >
             <p style={{ color: "#ff3333", fontSize: "1rem", letterSpacing: "0.2em" }}>⚠ {error}</p>
-            <a href="/login" style={{ color: "#fff", border: "1px solid rgba(255,255,255,0.4)", padding: "0.5rem 1.5rem", textDecoration: "none", fontSize: "0.85rem", letterSpacing: "0.2em" }}>
+            <a
+              href="/login"
+              style={{
+                color: "#fff",
+                border: "1px solid rgba(255,255,255,0.4)",
+                padding: "0.5rem 1.5rem",
+                textDecoration: "none",
+                fontSize: "0.85rem",
+                letterSpacing: "0.2em",
+              }}
+            >
               LOGIN
             </a>
           </div>
@@ -2654,16 +3049,44 @@ export default function ThreeWorld() {
             type="button"
             onClick={() => rendererDomRef.current?.requestPointerLock()}
             style={{
-              position: "absolute", inset: 0, width: "100%", height: "100%",
-              display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
-              gap: "1rem", background: "rgba(0,0,0,0.62)", cursor: "pointer", border: "none", fontFamily: "monospace", zIndex: 40,
+              position: "absolute",
+              inset: 0,
+              width: "100%",
+              height: "100%",
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: "1rem",
+              background: "rgba(0,0,0,0.62)",
+              cursor: "pointer",
+              border: "none",
+              fontFamily: "monospace",
+              zIndex: 40,
             }}
           >
-            <div style={{ color: "white", fontSize: "2rem", fontWeight: "bold", letterSpacing: "0.4em", textShadow: "0 0 30px rgba(255,255,255,0.7)" }}>
+            <div
+              style={{
+                color: "white",
+                fontSize: "2rem",
+                fontWeight: "bold",
+                letterSpacing: "0.4em",
+                textShadow: "0 0 30px rgba(255,255,255,0.7)",
+              }}
+            >
               CLICK TO PLAY
             </div>
-            <div style={{ color: "rgba(255,255,255,0.45)", fontSize: "0.68rem", letterSpacing: "0.18em", textAlign: "center", lineHeight: 1.8 }}>
-              WASD: MOVE · SHIFT: SPRINT · MOUSE: AIM<br />
+            <div
+              style={{
+                color: "rgba(255,255,255,0.45)",
+                fontSize: "0.68rem",
+                letterSpacing: "0.18em",
+                textAlign: "center",
+                lineHeight: 1.8,
+              }}
+            >
+              WASD: MOVE · SHIFT: SPRINT · MOUSE: AIM
+              <br />
               LMB: FIRE · R: RELOAD · 1/2/3: WEAPON · RMB: DESTROY BLOCK
             </div>
           </button>
@@ -2766,12 +3189,49 @@ export default function ThreeWorld() {
                 e.type === "boss" ? "BOSS" : e.type === "miniboss" ? "MINI" : `E${i + 1}`
               const hpPctEnemy = e.maxHp > 0 ? Math.round((e.hp / e.maxHp) * 100) : 0
               return (
-                <div key={e.id} style={{ display: "flex", alignItems: "center", gap: "4px", opacity: e.alive ? 1 : 0.4 }}>
-                  <span style={{ color: e.alive ? typeColor : "#444", fontSize: "0.55rem", minWidth: "26px" }}>{label}</span>
-                  <div style={{ width: "40px", height: "6px", background: "#1a0000", border: `1px solid ${e.alive ? typeColor : "#333"}33`, overflow: "hidden" }}>
-                    <div style={{ height: "100%", width: `${hpPctEnemy}%`, background: e.alive ? hpBarColor : "#333", transition: "width 0.3s" }} />
+                <div
+                  key={e.id}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "4px",
+                    opacity: e.alive ? 1 : 0.4,
+                  }}
+                >
+                  <span
+                    style={{
+                      color: e.alive ? typeColor : "#444",
+                      fontSize: "0.55rem",
+                      minWidth: "26px",
+                    }}
+                  >
+                    {label}
+                  </span>
+                  <div
+                    style={{
+                      width: "40px",
+                      height: "6px",
+                      background: "#1a0000",
+                      border: `1px solid ${e.alive ? typeColor : "#333"}33`,
+                      overflow: "hidden",
+                    }}
+                  >
+                    <div
+                      style={{
+                        height: "100%",
+                        width: `${hpPctEnemy}%`,
+                        background: e.alive ? hpBarColor : "#333",
+                        transition: "width 0.3s",
+                      }}
+                    />
                   </div>
-                  <span style={{ color: e.alive ? typeColor : "#444", fontSize: "0.55rem", minWidth: "24px" }}>
+                  <span
+                    style={{
+                      color: e.alive ? typeColor : "#444",
+                      fontSize: "0.55rem",
+                      minWidth: "24px",
+                    }}
+                  >
                     {e.alive ? `${e.hp}/${e.maxHp}` : "↺"}
                   </span>
                 </div>
@@ -2867,44 +3327,113 @@ export default function ThreeWorld() {
         {/* Move joystick */}
         {isMobile && !isLoading && !error && (
           <div
-            style={{ position: "absolute", bottom: "1rem", left: "1rem", width: "96px", height: "96px", borderRadius: "50%", background: "rgba(255,255,255,0.06)", border: "2px solid rgba(255,255,255,0.18)", display: "flex", alignItems: "center", justifyContent: "center", touchAction: "none", zIndex: 20 }}
+            style={{
+              position: "absolute",
+              bottom: "1rem",
+              left: "1rem",
+              width: "96px",
+              height: "96px",
+              borderRadius: "50%",
+              background: "rgba(255,255,255,0.06)",
+              border: "2px solid rgba(255,255,255,0.18)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              touchAction: "none",
+              zIndex: 20,
+            }}
             onTouchStart={handleJoyStart}
             onTouchMove={handleJoyMove}
             onTouchEnd={handleJoyEnd}
           >
-            <div ref={joyThumbRef} style={{ width: "36px", height: "36px", borderRadius: "50%", background: "rgba(255,255,255,0.25)", border: "1px solid rgba(255,255,255,0.4)", pointerEvents: "none" }} />
+            <div
+              ref={joyThumbRef}
+              style={{
+                width: "36px",
+                height: "36px",
+                borderRadius: "50%",
+                background: "rgba(255,255,255,0.25)",
+                border: "1px solid rgba(255,255,255,0.4)",
+                pointerEvents: "none",
+              }}
+            />
           </div>
         )}
 
         {/* Look joystick */}
         {isMobile && !isLoading && !error && (
           <div
-            style={{ position: "absolute", bottom: "1rem", right: "6rem", width: "96px", height: "96px", borderRadius: "50%", background: "rgba(100,150,255,0.06)", border: "2px solid rgba(100,150,255,0.2)", display: "flex", alignItems: "center", justifyContent: "center", touchAction: "none", zIndex: 20 }}
+            style={{
+              position: "absolute",
+              bottom: "1rem",
+              right: "6rem",
+              width: "96px",
+              height: "96px",
+              borderRadius: "50%",
+              background: "rgba(100,150,255,0.06)",
+              border: "2px solid rgba(100,150,255,0.2)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              touchAction: "none",
+              zIndex: 20,
+            }}
             onTouchStart={handleLookJoyStart}
             onTouchMove={handleLookJoyMove}
             onTouchEnd={handleLookJoyEnd}
           >
-            <div ref={lookJoyThumbRef} style={{ width: "36px", height: "36px", borderRadius: "50%", background: "rgba(100,150,255,0.3)", border: "1px solid rgba(100,150,255,0.5)", pointerEvents: "none" }} />
+            <div
+              ref={lookJoyThumbRef}
+              style={{
+                width: "36px",
+                height: "36px",
+                borderRadius: "50%",
+                background: "rgba(100,150,255,0.3)",
+                border: "1px solid rgba(100,150,255,0.5)",
+                pointerEvents: "none",
+              }}
+            />
           </div>
         )}
 
         {/* Chat */}
         {!isLoading && !error && (
-          <div style={{
-            position: "absolute",
-            bottom: isMobile ? "7.5rem" : "5.2rem",
-            left: isMobile ? "7.5rem" : "1.4rem",
-            width: "190px",
-            zIndex: 20,
-            fontFamily: "monospace",
-            display: "flex",
-            flexDirection: "column",
-            gap: "3px",
-          }}>
-            <div style={{ maxHeight: "80px", overflowY: "auto", display: "flex", flexDirection: "column", gap: "2px" }}>
+          <div
+            style={{
+              position: "absolute",
+              bottom: isMobile ? "7.5rem" : "5.2rem",
+              left: isMobile ? "7.5rem" : "1.4rem",
+              width: "190px",
+              zIndex: 20,
+              fontFamily: "monospace",
+              display: "flex",
+              flexDirection: "column",
+              gap: "3px",
+            }}
+          >
+            <div
+              style={{
+                maxHeight: "80px",
+                overflowY: "auto",
+                display: "flex",
+                flexDirection: "column",
+                gap: "2px",
+              }}
+            >
               {chatMessages.map((m) => (
-                <div key={m.id} style={{ fontSize: "0.6rem", color: m.isSystem ? "#55aaff" : "rgba(255,255,255,0.78)", background: "rgba(0,0,0,0.72)", padding: "1px 5px", wordBreak: "break-all" }}>
-                  <span style={{ color: m.isSystem ? "#3366aa" : "rgba(255,255,255,0.35)" }}>{m.from}: </span>
+                <div
+                  key={m.id}
+                  style={{
+                    fontSize: "0.6rem",
+                    color: m.isSystem ? "#55aaff" : "rgba(255,255,255,0.78)",
+                    background: "rgba(0,0,0,0.72)",
+                    padding: "1px 5px",
+                    wordBreak: "break-all",
+                  }}
+                >
+                  <span style={{ color: m.isSystem ? "#3366aa" : "rgba(255,255,255,0.35)" }}>
+                    {m.from}:{" "}
+                  </span>
                   {m.text}
                 </div>
               ))}
@@ -2916,26 +3445,84 @@ export default function ThreeWorld() {
                 onChange={(e) => setChatInput(e.target.value)}
                 placeholder="CHAT..."
                 maxLength={100}
-                style={{ flex: 1, background: "rgba(0,0,0,0.72)", border: "1px solid rgba(255,255,255,0.14)", color: "white", fontFamily: "monospace", fontSize: "0.6rem", padding: "2px 5px", outline: "none", minWidth: 0 }}
+                style={{
+                  flex: 1,
+                  background: "rgba(0,0,0,0.72)",
+                  border: "1px solid rgba(255,255,255,0.14)",
+                  color: "white",
+                  fontFamily: "monospace",
+                  fontSize: "0.6rem",
+                  padding: "2px 5px",
+                  outline: "none",
+                  minWidth: 0,
+                }}
               />
-              <button type="submit" style={{ background: "rgba(0,0,0,0.72)", border: "1px solid rgba(255,255,255,0.14)", color: "rgba(255,255,255,0.45)", fontFamily: "monospace", fontSize: "0.6rem", padding: "2px 6px", cursor: "pointer" }}>▶</button>
+              <button
+                type="submit"
+                style={{
+                  background: "rgba(0,0,0,0.72)",
+                  border: "1px solid rgba(255,255,255,0.14)",
+                  color: "rgba(255,255,255,0.45)",
+                  fontFamily: "monospace",
+                  fontSize: "0.6rem",
+                  padding: "2px 6px",
+                  cursor: "pointer",
+                }}
+              >
+                ▶
+              </button>
             </form>
           </div>
         )}
 
         {/* ── Game Over ─────────────────────────────────────────────────── */}
         {gamePhase === "gameover" && (
-          <div style={{
-            position: "absolute", inset: 0, display: "flex", flexDirection: "column",
-            alignItems: "center", justifyContent: "center", gap: "1.5rem",
-            background: "rgba(0,0,0,0.93)", zIndex: 60, fontFamily: "monospace",
-          }}>
-            <div style={{ color: "#ff3333", fontSize: "3rem", fontWeight: "bold", letterSpacing: "0.3em", textShadow: "0 0 40px rgba(255,0,0,0.8)" }}>
+          <div
+            style={{
+              position: "absolute",
+              inset: 0,
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: "1.5rem",
+              background: "rgba(0,0,0,0.93)",
+              zIndex: 60,
+              fontFamily: "monospace",
+            }}
+          >
+            <div
+              style={{
+                color: "#ff3333",
+                fontSize: "3rem",
+                fontWeight: "bold",
+                letterSpacing: "0.3em",
+                textShadow: "0 0 40px rgba(255,0,0,0.8)",
+              }}
+            >
               YOU DIED
             </div>
-            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "0.4rem", border: "1px solid rgba(255,50,50,0.25)", padding: "1rem 2rem" }}>
-              <div style={{ color: "#ffcc00", fontSize: "0.78rem", letterSpacing: "0.22em" }}>FINAL SCORE</div>
-              <div style={{ color: "#ffcc00", fontSize: "2.8rem", fontWeight: "bold", letterSpacing: "0.15em" }}>
+            <div
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                gap: "0.4rem",
+                border: "1px solid rgba(255,50,50,0.25)",
+                padding: "1rem 2rem",
+              }}
+            >
+              <div style={{ color: "#ffcc00", fontSize: "0.78rem", letterSpacing: "0.22em" }}>
+                FINAL SCORE
+              </div>
+              <div
+                style={{
+                  color: "#ffcc00",
+                  fontSize: "2.8rem",
+                  fontWeight: "bold",
+                  letterSpacing: "0.15em",
+                }}
+              >
                 {score.toString().padStart(6, "0")}
               </div>
               <div style={{ color: "rgba(255,255,255,0.35)", fontSize: "0.7rem" }}>
@@ -2946,65 +3533,171 @@ export default function ThreeWorld() {
               <button
                 type="button"
                 onClick={() => window.location.reload()}
-                style={{ background: "rgba(255,40,40,0.14)", border: "1px solid rgba(255,50,50,0.6)", color: "#ff5555", fontFamily: "monospace", fontSize: "0.9rem", letterSpacing: "0.2em", padding: "0.6rem 1.8rem", cursor: "pointer" }}
+                style={{
+                  background: "rgba(255,40,40,0.14)",
+                  border: "1px solid rgba(255,50,50,0.6)",
+                  color: "#ff5555",
+                  fontFamily: "monospace",
+                  fontSize: "0.9rem",
+                  letterSpacing: "0.2em",
+                  padding: "0.6rem 1.8rem",
+                  cursor: "pointer",
+                }}
               >
                 RESPAWN
               </button>
-              <a href="/dungeon" style={{ border: "1px solid rgba(255,255,255,0.15)", color: "rgba(255,255,255,0.38)", fontFamily: "monospace", fontSize: "0.9rem", letterSpacing: "0.2em", padding: "0.6rem 1.8rem", textDecoration: "none" }}>
+              <a
+                href="/dungeon"
+                style={{
+                  border: "1px solid rgba(255,255,255,0.15)",
+                  color: "rgba(255,255,255,0.38)",
+                  fontFamily: "monospace",
+                  fontSize: "0.9rem",
+                  letterSpacing: "0.2em",
+                  padding: "0.6rem 1.8rem",
+                  textDecoration: "none",
+                }}
+              >
                 DUNGEON
               </a>
             </div>
           </div>
         )}
-
       </div>
 
       {/* ── Inventory bar ─────────────────────────────────────────────────── */}
-      <div style={{ flexShrink: 0, padding: "0.4rem 1rem", background: "rgba(0,0,0,0.95)", borderTop: "1px solid rgba(255,255,255,0.07)" }}>
-        <div style={{ fontSize: "0.55rem", color: "rgba(255,255,255,0.18)", letterSpacing: "0.1em", marginBottom: "0.22rem" }}>
+      <div
+        style={{
+          flexShrink: 0,
+          padding: "0.4rem 1rem",
+          background: "rgba(0,0,0,0.95)",
+          borderTop: "1px solid rgba(255,255,255,0.07)",
+        }}
+      >
+        <div
+          style={{
+            fontSize: "0.55rem",
+            color: "rgba(255,255,255,0.18)",
+            letterSpacing: "0.1em",
+            marginBottom: "0.22rem",
+          }}
+        >
           LMB: FIRE · RMB: DESTROY · R: RELOAD · 1/2/3: WEAPON · SHIFT: SPRINT
-          <a href="/dungeon" style={{ color: "rgba(0,200,80,0.6)", marginLeft: "0.5rem", textDecoration: "underline" }}>DUNGEON</a>
+          <a
+            href="/dungeon"
+            style={{
+              color: "rgba(0,200,80,0.6)",
+              marginLeft: "0.5rem",
+              textDecoration: "underline",
+            }}
+          >
+            DUNGEON
+          </a>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>
-          <span style={{ flexShrink: 0, color: "rgba(255,255,255,0.18)", fontSize: "0.55rem", letterSpacing: "0.15em" }}>INV</span>
-          <div style={{ display: "flex", flex: 1, alignItems: "center", gap: "0.4rem", overflowX: "auto" }}>
+          <span
+            style={{
+              flexShrink: 0,
+              color: "rgba(255,255,255,0.18)",
+              fontSize: "0.55rem",
+              letterSpacing: "0.15em",
+            }}
+          >
+            INV
+          </span>
+          <div
+            style={{
+              display: "flex",
+              flex: 1,
+              alignItems: "center",
+              gap: "0.4rem",
+              overflowX: "auto",
+            }}
+          >
             {inventory.filter((i) => i.quantity > 0).length === 0 ? (
-              <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", fontSize: "0.65rem" }}>
-                <span style={{ color: "rgba(255,255,255,0.2)", letterSpacing: "0.08em" }}>NO BLOCKS</span>
-                <a href="/problems" style={{ color: "rgba(0,200,80,0.7)", letterSpacing: "0.08em", textDecoration: "underline" }}>SOLVE PROBLEMS →</a>
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "0.75rem",
+                  fontSize: "0.65rem",
+                }}
+              >
+                <span style={{ color: "rgba(255,255,255,0.2)", letterSpacing: "0.08em" }}>
+                  NO BLOCKS
+                </span>
+                <a
+                  href="/problems"
+                  style={{
+                    color: "rgba(0,200,80,0.7)",
+                    letterSpacing: "0.08em",
+                    textDecoration: "underline",
+                  }}
+                >
+                  SOLVE PROBLEMS →
+                </a>
               </div>
             ) : (
-              inventory.filter((i) => i.quantity > 0).map((item) => {
-                const info = BLOCK_INFO[item.blockType] ?? { label: item.blockType, color: "#888" }
-                const isSelected = selectedBlock === item.blockType
-                return (
-                  <button
-                    key={item.blockType}
-                    type="button"
-                    onClick={() => setSelectedBlock(isSelected ? null : item.blockType)}
-                    style={{
-                      display: "flex", flexShrink: 0, alignItems: "center", gap: "0.3rem",
-                      padding: "0.15rem 0.5rem", fontFamily: "monospace", fontSize: "0.65rem",
-                      letterSpacing: "0.07em",
-                      border: isSelected ? `1px solid ${info.color}` : "1px solid rgba(255,255,255,0.1)",
-                      background: isSelected ? "rgba(255,255,255,0.05)" : "transparent",
-                      color: isSelected ? "white" : "rgba(255,255,255,0.38)",
-                      cursor: "pointer",
-                    }}
-                  >
-                    <span style={{ width: "6px", height: "6px", flexShrink: 0, background: info.color, borderRadius: "1px" }} />
-                    <span style={{ whiteSpace: "nowrap" }}>{info.label}</span>
-                    <span style={{ color: "#00ff41", fontWeight: "bold" }}>×{item.quantity}</span>
-                  </button>
-                )
-              })
+              inventory
+                .filter((i) => i.quantity > 0)
+                .map((item) => {
+                  const info = BLOCK_INFO[item.blockType] ?? {
+                    label: item.blockType,
+                    color: "#888",
+                  }
+                  const isSelected = selectedBlock === item.blockType
+                  return (
+                    <button
+                      key={item.blockType}
+                      type="button"
+                      onClick={() => setSelectedBlock(isSelected ? null : item.blockType)}
+                      style={{
+                        display: "flex",
+                        flexShrink: 0,
+                        alignItems: "center",
+                        gap: "0.3rem",
+                        padding: "0.15rem 0.5rem",
+                        fontFamily: "monospace",
+                        fontSize: "0.65rem",
+                        letterSpacing: "0.07em",
+                        border: isSelected
+                          ? `1px solid ${info.color}`
+                          : "1px solid rgba(255,255,255,0.1)",
+                        background: isSelected ? "rgba(255,255,255,0.05)" : "transparent",
+                        color: isSelected ? "white" : "rgba(255,255,255,0.38)",
+                        cursor: "pointer",
+                      }}
+                    >
+                      <span
+                        style={{
+                          width: "6px",
+                          height: "6px",
+                          flexShrink: 0,
+                          background: info.color,
+                          borderRadius: "1px",
+                        }}
+                      />
+                      <span style={{ whiteSpace: "nowrap" }}>{info.label}</span>
+                      <span style={{ color: "#00ff41", fontWeight: "bold" }}>×{item.quantity}</span>
+                    </button>
+                  )
+                })
             )}
           </div>
           {selectedBlock && (
             <button
               type="button"
               onClick={() => setSelectedBlock(null)}
-              style={{ flexShrink: 0, color: "rgba(255,255,255,0.28)", fontSize: "0.55rem", border: "1px solid rgba(255,255,255,0.1)", padding: "0.1rem 0.3rem", background: "transparent", fontFamily: "monospace", cursor: "pointer" }}
+              style={{
+                flexShrink: 0,
+                color: "rgba(255,255,255,0.28)",
+                fontSize: "0.55rem",
+                border: "1px solid rgba(255,255,255,0.1)",
+                padding: "0.1rem 0.3rem",
+                background: "transparent",
+                fontFamily: "monospace",
+                cursor: "pointer",
+              }}
             >
               ESC
             </button>
