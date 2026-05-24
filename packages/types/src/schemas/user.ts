@@ -1,35 +1,21 @@
 import { z } from "zod"
 
-export const UserLevelSchema = z.number().int().nonnegative()
-
 export const UserSchema = z.object({
   id: z.string().uuid(),
-  githubId: z.string().nullable(),
-  email: z.string().email(),
-  username: z.string().min(3).max(32),
-  displayName: z.string().max(64).nullable(),
-  avatarUrl: z.string().url().nullable(),
-  level: UserLevelSchema,
-  xp: z.number().int().nonnegative(),
-  isActive: z.boolean(),
+  username: z.string().regex(/^[a-zA-Z0-9_]{4,16}$/),
+  totalKills: z.number().int().nonnegative(),
+  totalDeaths: z.number().int().nonnegative(),
+  totalScore: z.number().int().nonnegative(),
   createdAt: z.coerce.date(),
-  updatedAt: z.coerce.date(),
 })
 
-export const CreateUserSchema = UserSchema.pick({
-  email: true,
-  username: true,
-  displayName: true,
-  avatarUrl: true,
-  githubId: true,
+export const SignupSchema = z.object({
+  username: z.string().regex(/^[a-zA-Z0-9_]{4,16}$/),
+  password: z.string().min(8).max(128),
 })
 
-export const UpdateUserSchema = UserSchema.pick({
-  displayName: true,
-  avatarUrl: true,
-}).partial()
+export const LoginSchema = SignupSchema
 
-export type UserLevel = z.infer<typeof UserLevelSchema>
 export type User = z.infer<typeof UserSchema>
-export type CreateUser = z.infer<typeof CreateUserSchema>
-export type UpdateUser = z.infer<typeof UpdateUserSchema>
+export type Signup = z.infer<typeof SignupSchema>
+export type Login = z.infer<typeof LoginSchema>

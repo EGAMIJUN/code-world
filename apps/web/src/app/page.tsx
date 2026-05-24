@@ -13,7 +13,6 @@ export default function HomePage() {
         color: "#00ff41",
       }}
     >
-      {/* Title */}
       <div style={{ textAlign: "center" }}>
         <div
           style={{
@@ -35,17 +34,16 @@ export default function HomePage() {
             marginBottom: "0.4rem",
           }}
         >
-          コードを書いて、街を作れ。
+          純粋なオンラインFPS。
         </div>
         <div style={{ color: "#005500", fontSize: "0.8rem", letterSpacing: "0.1em" }}>
-          SEとして必要なスキルが全部身につく学習型オープンワールドゲーム。
+          BATTLE · RANK · SURVIVE
         </div>
       </div>
 
-      {/* CTA */}
       <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap", justifyContent: "center" }}>
         <a
-          href="/problems"
+          href="/world"
           style={{
             color: "#00ff41",
             border: "1px solid #00ff41",
@@ -58,10 +56,10 @@ export default function HomePage() {
             background: "rgba(0,255,65,0.05)",
           }}
         >
-          ▶ ENTER SYSTEM
+          ▶ PLAY
         </a>
         <a
-          href="/dungeon"
+          href="/leaderboard"
           style={{
             color: "#00aa2a",
             border: "1px solid #003300",
@@ -72,58 +70,38 @@ export default function HomePage() {
             background: "rgba(0,20,0,0.5)",
           }}
         >
-          ▷ DUNGEON
+          ▷ RANKING
         </a>
       </div>
 
-      {/* Category grid */}
       <div
         style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(2, 1fr)",
+          display: "flex",
           gap: "1rem",
-          width: "100%",
-          maxWidth: "500px",
+          fontSize: "0.75rem",
+          letterSpacing: "0.15em",
         }}
       >
-        {[
-          { label: "SQL", count: "50" },
-          { label: "DEBUG", count: "30" },
-          { label: "DESIGN", count: "20" },
-          { label: "REVIEW", count: "20" },
-        ].map(({ label, count }) => (
-          <div
-            key={label}
-            style={{
-              border: "1px solid #003300",
-              padding: "1rem",
-              textAlign: "center",
-              background: "rgba(0,15,0,0.6)",
-            }}
-          >
-            <div
-              style={{
-                fontSize: "1.3rem",
-                fontWeight: "bold",
-                color: "#00ff41",
-                textShadow: "0 0 8px #00ff41",
-                letterSpacing: "0.15em",
-              }}
-            >
-              {label}
-            </div>
-            <div
-              style={{
-                fontSize: "0.7rem",
-                color: "#00aa2a",
-                marginTop: "0.25rem",
-                letterSpacing: "0.1em",
-              }}
-            >
-              {count} MISSIONS
-            </div>
-          </div>
-        ))}
+        <a
+          href="/login"
+          style={{
+            color: "#005500",
+            textDecoration: "none",
+            borderBottom: "1px dashed #003300",
+          }}
+        >
+          LOGIN
+        </a>
+        <a
+          href="/signup"
+          style={{
+            color: "#005500",
+            textDecoration: "none",
+            borderBottom: "1px dashed #003300",
+          }}
+        >
+          REGISTER
+        </a>
       </div>
     </div>
   )

@@ -2,12 +2,13 @@
 
 import { useRouter } from "next/navigation"
 import { useState } from "react"
-import { authClient } from "../../lib/auth-client"
+import { signup } from "../../lib/auth-client"
+
+const USERNAME_RE = /^[a-zA-Z0-9_]{4,16}$/
 
 export default function SignupPage() {
   const router = useRouter()
-  const [name, setName] = useState("")
-  const [email, setEmail] = useState("")
+  const [username, setUsername] = useState("")
   const [password, setPassword] = useState("")
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
@@ -16,17 +17,22 @@ export default function SignupPage() {
     e.preventDefault()
     setLoading(true)
     setError(null)
+    if (!USERNAME_RE.test(username)) {
+      setError("ユーザーIDは英数字4〜16文字")
+      setLoading(false)
+      return
+    }
+    if (password.length < 8) {
+      setError("パスワードは8文字以上")
+      setLoading(false)
+      return
+    }
     try {
-      const result = await authClient.signUp.email({
-        email,
-        password,
-        name,
-        callbackURL: "/login",
-      })
+      const result = await signup(username, password)
       if (result.error) {
-        setError(result.error.message ?? "REGISTRATION FAILED")
+        setError(result.error)
       } else {
-        router.push("/login")
+        router.push("/world")
       }
     } catch {
       setError("REGISTRATION FAILED")
@@ -69,7 +75,6 @@ export default function SignupPage() {
           gap: "2rem",
         }}
       >
-        {/* Title */}
         <div style={{ textAlign: "center" }}>
           <div
             style={{
@@ -88,7 +93,6 @@ export default function SignupPage() {
           </div>
         </div>
 
-        {/* Signup box */}
         <div
           style={{
             border: "1px solid #003300",
@@ -117,17 +121,9 @@ export default function SignupPage() {
           >
             <input
               type="text"
-              placeholder="DISPLAY NAME"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              required
-              style={inputStyle}
-            />
-            <input
-              type="email"
-              placeholder="EMAIL ADDRESS"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
+              placeholder="USER ID (4-16 alphanumeric)"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
               required
               style={inputStyle}
             />
