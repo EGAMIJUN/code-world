@@ -629,6 +629,27 @@ interface ChatMessage {
   isSystem?: boolean
 }
 
+// Per-joint smoothed pose. Each frame we compute targetPose from the current
+// AI state, then exponentially interpolate currentPose toward it so direction
+// changes look like a real body easing in/out of motion rather than snapping.
+interface AnimPose {
+  leftShoulder: number // rotation.x
+  rightShoulder: number
+  leftElbow: number
+  rightElbow: number
+  leftHip: number
+  rightHip: number
+  leftKnee: number
+  rightKnee: number
+  torsoLeanZ: number // strafe lean
+  torsoPitchX: number // forward lean when sprinting
+  torsoBreath: number // additive scale.y
+  pelvisRotY: number // counter-rotate vs torso during walk
+  headYaw: number // head rotation.y (relative to body)
+  headPitch: number // head rotation.x (look up/down)
+  eyeOpenness: number // 1 = wide, 0 = blinking
+}
+
 interface CombatEnemy {
   id: string
   mesh: THREE.Group // humanoid root group
@@ -665,6 +686,23 @@ interface CombatEnemy {
   shadowMesh?: THREE.Mesh | null
   // Meshes that should hide when far (eyes / mouth / pouches / ghillie strips).
   lodDetails?: THREE.Object3D[]
+  // Eye meshes for blink scaling (subset of lodDetails). Optional.
+  leftEye?: THREE.Mesh
+  rightEye?: THREE.Mesh
+  // Smoothed walk velocity (world space). Lerps toward desired velocity each
+  // frame so enemies accelerate and decelerate instead of teleporting around.
+  velocity: { x: number; z: number }
+  // Smoothed yaw — body turns toward facing direction over time, not instantly.
+  smoothedYaw: number
+  // Per-frame interpolated pose. Animation state machine writes a target pose
+  // each tick; this `pose` lerps toward it (frame-independent exp blend).
+  pose: AnimPose
+  // Phase offsets so a crowd of enemies doesn't blink / breathe in lockstep.
+  blinkPhase: number
+  blinkTimer: number // seconds until next blink
+  blinkActive: number // seconds remaining in current blink
+  breathPhase: number
+  microIdleSeed: number
   isCommander: boolean // for destroy mission
   // Bot fields (FFA/TDM): set only when this enemy is a bot player
   isBot?: boolean
@@ -795,6 +833,15 @@ export default function ThreeWorld({
   const lookJoyRef = useRef({ vx: 0, vy: 0 })
   const lookJoyContainerRef = useRef<HTMLDivElement>(null)
   const lookJoyThumbRef = useRef<HTMLDivElement>(null)
+  // Low-pass filtered stick values — kills finger micro-jitter while staying
+  // responsive. Mouse input intentionally stays raw (smoothing mice adds lag).
+  const joySmoothRef = useRef({ vx: 0, vy: 0 })
+  const lookSmoothRef = useRef({ vx: 0, vy: 0 })
+  // Player movement velocity (smoothed). Position += vel * dt each frame so
+  // there's a tiny accel/decel instead of an instant snap when input changes.
+  const playerVelRef = useRef({ x: 0, z: 0 })
+  // Walk-bob: vertical head sway phase, advances only while moving.
+  const walkBobRef = useRef(0)
   const wsRef = useRef<WebSocket | null>(null)
   const usernameRef = useRef("Player")
   const remotePosRef = useRef<Record<string, RemotePlayer>>({})
@@ -1500,14 +1547,16 @@ export default function ThreeWorld({
         const jaw = new THREE.Mesh(box(0.16, 0.06, 0.14), skinMat)
         jaw.position.set(0, -0.11 * scale, 0.02 * scale)
         head.add(jaw)
-        // Glowing eyes (LOD-hidden when far)
+        // Glowing eyes (LOD-hidden when far). Keep handles for blink animation.
         const eyeGeo = sph(0.022, 6, 6)
-        for (const ex of [-0.055, 0.055]) {
-          const eye = new THREE.Mesh(eyeGeo, eyeMat)
-          eye.position.set(ex * scale, 0.02 * scale, -0.155 * scale)
-          head.add(eye)
-          lodDetails.push(eye)
-        }
+        const leftEye = new THREE.Mesh(eyeGeo, eyeMat)
+        leftEye.position.set(-0.055 * scale, 0.02 * scale, -0.155 * scale)
+        head.add(leftEye)
+        lodDetails.push(leftEye)
+        const rightEye = new THREE.Mesh(eyeGeo, eyeMat)
+        rightEye.position.set(0.055 * scale, 0.02 * scale, -0.155 * scale)
+        head.add(rightEye)
+        lodDetails.push(rightEye)
         // Mouth slit (LOD)
         const mouth = new THREE.Mesh(
           box(0.06, 0.012, 0.005),
@@ -1746,6 +1795,32 @@ export default function ThreeWorld({
           head,
           shadowMesh: shadow,
           lodDetails,
+          leftEye,
+          rightEye,
+          velocity: { x: 0, z: 0 },
+          smoothedYaw: 0,
+          pose: {
+            leftShoulder: 0,
+            rightShoulder: 0,
+            leftElbow: 0,
+            rightElbow: 0,
+            leftHip: 0,
+            rightHip: 0,
+            leftKnee: 0,
+            rightKnee: 0,
+            torsoLeanZ: 0,
+            torsoPitchX: 0,
+            torsoBreath: 0,
+            pelvisRotY: 0,
+            headYaw: 0,
+            headPitch: 0,
+            eyeOpenness: 1,
+          },
+          blinkPhase: Math.random() * Math.PI * 2,
+          blinkTimer: 2 + Math.random() * 5,
+          blinkActive: 0,
+          breathPhase: Math.random() * Math.PI * 2,
+          microIdleSeed: Math.random() * 1000,
           isCommander,
         }
       }
@@ -2427,9 +2502,22 @@ export default function ThreeWorld({
 
       function animate() {
         animFrameRef.current = requestAnimationFrame(animate)
-        const dt = clock.getDelta()
+        // Cap dt to 50ms so a tab refocus / long pause doesn't yank everything
+        // (massive lerp blends + massive position deltas would look like
+        // teleportation and could clip through walls).
+        const dt = Math.min(clock.getDelta(), 0.05)
         const refs = sceneRef.current
         if (!refs) return
+
+        // Low-pass filter the joystick inputs (mouse stays raw — smoothing
+        // mice would add input lag, but a finger on glass jitters and the
+        // micro-noise reads as camera shake without smoothing).
+        const joyBlend = 1 - Math.exp(-dt * 22)
+        joySmoothRef.current.vx += (joystickRef.current.vx - joySmoothRef.current.vx) * joyBlend
+        joySmoothRef.current.vy += (joystickRef.current.vy - joySmoothRef.current.vy) * joyBlend
+        const lookBlend = 1 - Math.exp(-dt * 28)
+        lookSmoothRef.current.vx += (lookJoyRef.current.vx - lookSmoothRef.current.vx) * lookBlend
+        lookSmoothRef.current.vy += (lookJoyRef.current.vy - lookSmoothRef.current.vy) * lookBlend
 
         // ADS FOV interpolation
         const targetFov = isAimingRef.current ? (currentWeaponIdxRef.current === 2 ? 28 : 50) : 75
@@ -2473,35 +2561,63 @@ export default function ThreeWorld({
         const sinceG = Date.now() - lastGrenadeRef.current
         setGrenadeCooldownMs(Math.max(0, Math.round((5000 - sinceG) / 100) * 100))
 
-        // WASD + move joystick
-        const joy = joystickRef.current
-        let vx = joy.vx
-        let vz = joy.vy
-        if (keysRef.current.has("ArrowLeft") || keysRef.current.has("a")) vx -= 1
-        if (keysRef.current.has("ArrowRight") || keysRef.current.has("d")) vx += 1
-        if (keysRef.current.has("ArrowUp") || keysRef.current.has("w")) vz -= 1
-        if (keysRef.current.has("ArrowDown") || keysRef.current.has("s")) vz += 1
+        // Input → desired movement direction. Joystick is filtered; WASD
+        // contributes raw ±1 components clamped to unit length.
+        const sjoy = joySmoothRef.current
+        let inVx = sjoy.vx
+        let inVz = sjoy.vy
+        if (keysRef.current.has("ArrowLeft") || keysRef.current.has("a")) inVx -= 1
+        if (keysRef.current.has("ArrowRight") || keysRef.current.has("d")) inVx += 1
+        if (keysRef.current.has("ArrowUp") || keysRef.current.has("w")) inVz -= 1
+        if (keysRef.current.has("ArrowDown") || keysRef.current.has("s")) inVz += 1
+        // Normalize once magnitude exceeds 1 so diagonal isn't √2 faster.
+        const inMag = Math.hypot(inVx, inVz)
+        if (inMag > 1) {
+          inVx /= inMag
+          inVz /= inMag
+        }
 
-        if (vx !== 0 || vz !== 0) {
-          const fwdX = -Math.sin(camState.yaw)
-          const fwdZ = -Math.cos(camState.yaw)
-          const isSprinting = keysRef.current.has("Shift")
-          const spd = MOVE_SPEED * (isSprinting ? SPRINT_MULTIPLIER : 1)
-          const dx = (fwdX * -vz + Math.cos(camState.yaw) * vx) * spd * dt
-          const dz = (fwdZ * -vz + -Math.sin(camState.yaw) * vx) * spd * dt
-          const nx = refs.focalPoint.x + dx
-          const nz = refs.focalPoint.z + dz
+        const fwdX = -Math.sin(camState.yaw)
+        const fwdZ = -Math.cos(camState.yaw)
+        const isSprinting = keysRef.current.has("Shift")
+        const spd = MOVE_SPEED * (isSprinting ? SPRINT_MULTIPLIER : 1)
+        // Desired world-space velocity from input.
+        const desiredVx = (fwdX * -inVz + Math.cos(camState.yaw) * inVx) * spd
+        const desiredVz = (fwdZ * -inVz + -Math.sin(camState.yaw) * inVx) * spd
+        // Smooth player velocity toward desired (accel ~10/s, no input → decel).
+        const moveBlend = 1 - Math.exp(-dt * 14)
+        playerVelRef.current.x += (desiredVx - playerVelRef.current.x) * moveBlend
+        playerVelRef.current.z += (desiredVz - playerVelRef.current.z) * moveBlend
+        const pv = playerVelRef.current
+        const playerSpeed = Math.hypot(pv.x, pv.z)
+        if (playerSpeed > 0.01) {
+          const nx = refs.focalPoint.x + pv.x * dt
+          const nz = refs.focalPoint.z + pv.z * dt
           if (!collidesWithWall(nx, refs.focalPoint.z, PLAYER_RADIUS)) refs.focalPoint.x = nx
           if (!collidesWithWall(refs.focalPoint.x, nz, PLAYER_RADIUS)) refs.focalPoint.z = nz
           updateCamera()
         }
 
-        // Look joystick: rotate the camera. Right stick on mobile.
-        const lJoy = lookJoyRef.current
-        if (lJoy.vx !== 0 || lJoy.vy !== 0) {
-          camState.yaw -= lJoy.vx * 2.6 * dt
-          camState.pitch = clampPitch(camState.pitch - lJoy.vy * 2.0 * dt)
+        // Look joystick: rotate the camera using the smoothed value. A mild
+        // square-curve makes small inputs precise without losing top speed.
+        const slook = lookSmoothRef.current
+        if (Math.abs(slook.vx) > 0.001 || Math.abs(slook.vy) > 0.001) {
+          const curveX = slook.vx * Math.abs(slook.vx)
+          const curveY = slook.vy * Math.abs(slook.vy)
+          camState.yaw -= curveX * 3.4 * dt
+          camState.pitch = clampPitch(camState.pitch - curveY * 2.6 * dt)
           updateCamera()
+        }
+
+        // Walk-bob: subtle vertical head sway when actually moving. Phase
+        // freezes when standing still so it doesn't bob while idle.
+        if (playerSpeed > 0.5) {
+          walkBobRef.current += dt * (4 + playerSpeed * 0.6)
+          const bobAmp = isAimingRef.current ? 0.012 : 0.03
+          camera.position.y = EYE_HEIGHT + Math.sin(walkBobRef.current * 2) * bobAmp
+        } else {
+          // Decay back to neutral so we don't snap.
+          camera.position.y += (EYE_HEIGHT - camera.position.y) * (1 - Math.exp(-dt * 10))
         }
 
         // HP auto-recovery (5s no damage → 2 HP/s)
@@ -2742,6 +2858,8 @@ export default function ThreeWorld({
             }
             const ex = enemy.mesh.position.x
             const ez = enemy.mesh.position.z
+            const prevX = ex
+            const prevZ = ez
             const toPx = fp.x - ex
             const toPz = fp.z - ez
             const distToPlayer = Math.sqrt(toPx * toPx + toPz * toPz)
@@ -2762,22 +2880,6 @@ export default function ThreeWorld({
                   if (!collidesWithWall(ex, nz, ENEMY_RADIUS)) enemy.mesh.position.z = nz
                   enemy.facing.set(wpDx / wpDist, 0, wpDz / wpDist)
                 }
-              }
-              enemy.mesh.rotation.y = Math.atan2(enemy.facing.x, enemy.facing.z)
-              // Patrol walk: shoulders + hips swing, elbows/knees counter-flex
-              // for a natural gait. Torso bobs subtly to simulate breathing.
-              enemy.animTime += dt * 5
-              const swingP = Math.sin(enemy.animTime) * 0.32
-              if (enemy.leftArm) enemy.leftArm.rotation.x = swingP
-              if (enemy.rightArm) enemy.rightArm.rotation.x = -swingP
-              if (enemy.leftForearm) enemy.leftForearm.rotation.x = -0.18 + swingP * 0.5
-              if (enemy.rightForearm) enemy.rightForearm.rotation.x = -0.18 - swingP * 0.5
-              if (enemy.leftLeg) enemy.leftLeg.rotation.x = -swingP * 0.85
-              if (enemy.rightLeg) enemy.rightLeg.rotation.x = swingP * 0.85
-              if (enemy.leftShin) enemy.leftShin.rotation.x = Math.max(0, swingP * 0.9)
-              if (enemy.rightShin) enemy.rightShin.rotation.x = Math.max(0, -swingP * 0.9)
-              if (enemy.torso) {
-                enemy.torso.scale.y = 1 + Math.sin(enemy.animTime * 0.4) * 0.025
               }
               if (
                 enemyCanSee(enemy.facing.x, enemy.facing.z, toPx, toPz, distToPlayer, enemy.config)
@@ -2817,7 +2919,6 @@ export default function ThreeWorld({
                   if (!collidesWithWall(ex, nz, ENEMY_RADIUS)) enemy.mesh.position.z = nz
                 }
                 enemy.facing.set(toPx / distToPlayer, 0, toPz / distToPlayer)
-                enemy.mesh.rotation.y = Math.atan2(enemy.facing.x, enemy.facing.z)
                 if (
                   !enemyCanSee(
                     enemy.facing.x,
@@ -2857,22 +2958,9 @@ export default function ThreeWorld({
                   damage: enemy.config.fireDamage,
                 })
               }
-              // Run anim while alerted: bigger amplitude, faster cadence, knee lift
-              enemy.animTime += dt * 8
-              const swingA = Math.sin(enemy.animTime) * 0.55
-              if (enemy.leftArm) enemy.leftArm.rotation.x = swingA
-              if (enemy.rightArm) enemy.rightArm.rotation.x = -swingA
-              if (enemy.leftForearm) enemy.leftForearm.rotation.x = -0.35 + swingA * 0.6
-              if (enemy.rightForearm) enemy.rightForearm.rotation.x = -0.35 - swingA * 0.6
-              if (enemy.leftLeg) enemy.leftLeg.rotation.x = -swingA * 0.95
-              if (enemy.rightLeg) enemy.rightLeg.rotation.x = swingA * 0.95
-              if (enemy.leftShin) enemy.leftShin.rotation.x = Math.max(0, swingA * 1.1)
-              if (enemy.rightShin) enemy.rightShin.rotation.x = Math.max(0, -swingA * 1.1)
-              if (enemy.torso) enemy.torso.scale.y = 1
             } else if (enemy.state === "attack") {
               if (distToPlayer > 0.001) {
                 enemy.facing.set(toPx / distToPlayer, 0, toPz / distToPlayer)
-                enemy.mesh.rotation.y = Math.atan2(enemy.facing.x, enemy.facing.z)
               }
               if (distToPlayer > enemy.config.attackRange * 1.5) {
                 enemy.state = "alert"
@@ -2928,21 +3016,6 @@ export default function ThreeWorld({
                   damage: enemy.config.fireDamage,
                 })
               }
-              // Aim/shoot pose: shoulders raise rifle forward, elbows bend to
-              // cradle it. Recoil kicks both arms back briefly after firing.
-              const timeSinceFire = (now - enemy.lastFireTime) / 1000
-              const recoilKick = Math.max(0, 0.25 - timeSinceFire * 4)
-              if (enemy.rightArm) enemy.rightArm.rotation.x = -1.35 - recoilKick
-              if (enemy.leftArm) enemy.leftArm.rotation.x = -1.05 - recoilKick * 0.5
-              if (enemy.rightForearm) enemy.rightForearm.rotation.x = 0.55
-              if (enemy.leftForearm) enemy.leftForearm.rotation.x = -0.65
-              if (enemy.leftLeg) enemy.leftLeg.rotation.x = 0
-              if (enemy.rightLeg) enemy.rightLeg.rotation.x = 0
-              if (enemy.leftShin) enemy.leftShin.rotation.x = 0
-              if (enemy.rightShin) enemy.rightShin.rotation.x = 0
-              if (enemy.torso) {
-                enemy.torso.scale.y = 1 + Math.sin(now * 0.004) * 0.012
-              }
             } else if (enemy.state === "search") {
               enemy.searchTimer -= dt
               if (enemy.searchTimer <= 0) {
@@ -2959,7 +3032,6 @@ export default function ThreeWorld({
                   if (!collidesWithWall(nx, ez, ENEMY_RADIUS)) enemy.mesh.position.x = nx
                   if (!collidesWithWall(ex, nz, ENEMY_RADIUS)) enemy.mesh.position.z = nz
                   enemy.facing.set(lx / ld, 0, lz / ld)
-                  enemy.mesh.rotation.y = Math.atan2(enemy.facing.x, enemy.facing.z)
                 } else {
                   enemy.lastSeenPlayer = null
                 }
@@ -2971,6 +3043,168 @@ export default function ThreeWorld({
                 enemy.lastSeenPlayer = { x: fp.x, z: fp.z }
               }
             }
+
+            // ── Unified animator ────────────────────────────────────────────
+            // Compute actual velocity from this frame's position delta so the
+            // animation reacts to real motion (including collision-clipping).
+            const safeDt = Math.max(dt, 1e-4)
+            enemy.velocity.x = (enemy.mesh.position.x - prevX) / safeDt
+            enemy.velocity.z = (enemy.mesh.position.z - prevZ) / safeDt
+            const speed = Math.hypot(enemy.velocity.x, enemy.velocity.z)
+            const moving = speed > 0.05
+
+            // Smooth body yaw — bodies don't snap to face a new direction, they
+            // pivot over a short window. Wrap diff into [-π, π] for shortest arc.
+            const targetYaw = Math.atan2(enemy.facing.x, enemy.facing.z)
+            let dYaw = targetYaw - enemy.smoothedYaw
+            while (dYaw > Math.PI) dYaw -= Math.PI * 2
+            while (dYaw < -Math.PI) dYaw += Math.PI * 2
+            const yawBlend = 1 - Math.exp(-dt * 7)
+            enemy.smoothedYaw += dYaw * yawBlend
+            enemy.mesh.rotation.y = enemy.smoothedYaw
+
+            // Velocity decomposed against body-relative right vector → strafe lean
+            const cosY = Math.cos(enemy.smoothedYaw)
+            const sinY = Math.sin(enemy.smoothedYaw)
+            const rightX = cosY
+            const rightZ = -sinY
+            const strafeVel = enemy.velocity.x * rightX + enemy.velocity.z * rightZ
+
+            const aimMode =
+              enemy.state === "attack" ||
+              (enemy.state === "alert" && distToPlayer <= enemy.config.fireRange)
+
+            // Cadence: advance walk phase only when actually moving so feet
+            // don't slide while standing still. Faster phase when running.
+            if (moving) {
+              const cadenceMult =
+                enemy.state === "alert" ? 1.7 : enemy.state === "search" ? 1.15 : 1
+              const speedRatio = Math.min(1.6, speed / Math.max(0.4, enemy.config.speed * 0.45))
+              enemy.animTime += dt * 5 * cadenceMult * speedRatio
+            }
+
+            // ── Build target pose for this state ─────────────────────────────
+            const t = enemy.animTime
+            let tgtLeftShoulder = 0
+            let tgtRightShoulder = 0
+            let tgtLeftElbow = -0.18
+            let tgtRightElbow = -0.18
+            let tgtLeftHip = 0
+            let tgtRightHip = 0
+            let tgtLeftKnee = 0
+            let tgtRightKnee = 0
+            let tgtPelvisRotY = 0
+            let tgtTorsoPitchX = 0
+
+            if (aimMode) {
+              const recoilKick = Math.max(0, 0.25 - (now - enemy.lastFireTime) / 4000)
+              tgtRightShoulder = -1.35 - recoilKick
+              tgtLeftShoulder = -1.05 - recoilKick * 0.5
+              tgtRightElbow = 0.55
+              tgtLeftElbow = -0.65
+              tgtTorsoPitchX = -0.04
+            } else if (moving) {
+              const amp = enemy.state === "alert" ? 0.55 : 0.32
+              const sw = Math.sin(t) * amp
+              tgtLeftShoulder = sw
+              tgtRightShoulder = -sw
+              tgtLeftElbow = -0.2 + sw * 0.5
+              tgtRightElbow = -0.2 - sw * 0.5
+              tgtLeftHip = -sw * 0.85
+              tgtRightHip = sw * 0.85
+              tgtLeftKnee = Math.max(0, sw) * 1.0
+              tgtRightKnee = Math.max(0, -sw) * 1.0
+              tgtPelvisRotY = -sw * 0.08
+              tgtTorsoPitchX = enemy.state === "alert" ? 0.1 : 0.04
+            } else {
+              // Idle: shoulders relaxed, slight weight shift on alternating leg
+              const w = Math.sin(now * 0.0012 + enemy.microIdleSeed)
+              tgtPelvisRotY = w * 0.04
+              tgtLeftHip = w * 0.04
+              tgtRightHip = -w * 0.04
+            }
+
+            // Strafe lean: torso rolls into the strafe direction
+            const tgtTorsoLeanZ = Math.max(-0.18, Math.min(0.18, -strafeVel * 0.07))
+
+            // Head look-at: when aware, tracks the player; otherwise drifts
+            let tgtHeadYaw: number
+            let tgtHeadPitch: number
+            if (enemy.state !== "patrol") {
+              const desiredAbsYaw = Math.atan2(toPx, toPz)
+              let headRel = desiredAbsYaw - enemy.smoothedYaw
+              while (headRel > Math.PI) headRel -= Math.PI * 2
+              while (headRel < -Math.PI) headRel += Math.PI * 2
+              tgtHeadYaw = Math.max(-0.9, Math.min(0.9, headRel))
+              tgtHeadPitch = Math.max(
+                -0.5,
+                Math.min(0.5, -Math.atan2(EYE_HEIGHT - 1.6, Math.max(0.5, distToPlayer))),
+              )
+            } else {
+              tgtHeadYaw = Math.sin(now * 0.0005 + enemy.microIdleSeed) * 0.22
+              tgtHeadPitch = Math.sin(now * 0.0008 + enemy.microIdleSeed * 1.3) * 0.05
+            }
+
+            // Always-on breathing (smaller when aiming)
+            enemy.breathPhase += dt * (aimMode ? 0.9 : 1.4)
+            const breathAmp = aimMode ? 0.014 : 0.026
+            const tgtTorsoBreath = Math.sin(enemy.breathPhase) * breathAmp
+
+            // Eye blink — close briefly every few seconds
+            if (enemy.blinkActive > 0) {
+              enemy.blinkActive -= dt
+              if (enemy.blinkActive <= 0) {
+                enemy.blinkActive = 0
+                enemy.blinkTimer = 3 + Math.random() * 4
+              }
+            } else {
+              enemy.blinkTimer -= dt
+              if (enemy.blinkTimer <= 0) enemy.blinkActive = 0.12
+            }
+            const tgtEyeOpen = enemy.blinkActive > 0 ? 0.08 : 1
+
+            // Frame-independent exp interpolation toward the target pose.
+            const blend = 1 - Math.exp(-dt * 12)
+            const p = enemy.pose
+            p.leftShoulder += (tgtLeftShoulder - p.leftShoulder) * blend
+            p.rightShoulder += (tgtRightShoulder - p.rightShoulder) * blend
+            p.leftElbow += (tgtLeftElbow - p.leftElbow) * blend
+            p.rightElbow += (tgtRightElbow - p.rightElbow) * blend
+            p.leftHip += (tgtLeftHip - p.leftHip) * blend
+            p.rightHip += (tgtRightHip - p.rightHip) * blend
+            p.leftKnee += (tgtLeftKnee - p.leftKnee) * blend
+            p.rightKnee += (tgtRightKnee - p.rightKnee) * blend
+            p.pelvisRotY += (tgtPelvisRotY - p.pelvisRotY) * blend
+            p.torsoLeanZ += (tgtTorsoLeanZ - p.torsoLeanZ) * blend
+            p.torsoPitchX += (tgtTorsoPitchX - p.torsoPitchX) * blend
+            p.torsoBreath = tgtTorsoBreath
+            const headBlend = 1 - Math.exp(-dt * 6)
+            p.headYaw += (tgtHeadYaw - p.headYaw) * headBlend
+            p.headPitch += (tgtHeadPitch - p.headPitch) * headBlend
+            const eyeBlend = 1 - Math.exp(-dt * 24)
+            p.eyeOpenness += (tgtEyeOpen - p.eyeOpenness) * eyeBlend
+
+            // ── Apply pose to all joints ────────────────────────────────────
+            if (enemy.leftArm) enemy.leftArm.rotation.x = p.leftShoulder
+            if (enemy.rightArm) enemy.rightArm.rotation.x = p.rightShoulder
+            if (enemy.leftForearm) enemy.leftForearm.rotation.x = p.leftElbow
+            if (enemy.rightForearm) enemy.rightForearm.rotation.x = p.rightElbow
+            if (enemy.leftLeg) enemy.leftLeg.rotation.x = p.leftHip
+            if (enemy.rightLeg) enemy.rightLeg.rotation.x = p.rightHip
+            if (enemy.leftShin) enemy.leftShin.rotation.x = p.leftKnee
+            if (enemy.rightShin) enemy.rightShin.rotation.x = p.rightKnee
+            if (enemy.torso) {
+              enemy.torso.rotation.x = p.torsoPitchX
+              enemy.torso.rotation.z = p.torsoLeanZ
+              enemy.torso.rotation.y = p.pelvisRotY
+              enemy.torso.scale.y = 1 + p.torsoBreath
+            }
+            if (enemy.head) {
+              enemy.head.rotation.y = p.headYaw
+              enemy.head.rotation.x = p.headPitch
+            }
+            if (enemy.leftEye) enemy.leftEye.scale.y = p.eyeOpenness
+            if (enemy.rightEye) enemy.rightEye.scale.y = p.eyeOpenness
           }
         }
 
