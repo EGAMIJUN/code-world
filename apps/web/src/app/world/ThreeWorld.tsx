@@ -653,6 +653,18 @@ interface CombatEnemy {
   rightArm: THREE.Object3D | null
   leftLeg: THREE.Object3D | null
   rightLeg: THREE.Object3D | null
+  // Sub-joints for natural articulation (elbow / knee).
+  leftForearm?: THREE.Object3D | null
+  rightForearm?: THREE.Object3D | null
+  leftShin?: THREE.Object3D | null
+  rightShin?: THREE.Object3D | null
+  // Torso (for breathing) and head (for look-at). Pelvis is enemy.mesh's child[0].
+  torso?: THREE.Object3D | null
+  head?: THREE.Object3D | null
+  // Per-bot/enemy shadow plane for ground projection (set in spawnEnemiesFromDef).
+  shadowMesh?: THREE.Mesh | null
+  // Meshes that should hide when far (eyes / mouth / pouches / ghillie strips).
+  lodDetails?: THREE.Object3D[]
   isCommander: boolean // for destroy mission
   // Bot fields (FFA/TDM): set only when this enemy is a bot player
   isBot?: boolean
@@ -1317,6 +1329,21 @@ export default function ThreeWorld({
       playerMesh.visible = false
       scene.add(playerMesh)
 
+      // Player ground shadow — circular planar decal that follows focalPoint.
+      // Cheap stand-in for shadow mapping; visible at the player's feet always.
+      const playerShadow = new THREE.Mesh(
+        new THREE.CircleGeometry(0.42, 18),
+        new THREE.MeshBasicMaterial({
+          color: 0x000000,
+          transparent: true,
+          opacity: 0.5,
+          depthWrite: false,
+        }),
+      )
+      playerShadow.rotation.x = -Math.PI / 2
+      playerShadow.position.set(focalPoint.x, 0.02, focalPoint.z)
+      scene.add(playerShadow)
+
       // ── Weapon (FPS gun) ───────────────────────────────────────────────────
       const gunGroup = new THREE.Group()
       const gunMatColor = 0x445566
@@ -1343,370 +1370,323 @@ export default function ThreeWorld({
       let enemyIdCounter = 0
       function makeEnemy(type: EnemyType, x: number, z: number, isCommander = false): CombatEnemy {
         const cfg = ENEMY_CONFIGS[type]
-        const scale = type === "heavy" ? 1.22 : type === "sniper" ? 1.02 : 1.0
+        const scale = type === "heavy" ? 1.25 : type === "sniper" ? 1.03 : 1.0
         const bodyColor = isCommander ? 0xff6600 : cfg.color
+        const eid = enemyIdCounter++
+        const enemyIdStr = `enemy_${eid}`
 
-        const group = new THREE.Group()
-        group.position.set(x, 0, z)
-        scene.add(group)
+        const root = new THREE.Group()
+        root.position.set(x, 0, z)
+        scene.add(root)
 
+        // ── Materials ────────────────────────────────────────────────────────
         const bodyMat = new THREE.MeshLambertMaterial({ color: bodyColor, emissive: cfg.emissive })
-        const darkColor = type === "grunt" ? 0x3a4030 : type === "sniper" ? 0x2a3a1f : 0x0a0a0a
+        const darkColor = type === "grunt" ? 0x2a3027 : type === "sniper" ? 0x18241b : 0x080808
         const darkMat = new THREE.MeshLambertMaterial({ color: darkColor })
         const skinMat = new THREE.MeshLambertMaterial({ color: 0xc8a878 })
-        const gloveMat = new THREE.MeshLambertMaterial({ color: 0x1a1a1a })
+        const gloveMat = new THREE.MeshLambertMaterial({ color: 0x141414 })
+        // Eye glow varies by archetype (sniper green NV, grunt blue, heavy red).
+        const eyeHex = type === "heavy" ? 0xff3333 : type === "sniper" ? 0x55ff99 : 0x88ddff
+        const eyeMat = new THREE.MeshBasicMaterial({ color: eyeHex })
 
-        function makePart(
-          geo: THREE.BufferGeometry,
-          mat: THREE.Material,
-          px: number,
-          py: number,
-          pz: number,
-          parent: THREE.Object3D = group,
-        ): THREE.Mesh {
-          const m = new THREE.Mesh(geo, mat)
-          m.position.set(px * scale, py * scale, pz * scale)
-          m.castShadow = true
-          m.userData.enemyId = `enemy_${enemyIdCounter}`
-          parent.add(m)
-          return m
+        const lodDetails: THREE.Object3D[] = []
+        // Mark a mesh as hit-target (raycast uses userData.enemyId).
+        function hit<T extends THREE.Object3D>(o: T): T {
+          o.userData.enemyId = enemyIdStr
+          return o
+        }
+        function cyl(rTop: number, rBot: number, h: number, seg = 8): THREE.CylinderGeometry {
+          return new THREE.CylinderGeometry(rTop * scale, rBot * scale, h * scale, seg)
+        }
+        function box(w: number, h: number, d: number): THREE.BoxGeometry {
+          return new THREE.BoxGeometry(w * scale, h * scale, d * scale)
+        }
+        function sph(r: number, ws = 10, hs = 8): THREE.SphereGeometry {
+          return new THREE.SphereGeometry(r * scale, ws, hs)
         }
 
-        // ── Legs (CylinderGeometry thighs + shins, BoxGeometry feet) ─────────
-        const hipY = 0.8
+        // ── Pelvis (root of the rig; everything above hangs off it) ──────────
+        const pelvis = new THREE.Group()
+        pelvis.position.set(0, 0.92 * scale, 0)
+        root.add(pelvis)
+        const pelvisMesh = hit(new THREE.Mesh(box(0.42, 0.18, 0.26), darkMat))
+        pelvisMesh.castShadow = true
+        pelvis.add(pelvisMesh)
+
+        // ── Legs (hip → knee → boot) ─────────────────────────────────────────
         const legSpread = type === "heavy" ? 0.16 : 0.13
+        function buildLeg(side: -1 | 1): { hip: THREE.Group; knee: THREE.Group } {
+          const hip = new THREE.Group()
+          hip.position.set(side * legSpread * scale, 0, 0)
+          pelvis.add(hip)
+          const thigh = hit(new THREE.Mesh(cyl(0.085, 0.072, 0.36), bodyMat))
+          thigh.position.y = -0.21 * scale
+          thigh.castShadow = true
+          hip.add(thigh)
+          // Knee group pivots at end of thigh for natural bend
+          const knee = new THREE.Group()
+          knee.position.y = -0.39 * scale
+          hip.add(knee)
+          const shin = hit(new THREE.Mesh(cyl(0.07, 0.06, 0.34), darkMat))
+          shin.position.y = -0.18 * scale
+          shin.castShadow = true
+          knee.add(shin)
+          // Boot — chunkier toe-forward shape
+          const boot = hit(new THREE.Mesh(box(0.14, 0.09, 0.24), darkMat))
+          boot.position.set(0, -0.4 * scale, 0.05 * scale)
+          knee.add(boot)
+          // Knee cap detail (LOD)
+          const kneeCap = new THREE.Mesh(sph(0.045, 6, 6), darkMat)
+          kneeCap.position.set(0, 0, 0.05 * scale)
+          knee.add(kneeCap)
+          lodDetails.push(kneeCap)
+          return { hip, knee }
+        }
+        const leftLeg = buildLeg(-1)
+        const rightLeg = buildLeg(1)
 
-        const leftLegGrp = new THREE.Group()
-        leftLegGrp.position.set(-legSpread * scale, hipY * scale, 0)
-        group.add(leftLegGrp)
-        makePart(
-          new THREE.CylinderGeometry(0.085 * scale, 0.075 * scale, 0.36 * scale, 8),
-          bodyMat,
-          0,
-          -0.18,
-          0,
-          leftLegGrp,
-        )
-        makePart(
-          new THREE.CylinderGeometry(0.07 * scale, 0.063 * scale, 0.34 * scale, 8),
-          darkMat,
-          0,
-          -0.53,
-          0,
-          leftLegGrp,
-        )
-        makePart(
-          new THREE.BoxGeometry(0.14 * scale, 0.09 * scale, 0.22 * scale),
-          darkMat,
-          0,
-          -0.75,
-          0.04,
-          leftLegGrp,
-        )
-
-        const rightLegGrp = new THREE.Group()
-        rightLegGrp.position.set(legSpread * scale, hipY * scale, 0)
-        group.add(rightLegGrp)
-        makePart(
-          new THREE.CylinderGeometry(0.085 * scale, 0.075 * scale, 0.36 * scale, 8),
-          bodyMat,
-          0,
-          -0.18,
-          0,
-          rightLegGrp,
-        )
-        makePart(
-          new THREE.CylinderGeometry(0.07 * scale, 0.063 * scale, 0.34 * scale, 8),
-          darkMat,
-          0,
-          -0.53,
-          0,
-          rightLegGrp,
-        )
-        makePart(
-          new THREE.BoxGeometry(0.14 * scale, 0.09 * scale, 0.22 * scale),
-          darkMat,
-          0,
-          -0.75,
-          0.04,
-          rightLegGrp,
-        )
-
-        // ── Hips / Waist (BoxGeometry) ───────────────────────────────────────
-        makePart(
-          new THREE.BoxGeometry(0.42 * scale, 0.18 * scale, 0.26 * scale),
-          darkMat,
-          0,
-          0.92,
-          0,
-        )
-
-        // ── Torso (BoxGeometry with plate carrier vest) ──────────────────────
+        // ── Torso (above pelvis; scales subtly for breathing) ────────────────
+        const torso = new THREE.Group()
+        torso.position.set(0, 0.1 * scale, 0)
+        pelvis.add(torso)
         const torsoW = type === "heavy" ? 0.56 : 0.48
         const torsoD = type === "heavy" ? 0.32 : 0.28
-        makePart(
-          new THREE.BoxGeometry(torsoW * scale, 0.54 * scale, torsoD * scale),
-          bodyMat,
-          0,
-          1.28,
-          0,
-        )
-        // Vest plate
-        makePart(
-          new THREE.BoxGeometry((torsoW + 0.02) * scale, 0.46 * scale, 0.06 * scale),
-          darkMat,
-          0,
-          1.3,
-          -(torsoD / 2 + 0.02),
-        )
-        // Vest pouches
-        makePart(
-          new THREE.BoxGeometry(0.12 * scale, 0.1 * scale, 0.06 * scale),
-          darkMat,
-          -0.14,
-          1.16,
-          -(torsoD / 2 + 0.04),
-        )
-        makePart(
-          new THREE.BoxGeometry(0.12 * scale, 0.1 * scale, 0.06 * scale),
-          darkMat,
-          0.14,
-          1.16,
-          -(torsoD / 2 + 0.04),
-        )
-
-        // ── Shoulders (SphereGeometry x2) ────────────────────────────────────
-        const shoulderX = type === "heavy" ? 0.34 : 0.28
-        const shoulderR = type === "heavy" ? 0.14 : 0.12
-        makePart(new THREE.SphereGeometry(shoulderR * scale, 8, 6), bodyMat, -shoulderX, 1.5, 0)
-        makePart(new THREE.SphereGeometry(shoulderR * scale, 8, 6), bodyMat, shoulderX, 1.5, 0)
-
-        // Heavy: angled shoulder armor pads
-        if (type === "heavy") {
-          makePart(
-            new THREE.BoxGeometry(0.22 * scale, 0.16 * scale, 0.3 * scale),
-            darkMat,
-            -0.36,
-            1.58,
-            0,
-          )
-          makePart(
-            new THREE.BoxGeometry(0.22 * scale, 0.16 * scale, 0.3 * scale),
-            darkMat,
-            0.36,
-            1.58,
-            0,
-          )
+        // Lower torso (narrower — trapezoidal silhouette)
+        const lowerTorso = hit(new THREE.Mesh(box(torsoW - 0.06, 0.24, torsoD - 0.02), bodyMat))
+        lowerTorso.position.y = 0.16 * scale
+        lowerTorso.castShadow = true
+        torso.add(lowerTorso)
+        // Upper torso (chest)
+        const upperTorso = hit(new THREE.Mesh(box(torsoW, 0.3, torsoD), bodyMat))
+        upperTorso.position.y = 0.42 * scale
+        upperTorso.castShadow = true
+        torso.add(upperTorso)
+        // Vest plate (front)
+        const vestFront = hit(new THREE.Mesh(box(torsoW + 0.02, 0.44, 0.06), darkMat))
+        vestFront.position.set(0, 0.34 * scale, -(torsoD / 2 + 0.02) * scale)
+        torso.add(vestFront)
+        // Vest pouches (LOD)
+        for (const sx of [-0.14, 0.14]) {
+          const pouch = new THREE.Mesh(box(0.12, 0.1, 0.06), darkMat)
+          pouch.position.set(sx * scale, 0.2 * scale, -(torsoD / 2 + 0.04) * scale)
+          torso.add(pouch)
+          lodDetails.push(pouch)
         }
 
-        // ── Arms (CylinderGeometry upper + lower, BoxGeometry hands) ─────────
-        const armSpread = shoulderX
-        const leftArmGrp = new THREE.Group()
-        leftArmGrp.position.set(-armSpread * scale, 1.5 * scale, 0)
-        group.add(leftArmGrp)
-        makePart(
-          new THREE.CylinderGeometry(0.07 * scale, 0.062 * scale, 0.3 * scale, 8),
-          bodyMat,
-          0,
-          -0.16,
-          0,
-          leftArmGrp,
-        )
-        makePart(
-          new THREE.CylinderGeometry(0.06 * scale, 0.055 * scale, 0.28 * scale, 8),
-          bodyMat,
-          0,
-          -0.45,
-          0,
-          leftArmGrp,
-        )
-        makePart(
-          new THREE.BoxGeometry(0.09 * scale, 0.1 * scale, 0.09 * scale),
-          gloveMat,
-          0,
-          -0.63,
-          0,
-          leftArmGrp,
-        )
+        // ── Neck ─────────────────────────────────────────────────────────────
+        const neck = new THREE.Mesh(cyl(0.06, 0.072, 0.13), skinMat)
+        neck.position.y = 0.68 * scale
+        torso.add(neck)
 
-        const rightArmGrp = new THREE.Group()
-        rightArmGrp.position.set(armSpread * scale, 1.5 * scale, 0)
-        group.add(rightArmGrp)
-        makePart(
-          new THREE.CylinderGeometry(0.07 * scale, 0.062 * scale, 0.3 * scale, 8),
-          bodyMat,
-          0,
-          -0.16,
-          0,
-          rightArmGrp,
+        // ── Head group (skull + jaw + eyes + mouth + helmet) ─────────────────
+        const head = new THREE.Group()
+        head.position.y = 0.84 * scale
+        torso.add(head)
+        const skull = hit(new THREE.Mesh(sph(0.17, 14, 12), skinMat))
+        skull.castShadow = true
+        head.add(skull)
+        // Jaw — subtle box under skull
+        const jaw = new THREE.Mesh(box(0.16, 0.06, 0.14), skinMat)
+        jaw.position.set(0, -0.11 * scale, 0.02 * scale)
+        head.add(jaw)
+        // Glowing eyes (LOD-hidden when far)
+        const eyeGeo = sph(0.022, 6, 6)
+        for (const ex of [-0.055, 0.055]) {
+          const eye = new THREE.Mesh(eyeGeo, eyeMat)
+          eye.position.set(ex * scale, 0.02 * scale, -0.155 * scale)
+          head.add(eye)
+          lodDetails.push(eye)
+        }
+        // Mouth slit (LOD)
+        const mouth = new THREE.Mesh(
+          box(0.06, 0.012, 0.005),
+          new THREE.MeshBasicMaterial({ color: 0x222222 }),
         )
-        makePart(
-          new THREE.CylinderGeometry(0.06 * scale, 0.055 * scale, 0.28 * scale, 8),
-          bodyMat,
-          0,
-          -0.45,
-          0,
-          rightArmGrp,
-        )
-        makePart(
-          new THREE.BoxGeometry(0.09 * scale, 0.1 * scale, 0.09 * scale),
-          gloveMat,
-          0,
-          -0.63,
-          0,
-          rightArmGrp,
-        )
+        mouth.position.set(0, -0.06 * scale, -0.165 * scale)
+        head.add(mouth)
+        lodDetails.push(mouth)
 
-        // ── Rifle (held in right hand) ───────────────────────────────────────
+        // ── Helmet / Visor (per archetype) ───────────────────────────────────
+        const helmetColor = type === "grunt" ? 0x3a4230 : type === "sniper" ? 0x4a5535 : 0x101010
+        const helmetMat = new THREE.MeshLambertMaterial({ color: helmetColor })
+        if (type === "heavy") {
+          const helmet = hit(new THREE.Mesh(box(0.36, 0.24, 0.34), helmetMat))
+          helmet.position.y = 0.06 * scale
+          helmet.castShadow = true
+          head.add(helmet)
+          // Translucent wraparound visor (LOD: keep but always visible since it ID's the unit)
+          const visor = new THREE.Mesh(
+            box(0.32, 0.08, 0.04),
+            new THREE.MeshLambertMaterial({
+              color: eyeHex,
+              emissive: eyeHex,
+              emissiveIntensity: 0.8,
+              transparent: true,
+              opacity: 0.75,
+            }),
+          )
+          visor.position.set(0, 0.02 * scale, -0.18 * scale)
+          head.add(visor)
+        } else {
+          const helmet = hit(
+            new THREE.Mesh(
+              new THREE.SphereGeometry(0.2 * scale, 12, 8, 0, Math.PI * 2, 0, Math.PI * 0.55),
+              helmetMat,
+            ),
+          )
+          helmet.position.y = 0.04 * scale
+          helmet.castShadow = true
+          head.add(helmet)
+          const brim = new THREE.Mesh(box(0.36, 0.04, 0.08), helmetMat)
+          brim.position.set(0, 0.0, -0.17 * scale)
+          head.add(brim)
+          // Translucent visor band (snipers get a darker tint, grunts a faint glow)
+          const visor = new THREE.Mesh(
+            box(0.28, 0.06, 0.03),
+            new THREE.MeshLambertMaterial({
+              color: eyeHex,
+              emissive: eyeHex,
+              emissiveIntensity: type === "sniper" ? 0.4 : 0.6,
+              transparent: true,
+              opacity: 0.7,
+            }),
+          )
+          visor.position.set(0, 0.0, -0.18 * scale)
+          head.add(visor)
+        }
+
+        // ── Shoulders + Arms (upper arm → forearm → hand; rifle on right) ────
+        const shoulderX = type === "heavy" ? 0.34 : 0.28
+        const shoulderR = type === "heavy" ? 0.14 : 0.12
+        function buildArm(side: -1 | 1): { shoulder: THREE.Group; elbow: THREE.Group } {
+          const shoulder = new THREE.Group()
+          shoulder.position.set(side * shoulderX * scale, 0.58 * scale, 0)
+          torso.add(shoulder)
+          // Rounded shoulder ball
+          const ball = hit(new THREE.Mesh(sph(shoulderR, 10, 8), bodyMat))
+          shoulder.add(ball)
+          // Shoulder pad (placeholder; spawnBots may swap material for team color)
+          const padW = type === "heavy" ? 0.22 : 0.18
+          const padH = type === "heavy" ? 0.14 : 0.1
+          const padD = type === "heavy" ? 0.28 : 0.22
+          const pad = new THREE.Mesh(box(padW, padH, padD), darkMat)
+          pad.position.set(side * 0.06 * scale, 0.04 * scale, 0)
+          shoulder.add(pad)
+          pad.userData.shoulderPad = true // tagged so spawnBots can find & recolor
+          // Upper arm
+          const upperArm = hit(new THREE.Mesh(cyl(0.07, 0.062, 0.3), bodyMat))
+          upperArm.position.y = -0.18 * scale
+          upperArm.castShadow = true
+          shoulder.add(upperArm)
+          // Elbow joint
+          const elbow = new THREE.Group()
+          elbow.position.y = -0.33 * scale
+          shoulder.add(elbow)
+          // Forearm
+          const forearm = hit(new THREE.Mesh(cyl(0.06, 0.052, 0.28), bodyMat))
+          forearm.position.y = -0.16 * scale
+          forearm.castShadow = true
+          elbow.add(forearm)
+          // Hand
+          const hand = hit(new THREE.Mesh(sph(0.058, 8, 6), gloveMat))
+          hand.position.y = -0.32 * scale
+          elbow.add(hand)
+          return { shoulder, elbow }
+        }
+        const leftArm = buildArm(-1)
+        const rightArm = buildArm(1)
+
+        // ── Rifle (parented to right elbow so it tracks aim) ─────────────────
         const rifleMat = new THREE.MeshLambertMaterial({
           color: type === "sniper" ? 0x1a1812 : 0x2a2a2a,
         })
         const rifleLen = type === "sniper" ? 0.95 : type === "heavy" ? 0.7 : 0.55
-        const rifleBody = new THREE.Mesh(
-          new THREE.BoxGeometry(0.06 * scale, 0.08 * scale, rifleLen * scale),
-          rifleMat,
-        )
-        rifleBody.position.set(0.04 * scale, -0.66 * scale, -rifleLen * 0.35 * scale)
+        const rifleGrp = new THREE.Group()
+        // Position rifle in front of forearm, slight outward offset
+        rifleGrp.position.set(0.04 * scale, -0.3 * scale, -rifleLen * 0.3 * scale)
+        rightArm.elbow.add(rifleGrp)
+        const rifleBody = new THREE.Mesh(box(0.06, 0.08, rifleLen), rifleMat)
         rifleBody.castShadow = true
-        rightArmGrp.add(rifleBody)
+        rifleGrp.add(rifleBody)
         const rifleBarrel = new THREE.Mesh(
           new THREE.CylinderGeometry(0.022 * scale, 0.022 * scale, rifleLen * 0.5 * scale, 6),
           rifleMat,
         )
         rifleBarrel.rotation.x = Math.PI / 2
-        rifleBarrel.position.set(0.04 * scale, -0.64 * scale, -rifleLen * 0.78 * scale)
-        rightArmGrp.add(rifleBarrel)
-        // Magazine
-        const rifleMag = new THREE.Mesh(
-          new THREE.BoxGeometry(0.05 * scale, 0.12 * scale, 0.08 * scale),
-          rifleMat,
-        )
-        rifleMag.position.set(0.04 * scale, -0.76 * scale, -rifleLen * 0.25 * scale)
-        rightArmGrp.add(rifleMag)
-        // Sniper scope
+        rifleBarrel.position.set(0, 0.02 * scale, -rifleLen * 0.42 * scale)
+        rifleGrp.add(rifleBarrel)
+        const rifleMag = new THREE.Mesh(box(0.05, 0.12, 0.08), rifleMat)
+        rifleMag.position.y = -0.1 * scale
+        rifleGrp.add(rifleMag)
         if (type === "sniper") {
-          const scopeMat = new THREE.MeshLambertMaterial({ color: 0x080808 })
-          const scope = new THREE.Mesh(
-            new THREE.CylinderGeometry(0.04 * scale, 0.04 * scale, 0.18 * scale, 8),
-            scopeMat,
-          )
+          const scope = new THREE.Mesh(cyl(0.04, 0.04, 0.18), darkMat)
           scope.rotation.x = Math.PI / 2
-          scope.position.set(0.04 * scale, -0.56 * scale, -rifleLen * 0.32 * scale)
-          rightArmGrp.add(scope)
-          // Bipod
-          const bipodMat = new THREE.MeshLambertMaterial({ color: 0x2a2a2a })
-          const bipodL = new THREE.Mesh(
-            new THREE.CylinderGeometry(0.012 * scale, 0.012 * scale, 0.15 * scale, 6),
-            bipodMat,
-          )
+          scope.position.set(0, 0.08 * scale, 0)
+          rifleGrp.add(scope)
+          lodDetails.push(scope)
+          const bipodGeo = cyl(0.012, 0.012, 0.15, 6)
+          const bipodL = new THREE.Mesh(bipodGeo, darkMat)
           bipodL.rotation.z = 0.3
-          bipodL.position.set(-0.02 * scale, -0.76 * scale, -rifleLen * 0.7 * scale)
-          rightArmGrp.add(bipodL)
-          const bipodR = bipodL.clone()
+          bipodL.position.set(-0.04 * scale, -0.1 * scale, -rifleLen * 0.4 * scale)
+          rifleGrp.add(bipodL)
+          const bipodR = new THREE.Mesh(bipodGeo, darkMat)
           bipodR.rotation.z = -0.3
-          bipodR.position.set(0.1 * scale, -0.76 * scale, -rifleLen * 0.7 * scale)
-          rightArmGrp.add(bipodR)
+          bipodR.position.set(0.04 * scale, -0.1 * scale, -rifleLen * 0.4 * scale)
+          rifleGrp.add(bipodR)
         }
-        // Heavy: foregrip + drum mag accent
         if (type === "heavy") {
-          const drumMag = new THREE.Mesh(
-            new THREE.CylinderGeometry(0.07 * scale, 0.07 * scale, 0.06 * scale, 10),
-            rifleMat,
-          )
-          drumMag.position.set(0.04 * scale, -0.76 * scale, -rifleLen * 0.18 * scale)
-          rightArmGrp.add(drumMag)
+          const drum = new THREE.Mesh(cyl(0.07, 0.07, 0.06, 10), rifleMat)
+          drum.position.y = -0.1 * scale
+          rifleGrp.add(drum)
         }
 
-        // ── Neck (CylinderGeometry) ──────────────────────────────────────────
-        makePart(
-          new THREE.CylinderGeometry(0.06 * scale, 0.072 * scale, 0.13 * scale, 8),
-          skinMat,
-          0,
-          1.64,
-          0,
-        )
-
-        // ── Head (SphereGeometry) ────────────────────────────────────────────
-        const headMesh = new THREE.Mesh(new THREE.SphereGeometry(0.17 * scale, 10, 8), skinMat)
-        headMesh.position.set(0, 1.82 * scale, 0)
-        headMesh.castShadow = true
-        headMesh.userData.enemyId = `enemy_${enemyIdCounter}`
-        group.add(headMesh)
-
-        // ── Helmet (BoxGeometry / SphereGeometry cap per type) ───────────────
-        const helmetColor = type === "grunt" ? 0x3a4230 : type === "sniper" ? 0x4a5535 : 0x0a0a0a
-        const helmetMat = new THREE.MeshLambertMaterial({ color: helmetColor })
-        if (type === "heavy") {
-          // Heavy: full tactical helmet (box + visor)
-          const helmet = new THREE.Mesh(
-            new THREE.BoxGeometry(0.36 * scale, 0.24 * scale, 0.34 * scale),
-            helmetMat,
-          )
-          helmet.position.set(0, 1.88 * scale, 0)
-          helmet.castShadow = true
-          helmet.userData.enemyId = `enemy_${enemyIdCounter}`
-          group.add(helmet)
-          const visor = new THREE.Mesh(
-            new THREE.BoxGeometry(0.3 * scale, 0.06 * scale, 0.04 * scale),
-            new THREE.MeshLambertMaterial({
-              color: 0xff2222,
-              emissive: 0x661111,
-              emissiveIntensity: 0.8,
-            }),
-          )
-          visor.position.set(0, 1.84 * scale, -0.18 * scale)
-          group.add(visor)
-        } else {
-          const helmet = new THREE.Mesh(
-            new THREE.SphereGeometry(0.2 * scale, 10, 6, 0, Math.PI * 2, 0, Math.PI * 0.55),
-            helmetMat,
-          )
-          helmet.position.set(0, 1.85 * scale, 0)
-          helmet.castShadow = true
-          helmet.userData.enemyId = `enemy_${enemyIdCounter}`
-          group.add(helmet)
-          // Helmet brim
-          const brim = new THREE.Mesh(
-            new THREE.BoxGeometry(0.36 * scale, 0.04 * scale, 0.08 * scale),
-            helmetMat,
-          )
-          brim.position.set(0, 1.81 * scale, -0.17 * scale)
-          group.add(brim)
-        }
-
-        // Sniper: ghillie strips on torso
+        // Sniper ghillie strips (purely cosmetic; LOD-hidden when far)
         if (type === "sniper") {
           for (let i = 0; i < 8; i++) {
             const stripMat = new THREE.MeshLambertMaterial({
               color: i % 3 === 0 ? 0x5a6a3a : i % 3 === 1 ? 0x7a6a4a : 0x3a4a25,
             })
-            const strip = new THREE.Mesh(
-              new THREE.BoxGeometry(0.06 * scale, 0.22 * scale, 0.03 * scale),
-              stripMat,
-            )
+            const strip = new THREE.Mesh(box(0.06, 0.22, 0.03), stripMat)
             const colIdx = i % 4
             const rowIdx = Math.floor(i / 4)
             strip.position.set(
               (colIdx - 1.5) * 0.09 * scale,
-              (1.36 - rowIdx * 0.18) * scale,
+              (0.5 - rowIdx * 0.18) * scale,
               (torsoD / 2 + 0.04) * scale,
             )
-            group.add(strip)
+            torso.add(strip)
+            lodDetails.push(strip)
           }
         }
 
-        // Commander indicator (orange glowing halo)
+        // Commander indicator (orange torus halo + point light)
         if (isCommander) {
-          const haloGeo = new THREE.TorusGeometry(0.3 * scale, 0.04 * scale, 6, 12)
-          const haloMat = new THREE.MeshBasicMaterial({ color: 0xff6600 })
-          const halo = new THREE.Mesh(haloGeo, haloMat)
-          halo.position.set(0, 2.1 * scale, 0)
-          halo.userData.enemyId = `enemy_${enemyIdCounter}`
-          group.add(halo)
+          const halo = hit(
+            new THREE.Mesh(
+              new THREE.TorusGeometry(0.3 * scale, 0.04 * scale, 6, 14),
+              new THREE.MeshBasicMaterial({ color: 0xff6600 }),
+            ),
+          )
+          halo.position.y = 0.32 * scale
+          head.add(halo)
           const glow = new THREE.PointLight(0xff6600, 1.0, 4)
-          glow.position.set(0, 2.0 * scale, 0)
-          group.add(glow)
+          glow.position.y = 0.22 * scale
+          head.add(glow)
         }
+
+        // Per-enemy ground shadow (cheap planar decal)
+        const shadow = new THREE.Mesh(
+          new THREE.CircleGeometry(0.35 * scale, 14),
+          new THREE.MeshBasicMaterial({
+            color: 0x000000,
+            transparent: true,
+            opacity: 0.45,
+            depthWrite: false,
+          }),
+        )
+        shadow.rotation.x = -Math.PI / 2
+        shadow.position.y = 0.02
+        root.add(shadow)
 
         const patrol = [
           { x, z },
@@ -1723,10 +1703,9 @@ export default function ThreeWorld({
             z: Math.max(2, Math.min(MAP_SIZE - 2, z - 8)),
           },
         ]
-        const eid = enemyIdCounter++
         return {
-          id: `enemy_${eid}`,
-          mesh: group,
+          id: enemyIdStr,
+          mesh: root,
           hp: cfg.hp,
           maxHp: cfg.hp,
           type,
@@ -1744,10 +1723,18 @@ export default function ThreeWorld({
           spawnZ: z,
           dyingTimer: -1,
           animTime: Math.random() * Math.PI * 2,
-          leftArm: leftArmGrp,
-          rightArm: rightArmGrp,
-          leftLeg: leftLegGrp,
-          rightLeg: rightLegGrp,
+          leftArm: leftArm.shoulder,
+          rightArm: rightArm.shoulder,
+          leftLeg: leftLeg.hip,
+          rightLeg: rightLeg.hip,
+          leftForearm: leftArm.elbow,
+          rightForearm: rightArm.elbow,
+          leftShin: leftLeg.knee,
+          rightShin: rightLeg.knee,
+          torso,
+          head,
+          shadowMesh: shadow,
+          lodDetails,
           isCommander,
         }
       }
@@ -1871,6 +1858,15 @@ export default function ThreeWorld({
             bot.botTeam = i === 0 ? oppositeOfPlayer : i % 2 === 0 ? "red" : "blue"
             const teamColor = bot.botTeam === "red" ? 0xff3344 : 0x3388ff
             tintBotMesh(bot.mesh, teamColor)
+            // Swap the shoulder pads to solid team color — most visible at a glance.
+            const padMat = new THREE.MeshLambertMaterial({
+              color: teamColor,
+              emissive: teamColor,
+              emissiveIntensity: 0.18,
+            })
+            bot.mesh.traverse((c) => {
+              if (c instanceof THREE.Mesh && c.userData.shoulderPad) c.material = padMat
+            })
             const halo = new THREE.Mesh(
               new THREE.TorusGeometry(0.34, 0.04, 6, 16),
               new THREE.MeshBasicMaterial({ color: teamColor }),
@@ -2656,10 +2652,25 @@ export default function ThreeWorld({
             // Respawn dead enemies (with death animation)
             if (enemy.hp <= 0) {
               if (enemy.dyingTimer >= 0) {
-                // Death fall animation
+                // Knee-collapse death animation:
+                //   Phase 1 (progress 0→0.5): knees buckle forward, body drops.
+                //   Phase 2 (progress 0.5→1.0): torso/whole rig falls prone.
+                // Then fade out the last ~1s before hiding the mesh.
                 enemy.dyingTimer -= dt
                 const progress = Math.max(0, 1 - enemy.dyingTimer / 2.0)
-                enemy.mesh.rotation.x = progress * (Math.PI / 2)
+                const buckle = Math.min(1, progress * 2) // 0→1 over first half
+                const fallPhase = Math.max(0, (progress - 0.5) * 2) // 0→1 over second half
+                if (enemy.leftLeg) enemy.leftLeg.rotation.x = buckle * 1.0
+                if (enemy.rightLeg) enemy.rightLeg.rotation.x = buckle * 0.7
+                if (enemy.leftShin) enemy.leftShin.rotation.x = buckle * 1.4
+                if (enemy.rightShin) enemy.rightShin.rotation.x = buckle * 1.2
+                if (enemy.leftArm) enemy.leftArm.rotation.x = -buckle * 0.6
+                if (enemy.rightArm) enemy.rightArm.rotation.x = -buckle * 0.4
+                if (enemy.torso) {
+                  enemy.torso.rotation.x = fallPhase * 1.1
+                  enemy.torso.scale.y = 1
+                }
+                enemy.mesh.rotation.x = fallPhase * (Math.PI / 2 - 1.1)
                 enemy.mesh.position.y =
                   (enemy.config.bodyH / 2) * Math.cos((progress * Math.PI) / 2)
                 const opacity = enemy.dyingTimer < 1.0 ? enemy.dyingTimer : 1.0
@@ -2670,6 +2681,10 @@ export default function ThreeWorld({
                     m.opacity = opacity
                   }
                 })
+                if (enemy.shadowMesh) {
+                  const sm = enemy.shadowMesh.material as THREE.MeshBasicMaterial
+                  sm.opacity = 0.45 * opacity
+                }
                 if (enemy.dyingTimer <= 0) {
                   spawnExplosion(enemy.mesh.position.clone())
                   enemy.dyingTimer = -1
@@ -2684,6 +2699,20 @@ export default function ThreeWorld({
                     }
                   })
                   enemy.mesh.rotation.x = 0
+                  if (enemy.torso) enemy.torso.rotation.x = 0
+                  // Reset joint rotations so the bot stands cleanly on respawn.
+                  for (const j of [
+                    enemy.leftArm,
+                    enemy.rightArm,
+                    enemy.leftLeg,
+                    enemy.rightLeg,
+                    enemy.leftForearm,
+                    enemy.rightForearm,
+                    enemy.leftShin,
+                    enemy.rightShin,
+                  ]) {
+                    if (j) j.rotation.x = 0
+                  }
                   // Bots respawn after a cooldown; mission enemies stay down.
                   enemy.respawnTimer = enemy.isBot
                     ? (enemy.botRespawnMs ?? 4000) / 1000
@@ -2706,6 +2735,11 @@ export default function ThreeWorld({
                   enemy.mesh.position.set(nx, 0, nz)
                   enemy.mesh.rotation.x = 0
                   enemy.mesh.visible = true
+                  if (enemy.shadowMesh) {
+                    const sm = enemy.shadowMesh.material as THREE.MeshBasicMaterial
+                    sm.opacity = 0.45
+                  }
+                  if (enemy.torso) enemy.torso.rotation.x = 0
                   enemy.hp = enemy.maxHp
                   enemy.state = "patrol"
                   enemy.lastSeenPlayer = null
@@ -2741,13 +2775,21 @@ export default function ThreeWorld({
                 }
               }
               enemy.mesh.rotation.y = Math.atan2(enemy.facing.x, enemy.facing.z)
-              // Patrol walking animation
+              // Patrol walk: shoulders + hips swing, elbows/knees counter-flex
+              // for a natural gait. Torso bobs subtly to simulate breathing.
               enemy.animTime += dt * 5
-              const swingP = Math.sin(enemy.animTime) * 0.3
+              const swingP = Math.sin(enemy.animTime) * 0.32
               if (enemy.leftArm) enemy.leftArm.rotation.x = swingP
               if (enemy.rightArm) enemy.rightArm.rotation.x = -swingP
-              if (enemy.leftLeg) enemy.leftLeg.rotation.x = -swingP * 0.8
-              if (enemy.rightLeg) enemy.rightLeg.rotation.x = swingP * 0.8
+              if (enemy.leftForearm) enemy.leftForearm.rotation.x = -0.18 + swingP * 0.5
+              if (enemy.rightForearm) enemy.rightForearm.rotation.x = -0.18 - swingP * 0.5
+              if (enemy.leftLeg) enemy.leftLeg.rotation.x = -swingP * 0.85
+              if (enemy.rightLeg) enemy.rightLeg.rotation.x = swingP * 0.85
+              if (enemy.leftShin) enemy.leftShin.rotation.x = Math.max(0, swingP * 0.9)
+              if (enemy.rightShin) enemy.rightShin.rotation.x = Math.max(0, -swingP * 0.9)
+              if (enemy.torso) {
+                enemy.torso.scale.y = 1 + Math.sin(enemy.animTime * 0.4) * 0.025
+              }
               if (
                 enemyCanSee(enemy.facing.x, enemy.facing.z, toPx, toPz, distToPlayer, enemy.config)
               ) {
@@ -2826,13 +2868,18 @@ export default function ThreeWorld({
                   damage: enemy.config.fireDamage,
                 })
               }
-              // Walking animation while alerting
-              enemy.animTime += dt * 7
-              const swingA = Math.sin(enemy.animTime) * 0.4
+              // Run anim while alerted: bigger amplitude, faster cadence, knee lift
+              enemy.animTime += dt * 8
+              const swingA = Math.sin(enemy.animTime) * 0.55
               if (enemy.leftArm) enemy.leftArm.rotation.x = swingA
               if (enemy.rightArm) enemy.rightArm.rotation.x = -swingA
-              if (enemy.leftLeg) enemy.leftLeg.rotation.x = -swingA * 0.7
-              if (enemy.rightLeg) enemy.rightLeg.rotation.x = swingA * 0.7
+              if (enemy.leftForearm) enemy.leftForearm.rotation.x = -0.35 + swingA * 0.6
+              if (enemy.rightForearm) enemy.rightForearm.rotation.x = -0.35 - swingA * 0.6
+              if (enemy.leftLeg) enemy.leftLeg.rotation.x = -swingA * 0.95
+              if (enemy.rightLeg) enemy.rightLeg.rotation.x = swingA * 0.95
+              if (enemy.leftShin) enemy.leftShin.rotation.x = Math.max(0, swingA * 1.1)
+              if (enemy.rightShin) enemy.rightShin.rotation.x = Math.max(0, -swingA * 1.1)
+              if (enemy.torso) enemy.torso.scale.y = 1
             } else if (enemy.state === "attack") {
               if (distToPlayer > 0.001) {
                 enemy.facing.set(toPx / distToPlayer, 0, toPz / distToPlayer)
@@ -2892,13 +2939,21 @@ export default function ThreeWorld({
                   damage: enemy.config.fireDamage,
                 })
               }
-              // Shooting/ready pose: rifle braced forward with recoil kick
+              // Aim/shoot pose: shoulders raise rifle forward, elbows bend to
+              // cradle it. Recoil kicks both arms back briefly after firing.
               const timeSinceFire = (now - enemy.lastFireTime) / 1000
               const recoilKick = Math.max(0, 0.25 - timeSinceFire * 4)
-              if (enemy.rightArm) enemy.rightArm.rotation.x = -1.2 - recoilKick
-              if (enemy.leftArm) enemy.leftArm.rotation.x = -0.9 - recoilKick * 0.5
+              if (enemy.rightArm) enemy.rightArm.rotation.x = -1.35 - recoilKick
+              if (enemy.leftArm) enemy.leftArm.rotation.x = -1.05 - recoilKick * 0.5
+              if (enemy.rightForearm) enemy.rightForearm.rotation.x = 0.55
+              if (enemy.leftForearm) enemy.leftForearm.rotation.x = -0.65
               if (enemy.leftLeg) enemy.leftLeg.rotation.x = 0
               if (enemy.rightLeg) enemy.rightLeg.rotation.x = 0
+              if (enemy.leftShin) enemy.leftShin.rotation.x = 0
+              if (enemy.rightShin) enemy.rightShin.rotation.x = 0
+              if (enemy.torso) {
+                enemy.torso.scale.y = 1 + Math.sin(now * 0.004) * 0.012
+              }
             } else if (enemy.state === "search") {
               enemy.searchTimer -= dt
               if (enemy.searchTimer <= 0) {
@@ -2927,6 +2982,25 @@ export default function ThreeWorld({
                 enemy.lastSeenPlayer = { x: fp.x, z: fp.z }
               }
             }
+          }
+        }
+
+        // ── Player ground shadow follows focal point ───────────────────────
+        playerShadow.position.x = refs.focalPoint.x
+        playerShadow.position.z = refs.focalPoint.z
+
+        // ── Per-frame LOD: hide small details (eyes / mouth / pouches /
+        // ghillie strips / scope / knee caps) on enemies farther than 25m
+        // from the camera. Cheap O(n) distance check; toggling .visible is
+        // free if it hasn't changed.
+        const LOD_NEAR = 25 * 25
+        for (const enemy of refs.enemies) {
+          if (!enemy.lodDetails || enemy.lodDetails.length === 0) continue
+          const ddx = enemy.mesh.position.x - camera.position.x
+          const ddz = enemy.mesh.position.z - camera.position.z
+          const showDetail = ddx * ddx + ddz * ddz < LOD_NEAR
+          for (const d of enemy.lodDetails) {
+            if (d.visible !== showDetail) d.visible = showDetail
           }
         }
 
