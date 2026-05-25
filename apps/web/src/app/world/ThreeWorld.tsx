@@ -778,9 +778,11 @@ export default function ThreeWorld({
   const animFrameRef = useRef<number>(0)
   const keysRef = useRef<Set<string>>(new Set())
   const joystickRef = useRef({ vx: 0, vy: 0 })
-  const joyBaseRef = useRef<{ x: number; y: number } | null>(null)
+  const joyContainerRef = useRef<HTMLDivElement>(null)
   const joyThumbRef = useRef<HTMLDivElement>(null)
-  const joyPointerIdRef = useRef<number | null>(null)
+  const lookJoyRef = useRef({ vx: 0, vy: 0 })
+  const lookJoyContainerRef = useRef<HTMLDivElement>(null)
+  const lookJoyThumbRef = useRef<HTMLDivElement>(null)
   const wsRef = useRef<WebSocket | null>(null)
   const usernameRef = useRef("Player")
   const remotePosRef = useRef<Record<string, RemotePlayer>>({})
@@ -857,6 +859,7 @@ export default function ThreeWorld({
   const [notification, setNotification] = useState<string | null>(null)
   const [onlineCount, setOnlineCount] = useState(1)
   const [isMobile, setIsMobile] = useState(false)
+  const [isLandscape, setIsLandscape] = useState(false)
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
   const [chatInput, setChatInput] = useState("")
   const chatEndRef = useRef<HTMLDivElement>(null)
@@ -895,6 +898,10 @@ export default function ThreeWorld({
 
   useEffect(() => {
     setIsMobile(navigator.maxTouchPoints > 0)
+    const detectLandscape = () => setIsLandscape(window.innerWidth > window.innerHeight)
+    detectLandscape()
+    window.addEventListener("resize", detectLandscape)
+    window.addEventListener("orientationchange", detectLandscape)
     try {
       const stored = localStorage.getItem("fps_unlocked_weapons")
       if (stored) {
@@ -903,6 +910,10 @@ export default function ThreeWorld({
       }
     } catch {
       /* ignore */
+    }
+    return () => {
+      window.removeEventListener("resize", detectLandscape)
+      window.removeEventListener("orientationchange", detectLandscape)
     }
   }, [])
   useEffect(() => {
@@ -2392,44 +2403,14 @@ export default function ThreeWorld({
         e.preventDefault()
       }
 
-      // Mobile drag-to-look: track first touch on canvas, rotate yaw/pitch on move.
-      // Fire is intentionally bound to a dedicated FIRE button so dragging to look
-      // doesn't trigger weapon discharge.
-      const lookTouch = { id: -1, x: 0, y: 0 }
-      function onTouchStartLP(e: TouchEvent) {
-        if (lookTouch.id !== -1) return
-        const t = e.changedTouches[0]
-        if (!t) return
-        lookTouch.id = t.identifier
-        lookTouch.x = t.clientX
-        lookTouch.y = t.clientY
+      // Canvas swallows touch events with passive listeners so the page can't
+      // scroll/zoom while playing, but all camera + fire input now comes from
+      // the on-screen joysticks and buttons (the right stick handles look).
+      const noopTouch = (e: TouchEvent) => {
+        if (e.cancelable) e.preventDefault()
       }
-      function onTouchMoveLP(e: TouchEvent) {
-        for (let i = 0; i < e.changedTouches.length; i++) {
-          const t = e.changedTouches.item(i)
-          if (!t || t.identifier !== lookTouch.id) continue
-          const dx = t.clientX - lookTouch.x
-          const dy = t.clientY - lookTouch.y
-          lookTouch.x = t.clientX
-          lookTouch.y = t.clientY
-          camState.yaw -= dx * 0.005
-          camState.pitch = clampPitch(camState.pitch - dy * 0.005)
-          updateCamera()
-        }
-      }
-      function onTouchEndLP(e: TouchEvent) {
-        for (let i = 0; i < e.changedTouches.length; i++) {
-          const t = e.changedTouches.item(i)
-          if (t && t.identifier === lookTouch.id) {
-            lookTouch.id = -1
-          }
-        }
-      }
-
-      renderer.domElement.addEventListener("touchstart", onTouchStartLP, { passive: true })
-      renderer.domElement.addEventListener("touchend", onTouchEndLP)
-      renderer.domElement.addEventListener("touchmove", onTouchMoveLP, { passive: true })
-      renderer.domElement.addEventListener("touchcancel", onTouchEndLP)
+      renderer.domElement.addEventListener("touchstart", noopTouch, { passive: false })
+      renderer.domElement.addEventListener("touchmove", noopTouch, { passive: false })
       renderer.domElement.addEventListener("mousedown", onMouseDown)
       renderer.domElement.addEventListener("contextmenu", onContextMenu)
       document.addEventListener("mousemove", onDocMouseMove)
@@ -2516,6 +2497,14 @@ export default function ThreeWorld({
           const nz = refs.focalPoint.z + dz
           if (!collidesWithWall(nx, refs.focalPoint.z, PLAYER_RADIUS)) refs.focalPoint.x = nx
           if (!collidesWithWall(refs.focalPoint.x, nz, PLAYER_RADIUS)) refs.focalPoint.z = nz
+          updateCamera()
+        }
+
+        // Look joystick: rotate the camera. Right stick on mobile.
+        const lJoy = lookJoyRef.current
+        if (lJoy.vx !== 0 || lJoy.vy !== 0) {
+          camState.yaw -= lJoy.vx * 2.6 * dt
+          camState.pitch = clampPitch(camState.pitch - lJoy.vy * 2.0 * dt)
           updateCamera()
         }
 
@@ -3152,10 +3141,8 @@ export default function ThreeWorld({
         if (document.pointerLockElement === renderer.domElement) document.exitPointerLock()
         renderer.domElement.removeEventListener("mousedown", onMouseDown)
         renderer.domElement.removeEventListener("contextmenu", onContextMenu)
-        renderer.domElement.removeEventListener("touchstart", onTouchStartLP)
-        renderer.domElement.removeEventListener("touchend", onTouchEndLP)
-        renderer.domElement.removeEventListener("touchmove", onTouchMoveLP)
-        renderer.domElement.removeEventListener("touchcancel", onTouchEndLP)
+        renderer.domElement.removeEventListener("touchstart", noopTouch)
+        renderer.domElement.removeEventListener("touchmove", noopTouch)
         window.removeEventListener("resize", onResize)
       }
     }
@@ -3465,39 +3452,88 @@ export default function ThreeWorld({
     return () => clearInterval(interval)
   }, [tagGame?.running])
 
-  // ── Move joystick (pointer events for robust multi-touch + capture) ────────
-  const JOY_MAX_DIST = 52
-  const handleJoyStart = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
-    if (joyPointerIdRef.current !== null) return
-    try {
-      e.currentTarget.setPointerCapture(e.pointerId)
-    } catch {}
-    joyPointerIdRef.current = e.pointerId
-    joyBaseRef.current = { x: e.clientX, y: e.clientY }
-  }, [])
-  const handleJoyMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
-    if (joyPointerIdRef.current !== e.pointerId) return
-    if (!joyBaseRef.current) return
-    const dx = e.clientX - joyBaseRef.current.x
-    const dy = e.clientY - joyBaseRef.current.y
-    const dist = Math.hypot(dx, dy)
-    const clamped = Math.min(dist, JOY_MAX_DIST)
-    const nx = dist > 0 ? (dx / dist) * clamped : 0
-    const ny = dist > 0 ? (dy / dist) * clamped : 0
-    joystickRef.current = { vx: nx / JOY_MAX_DIST, vy: ny / JOY_MAX_DIST }
-    if (joyThumbRef.current) joyThumbRef.current.style.transform = `translate(${nx}px, ${ny}px)`
-  }, [])
-  const handleJoyEnd = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
-    if (joyPointerIdRef.current !== null && joyPointerIdRef.current !== e.pointerId) return
-    try {
-      if (e.currentTarget.hasPointerCapture(e.pointerId))
-        e.currentTarget.releasePointerCapture(e.pointerId)
-    } catch {}
-    joyPointerIdRef.current = null
-    joyBaseRef.current = null
-    joystickRef.current = { vx: 0, vy: 0 }
-    if (joyThumbRef.current) joyThumbRef.current.style.transform = "translate(0px, 0px)"
-  }, [])
+  // ── Twin joysticks: native touch events with per-stick identifier tracking ─
+  // React's onTouch/onPointer handlers run through the synthetic event system
+  // which is passive on touch inputs (preventDefault is a silent no-op) and on
+  // some Android browsers the pointer events for canvas-adjacent elements get
+  // swallowed. Binding addEventListener with passive:false dodges both bugs.
+  useEffect(() => {
+    if (!isMobile) return
+    const moveEl = joyContainerRef.current
+    const lookEl = lookJoyContainerRef.current
+    if (!moveEl || !lookEl) return
+    const MAX_DIST = 52
+
+    function bindStick(
+      el: HTMLDivElement,
+      valueRef: { current: { vx: number; vy: number } },
+      thumbRef: { current: HTMLDivElement | null },
+    ): () => void {
+      let activeId = -1
+      let baseX = 0
+      let baseY = 0
+      const reset = () => {
+        activeId = -1
+        valueRef.current = { vx: 0, vy: 0 }
+        if (thumbRef.current) thumbRef.current.style.transform = "translate(0px, 0px)"
+      }
+      const onStart = (e: TouchEvent) => {
+        if (activeId !== -1) return
+        const t = e.changedTouches[0]
+        if (!t) return
+        e.preventDefault()
+        activeId = t.identifier
+        baseX = t.clientX
+        baseY = t.clientY
+      }
+      const onMove = (e: TouchEvent) => {
+        if (activeId === -1) return
+        for (let i = 0; i < e.changedTouches.length; i++) {
+          const t = e.changedTouches.item(i)
+          if (!t || t.identifier !== activeId) continue
+          e.preventDefault()
+          const dx = t.clientX - baseX
+          const dy = t.clientY - baseY
+          const dist = Math.hypot(dx, dy)
+          const clamped = Math.min(dist, MAX_DIST)
+          const nx = dist > 0 ? (dx / dist) * clamped : 0
+          const ny = dist > 0 ? (dy / dist) * clamped : 0
+          valueRef.current = { vx: nx / MAX_DIST, vy: ny / MAX_DIST }
+          if (thumbRef.current) {
+            thumbRef.current.style.transform = `translate(${nx}px, ${ny}px)`
+          }
+        }
+      }
+      const onEnd = (e: TouchEvent) => {
+        if (activeId === -1) return
+        for (let i = 0; i < e.changedTouches.length; i++) {
+          const t = e.changedTouches.item(i)
+          if (t && t.identifier === activeId) {
+            reset()
+            return
+          }
+        }
+      }
+      el.addEventListener("touchstart", onStart, { passive: false })
+      el.addEventListener("touchmove", onMove, { passive: false })
+      el.addEventListener("touchend", onEnd, { passive: false })
+      el.addEventListener("touchcancel", onEnd, { passive: false })
+      return () => {
+        el.removeEventListener("touchstart", onStart)
+        el.removeEventListener("touchmove", onMove)
+        el.removeEventListener("touchend", onEnd)
+        el.removeEventListener("touchcancel", onEnd)
+        reset()
+      }
+    }
+
+    const cleanupMove = bindStick(moveEl, joystickRef, joyThumbRef)
+    const cleanupLook = bindStick(lookEl, lookJoyRef, lookJoyThumbRef)
+    return () => {
+      cleanupMove()
+      cleanupLook()
+    }
+  }, [isMobile])
 
   const sendChat = useCallback(
     (e: React.FormEvent) => {
@@ -4905,36 +4941,35 @@ export default function ThreeWorld({
           </div>
         )}
 
-        {/* Move joystick (bottom-left, larger; pointer events with capture for robust drag) */}
+        {/* Move joystick (bottom-left; native touch listeners are attached in
+            a useEffect to dodge React's passive-touch quirk on mobile). */}
         {isMobile && !isLoading && !error && (
           <div
+            ref={joyContainerRef}
             style={{
               position: "absolute",
-              bottom: "1.2rem",
-              left: "1.2rem",
-              width: "130px",
-              height: "130px",
+              bottom: isLandscape ? "0.6rem" : "1.2rem",
+              left: isLandscape ? "0.6rem" : "1.2rem",
+              width: isLandscape ? "108px" : "130px",
+              height: isLandscape ? "108px" : "130px",
               borderRadius: "50%",
               background: "rgba(0,0,0,0.45)",
-              border: "2px solid rgba(255,255,255,0.28)",
+              border: "2px solid rgba(255,255,255,0.32)",
               boxShadow: "0 0 14px rgba(0,0,0,0.6)",
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
               touchAction: "none",
-              zIndex: 22,
+              WebkitTapHighlightColor: "transparent",
+              zIndex: 30,
               userSelect: "none",
             }}
-            onPointerDown={handleJoyStart}
-            onPointerMove={handleJoyMove}
-            onPointerUp={handleJoyEnd}
-            onPointerCancel={handleJoyEnd}
           >
             <div
               ref={joyThumbRef}
               style={{
-                width: "54px",
-                height: "54px",
+                width: "50px",
+                height: "50px",
                 borderRadius: "50%",
                 background: "rgba(255,255,255,0.32)",
                 border: "1px solid rgba(255,255,255,0.55)",
@@ -4945,10 +4980,49 @@ export default function ThreeWorld({
           </div>
         )}
 
+        {/* Look joystick (bottom-right symmetric; rotates the camera) */}
+        {isMobile && !isLoading && !error && gamePhase === "playing" && (
+          <div
+            ref={lookJoyContainerRef}
+            style={{
+              position: "absolute",
+              bottom: isLandscape ? "0.6rem" : "1.2rem",
+              right: isLandscape ? "0.6rem" : "1.2rem",
+              width: isLandscape ? "108px" : "130px",
+              height: isLandscape ? "108px" : "130px",
+              borderRadius: "50%",
+              background: "rgba(0,40,80,0.35)",
+              border: "2px solid rgba(120,180,255,0.45)",
+              boxShadow: "0 0 14px rgba(0,80,160,0.5)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              touchAction: "none",
+              WebkitTapHighlightColor: "transparent",
+              zIndex: 30,
+              userSelect: "none",
+            }}
+          >
+            <div
+              ref={lookJoyThumbRef}
+              style={{
+                width: "50px",
+                height: "50px",
+                borderRadius: "50%",
+                background: "rgba(120,180,255,0.35)",
+                border: "1px solid rgba(160,210,255,0.65)",
+                pointerEvents: "none",
+                transition: "background 0.15s",
+              }}
+            />
+          </div>
+        )}
+
         {/* Mobile action buttons */}
         {isMobile && !isLoading && !error && gamePhase === "playing" && (
           <>
-            {/* Large FIRE button (bottom-right) */}
+            {/* FIRE button — sits ABOVE the right look-stick so right thumb
+                can stretch up to fire without leaving the stick. */}
             <button
               type="button"
               onPointerDown={(e) => {
@@ -4964,23 +5038,23 @@ export default function ThreeWorld({
               }}
               style={{
                 position: "absolute",
-                bottom: "1.5rem",
-                right: "1.5rem",
-                width: "110px",
-                height: "110px",
+                bottom: isLandscape ? "7.5rem" : "11rem",
+                right: isLandscape ? "1rem" : "2rem",
+                width: isLandscape ? "72px" : "86px",
+                height: isLandscape ? "72px" : "86px",
                 borderRadius: "50%",
                 background: "rgba(255,40,40,0.32)",
                 border: "3px solid rgba(255,80,80,0.85)",
                 boxShadow: "0 0 16px rgba(255,40,40,0.45)",
                 color: "#ffeaea",
                 fontFamily: "monospace",
-                fontSize: "1.15rem",
+                fontSize: isLandscape ? "0.9rem" : "1.05rem",
                 letterSpacing: "0.18em",
                 fontWeight: "bold",
                 textShadow: "0 0 10px #ff4040",
                 touchAction: "none",
                 userSelect: "none",
-                zIndex: 22,
+                zIndex: 32,
               }}
             >
               FIRE
@@ -5015,23 +5089,23 @@ export default function ThreeWorld({
               }}
               style={{
                 position: "absolute",
-                bottom: "1.5rem",
+                bottom: isLandscape ? "1rem" : "2.5rem",
                 left: "50%",
                 transform: "translateX(-50%)",
-                width: "72px",
-                height: "72px",
+                width: isLandscape ? "60px" : "72px",
+                height: isLandscape ? "60px" : "72px",
                 borderRadius: "50%",
-                background: "rgba(0,0,0,0.55)",
+                background: "rgba(0,0,0,0.6)",
                 border: "2px solid rgba(255,200,0,0.6)",
                 boxShadow: "0 0 10px rgba(255,200,0,0.25)",
                 color: "#ffdf66",
                 fontFamily: "monospace",
-                fontSize: "0.72rem",
+                fontSize: isLandscape ? "0.62rem" : "0.72rem",
                 letterSpacing: "0.1em",
                 fontWeight: "bold",
                 touchAction: "none",
                 userSelect: "none",
-                zIndex: 22,
+                zIndex: 30,
               }}
             >
               ↻
@@ -5058,21 +5132,21 @@ export default function ThreeWorld({
               }}
               style={{
                 position: "absolute",
-                top: "3.6rem",
-                right: "1.2rem",
-                width: "64px",
-                height: "64px",
+                top: isLandscape ? "0.6rem" : "3.6rem",
+                right: isLandscape ? "7.5rem" : "1.2rem",
+                width: isLandscape ? "56px" : "64px",
+                height: isLandscape ? "56px" : "64px",
                 borderRadius: "50%",
-                background: "rgba(0,0,0,0.55)",
+                background: "rgba(0,0,0,0.6)",
                 border: "2px solid rgba(0,200,255,0.6)",
                 boxShadow: "0 0 10px rgba(0,200,255,0.2)",
                 color: "#88e0ff",
                 fontFamily: "monospace",
-                fontSize: "0.72rem",
+                fontSize: isLandscape ? "0.62rem" : "0.72rem",
                 fontWeight: "bold",
                 touchAction: "none",
                 userSelect: "none",
-                zIndex: 22,
+                zIndex: 30,
               }}
             >
               ⊙
@@ -5094,12 +5168,12 @@ export default function ThreeWorld({
               }}
               style={{
                 position: "absolute",
-                top: "9rem",
-                right: "1.2rem",
-                width: "64px",
-                height: "64px",
+                top: isLandscape ? "0.6rem" : "9rem",
+                right: isLandscape ? "13.5rem" : "1.2rem",
+                width: isLandscape ? "56px" : "64px",
+                height: isLandscape ? "56px" : "64px",
                 borderRadius: "50%",
-                background: "rgba(0,0,0,0.55)",
+                background: "rgba(0,0,0,0.6)",
                 border:
                   grenadeCooldownMs > 0
                     ? "2px solid rgba(120,120,120,0.55)"
@@ -5107,11 +5181,11 @@ export default function ThreeWorld({
                 boxShadow: grenadeCooldownMs > 0 ? "none" : "0 0 10px rgba(255,140,40,0.25)",
                 color: grenadeCooldownMs > 0 ? "#888" : "#ffaa66",
                 fontFamily: "monospace",
-                fontSize: "0.72rem",
+                fontSize: isLandscape ? "0.62rem" : "0.72rem",
                 fontWeight: "bold",
                 touchAction: "none",
                 userSelect: "none",
-                zIndex: 22,
+                zIndex: 30,
               }}
             >
               {grenadeCooldownMs > 0 ? `${Math.ceil(grenadeCooldownMs / 1000)}s` : "🧨"}
