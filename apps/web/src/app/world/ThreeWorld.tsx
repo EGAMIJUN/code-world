@@ -654,6 +654,14 @@ interface CombatEnemy {
   leftLeg: THREE.Object3D | null
   rightLeg: THREE.Object3D | null
   isCommander: boolean // for destroy mission
+  // Bot fields (FFA/TDM): set only when this enemy is a bot player
+  isBot?: boolean
+  botName?: string
+  botTeam?: "red" | "blue" | "ffa"
+  botAccuracyMult?: number // 1.0 = stock; lower = worse aim spread
+  botReactMult?: number // 1.0 = stock; higher = slower fire interval
+  botRespawnMs?: number // ms between death and respawn
+  nameSprite?: THREE.Sprite | null
 }
 
 interface Bullet {
@@ -710,15 +718,59 @@ interface SceneRefs {
   goalMarkers: GoalMarker[]
 }
 
+export type BotDifficulty = "easy" | "normal" | "hard"
+
+interface BotDifficultyTuning {
+  hpMult: number
+  accuracyMult: number // <1 = sloppier aim
+  reactMult: number // >1 = slower fire cadence
+  damageMult: number
+  sightMult: number
+  respawnMs: number
+}
+
+const BOT_DIFFICULTY_CONFIGS: Record<BotDifficulty, BotDifficultyTuning> = {
+  easy: {
+    hpMult: 0.65,
+    accuracyMult: 0.45,
+    reactMult: 1.6,
+    damageMult: 0.6,
+    sightMult: 0.85,
+    respawnMs: 5000,
+  },
+  normal: {
+    hpMult: 1.0,
+    accuracyMult: 1.0,
+    reactMult: 1.0,
+    damageMult: 1.0,
+    sightMult: 1.0,
+    respawnMs: 4000,
+  },
+  hard: {
+    hpMult: 1.3,
+    accuracyMult: 1.6,
+    reactMult: 0.7,
+    damageMult: 1.3,
+    sightMult: 1.2,
+    respawnMs: 3000,
+  },
+}
+
+const BOT_NAMES = ["Bot_α", "Bot_β", "Bot_γ", "Bot_δ", "Bot_ε", "Bot_ζ", "Bot_η", "Bot_θ", "Bot_ι"]
+
 export interface ThreeWorldProps {
   mode?: "wave_defense" | "ffa" | "tdm"
   mapId?: "urban" | "desert" | "snow"
+  botCount?: number
+  botDifficulty?: BotDifficulty
   onExit?: () => void
 }
 
 export default function ThreeWorld({
   mode = "wave_defense",
   mapId = "urban",
+  botCount = 0,
+  botDifficulty = "normal",
   onExit,
 }: ThreeWorldProps = {}) {
   const mountRef = useRef<HTMLDivElement>(null)
@@ -1737,6 +1789,120 @@ export default function ThreeWorld({
         )
       }
 
+      // ── Bot label sprite (name floats above head) ─────────────────────────
+      function makeNameSprite(text: string, color: string): THREE.Sprite {
+        const canvas = document.createElement("canvas")
+        canvas.width = 256
+        canvas.height = 64
+        const ctx = canvas.getContext("2d")
+        if (ctx) {
+          ctx.fillStyle = "rgba(0,0,0,0.55)"
+          ctx.fillRect(0, 0, canvas.width, canvas.height)
+          ctx.font = "bold 32px monospace"
+          ctx.textAlign = "center"
+          ctx.textBaseline = "middle"
+          ctx.fillStyle = color
+          ctx.fillText(text, canvas.width / 2, canvas.height / 2)
+        }
+        const tex = new THREE.CanvasTexture(canvas)
+        tex.needsUpdate = true
+        const mat = new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true })
+        const sprite = new THREE.Sprite(mat)
+        sprite.scale.set(2.0, 0.5, 1)
+        sprite.renderOrder = 1000
+        return sprite
+      }
+
+      // Tint a bot's body/limb materials toward a team color while preserving shading.
+      function tintBotMesh(group: THREE.Group, teamColor: number) {
+        const target = new THREE.Color(teamColor)
+        group.traverse((child) => {
+          if (!(child instanceof THREE.Mesh)) return
+          const m = child.material as THREE.Material
+          if (m instanceof THREE.MeshLambertMaterial && m.color) {
+            const c = m.color.clone()
+            c.lerp(target, 0.45)
+            const tintMat = m.clone()
+            tintMat.color = c
+            child.material = tintMat
+          }
+        })
+      }
+
+      // ── Bot spawner (FFA / TDM only) ──────────────────────────────────────
+      function spawnBots(count: number, diff: BotDifficulty, gameMode: "ffa" | "tdm") {
+        if (count <= 0) return
+        const tuning = BOT_DIFFICULTY_CONFIGS[diff]
+        const shuffled = [...SPAWN_POINTS].sort(() => Math.random() - 0.5)
+        const myTeam = myTeamRef.current
+        for (let i = 0; i < count; i++) {
+          const sp = shuffled[i % shuffled.length] ?? shuffled[0]
+          if (!sp) continue
+          // 70% grunt, 20% sniper, 10% heavy
+          const r = Math.random()
+          const type: EnemyType = r < 0.7 ? "grunt" : r < 0.9 ? "sniper" : "heavy"
+          const ex = Math.max(3, Math.min(MAP_SIZE - 3, sp.x + (Math.random() - 0.5) * 4))
+          const ez = Math.max(3, Math.min(MAP_SIZE - 3, sp.z + (Math.random() - 0.5) * 4))
+          const bot = makeEnemy(type, ex, ez, false)
+
+          // Per-bot config clone with difficulty applied (don't mutate shared ENEMY_CONFIGS)
+          const baseCfg = bot.config
+          bot.config = {
+            ...baseCfg,
+            hp: Math.round(baseCfg.hp * tuning.hpMult),
+            fireDamage: Math.round(baseCfg.fireDamage * tuning.damageMult),
+            attackDamage: Math.round(baseCfg.attackDamage * tuning.damageMult),
+            fireInterval: Math.round(baseCfg.fireInterval * tuning.reactMult),
+            sightRange: baseCfg.sightRange * tuning.sightMult,
+          }
+          bot.hp = bot.config.hp
+          bot.maxHp = bot.config.hp
+
+          bot.isBot = true
+          bot.botName = BOT_NAMES[i % BOT_NAMES.length] ?? `Bot_${i}`
+          bot.botAccuracyMult = tuning.accuracyMult
+          bot.botReactMult = tuning.reactMult
+          bot.botRespawnMs = tuning.respawnMs
+
+          // Team assignment
+          if (gameMode === "tdm") {
+            // Roughly even split, but always opposite the player so there's someone to shoot
+            const oppositeOfPlayer = myTeam === "red" ? "blue" : "red"
+            bot.botTeam = i === 0 ? oppositeOfPlayer : i % 2 === 0 ? "red" : "blue"
+            const teamColor = bot.botTeam === "red" ? 0xff3344 : 0x3388ff
+            tintBotMesh(bot.mesh, teamColor)
+            const halo = new THREE.Mesh(
+              new THREE.TorusGeometry(0.34, 0.04, 6, 16),
+              new THREE.MeshBasicMaterial({ color: teamColor }),
+            )
+            halo.position.set(0, 2.18, 0)
+            bot.mesh.add(halo)
+          } else {
+            bot.botTeam = "ffa"
+          }
+
+          // Floating name label
+          const labelColor =
+            bot.botTeam === "red" ? "#ff6677" : bot.botTeam === "blue" ? "#66aaff" : "#ffd55a"
+          const sprite = makeNameSprite(bot.botName, labelColor)
+          sprite.position.set(0, 2.55, 0)
+          bot.mesh.add(sprite)
+          bot.nameSprite = sprite
+
+          enemies.push(bot)
+        }
+        setAliveEnemyCount(enemies.filter((e) => e.hp > 0).length)
+        setEnemyStatus(
+          enemies.map((e) => ({
+            id: e.id,
+            hp: e.hp,
+            maxHp: e.maxHp,
+            type: e.type,
+            alive: e.hp > 0,
+          })),
+        )
+      }
+
       function placeGoalMarker(mx: number, mz: number, markerOrder: number, color = 0xffcc00) {
         const markerMat = new THREE.MeshLambertMaterial({
           color,
@@ -1836,6 +2002,14 @@ export default function ThreeWorld({
         spawnEnemiesFromDef(def)
       }
       spawnWaveRef.current = spawnWave
+
+      // Auto-spawn bots for FFA/TDM modes (wave_defense uses mission select).
+      if ((modeRef.current === "ffa" || modeRef.current === "tdm") && botCount > 0) {
+        spawnBots(botCount, botDifficulty, modeRef.current)
+        showNotification(
+          `${botCount} BOT${botCount === 1 ? "" : "S"} ENGAGED · ${botDifficulty.toUpperCase()}`,
+        )
+      }
 
       const bullets: Bullet[] = []
       const bloodParticles: BloodParticle[] = []
@@ -2075,8 +2249,25 @@ export default function ThreeWorld({
               setKills(killsRef.current)
               scoreRef.current += hitEnemy.config.score
               setScore(scoreRef.current)
-              const tag =
-                hitEnemy.type === "heavy"
+              // TDM: opposite-team bot kill awards a point to the player's team locally.
+              if (
+                hitEnemy.isBot &&
+                modeRef.current === "tdm" &&
+                hitEnemy.botTeam &&
+                hitEnemy.botTeam !== myTeamRef.current &&
+                myTeamRef.current !== "ffa"
+              ) {
+                const team = myTeamRef.current
+                const next = {
+                  red: teamScoreRef.current.red + (team === "red" ? 1 : 0),
+                  blue: teamScoreRef.current.blue + (team === "blue" ? 1 : 0),
+                }
+                teamScoreRef.current = next
+                setTeamScore(next)
+              }
+              const tag = hitEnemy.isBot
+                ? `${usernameRef.current} ▶ ${hitEnemy.botName}`
+                : hitEnemy.type === "heavy"
                   ? "HEAVY ELIMINATED"
                   : hitEnemy.type === "sniper"
                     ? "SNIPER ELIMINATED"
@@ -2085,8 +2276,13 @@ export default function ThreeWorld({
                       : "GRUNT ELIMINATED"
               showNotification(`${tag} +${hitEnemy.config.score}pt`)
               // Kill feed
-              const feedColor =
-                hitEnemy.type === "heavy"
+              const feedColor = hitEnemy.isBot
+                ? hitEnemy.botTeam === "red"
+                  ? "#ff6677"
+                  : hitEnemy.botTeam === "blue"
+                    ? "#66aaff"
+                    : "#ffd55a"
+                : hitEnemy.type === "heavy"
                   ? "#cc44ff"
                   : hitEnemy.type === "sniper"
                     ? "#88cc44"
@@ -2488,7 +2684,35 @@ export default function ThreeWorld({
                     }
                   })
                   enemy.mesh.rotation.x = 0
+                  // Bots respawn after a cooldown; mission enemies stay down.
+                  enemy.respawnTimer = enemy.isBot
+                    ? (enemy.botRespawnMs ?? 4000) / 1000
+                    : ENEMY_NO_RESPAWN
+                }
+              } else if (
+                enemy.isBot &&
+                enemy.respawnTimer !== ENEMY_NO_RESPAWN &&
+                enemy.respawnTimer > 0
+              ) {
+                // Bot respawn countdown (mesh is hidden during this phase).
+                enemy.respawnTimer -= dt
+                if (enemy.respawnTimer <= 0) {
+                  const sp = SPAWN_POINTS[Math.floor(Math.random() * SPAWN_POINTS.length)] ?? {
+                    x: enemy.spawnX,
+                    z: enemy.spawnZ,
+                  }
+                  const nx = Math.max(3, Math.min(MAP_SIZE - 3, sp.x + (Math.random() - 0.5) * 4))
+                  const nz = Math.max(3, Math.min(MAP_SIZE - 3, sp.z + (Math.random() - 0.5) * 4))
+                  enemy.mesh.position.set(nx, 0, nz)
+                  enemy.mesh.rotation.x = 0
+                  enemy.mesh.visible = true
+                  enemy.hp = enemy.maxHp
+                  enemy.state = "patrol"
+                  enemy.lastSeenPlayer = null
+                  enemy.searchTimer = 0
+                  enemy.dyingTimer = -1
                   enemy.respawnTimer = ENEMY_NO_RESPAWN
+                  setAliveEnemyCount(enemies.filter((e2) => e2.hp > 0).length)
                 }
               }
               continue
@@ -2584,8 +2808,9 @@ export default function ThreeWorld({
               ) {
                 enemy.lastFireTime = now
                 const fwd = new THREE.Vector3(toPx / distToPlayer, 0, toPz / distToPlayer)
-                fwd.x += (Math.random() - 0.5) * 0.06
-                fwd.z += (Math.random() - 0.5) * 0.06
+                const accInv = 1 / (enemy.botAccuracyMult ?? 1)
+                fwd.x += (Math.random() - 0.5) * 0.06 * accInv
+                fwd.z += (Math.random() - 0.5) * 0.06 * accInv
                 fwd.normalize()
                 const bGeo = new THREE.BoxGeometry(0.04, 0.04, 0.22)
                 const bMat = new THREE.MeshBasicMaterial({ color: 0xff4400 })
@@ -2641,7 +2866,8 @@ export default function ThreeWorld({
               ) {
                 enemy.lastFireTime = now
                 const fwd = new THREE.Vector3(toPx / distToPlayer, 0, toPz / distToPlayer)
-                const spread = enemy.type === "sniper" ? 0.005 : 0.03
+                const baseSpread = enemy.type === "sniper" ? 0.005 : 0.03
+                const spread = baseSpread / (enemy.botAccuracyMult ?? 1)
                 fwd.x += (Math.random() - 0.5) * spread
                 fwd.z += (Math.random() - 0.5) * spread
                 fwd.normalize()
@@ -3952,32 +4178,41 @@ export default function ThreeWorld({
             </div>
           )}
 
-        {/* ── Enemy count (top-center) ────────────────────────────────── */}
-        {!isLoading && !error && gamePhase === "playing" && !showMissionSelect && (
-          <div
-            style={{
-              position: "absolute",
-              top: "0.6rem",
-              left: "50%",
-              transform: "translateX(-50%)",
-              zIndex: 20,
-              pointerEvents: "none",
-              fontFamily: "monospace",
-              textAlign: "center",
-            }}
-          >
+        {/* ── Enemy / bot count (top-center; only when there's actually a count to show) */}
+        {!isLoading &&
+          !error &&
+          gamePhase === "playing" &&
+          !showMissionSelect &&
+          !isMobile &&
+          aliveEnemyCount > 0 && (
             <div
-              style={{ color: "rgba(255,80,80,0.85)", fontSize: "0.62rem", letterSpacing: "0.2em" }}
+              style={{
+                position: "absolute",
+                top: "0.6rem",
+                left: "50%",
+                transform: "translateX(-50%)",
+                zIndex: 20,
+                pointerEvents: "none",
+                fontFamily: "monospace",
+                textAlign: "center",
+              }}
             >
-              ENEMIES REMAINING
+              <div
+                style={{
+                  color: "rgba(255,80,80,0.85)",
+                  fontSize: "0.62rem",
+                  letterSpacing: "0.2em",
+                }}
+              >
+                {mode === "wave_defense" ? "ENEMIES REMAINING" : "BOTS ALIVE"}
+              </div>
+              <div
+                style={{ color: "#ff5555", fontSize: "1.4rem", fontWeight: "bold", lineHeight: 1 }}
+              >
+                {aliveEnemyCount}
+              </div>
             </div>
-            <div
-              style={{ color: "#ff5555", fontSize: "1.4rem", fontWeight: "bold", lineHeight: 1 }}
-            >
-              {aliveEnemyCount}
-            </div>
-          </div>
-        )}
+          )}
 
         {/* ── Kill feed (right side; shifted left on mobile so action buttons stay clear) */}
         {!isLoading && !error && killFeed.length > 0 && (

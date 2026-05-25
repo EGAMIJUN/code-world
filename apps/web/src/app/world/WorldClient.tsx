@@ -27,30 +27,52 @@ const ThreeWorld = dynamic(() => import("./ThreeWorld"), {
 
 export type GameMode = "wave_defense" | "ffa" | "tdm"
 export type GameMap = "urban" | "desert" | "snow"
+export type BotDifficulty = "easy" | "normal" | "hard"
 
 const STORAGE_MODE = "cw_mode"
 const STORAGE_MAP = "cw_map"
+const STORAGE_BOT_COUNT = "cw_bot_count"
+const STORAGE_BOT_DIFF = "cw_bot_diff"
 
 export default function WorldClient() {
   const { t } = useI18n()
   const [phase, setPhase] = useState<"select" | "play">("select")
   const [mode, setMode] = useState<GameMode>("wave_defense")
   const [mapId, setMapId] = useState<GameMap>("urban")
+  const [botCount, setBotCount] = useState<number>(5)
+  const [botDifficulty, setBotDifficulty] = useState<BotDifficulty>("normal")
 
   useEffect(() => {
     try {
       const m = localStorage.getItem(STORAGE_MODE) as GameMode | null
       const mp = localStorage.getItem(STORAGE_MAP) as GameMap | null
+      const bc = localStorage.getItem(STORAGE_BOT_COUNT)
+      const bd = localStorage.getItem(STORAGE_BOT_DIFF) as BotDifficulty | null
       if (m && ["wave_defense", "ffa", "tdm"].includes(m)) setMode(m)
       if (mp && ["urban", "desert", "snow"].includes(mp)) setMapId(mp)
+      if (bc !== null) {
+        const n = Number.parseInt(bc, 10)
+        if (Number.isFinite(n) && n >= 0 && n <= 9) setBotCount(n)
+      }
+      if (bd && ["easy", "normal", "hard"].includes(bd)) setBotDifficulty(bd)
     } catch {
       /* ignore */
     }
   }, [])
 
   if (phase === "play") {
-    return <ThreeWorld mode={mode} mapId={mapId} onExit={() => setPhase("select")} />
+    return (
+      <ThreeWorld
+        mode={mode}
+        mapId={mapId}
+        botCount={botCount}
+        botDifficulty={botDifficulty}
+        onExit={() => setPhase("select")}
+      />
+    )
   }
+
+  const showBotControls = mode === "ffa" || mode === "tdm"
 
   return (
     <div
@@ -188,6 +210,137 @@ export default function WorldClient() {
             )
           })}
         </div>
+
+        {showBotControls && (
+          <>
+            <div
+              style={{
+                fontSize: "0.9rem",
+                letterSpacing: "0.2em",
+                marginBottom: "0.5rem",
+                color: "#00aa2a",
+              }}
+            >
+              AI BOTS
+            </div>
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "1fr 1fr",
+                gap: "0.75rem",
+                marginBottom: "2rem",
+              }}
+            >
+              <div
+                style={{
+                  background: "rgba(0,8,0,0.6)",
+                  border: "1px solid #003300",
+                  padding: "0.75rem",
+                }}
+              >
+                <div
+                  style={{
+                    fontSize: "0.7rem",
+                    color: "#00aa2a",
+                    letterSpacing: "0.15em",
+                    marginBottom: "0.5rem",
+                  }}
+                >
+                  BOT COUNT
+                </div>
+                <div style={{ display: "flex", gap: "0.3rem", flexWrap: "wrap" }}>
+                  {[0, 1, 3, 5, 7, 9].map((n) => {
+                    const sel = botCount === n
+                    return (
+                      <button
+                        type="button"
+                        key={n}
+                        onClick={() => {
+                          setBotCount(n)
+                          try {
+                            localStorage.setItem(STORAGE_BOT_COUNT, String(n))
+                          } catch {
+                            /* ignore */
+                          }
+                        }}
+                        style={{
+                          minWidth: "44px",
+                          background: sel ? "rgba(0,255,65,0.18)" : "rgba(0,0,0,0.5)",
+                          border: `1px solid ${sel ? "#00ff41" : "#003300"}`,
+                          color: sel ? "#00ff41" : "#00aa2a",
+                          padding: "0.4rem 0.6rem",
+                          fontFamily: "monospace",
+                          fontSize: "0.9rem",
+                          cursor: "pointer",
+                          textShadow: sel ? "0 0 4px #00ff41" : "none",
+                        }}
+                      >
+                        {n}
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+              <div
+                style={{
+                  background: "rgba(0,8,0,0.6)",
+                  border: "1px solid #003300",
+                  padding: "0.75rem",
+                }}
+              >
+                <div
+                  style={{
+                    fontSize: "0.7rem",
+                    color: "#00aa2a",
+                    letterSpacing: "0.15em",
+                    marginBottom: "0.5rem",
+                  }}
+                >
+                  DIFFICULTY
+                </div>
+                <div style={{ display: "flex", gap: "0.3rem" }}>
+                  {(
+                    [
+                      { id: "easy", label: "EASY", color: "#66cc66" },
+                      { id: "normal", label: "NORMAL", color: "#ffcc44" },
+                      { id: "hard", label: "HARD", color: "#ff5544" },
+                    ] as { id: BotDifficulty; label: string; color: string }[]
+                  ).map((d) => {
+                    const sel = botDifficulty === d.id
+                    return (
+                      <button
+                        type="button"
+                        key={d.id}
+                        onClick={() => {
+                          setBotDifficulty(d.id)
+                          try {
+                            localStorage.setItem(STORAGE_BOT_DIFF, d.id)
+                          } catch {
+                            /* ignore */
+                          }
+                        }}
+                        style={{
+                          flex: 1,
+                          background: sel ? `${d.color}25` : "rgba(0,0,0,0.5)",
+                          border: `1px solid ${sel ? d.color : "#003300"}`,
+                          color: sel ? d.color : "#666",
+                          padding: "0.4rem",
+                          fontFamily: "monospace",
+                          fontSize: "0.78rem",
+                          letterSpacing: "0.1em",
+                          cursor: "pointer",
+                          textShadow: sel ? `0 0 4px ${d.color}` : "none",
+                        }}
+                      >
+                        {d.label}
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+            </div>
+          </>
+        )}
 
         <div style={{ textAlign: "center" }}>
           <button
