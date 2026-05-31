@@ -29,7 +29,7 @@ export default function HomePage() {
             marginBottom: "0.75rem",
           }}
         >
-          ▓▓ CODE WORLD ▓▓
+          鉄火 TEKKA
         </div>
         <div
           style={{

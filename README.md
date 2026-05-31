@@ -1,4 +1,4 @@
-# ⚡ CODE WORLD
+# 鉄火 TEKKA
 
 > 純粋なオンライン FPS。 — BATTLE · RANK · SURVIVE
 

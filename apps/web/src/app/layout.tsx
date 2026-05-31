@@ -5,7 +5,7 @@ import { I18nProvider } from "../i18n"
 import "./globals.css"
 
 export const metadata: Metadata = {
-  title: "CODE WORLD",
+  title: "鉄火 TEKKA",
   description: "純粋なオンラインFPS。— BATTLE · RANK · SURVIVE",
 }
 

@@ -1,4 +1,4 @@
-# CODE WORLD — デプロイ手順
+# 鉄火 TEKKA — デプロイ手順
 
 友達に使ってもらうための本番デプロイ手順です。
 すべて無料枠で動きます。
@@ -21,7 +21,7 @@
 ### GitHub OAuth App を本番用に作成
 
 1. https://github.com/settings/developers → "New OAuth App"
-2. **Application name**: CODE WORLD
+2. **Application name**: 鉄火 TEKKA
 3. **Homepage URL**: `https://あなたのvercelドメイン.vercel.app`
 4. **Authorization callback URL**: `https://あなたのrailwayドメイン.up.railway.app/api/auth/callback/github`
 5. Client ID と Client Secret をメモ
