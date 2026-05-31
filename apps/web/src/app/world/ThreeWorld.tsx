@@ -26,6 +26,22 @@ const SPRINT_MULTIPLIER = 1.5
 const AUTO_RECOVER_DELAY = 5
 const RECOVER_RATE = 2
 const CAM_SHAKE_DECAY = 6
+// ── Vertical movement ──────────────────────────────────────────────────────────
+// Real gravity in m/s². Picked to feel snappy (a 4m drop = ~0.6s in air),
+// not a perfect-physics simulation. Tuned by feel under EYE_HEIGHT.
+const GRAVITY = 22
+// Auto step-up: when the new floor below the player is at most this many
+// metres higher than the current foot position, we silently snap up (small
+// curbs, low stairs). Larger climbs require an E-key climb zone.
+const STEP_UP_MAX = 0.4
+// Vertical speeds (m/s) for fall-damage interpolation. Below SAFE: no
+// damage. Above LETHAL: full damage. Linear ramp in between.
+const FALL_SAFE_SPEED = 7
+const FALL_LETHAL_SPEED = 18
+const FALL_MAX_DAMAGE = 75
+// How close the player has to be to a climb zone for E to lift them up.
+// Radius around the zone's center.
+const CLIMB_INTERACT_PAD = 0.2 // extra slack on the climb-zone AABB
 // Death animation: 1.2s collapse → 1.8s lying on ground → 1.0s fade out.
 const DEATH_ANIM_FALL = 1.2
 const DEATH_ANIM_LIE = 1.8
@@ -193,32 +209,13 @@ const SOUNDS = {
 
 // ── Map object definitions [x, z, width, depth, type]
 // type: 0=building, 1=car, 2=barricade, 3=tank/pipe, 4=tree, 5=trench
+//
+// Urban-zone buildings (x < 32, type 0) used to live here as solid boxes
+// that the player could only hide *behind*. They've been pulled out and
+// replaced with proper hollow buildings — see BATTLE_CITY_BUILDINGS at
+// the bottom of this module + the makeHollowBuilding pass in init().
 const MAP_OBJECTS: [number, number, number, number, number][] = [
-  // ── Urban zone (x: 3–28) ─────────────────────────────────────────────────
-  // Buildings
-  [3, 3, 7, 8, 0],
-  [14, 3, 8, 6, 0],
-  [3, 14, 6, 7, 0],
-  [13, 13, 7, 6, 0],
-  [24, 5, 5, 6, 0],
-  [22, 14, 5, 7, 0],
-  [3, 24, 7, 8, 0],
-  [14, 24, 6, 7, 0],
-  [24, 26, 5, 5, 0],
-  [3, 35, 8, 6, 0],
-  [15, 35, 7, 5, 0],
-  [25, 35, 4, 8, 0],
-  [3, 45, 6, 7, 0],
-  [13, 44, 8, 6, 0],
-  [24, 46, 5, 6, 0],
-  [3, 56, 7, 8, 0],
-  [14, 56, 6, 7, 0],
-  [24, 58, 5, 5, 0],
-  [3, 68, 8, 6, 0],
-  [15, 68, 7, 5, 0],
-  [3, 77, 7, 8, 0],
-  [14, 78, 6, 6, 0],
-  [24, 76, 5, 7, 0],
+  // ── Urban zone (x: 3–28) ─ buildings now in BATTLE_CITY_BUILDINGS ──
   // Cars
   [12, 11, 2, 1, 1],
   [20, 21, 2, 1, 1],
@@ -233,26 +230,25 @@ const MAP_OBJECTS: [number, number, number, number, number][] = [
   [10, 62, 3, 0.4, 2],
   [25, 72, 3, 0.4, 2],
   // ── Industrial zone (x: 33–64) ───────────────────────────────────────────
-  // Warehouses / factory buildings
+  // Warehouses / factory buildings. Six entries in the z = 32–67 band
+  // were removed — they either sat *inside* the new BATTLE_CITY_BUILDINGS
+  // flanks or blocked the central avenue at z ≈ 44–55. The remaining
+  // four (z=5–28 and z=71–79) sit outside the avenue and still serve as
+  // cover/skyline backdrop.
   [33, 5, 10, 9, 0],
   [47, 5, 12, 8, 0],
   [33, 18, 9, 10, 0],
   [46, 18, 11, 9, 0],
-  [33, 32, 10, 8, 0],
-  [47, 32, 10, 9, 0],
-  [33, 44, 9, 10, 0],
-  [46, 45, 11, 8, 0],
-  [33, 58, 10, 9, 0],
-  [47, 58, 10, 8, 0],
   [33, 71, 9, 8, 0],
   [46, 72, 11, 7, 0],
-  // Tanks & pipes
+  // Tanks & pipes. Pipe at [63, 46, 1, 10, 3] removed — it was a tall
+  // 1m-wide 7m-tall slab sitting in the middle of the central avenue,
+  // blocking the spawn-to-terminus walking path.
   [60, 5, 2, 2, 3],
   [63, 10, 1, 10, 3],
   [60, 24, 2, 2, 3],
   [63, 28, 8, 1, 3],
   [60, 42, 2, 2, 3],
-  [63, 46, 1, 10, 3],
   [60, 60, 2, 2, 3],
   [63, 65, 8, 1, 3],
   // ── Outdoor zone (x: 68–92) ──────────────────────────────────────────────
@@ -319,8 +315,10 @@ const MAP_OBJECTS: [number, number, number, number, number][] = [
   [25, 92, 6, 5, 0],
 ]
 
-// WALL_DEFS for backward compat (minimap, cover AI)
-const WALL_DEFS: [number, number, number, number][] = MAP_OBJECTS.map(([x, z, w, d]) => [
+// WALL_DEFS — formerly used by the minimap draw loop. Now superseded by
+// ALL_AABBS sweeping (picks up dynamic walls / hollow buildings), but left
+// here so any external reference (debug overlays etc.) keeps compiling.
+const _WALL_DEFS: [number, number, number, number][] = MAP_OBJECTS.map(([x, z, w, d]) => [
   x,
   z,
   w,
@@ -505,6 +503,45 @@ const SPAWN_POINTS = [
   { x: 18, z: 82 },
   { x: 50, z: 82 },
   { x: 82, z: 82 },
+]
+
+// ── Battle-city building layout ────────────────────────────────────────────────
+// Replaces the 23 solid urban boxes deleted from MAP_OBJECTS. A central
+// east–west avenue runs through z ≈ 44–58; buildings flank it on the
+// north side (z < 44) and south side (z > 58), so running east from the
+// west-edge spawn always leads past explorable interiors.
+//   doorSide is *outward-facing* toward the avenue.
+//   bldKind chooses material at render time (concrete vs industrial).
+interface BattleCityBuilding {
+  x: number
+  z: number
+  w: number
+  d: number
+  h?: number
+  doorSide: "north" | "south" | "east" | "west"
+  bldKind: "concrete" | "industrial"
+}
+const BATTLE_CITY_BUILDINGS: BattleCityBuilding[] = [
+  // North flank — buildings ride right against the avenue (z2 reaches
+  // ≈44) so they read as the *wall* of the street, not distant scenery.
+  // Doors face +z (south) so the player sees them while walking down
+  // the avenue. The first building is intentionally close to spawn so
+  // it's visible the instant the camera unlocks.
+  { x: 10, z: 32, w: 12, d: 11, h: 4.5, doorSide: "south", bldKind: "concrete" },
+  { x: 26, z: 30, w: 14, d: 13, h: 5.5, doorSide: "south", bldKind: "concrete" },
+  { x: 44, z: 32, w: 14, d: 11, h: 5.0, doorSide: "south", bldKind: "industrial" },
+  { x: 62, z: 30, w: 14, d: 13, h: 4.5, doorSide: "south", bldKind: "concrete" },
+  // South flank — mirror image; doors face -z (north toward the avenue).
+  { x: 10, z: 57, w: 12, d: 12, h: 4.5, doorSide: "north", bldKind: "concrete" },
+  { x: 26, z: 57, w: 14, d: 13, h: 5.0, doorSide: "north", bldKind: "concrete" },
+  { x: 46, z: 57, w: 14, d: 13, h: 5.5, doorSide: "north", bldKind: "industrial" },
+  { x: 64, z: 57, w: 14, d: 13, h: 4.5, doorSide: "north", bldKind: "concrete" },
+  // ── Avenue terminus ─────────────────────────────────────────────────
+  // A 9th building positioned across the east end of the avenue with a
+  // door on the *west* face. Walking straight east from spawn now ends
+  // at a clearly visible building — no more "endless empty road".
+  // Sized + positioned to clear the outdoor-zone perimeter ruin at x≈91.
+  { x: 74, z: 45, w: 12, d: 12, h: 5.5, doorSide: "west", bldKind: "industrial" },
 ]
 
 // ── Mission system ─────────────────────────────────────────────────────────────
@@ -771,6 +808,33 @@ interface CombatEnemy {
   botReactMult?: number // 1.0 = stock; higher = slower fire interval
   botRespawnMs?: number // ms between death and respawn
   nameSprite?: THREE.Sprite | null
+
+  // ── Aggressive-AI fields ────────────────────────────────────────────────
+  // Until-when this enemy reacts to *external* stimulus (heard a shot or
+  // saw a teammate die). Patrol uses this to abandon waypoints and move
+  // toward the last noise; alert uses it to extend pursuit beyond LOS loss.
+  alertedUntil: number
+  // Sticky flank offset chosen when this enemy enters alert. -1/+1 picks a
+  // side; magnitude (0–1) scales perpendicular offset to the bee-line path
+  // so groups of enemies arc around the player instead of stacking.
+  flankSide: -1 | 1
+  flankStrength: number
+  // Grunt sprint window: until-when the enemy moves at dash speed toward
+  // the player. Re-armed via `nextDashCheckTime`.
+  dashUntil: number
+  nextDashCheckTime: number
+  // Heavy grenade cooldown (timestamp when the next throw is allowed).
+  nextGrenadeTime: number
+  // Overhead "!" / "?" / null marker — alert sting / search marker. Hidden
+  // when `markerUntil < now`. Sprite stays attached to the mesh group so it
+  // moves with the enemy.
+  markerSprite?: THREE.Sprite | null
+  markerKind?: "alert" | "search" | null
+  markerUntil: number
+  // Difficulty tuning the AI reads from. Bots: assigned from selected
+  // difficulty in spawnBots. Mission enemies: left undefined (state machine
+  // falls back to MISSION_AI_TUNING — currently the "normal" profile).
+  aiTuning?: BotDifficultyTuning
 }
 
 interface Bullet {
@@ -779,6 +843,10 @@ interface Bullet {
   life: number
   isEnemy: boolean
   damage: number
+  // Thrown enemy grenade — arcs under gravity and AOE-explodes on impact /
+  // expiry. Plain bullets ignore this field.
+  isGrenade?: boolean
+  grenadeRadius?: number
 }
 
 interface GoalMarker {
@@ -805,6 +873,41 @@ interface ExplosionParticle {
   isSpark: boolean
 }
 
+// ── Vertical-world geometry ────────────────────────────────────────────────────
+// A horizontal walkable surface at altitude y. The ground is implicit
+// (y = 0 everywhere); these are added on top for rooftops and any interior
+// upper floors.
+interface FloorAABB {
+  x1: number
+  z1: number
+  x2: number
+  z2: number
+  y: number
+}
+// A ceiling: above-head obstruction the player can't pass through while
+// rising vertically (rarely needed today but reserved so future jump/lift
+// mechanics don't pop through interior roofs).
+interface CeilingAABB {
+  x1: number
+  z1: number
+  x2: number
+  z2: number
+  y: number
+}
+// E-key interactable lift. Entering the AABB on foot and pressing E
+// teleports the player up to targetY (used for ladders / external stairs
+// to a rooftop). A short cooldown stops accidental double-fires.
+interface ClimbZone {
+  x1: number
+  z1: number
+  x2: number
+  z2: number
+  targetY: number
+  // Down-climb target — when the player is *on the elevated platform*
+  // and presses E inside the zone, they descend back to this Y.
+  downY?: number
+}
+
 // ── Three.js scene refs ────────────────────────────────────────────────────────
 interface SceneRefs {
   scene: THREE.Scene
@@ -825,6 +928,15 @@ interface SceneRefs {
   aimedEnemyId: string | null
   explosionParticles: ExplosionParticle[]
   goalMarkers: GoalMarker[]
+  // Vertical-world: rooftops + interior floors + ladder/staircase lifts.
+  // Module-level state lives here so the animate loop can sample without
+  // capturing fresh closures every frame.
+  floors: FloorAABB[]
+  ceilings: CeilingAABB[]
+  climbZones: ClimbZone[]
+  // Door / ladder annotations — drawn on the minimap so the player can
+  // navigate to interactable entries without hunting along walls.
+  entries: { x: number; z: number; kind: "door" | "ladder" }[]
 }
 
 export type BotDifficulty = "easy" | "normal" | "hard"
@@ -836,9 +948,18 @@ interface BotDifficultyTuning {
   damageMult: number
   sightMult: number
   respawnMs: number
+  // Aggressive-AI knobs — read by the enemy state machine each tick.
+  flankFactor: number // 0 = bee-line, 1 = full side-step toward flanks
+  speedMult: number // baseline multiplier on enemy.config.speed
+  dashEnabled: boolean // close-range grunts sprint at dash speed
+  grenadeEnabled: boolean // heavies throw arc grenades
+  groupTactics: boolean // pursue/share lastSeenPlayer with nearby allies
+  noiseRange: number // m: how far a fired-shot noise alerts patrols
 }
 
 const BOT_DIFFICULTY_CONFIGS: Record<BotDifficulty, BotDifficultyTuning> = {
+  // EASY is intentionally "old AI": no flank, no dash, no grenade, narrow
+  // noise-radius. Players new to FPS still get a tactical pace.
   easy: {
     hpMult: 0.65,
     accuracyMult: 0.45,
@@ -846,7 +967,16 @@ const BOT_DIFFICULTY_CONFIGS: Record<BotDifficulty, BotDifficultyTuning> = {
     damageMult: 0.6,
     sightMult: 0.85,
     respawnMs: 5000,
+    flankFactor: 0.2,
+    speedMult: 0.9,
+    dashEnabled: false,
+    grenadeEnabled: false,
+    groupTactics: false,
+    noiseRange: 14,
   },
+  // NORMAL is the full new AI: flanking, dashing grunts, grenade-tossing
+  // heavies, allies share last-seen player position on hearing a shot or
+  // a teammate die.
   normal: {
     hpMult: 1.0,
     accuracyMult: 1.0,
@@ -854,7 +984,14 @@ const BOT_DIFFICULTY_CONFIGS: Record<BotDifficulty, BotDifficultyTuning> = {
     damageMult: 1.0,
     sightMult: 1.0,
     respawnMs: 4000,
+    flankFactor: 0.7,
+    speedMult: 1.0,
+    dashEnabled: true,
+    grenadeEnabled: true,
+    groupTactics: true,
+    noiseRange: 24,
   },
+  // HARD: tighter aim, faster reflexes, near-constant pressure.
   hard: {
     hpMult: 1.3,
     accuracyMult: 1.6,
@@ -862,8 +999,18 @@ const BOT_DIFFICULTY_CONFIGS: Record<BotDifficulty, BotDifficultyTuning> = {
     damageMult: 1.3,
     sightMult: 1.2,
     respawnMs: 3000,
+    flankFactor: 1.0,
+    speedMult: 1.2,
+    dashEnabled: true,
+    grenadeEnabled: true,
+    groupTactics: true,
+    noiseRange: 32,
   },
 }
+
+// Mission enemies (non-bot) don't carry a difficulty selector. They run on
+// the "normal" aggressive profile so the FPS missions feel modern.
+const MISSION_AI_TUNING: BotDifficultyTuning = BOT_DIFFICULTY_CONFIGS.normal
 
 const BOT_NAMES = ["Bot_α", "Bot_β", "Bot_γ", "Bot_δ", "Bot_ε", "Bot_ζ", "Bot_η", "Bot_θ", "Bot_ι"]
 
@@ -901,6 +1048,31 @@ export default function ThreeWorld({
   const playerVelRef = useRef({ x: 0, z: 0 })
   // Walk-bob: vertical head sway phase, advances only while moving.
   const walkBobRef = useRef(0)
+  // Pointer-locked mouse delta accumulates here per event, then drains in
+  // the animate loop with a tiny low-pass blend. Decouples mouse-event rate
+  // (which can spike >500Hz on gaming mice) from frame rate, and removes
+  // sub-pixel jitter without adding perceivable input lag.
+  const mouseDeltaRef = useRef({ x: 0, y: 0 })
+  // Vertical movement: ground-relative foot Y velocity in m/s. Positive =
+  // rising (currently only via E-key climb), negative = falling. Sampled
+  // each frame against the floor heightmap.
+  const playerVelYRef = useRef(0)
+  // ── Sensitivity / motion-sickness refs ───────────────────────────────
+  // Multipliers applied to mouse + look-stick deltas inside the animate
+  // loop. Mirrored from React state via dedicated useEffects so the loop
+  // never closes over stale state.
+  const mouseSensRef = useRef(1.0)
+  const lookSensRef = useRef(1.0)
+  // Walk-bob feels great for some players, motion-sick others. Default
+  // off (CLAUDE.md's stated tolerance) — toggleable in settings.
+  const walkBobOnRef = useRef(false)
+  // E-key climb request — set in keydown, consumed and cleared inside the
+  // animate loop (so the climb only fires once per press, even if the key
+  // remains held).
+  const climbRequestRef = useRef(false)
+  // Cooldown timestamp after a climb fires; blocks chaining a second climb
+  // for half a second so you can't jitter up and down a ladder.
+  const climbCooldownUntilRef = useRef(0)
   const wsRef = useRef<WebSocket | null>(null)
   const usernameRef = useRef("Player")
   const remotePosRef = useRef<Record<string, RemotePlayer>>({})
@@ -964,6 +1136,17 @@ export default function ThreeWorld({
   const [mvpName, setMvpName] = useState<string | null>(null)
   const [grenadeCooldownMs, setGrenadeCooldownMs] = useState(0)
   const lastGrenadeRef = useRef(0)
+  // Last value pushed to setGrenadeCooldownMs — guards against re-renders
+  // when the rounded display value hasn't changed (animate loop calls this
+  // every frame).
+  const prevGrenadeCdRef = useRef(0)
+  // Mirror of `playerHp` (the rendered React state). Animate loop uses this
+  // to bail out of setPlayerHp calls while regen is ticking sub-integer.
+  const prevDisplayHpRef = useRef(PLAYER_MAX_HP)
+  // Most recent loud event from the player (gunshot, explosion). Patrolling
+  // enemies within `noiseRange` of (x, z) drop their patrol and move toward
+  // this point. `expires` is a Date.now() ms timestamp — past it = stale.
+  const lastNoiseRef = useRef<{ x: number; z: number; expires: number } | null>(null)
   const requestGrenadeRef = useRef(false)
   const modeRef = useRef(mode)
   // initialize spawn invuln (3s grace at match start)
@@ -978,9 +1161,23 @@ export default function ThreeWorld({
   const [onlineCount, setOnlineCount] = useState(1)
   const [isMobile, setIsMobile] = useState(false)
   const [isLandscape, setIsLandscape] = useState(false)
+  // True while the player is inside (or right next to) any ClimbZone — the
+  // "[E] 登る" prompt at the bottom of the HUD watches this. State is
+  // pushed from the animate loop via prevNearClimbRef so we only flip on
+  // boundary changes, not every frame.
+  const [nearClimb, setNearClimb] = useState(false)
+  const prevNearClimbRef = useRef(false)
   // CRT scanlines: default off (was too distracting). F8 toggles, persisted
   // in localStorage so the choice survives refresh.
   const [scanlinesOn, setScanlinesOn] = useState(false)
+  // ── Sensitivity (motion-sickness controls) ─────────────────────────────
+  // mouseSens / lookSens are multipliers on top of the (now-lowered) base
+  // sensitivity. Range 0.5–2.0 in the settings UI. walkBobOn gates the
+  // head-bob effect. All persisted under "fps_*" localStorage keys.
+  const [mouseSens, setMouseSens] = useState(1.0)
+  const [lookSens, setLookSens] = useState(1.0)
+  const [walkBobOn, setWalkBobOn] = useState(false)
+  const [showSettings, setShowSettings] = useState(false)
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
   const [chatInput, setChatInput] = useState("")
   const chatEndRef = useRef<HTMLDivElement>(null)
@@ -1037,11 +1234,32 @@ export default function ThreeWorld({
     } catch {
       /* ignore */
     }
+    // Sensitivity + walk-bob preferences. Stored as decimals (e.g. "1.25").
+    try {
+      const ms = Number.parseFloat(localStorage.getItem("fps_mouse_sens") ?? "")
+      if (Number.isFinite(ms) && ms > 0.1 && ms < 3.5) setMouseSens(ms)
+      const ls = Number.parseFloat(localStorage.getItem("fps_look_sens") ?? "")
+      if (Number.isFinite(ls) && ls > 0.1 && ls < 3.5) setLookSens(ls)
+      if (localStorage.getItem("fps_walkbob") === "1") setWalkBobOn(true)
+    } catch {
+      /* ignore */
+    }
     return () => {
       window.removeEventListener("resize", detectLandscape)
       window.removeEventListener("orientationchange", detectLandscape)
     }
   }, [])
+
+  // Mirror sensitivity state into refs (animate loop reads refs).
+  useEffect(() => {
+    mouseSensRef.current = mouseSens
+  }, [mouseSens])
+  useEffect(() => {
+    lookSensRef.current = lookSens
+  }, [lookSens])
+  useEffect(() => {
+    walkBobOnRef.current = walkBobOn
+  }, [walkBobOn])
   useEffect(() => {
     if (gamePhase === "gameover") {
       SOUNDS.gameover()
@@ -1134,26 +1352,48 @@ export default function ThreeWorld({
       scene.fog = new THREE.Fog(theme.fog, 80, 280)
 
       // ── Camera (FPS) ───────────────────────────────────────────────────────
+      // FOV 80 (was 75): wider field reduces peripheral motion-shear when
+      // the player whips around, a common motion-sickness trigger.
       const camera = new THREE.PerspectiveCamera(
-        75,
+        80,
         container.clientWidth / container.clientHeight,
         0.1,
-        300,
+        320,
       )
       camera.rotation.order = "YXZ"
 
       // ── Renderer ───────────────────────────────────────────────────────────
-      const renderer = new THREE.WebGLRenderer({ antialias: true })
+      const renderer = new THREE.WebGLRenderer({
+        antialias: true,
+        powerPreference: "high-performance",
+      })
       renderer.setSize(container.clientWidth, container.clientHeight)
-      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
+      // Cap at 1.75 instead of 2 — on retina the extra 14% pixels rarely
+      // shows visually but costs ~30% GPU. Keeps perf room for shadows.
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.75))
       renderer.shadowMap.enabled = true
       renderer.shadowMap.type = THREE.PCFSoftShadowMap
+      // ACESFilmic + linear→sRGB output gives the "cinematic" desaturated
+      // highlight rolloff that COD/Battlefield use; exposure < 1 keeps the
+      // bright sky from blowing out against PBR-lit concrete.
+      renderer.toneMapping = THREE.ACESFilmicToneMapping
+      renderer.toneMappingExposure = 0.95
+      renderer.outputColorSpace = THREE.SRGBColorSpace
       container.appendChild(renderer.domElement)
       rendererDomRef.current = renderer.domElement
+      // Max anisotropy is read once and reused for every procedural texture
+      // below — saves repeated capability lookups.
+      const maxAniso = renderer.capabilities.getMaxAnisotropy()
 
       // ── Lights (daytime battlefield) ───────────────────────────────────────
-      scene.add(new THREE.AmbientLight(theme.ambient, 2.4))
-      const sun = new THREE.DirectionalLight(theme.sun, 3.5)
+      // Ambient was 2.4 — washed out shadows entirely. Drop it to 0.45 and
+      // let a HemisphereLight handle the sky-vs-ground gradient (gives
+      // "outdoor day" feel without crushing shadow contrast).
+      scene.add(new THREE.AmbientLight(theme.ambient, 0.45))
+      const hemi = new THREE.HemisphereLight(theme.sky, 0x4a4030, 0.55)
+      hemi.position.set(0, 50, 0)
+      scene.add(hemi)
+      const sun = new THREE.DirectionalLight(theme.sun, 2.8)
       sun.position.set(60, 80, 40)
       sun.castShadow = true
       sun.shadow.mapSize.set(2048, 2048)
@@ -1163,11 +1403,64 @@ export default function ThreeWorld({
       sun.shadow.camera.right = 80
       sun.shadow.camera.bottom = -80
       sun.shadow.camera.top = 80
+      // Bias fights shadow acne on the flat building walls; normal bias
+      // handles the bands where the sun grazes a vertical surface.
+      sun.shadow.bias = -0.0005
+      sun.shadow.normalBias = 0.04
+      sun.shadow.radius = 2
       scene.add(sun)
-      // Fill light from opposite side
-      const fillLight = new THREE.DirectionalLight(0xb0c8ff, 0.8)
+      // Fill light from opposite side (gentle bounce-light proxy)
+      const fillLight = new THREE.DirectionalLight(0xb0c8ff, 0.45)
       fillLight.position.set(-40, 30, -20)
       scene.add(fillLight)
+
+      // ── Procedural noise textures ──────────────────────────────────────────
+      // Pure flat-colored boxes shimmer at distance (moire from mipmap aliasing
+      // of the constant color against fog). A subtle multi-octave noise
+      // texture per material breaks up the surface, gives mipmaps something
+      // to filter, and reads as "concrete/metal weathering".
+      function makeNoiseTexture(
+        size: number,
+        baseHex: number,
+        contrast: number,
+        repeat: number,
+      ): THREE.CanvasTexture {
+        const canvas = document.createElement("canvas")
+        canvas.width = size
+        canvas.height = size
+        const ctx = canvas.getContext("2d")
+        if (ctx) {
+          const baseR = (baseHex >> 16) & 0xff
+          const baseG = (baseHex >> 8) & 0xff
+          const baseB = baseHex & 0xff
+          const img = ctx.createImageData(size, size)
+          for (let i = 0; i < size * size; i++) {
+            // Mix two noise scales for fake fractal feel.
+            const coarse = Math.random()
+            const fine = Math.random()
+            const n = (coarse * 0.7 + fine * 0.3 - 0.5) * 2 // [-1, 1]
+            const k = 1 + n * contrast
+            img.data[i * 4 + 0] = Math.max(0, Math.min(255, baseR * k))
+            img.data[i * 4 + 1] = Math.max(0, Math.min(255, baseG * k))
+            img.data[i * 4 + 2] = Math.max(0, Math.min(255, baseB * k))
+            img.data[i * 4 + 3] = 255
+          }
+          ctx.putImageData(img, 0, 0)
+        }
+        const tex = new THREE.CanvasTexture(canvas)
+        tex.wrapS = THREE.RepeatWrapping
+        tex.wrapT = THREE.RepeatWrapping
+        tex.repeat.set(repeat, repeat)
+        tex.generateMipmaps = true
+        tex.minFilter = THREE.LinearMipmapLinearFilter
+        tex.magFilter = THREE.LinearFilter
+        tex.anisotropy = maxAniso
+        tex.colorSpace = THREE.SRGBColorSpace
+        return tex
+      }
+      const concreteNoise = makeNoiseTexture(128, 0xffffff, 0.12, 6)
+      const industrialNoise = makeNoiseTexture(128, 0xffffff, 0.09, 5)
+      const groundNoise = makeNoiseTexture(256, 0xffffff, 0.07, 24)
 
       // ── Ground zones ───────────────────────────────────────────────────────
       const zoneTint = (base: number): number => {
@@ -1188,7 +1481,14 @@ export default function ThreeWorld({
       for (const zone of ZONES) {
         const zw = (zone.endTX - zone.startTX + 1) * TILE_UNIT
         const geo = new THREE.PlaneGeometry(zw, MAP_SIZE * TILE_UNIT)
-        const mat = new THREE.MeshLambertMaterial({ color: zoneTint(zone.color) })
+        // Standard material + the shared ground noise texture so the floor
+        // doesn't look like a flat painted plane under directional light.
+        const mat = new THREE.MeshStandardMaterial({
+          color: zoneTint(zone.color),
+          map: groundNoise,
+          roughness: 0.95,
+          metalness: 0,
+        })
         const mesh = new THREE.Mesh(geo, mat)
         mesh.rotation.x = -Math.PI / 2
         mesh.position.set(
@@ -1210,13 +1510,45 @@ export default function ThreeWorld({
       // ── War-zone buildings / obstacles ─────────────────────────────────────
       const wallMeshes: THREE.Mesh[] = []
 
-      // Shared materials
-      const concreteMat = new THREE.MeshLambertMaterial({ color: 0x8a8878 })
-      const concreteRoofMat = new THREE.MeshLambertMaterial({ color: 0x7a7868 })
-      const industrialMat = new THREE.MeshLambertMaterial({ color: 0x787878 })
-      const industrialRoofMat = new THREE.MeshLambertMaterial({ color: 0x686868 })
-      const windowMat = new THREE.MeshLambertMaterial({ color: 0x1a2833, emissive: 0x050a10 })
-      const barricadeMat = new THREE.MeshLambertMaterial({ color: 0x888870 })
+      // Shared materials. Buildings use MeshStandardMaterial (PBR) with the
+      // procedural noise as albedo so they read as weathered concrete/metal
+      // under tone mapping. Roughness near 1 keeps the specular subtle.
+      const concreteMat = new THREE.MeshStandardMaterial({
+        color: 0x8a8878,
+        map: concreteNoise,
+        roughness: 0.92,
+        metalness: 0,
+      })
+      const concreteRoofMat = new THREE.MeshStandardMaterial({
+        color: 0x7a7868,
+        map: concreteNoise,
+        roughness: 0.95,
+        metalness: 0,
+      })
+      const industrialMat = new THREE.MeshStandardMaterial({
+        color: 0x787878,
+        map: industrialNoise,
+        roughness: 0.7,
+        metalness: 0.25,
+      })
+      const industrialRoofMat = new THREE.MeshStandardMaterial({
+        color: 0x686868,
+        map: industrialNoise,
+        roughness: 0.75,
+        metalness: 0.25,
+      })
+      const windowMat = new THREE.MeshStandardMaterial({
+        color: 0x1a2833,
+        emissive: 0x050a10,
+        roughness: 0.1,
+        metalness: 0.6,
+      })
+      const barricadeMat = new THREE.MeshStandardMaterial({
+        color: 0x888870,
+        map: concreteNoise,
+        roughness: 0.9,
+        metalness: 0,
+      })
       const tankMat = new THREE.MeshLambertMaterial({ color: 0x6a7060 })
       const pipeMat = new THREE.MeshLambertMaterial({ color: 0x888878 })
       const trenchMat = new THREE.MeshLambertMaterial({ color: 0x706050 })
@@ -1260,12 +1592,20 @@ export default function ThreeWorld({
           mesh.receiveShadow = true
           scene.add(mesh)
           wallMeshes.push(mesh)
-          // Sandbag texture strips
-          const bagGeo = new THREE.BoxGeometry(ow * 0.9, 0.22, od * 0.9)
-          const bagMat = new THREE.MeshLambertMaterial({ color: 0x9a8a6a })
+          // Sandbag strips — stacked *on top of* the trench (previously
+          // their geometry sat inside the trench body, z-fighting both
+          // top and side faces of the parent box).
+          const bagGeo = new THREE.BoxGeometry(ow * 0.9, 0.16, od * 0.9)
+          const bagMat = new THREE.MeshStandardMaterial({
+            color: 0x9a8a6a,
+            roughness: 0.95,
+            metalness: 0,
+          })
           for (let bi = 0; bi < 2; bi++) {
             const bag = new THREE.Mesh(bagGeo, bagMat)
-            bag.position.set(cx, trenchH - 0.11 - bi * 0.24, cz)
+            bag.position.set(cx, trenchH + 0.08 + bi * 0.17, cz)
+            bag.castShadow = true
+            bag.receiveShadow = true
             scene.add(bag)
           }
           continue
@@ -1282,9 +1622,11 @@ export default function ThreeWorld({
           body.receiveShadow = true
           scene.add(body)
           wallMeshes.push(body)
-          // Windshield
+          // Windshield — sit it *on* the front face (z = oz, slight offset)
+          // instead of buried inside the body (was at oz + od*0.3, fully
+          // inside the box — flickered through the body's front face).
           const windshield = new THREE.Mesh(new THREE.BoxGeometry(ow * 0.6, 0.38, 0.05), windowMat)
-          windshield.position.set(cx, carH * 0.85, oz + od * 0.3)
+          windshield.position.set(cx, carH * 0.85, oz - 0.03)
           scene.add(windshield)
           // Tires (4 wheels)
           const tireMat = new THREE.MeshLambertMaterial({ color: 0x1a1a1a })
@@ -1322,9 +1664,16 @@ export default function ThreeWorld({
           mesh.receiveShadow = true
           scene.add(mesh)
           wallMeshes.push(mesh)
-          // Stripe markings
-          const stripeMat = new THREE.MeshLambertMaterial({ color: 0xffaa00 })
-          const stripeGeo = new THREE.BoxGeometry(ow, 0.08, od + 0.02)
+          // Stripe markings — protrude meaningfully on all 4 sides so no
+          // face is coplanar with the parent barricade (was only +0.01 on
+          // z and identical on x, which flickered at distance).
+          const stripeMat = new THREE.MeshStandardMaterial({
+            color: 0xffaa00,
+            emissive: 0x301800,
+            roughness: 0.6,
+            metalness: 0,
+          })
+          const stripeGeo = new THREE.BoxGeometry(ow + 0.06, 0.08, od + 0.06)
           const stripe = new THREE.Mesh(stripeGeo, stripeMat)
           stripe.position.set(cx, bH * 0.6, cz)
           scene.add(stripe)
@@ -1342,8 +1691,12 @@ export default function ThreeWorld({
             )
             tankBody.position.set(cx, tankH / 2, cz)
             tankBody.castShadow = true
+            tankBody.receiveShadow = true
             scene.add(tankBody)
-            wallMeshes.push(new THREE.Mesh(new THREE.BoxGeometry(ow, tankH, od), tankMat))
+            // Was pushing a dummy box at position (0,0,0) — never matched
+            // the real tank's location, so wall-occlusion raycasts and
+            // bullet checks missed tanks entirely. Push the cylinder itself.
+            wallMeshes.push(tankBody)
             // Top dome
             const dome = new THREE.Mesh(
               new THREE.SphereGeometry(1.1, 8, 5, 0, Math.PI * 2, 0, Math.PI / 2),
@@ -1378,11 +1731,14 @@ export default function ThreeWorld({
         scene.add(bodyMesh)
         wallMeshes.push(bodyMesh)
 
-        // Roof
+        // Roof — small upward offset so the roof's bottom face doesn't
+        // sit *exactly* on the body's top face (used to z-fight at the
+        // joint when viewed from a distance).
         const roofGeo = new THREE.BoxGeometry(ow + 0.2, 0.2, od + 0.2)
         const roof = new THREE.Mesh(roofGeo, roofBldMat)
-        roof.position.set(cx, wallH + 0.1, cz)
+        roof.position.set(cx, wallH + 0.12, cz)
         roof.castShadow = true
+        roof.receiveShadow = true
         scene.add(roof)
 
         // Windows on large buildings
@@ -1393,12 +1749,15 @@ export default function ThreeWorld({
             for (let wCol = 0; wCol < wCols; wCol++) {
               const winX = ox + (wCol + 0.5) * (ow / wCols)
               const winY = 1.0 + wRow * ((wallH - 1.0) / wRows)
-              const winGeo = new THREE.BoxGeometry((ow / wCols) * 0.5, 0.7, 0.06)
+              const winGeo = new THREE.BoxGeometry((ow / wCols) * 0.5, 0.7, 0.08)
+              // Centered ON the wall face (slight protrusion outward) so
+              // the inner face is clearly inside the wall — eliminates the
+              // earlier 0.01 hairline-gap z-fight.
               const winF = new THREE.Mesh(winGeo, windowMat)
-              winF.position.set(winX, winY, oz - 0.04)
+              winF.position.set(winX, winY, oz - 0.02)
               scene.add(winF)
               const winB = winF.clone()
-              winB.position.set(winX, winY, oz + od + 0.04)
+              winB.position.set(winX, winY, oz + od + 0.02)
               scene.add(winB)
             }
           }
@@ -1425,11 +1784,817 @@ export default function ThreeWorld({
         }
       }
 
+      // ── Vertical city: interiors + rooftops + props + signage ─────────────
+      // Everything below extends the city beyond the flat-box MAP_OBJECTS:
+      //   - 2 hollow buildings with doors + interior props + ceiling
+      //   - 2 rooftop towers with ladder climb zones + parapets + roof props
+      //   - street props (drums / pallets / trash / broken cars)
+      //   - crosswalk markings
+      //   - neon signage
+      // All collision is appended to ALL_AABBS so collidesWithWall / bullet
+      // checks just see them as regular walls. Floors + climb zones go into
+      // the new dedicated arrays that the gravity loop samples each frame.
+      const floors: FloorAABB[] = []
+      const ceilings: CeilingAABB[] = []
+      const climbZones: ClimbZone[] = []
+      const entries: { x: number; z: number; kind: "door" | "ladder" }[] = []
+
+      // Reusable "ENTER" sign sprite — drawn above hollow-building doors
+      // and rebuilt per-call so we can vary text/color later if needed.
+      // Always-on-top via depthTest:false so cover doesn't hide it.
+      function makeEntrySign(label: string, color: string): THREE.Sprite {
+        const canvas = document.createElement("canvas")
+        canvas.width = 256
+        canvas.height = 96
+        const ctx = canvas.getContext("2d")
+        if (ctx) {
+          ctx.fillStyle = "rgba(0,0,0,0.7)"
+          ctx.fillRect(0, 0, 256, 96)
+          ctx.strokeStyle = color
+          ctx.lineWidth = 4
+          ctx.strokeRect(4, 4, 248, 88)
+          ctx.font = "bold 52px monospace"
+          ctx.textAlign = "center"
+          ctx.textBaseline = "middle"
+          ctx.lineWidth = 6
+          ctx.strokeStyle = "rgba(0,0,0,0.9)"
+          ctx.strokeText(label, 128, 50)
+          ctx.fillStyle = color
+          ctx.fillText(label, 128, 50)
+        }
+        const tex = new THREE.CanvasTexture(canvas)
+        tex.needsUpdate = true
+        const mat = new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true })
+        const sprite = new THREE.Sprite(mat)
+        sprite.scale.set(2.4, 0.9, 1)
+        sprite.renderOrder = 1050
+        return sprite
+      }
+
+      // Pulsing yellow ground disc — placed under entries so the player
+      // can spot them peripherally even without looking up at the sign.
+      // We tag the mesh with userData.pulse so the animate loop can find
+      // them by name and modulate their emissiveIntensity.
+      function makeEntryDecal(x: number, z: number, color: number): THREE.Mesh {
+        const mat = new THREE.MeshStandardMaterial({
+          color,
+          emissive: color,
+          emissiveIntensity: 1.0,
+          roughness: 0.4,
+          metalness: 0.1,
+          transparent: true,
+          opacity: 0.85,
+        })
+        const ring = new THREE.Mesh(new THREE.CircleGeometry(0.75, 24), mat)
+        ring.rotation.x = -Math.PI / 2
+        ring.position.set(x, 0.025, z)
+        ring.userData.pulse = true
+        scene.add(ring)
+        return ring
+      }
+      const entryDecals: THREE.Mesh[] = []
+
+      // Default ceiling height used for hollow buildings.
+      const INTERIOR_H = 4.0
+      const WALL_T = 0.3 // wall slab thickness
+
+      // Build a single thin wall slab and register it for collision + raycast.
+      function addWallSlab(
+        cxw: number,
+        cy: number,
+        czw: number,
+        sx: number,
+        sy: number,
+        sz: number,
+        mat: THREE.Material,
+      ) {
+        const m = new THREE.Mesh(new THREE.BoxGeometry(sx, sy, sz), mat)
+        m.position.set(cxw, cy, czw)
+        m.castShadow = true
+        m.receiveShadow = true
+        scene.add(m)
+        wallMeshes.push(m)
+        ALL_AABBS.push({
+          x1: cxw - sx / 2,
+          x2: cxw + sx / 2,
+          z1: czw - sz / 2,
+          z2: czw + sz / 2,
+          h: cy + sy / 2, // top of slab
+        })
+        return m
+      }
+
+      // Build a hollow building (4 perimeter walls with a door gap on one
+      // side, plus ceiling). Interior props are added separately by caller.
+      function makeHollowBuilding(opts: {
+        x: number
+        z: number
+        w: number
+        d: number
+        h?: number
+        doorSide: "north" | "south" | "east" | "west"
+        doorWidth?: number
+        bldMat: THREE.Material
+        roofMat: THREE.Material
+      }) {
+        const { x, z, w, d, doorSide, bldMat, roofMat } = opts
+        const h = opts.h ?? INTERIOR_H
+        const doorW = opts.doorWidth ?? 2.0
+        // West wall (low-x)
+        if (doorSide === "west") {
+          const gapStart = z + d / 2 - doorW / 2
+          const gapEnd = z + d / 2 + doorW / 2
+          // North half (z < gapStart)
+          addWallSlab(x, h / 2, (z + gapStart) / 2, WALL_T, h, gapStart - z, bldMat)
+          // South half (z > gapEnd)
+          addWallSlab(x, h / 2, (gapEnd + (z + d)) / 2, WALL_T, h, z + d - gapEnd, bldMat)
+        } else {
+          addWallSlab(x, h / 2, z + d / 2, WALL_T, h, d, bldMat)
+        }
+        // East wall (high-x)
+        if (doorSide === "east") {
+          const gapStart = z + d / 2 - doorW / 2
+          const gapEnd = z + d / 2 + doorW / 2
+          addWallSlab(x + w, h / 2, (z + gapStart) / 2, WALL_T, h, gapStart - z, bldMat)
+          addWallSlab(x + w, h / 2, (gapEnd + (z + d)) / 2, WALL_T, h, z + d - gapEnd, bldMat)
+        } else {
+          addWallSlab(x + w, h / 2, z + d / 2, WALL_T, h, d, bldMat)
+        }
+        // North wall (low-z)
+        if (doorSide === "north") {
+          const gapStart = x + w / 2 - doorW / 2
+          const gapEnd = x + w / 2 + doorW / 2
+          addWallSlab((x + gapStart) / 2, h / 2, z, gapStart - x, h, WALL_T, bldMat)
+          addWallSlab((gapEnd + (x + w)) / 2, h / 2, z, x + w - gapEnd, h, WALL_T, bldMat)
+        } else {
+          addWallSlab(x + w / 2, h / 2, z, w, h, WALL_T, bldMat)
+        }
+        // South wall (high-z)
+        if (doorSide === "south") {
+          const gapStart = x + w / 2 - doorW / 2
+          const gapEnd = x + w / 2 + doorW / 2
+          addWallSlab((x + gapStart) / 2, h / 2, z + d, gapStart - x, h, WALL_T, bldMat)
+          addWallSlab((gapEnd + (x + w)) / 2, h / 2, z + d, x + w - gapEnd, h, WALL_T, bldMat)
+        } else {
+          addWallSlab(x + w / 2, h / 2, z + d, w, h, WALL_T, bldMat)
+        }
+        // Roof / ceiling slab — interior visible from below, doubles as
+        // potential rooftop walkable surface (we don't add it to floors[]
+        // since these hollow buildings don't have roof access in this PR).
+        const roof = new THREE.Mesh(new THREE.BoxGeometry(w + 0.3, 0.25, d + 0.3), roofMat)
+        roof.position.set(x + w / 2, h + 0.12, z + d / 2)
+        roof.castShadow = true
+        roof.receiveShadow = true
+        scene.add(roof)
+        // Interior floor patch (slightly darker) so it reads as "inside".
+        const floorMat = new THREE.MeshStandardMaterial({
+          color: 0x554a3a,
+          roughness: 0.95,
+          metalness: 0,
+        })
+        const interiorFloor = new THREE.Mesh(
+          new THREE.PlaneGeometry(w - WALL_T, d - WALL_T),
+          floorMat,
+        )
+        interiorFloor.rotation.x = -Math.PI / 2
+        interiorFloor.position.set(x + w / 2, 0.015, z + d / 2)
+        interiorFloor.receiveShadow = true
+        scene.add(interiorFloor)
+        // ── Door cue: "ENTER" sprite above the gap + ground decal below.
+        // Position is the door's outside footprint so the player sees the
+        // sign before stepping through. Entry record drives the minimap icon.
+        let doorX = x + w / 2
+        let doorZ = z + d / 2
+        const doorClearance = 0.6 // outside the wall plane
+        if (doorSide === "north") doorZ = z - doorClearance
+        else if (doorSide === "south") doorZ = z + d + doorClearance
+        else if (doorSide === "west") doorX = x - doorClearance
+        else doorX = x + w + doorClearance
+        const enterSign = makeEntrySign("ENTER", "#44ff88")
+        enterSign.position.set(doorX, h + 0.7, doorZ)
+        scene.add(enterSign)
+        entryDecals.push(makeEntryDecal(doorX, doorZ, 0x44ff88))
+        entries.push({ x: doorX, z: doorZ, kind: "door" })
+      }
+
+      // Place a prop crate / table / shelf with collision.
+      function placeProp(opts: {
+        x: number
+        y: number
+        z: number
+        w: number
+        h: number
+        d: number
+        color: number
+        roughness?: number
+        metalness?: number
+        emissive?: number
+      }) {
+        const mat = new THREE.MeshStandardMaterial({
+          color: opts.color,
+          roughness: opts.roughness ?? 0.8,
+          metalness: opts.metalness ?? 0.05,
+          emissive: opts.emissive ?? 0x000000,
+        })
+        const mesh = new THREE.Mesh(new THREE.BoxGeometry(opts.w, opts.h, opts.d), mat)
+        mesh.position.set(opts.x, opts.y + opts.h / 2, opts.z)
+        mesh.castShadow = true
+        mesh.receiveShadow = true
+        scene.add(mesh)
+        wallMeshes.push(mesh)
+        ALL_AABBS.push({
+          x1: opts.x - opts.w / 2,
+          x2: opts.x + opts.w / 2,
+          z1: opts.z - opts.d / 2,
+          z2: opts.z + opts.d / 2,
+          h: opts.y + opts.h,
+        })
+      }
+
+      // ── Battle city: hollow buildings flanking the central avenue ─────
+      // Generated from the BATTLE_CITY_BUILDINGS module-level spec so the
+      // layout is editable in one place. Each gets 2–3 interior cover
+      // props placed deterministically (seeded by position) so the same
+      // building always renders the same crates / desks.
+      for (const b of BATTLE_CITY_BUILDINGS) {
+        const matB = b.bldKind === "concrete" ? concreteMat : industrialMat
+        const matR = b.bldKind === "concrete" ? concreteRoofMat : industrialRoofMat
+        const h = b.h ?? 4.5
+        makeHollowBuilding({
+          x: b.x,
+          z: b.z,
+          w: b.w,
+          d: b.d,
+          h,
+          doorSide: b.doorSide,
+          doorWidth: 2.4,
+          bldMat: matB,
+          roofMat: matR,
+        })
+        // Interior cover — quantize position by a fixed seed so the inner
+        // layout reads as "designed" rather than random.
+        const seed = (b.x * 13 + b.z * 7) & 0xff
+        const cx = b.x + b.w * 0.35
+        const cz = b.z + b.d * 0.5
+        placeProp({
+          x: cx,
+          y: 0,
+          z: cz,
+          w: 1.4,
+          h: 1.0,
+          d: 1.4,
+          color: 0x6a4a26,
+        })
+        placeProp({
+          x: b.x + b.w * 0.7,
+          y: 0,
+          z: b.z + b.d * (0.3 + ((seed >> 4) & 1) * 0.4),
+          w: 2.0,
+          h: 0.85,
+          d: 1.0,
+          color: 0x444444,
+        })
+        // A tall shelf only in larger buildings.
+        if (b.w >= 14) {
+          placeProp({
+            x: b.x + b.w * 0.85,
+            y: 0,
+            z: b.z + b.d * 0.7,
+            w: 1.0,
+            h: 1.8,
+            d: 0.4,
+            color: 0x333333,
+          })
+        }
+      }
+
+      // Hollow building #1 — warehouse on south urban edge.
+      {
+        const x = 16
+        const z = 86
+        const w = 10
+        const d = 8
+        makeHollowBuilding({
+          x,
+          z,
+          w,
+          d,
+          doorSide: "north",
+          doorWidth: 2.0,
+          bldMat: concreteMat,
+          roofMat: concreteRoofMat,
+        })
+        // Interior props
+        placeProp({ x: x + 2, y: 0, z: z + 2.5, w: 1.4, h: 1.0, d: 1.4, color: 0x6a4a26 })
+        placeProp({ x: x + 2, y: 1.0, z: z + 2.5, w: 1.2, h: 0.9, d: 1.2, color: 0x5a3a1c })
+        placeProp({ x: x + 7.5, y: 0, z: z + 5.5, w: 2.5, h: 0.85, d: 1.0, color: 0x444444 })
+        placeProp({ x: x + 5, y: 0, z: z + 5.5, w: 1.0, h: 1.8, d: 0.4, color: 0x333333 })
+      }
+
+      // Hollow building #2 — office on industrial / outdoor border.
+      {
+        const x = 43
+        const z = 85
+        const w = 10
+        const d = 8
+        makeHollowBuilding({
+          x,
+          z,
+          w,
+          d,
+          doorSide: "north",
+          doorWidth: 1.8,
+          bldMat: industrialMat,
+          roofMat: industrialRoofMat,
+        })
+        placeProp({ x: x + 2, y: 0, z: z + 4, w: 2.0, h: 0.85, d: 1.0, color: 0x333333 })
+        placeProp({ x: x + 7, y: 0, z: z + 6.5, w: 1.0, h: 1.7, d: 0.4, color: 0x222222 })
+        placeProp({ x: x + 7, y: 0, z: z + 2.0, w: 1.0, h: 1.7, d: 0.4, color: 0x222222 })
+      }
+
+      // Build a roof-access tower: solid box you can't enter, with an
+      // exterior ladder, a walkable roof, parapets, and one roof prop.
+      // The ladder is purely cosmetic + a climb zone; pressing E inside the
+      // zone teleports the player up (or back down).
+      function makeRoofTower(opts: {
+        x: number
+        z: number
+        w: number
+        d: number
+        h: number
+        ladderSide: "north" | "south" | "east" | "west"
+        bldMat: THREE.Material
+        roofMat: THREE.Material
+        roofProp?: "tank" | "vent"
+      }) {
+        const { x, z, w, d, h, ladderSide, bldMat, roofMat } = opts
+        const body = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), bldMat)
+        body.position.set(x + w / 2, h / 2, z + d / 2)
+        body.castShadow = true
+        body.receiveShadow = true
+        scene.add(body)
+        wallMeshes.push(body)
+        ALL_AABBS.push({ x1: x, z1: z, x2: x + w, z2: z + d, h })
+        // Roof slab (slightly larger than body)
+        const roof = new THREE.Mesh(new THREE.BoxGeometry(w + 0.3, 0.25, d + 0.3), roofMat)
+        roof.position.set(x + w / 2, h + 0.12, z + d / 2)
+        roof.castShadow = true
+        roof.receiveShadow = true
+        scene.add(roof)
+        // Walkable floor on top.
+        floors.push({ x1: x, z1: z, x2: x + w, z2: z + d, y: h + 0.25 })
+        // Parapets (low walls on each edge) — 0.8m tall.
+        const para = 0.8
+        const paraT = 0.2
+        const paraMat = bldMat
+        const paraY = h + 0.25 + para / 2
+        addWallSlab(x + w / 2, paraY, z, w, para, paraT, paraMat) // north
+        addWallSlab(x + w / 2, paraY, z + d, w, para, paraT, paraMat) // south
+        addWallSlab(x, paraY, z + d / 2, paraT, para, d, paraMat) // west
+        addWallSlab(x + w, paraY, z + d / 2, paraT, para, d, paraMat) // east
+        // Ladder mesh — vertical rails + rungs on the chosen side.
+        const railMat = new THREE.MeshStandardMaterial({
+          color: 0x444444,
+          roughness: 0.4,
+          metalness: 0.9,
+        })
+        const ladderH = h + 0.25
+        let lx = 0
+        let lz = 0
+        if (ladderSide === "west") {
+          lx = x - 0.15
+          lz = z + d / 2
+        } else if (ladderSide === "east") {
+          lx = x + w + 0.15
+          lz = z + d / 2
+        } else if (ladderSide === "north") {
+          lx = x + w / 2
+          lz = z - 0.15
+        } else {
+          lx = x + w / 2
+          lz = z + d + 0.15
+        }
+        // Two rails — orient along Y, offset 0.3m apart laterally.
+        const railW = 0.06
+        const sideOffset = ladderSide === "west" || ladderSide === "east" ? 0 : 0.3
+        const otherOffset = ladderSide === "west" || ladderSide === "east" ? 0.3 : 0
+        for (const s of [-1, 1]) {
+          const rail = new THREE.Mesh(new THREE.BoxGeometry(railW, ladderH, railW), railMat)
+          rail.position.set(lx + s * sideOffset, ladderH / 2, lz + s * otherOffset)
+          rail.castShadow = true
+          scene.add(rail)
+        }
+        // Rungs every 0.35m.
+        for (let yy = 0.3; yy < ladderH - 0.1; yy += 0.4) {
+          const rung = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.05, 0.05), railMat)
+          rung.position.set(lx, yy, lz)
+          if (ladderSide === "north" || ladderSide === "south") {
+            rung.rotation.y = Math.PI / 2
+          }
+          scene.add(rung)
+        }
+        // Climb zone — small rectangle in front of the ladder base.
+        const cz: ClimbZone = (() => {
+          if (ladderSide === "west") {
+            return {
+              x1: lx - 1.2,
+              x2: lx + 0.2,
+              z1: lz - 0.7,
+              z2: lz + 0.7,
+              targetY: h + 0.25,
+              downY: 0,
+            }
+          }
+          if (ladderSide === "east") {
+            return {
+              x1: lx - 0.2,
+              x2: lx + 1.2,
+              z1: lz - 0.7,
+              z2: lz + 0.7,
+              targetY: h + 0.25,
+              downY: 0,
+            }
+          }
+          if (ladderSide === "north") {
+            return {
+              x1: lx - 0.7,
+              x2: lx + 0.7,
+              z1: lz - 1.2,
+              z2: lz + 0.2,
+              targetY: h + 0.25,
+              downY: 0,
+            }
+          }
+          return {
+            x1: lx - 0.7,
+            x2: lx + 0.7,
+            z1: lz - 0.2,
+            z2: lz + 1.2,
+            targetY: h + 0.25,
+            downY: 0,
+          }
+        })()
+        climbZones.push(cz)
+        // Ladder cue: yellow ground disc at the base + "[E] CLIMB" sprite
+        // a bit above eye height so it pops against the tower wall.
+        const decalX = (cz.x1 + cz.x2) / 2
+        const decalZ = (cz.z1 + cz.z2) / 2
+        entryDecals.push(makeEntryDecal(decalX, decalZ, 0xffcc22))
+        const climbSign = makeEntrySign("[E] CLIMB", "#ffcc22")
+        climbSign.position.set(decalX, 2.3, decalZ)
+        scene.add(climbSign)
+        entries.push({ x: decalX, z: decalZ, kind: "ladder" })
+        // Roof prop.
+        if (opts.roofProp === "tank") {
+          const tank = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.9, 1.0, 1.6, 12),
+            new THREE.MeshStandardMaterial({
+              color: 0x6a8a8a,
+              roughness: 0.55,
+              metalness: 0.35,
+            }),
+          )
+          tank.position.set(x + w / 2 + 0.8, h + 0.25 + 0.8, z + d / 2 - 0.6)
+          tank.castShadow = true
+          scene.add(tank)
+          ALL_AABBS.push({
+            x1: tank.position.x - 1.0,
+            x2: tank.position.x + 1.0,
+            z1: tank.position.z - 1.0,
+            z2: tank.position.z + 1.0,
+            h: h + 0.25 + 1.6,
+          })
+        } else if (opts.roofProp === "vent") {
+          const vent = new THREE.Mesh(
+            new THREE.BoxGeometry(1.4, 0.9, 1.0),
+            new THREE.MeshStandardMaterial({
+              color: 0x6a6a6a,
+              roughness: 0.4,
+              metalness: 0.5,
+            }),
+          )
+          vent.position.set(x + w / 2 - 0.5, h + 0.25 + 0.45, z + d / 2 + 0.5)
+          vent.castShadow = true
+          scene.add(vent)
+          ALL_AABBS.push({
+            x1: vent.position.x - 0.7,
+            x2: vent.position.x + 0.7,
+            z1: vent.position.z - 0.5,
+            z2: vent.position.z + 0.5,
+            h: h + 0.25 + 0.9,
+          })
+        }
+      }
+
+      // Roof tower #1 — west-facing ladder, water tank on top.
+      makeRoofTower({
+        x: 28,
+        z: 86,
+        w: 5,
+        d: 5,
+        h: 6,
+        ladderSide: "west",
+        bldMat: concreteMat,
+        roofMat: concreteRoofMat,
+        roofProp: "tank",
+      })
+      // Roof tower #2 — east-facing ladder, AC vent on top.
+      makeRoofTower({
+        x: 60,
+        z: 86,
+        w: 5,
+        d: 5,
+        h: 5,
+        ladderSide: "east",
+        bldMat: industrialMat,
+        roofMat: industrialRoofMat,
+        roofProp: "vent",
+      })
+
+      // ── Street props ───────────────────────────────────────────────────────
+      // Drum barrels (cylinders) clustered at key choke points.
+      const drumMat = new THREE.MeshStandardMaterial({
+        color: 0x8a3a2a,
+        roughness: 0.65,
+        metalness: 0.35,
+      })
+      const drumStripeMat = new THREE.MeshStandardMaterial({
+        color: 0xffd84a,
+        emissive: 0x3a2200,
+        roughness: 0.6,
+        metalness: 0,
+      })
+      const drumSpots: [number, number][] = [
+        [12, 36],
+        [12.7, 36.6],
+        [13.4, 36],
+        [40, 30],
+        [40.7, 30.7],
+        [55, 50],
+        [56, 50.6],
+        [70, 70],
+        [70.7, 70.6],
+        [85, 30],
+        [85.7, 30.7],
+      ]
+      for (const [dx, dz] of drumSpots) {
+        const drum = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.35, 0.95, 10), drumMat)
+        drum.position.set(dx, 0.475, dz)
+        drum.castShadow = true
+        drum.receiveShadow = true
+        scene.add(drum)
+        wallMeshes.push(drum)
+        ALL_AABBS.push({ x1: dx - 0.4, x2: dx + 0.4, z1: dz - 0.4, z2: dz + 0.4, h: 0.95 })
+        // Yellow stripe band around the drum.
+        const stripe = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.36, 0.36, 0.12, 10),
+          drumStripeMat,
+        )
+        stripe.position.set(dx, 0.65, dz)
+        scene.add(stripe)
+      }
+
+      // Wood pallets (low flat boxes).
+      const palletMat = new THREE.MeshStandardMaterial({
+        color: 0x886a3a,
+        roughness: 0.95,
+        metalness: 0,
+      })
+      const palletSpots: [number, number, number][] = [
+        [38, 40, 0],
+        [38, 41.1, 0],
+        [52, 70, Math.PI / 6],
+        [82, 22, 0],
+      ]
+      for (const [px, pz, rot] of palletSpots) {
+        const pal = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.15, 0.8), palletMat)
+        pal.position.set(px, 0.075, pz)
+        pal.rotation.y = rot
+        pal.castShadow = true
+        pal.receiveShadow = true
+        scene.add(pal)
+        // No AABB — players step over flat pallets.
+      }
+
+      // Trash cans (small cylinders).
+      const trashMat = new THREE.MeshStandardMaterial({
+        color: 0x2a2e22,
+        roughness: 0.7,
+        metalness: 0.2,
+      })
+      const trashSpots: [number, number][] = [
+        [10, 28],
+        [10, 60],
+        [10, 78],
+        [27, 66],
+      ]
+      for (const [tx, tz] of trashSpots) {
+        const can = new THREE.Mesh(new THREE.CylinderGeometry(0.28, 0.32, 0.85, 10), trashMat)
+        can.position.set(tx, 0.425, tz)
+        can.castShadow = true
+        scene.add(can)
+        wallMeshes.push(can)
+        ALL_AABBS.push({ x1: tx - 0.32, x2: tx + 0.32, z1: tz - 0.32, z2: tz + 0.32, h: 0.85 })
+      }
+
+      // A wrecked car / hulk in the south plaza — bigger silhouette than
+      // the existing patrol cars; clearly broken (no windshield, tilted).
+      {
+        const wreckMat = new THREE.MeshStandardMaterial({
+          color: 0x3a3a32,
+          roughness: 0.85,
+          metalness: 0.2,
+        })
+        const wx = 33
+        const wz = 88
+        const wreck = new THREE.Mesh(new THREE.BoxGeometry(3.0, 0.9, 1.5), wreckMat)
+        wreck.position.set(wx, 0.45, wz)
+        wreck.rotation.z = 0.12
+        wreck.castShadow = true
+        wreck.receiveShadow = true
+        scene.add(wreck)
+        wallMeshes.push(wreck)
+        ALL_AABBS.push({ x1: wx - 1.6, x2: wx + 1.6, z1: wz - 0.8, z2: wz + 0.8, h: 0.9 })
+        // Tires (4)
+        const tireMat = new THREE.MeshStandardMaterial({
+          color: 0x141414,
+          roughness: 0.95,
+          metalness: 0,
+        })
+        const tireOffsets: [number, number][] = [
+          [wx - 1.1, wz - 0.65],
+          [wx + 1.1, wz - 0.65],
+          [wx - 1.1, wz + 0.65],
+          [wx + 1.1, wz + 0.65],
+        ]
+        for (const [tox, toz] of tireOffsets) {
+          const tire = new THREE.Mesh(new THREE.CylinderGeometry(0.24, 0.24, 0.14, 8), tireMat)
+          tire.position.set(tox, 0.24, toz)
+          tire.rotation.z = Math.PI / 2
+          scene.add(tire)
+        }
+      }
+
+      // ── Crosswalk markings ────────────────────────────────────────────────
+      // Painted white stripes on the ground; no collision, slight y-lift so
+      // they sit on top of the ground plane without z-fighting.
+      const crosswalkMat = new THREE.MeshStandardMaterial({
+        color: 0xeae8d8,
+        roughness: 0.9,
+        metalness: 0,
+        emissive: 0x1a1814,
+      })
+      const crosswalks: { cx: number; cz: number; rot: number }[] = [
+        { cx: 12, cz: 22, rot: 0 },
+        { cx: 31, cz: 43, rot: Math.PI / 2 },
+        { cx: 60, cz: 22, rot: 0 },
+      ]
+      for (const cw of crosswalks) {
+        for (let s = -2; s <= 2; s++) {
+          const stripe = new THREE.Mesh(new THREE.PlaneGeometry(0.45, 3.5), crosswalkMat)
+          stripe.rotation.x = -Math.PI / 2
+          stripe.rotation.z = cw.rot
+          const off = s * 0.85
+          stripe.position.set(cw.cx + Math.cos(cw.rot) * off, 0.018, cw.cz + Math.sin(cw.rot) * off)
+          stripe.receiveShadow = true
+          scene.add(stripe)
+        }
+      }
+
+      // ── Neon signage ──────────────────────────────────────────────────────
+      // Wall-mounted emissive boxes near major buildings — readable from
+      // far away thanks to the high emissiveIntensity under ACESFilmic.
+      const neonSpec: {
+        x: number
+        z: number
+        rot: number
+        w: number
+        h: number
+        color: number
+      }[] = [
+        { x: 11, z: 14.5, rot: 0, w: 4, h: 0.9, color: 0xff4488 }, // pink
+        { x: 47, z: 4.5, rot: 0, w: 5, h: 1.0, color: 0x44ffcc }, // teal
+        { x: 22.5, z: 14, rot: Math.PI / 2, w: 3, h: 0.7, color: 0xffcc44 }, // amber
+        { x: 70, z: 5.5, rot: 0, w: 4, h: 0.8, color: 0x8844ff }, // violet
+      ]
+      for (const n of neonSpec) {
+        const neonMat = new THREE.MeshStandardMaterial({
+          color: n.color,
+          emissive: n.color,
+          emissiveIntensity: 1.4,
+          roughness: 0.4,
+          metalness: 0.2,
+        })
+        const sign = new THREE.Mesh(new THREE.BoxGeometry(n.w, n.h, 0.12), neonMat)
+        sign.position.set(n.x, 3.2, n.z)
+        sign.rotation.y = n.rot
+        scene.add(sign)
+        // Add a small point light so the neon casts a colored wash on the
+        // nearby wall (subtle but adds the "wet street" cyberpunk feel).
+        const pl = new THREE.PointLight(n.color, 0.55, 8)
+        pl.position.set(n.x, 3.5, n.z + 0.3)
+        scene.add(pl)
+      }
+
+      // ── Distant skyline silhouette ─────────────────────────────────────
+      // Tall dark blocks placed *outside* the playable map. Purely
+      // cosmetic — no collision, no shadow casting — but it sells the
+      // "city street" framing instead of an open arena vibe.
+      const skylineMat = new THREE.MeshLambertMaterial({
+        color: 0x202833,
+        emissive: 0x080a14,
+      })
+      // Use a single InstancedMesh per orientation strip to keep draw
+      // calls low. Each row is a fixed pattern with per-instance scale.
+      const skylineRows: { z: number; baseX: number; n: number; depth: number }[] = [
+        { z: -25, baseX: -15, n: 18, depth: 6 }, // far north
+        { z: MAP_SIZE + 25, baseX: -15, n: 18, depth: 6 }, // far south
+      ]
+      for (const row of skylineRows) {
+        const inst = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), skylineMat, row.n)
+        inst.castShadow = false
+        inst.receiveShadow = false
+        const dummy = new THREE.Object3D()
+        for (let i = 0; i < row.n; i++) {
+          const w = 5 + ((i * 7) % 5)
+          const h = 14 + ((i * 13) % 18)
+          const x = row.baseX + i * 7.5 + ((i * 5) % 3)
+          dummy.position.set(x, h / 2, row.z)
+          dummy.scale.set(w, h, row.depth)
+          dummy.updateMatrix()
+          inst.setMatrixAt(i, dummy.matrix)
+        }
+        inst.instanceMatrix.needsUpdate = true
+        scene.add(inst)
+      }
+      // Sky lanes (east-west far ends) — give depth along the avenue too.
+      for (const xFar of [-22, MAP_SIZE + 22]) {
+        const inst = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), skylineMat, 12)
+        const dummy = new THREE.Object3D()
+        for (let i = 0; i < 12; i++) {
+          const w = 5 + ((i * 11) % 6)
+          const h = 12 + ((i * 9) % 22)
+          const z = -10 + i * 10 + ((i * 3) % 4)
+          dummy.position.set(xFar, h / 2, z)
+          dummy.scale.set(w, h, 6)
+          dummy.updateMatrix()
+          inst.setMatrixAt(i, dummy.matrix)
+        }
+        inst.instanceMatrix.needsUpdate = true
+        scene.add(inst)
+      }
+
+      // ── Street lamps along the central avenue ──────────────────────────
+      // Tall cylinder with a glowing top — gives the avenue a clear
+      // "road" reading at a distance. Lamps alternate sides.
+      const lampPostMat = new THREE.MeshStandardMaterial({
+        color: 0x2a2e36,
+        roughness: 0.55,
+        metalness: 0.55,
+      })
+      const lampHeadMat = new THREE.MeshStandardMaterial({
+        color: 0xffe9aa,
+        emissive: 0xffd060,
+        emissiveIntensity: 1.6,
+        roughness: 0.4,
+        metalness: 0,
+      })
+      for (let lx = 8; lx <= 92; lx += 12) {
+        for (const lz of [44, 56]) {
+          const post = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.12, 5, 8), lampPostMat)
+          post.position.set(lx, 2.5, lz)
+          post.castShadow = true
+          scene.add(post)
+          // Arm overhanging the avenue
+          const arm = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.08, 0.08), lampPostMat)
+          arm.position.set(lx + (lz < 50 ? 0.5 : -0.5), 4.8, lz)
+          scene.add(arm)
+          // Glowing head
+          const head = new THREE.Mesh(new THREE.SphereGeometry(0.22, 10, 8), lampHeadMat)
+          head.position.set(lx + (lz < 50 ? 1.0 : -1.0), 4.65, lz)
+          scene.add(head)
+          // Subtle warm point light (low range so we don't run out of
+          // dynamic lights — 12 lamps total).
+          const lampLight = new THREE.PointLight(0xffd060, 0.4, 7)
+          lampLight.position.set(head.position.x, head.position.y, head.position.z)
+          scene.add(lampLight)
+          // Cylinder gets minimal collision — a thin AABB at the base.
+          ALL_AABBS.push({
+            x1: lx - 0.18,
+            x2: lx + 0.18,
+            z1: lz - 0.18,
+            z2: lz + 0.18,
+            h: 5,
+          })
+        }
+      }
+
       // ── FPS camera state ───────────────────────────────────────────────────
-      // West edge of map, facing east into the urban zone. (Previously (8, 48)
-      // which sat *inside* building AABB [3,45,6,7] — collidesWithWall blocked
-      // every step, so the player could never leave spawn.)
-      const focalPoint = new THREE.Vector3(2, 0, 48)
+      // West end of the central avenue, with the avenue terminus building
+      // visible dead-ahead. Buildings flanking at z=32–44 (north) and
+      // z=57–70 (south) sit tight against the avenue (z≈44–57) so they
+      // read as "the city's street walls" — no more "off in the distance".
+      const focalPoint = new THREE.Vector3(4, 0, 50)
       const camState = { yaw: -Math.PI / 2, pitch: 0 } // facing +X (east)
 
       function clampPitch(p: number) {
@@ -1437,7 +2602,9 @@ export default function ThreeWorld({
       }
 
       function updateCamera() {
-        camera.position.set(focalPoint.x, EYE_HEIGHT, focalPoint.z)
+        // focalPoint.y is now the player's foot Y (0 on ground, raised when
+        // standing on a rooftop / climbed ladder). Eye sits above feet.
+        camera.position.set(focalPoint.x, focalPoint.y + EYE_HEIGHT, focalPoint.z)
         camera.rotation.y = camState.yaw
         camera.rotation.x = camState.pitch
       }
@@ -1896,6 +3063,17 @@ export default function ThreeWorld({
           breathPhase: Math.random() * Math.PI * 2,
           microIdleSeed: Math.random() * 1000,
           isCommander,
+          // Aggressive-AI bookkeeping (initial values).
+          alertedUntil: 0,
+          // Random side at spawn so groups arc around the player from both
+          // sides rather than stacking on a single flank.
+          flankSide: Math.random() < 0.5 ? -1 : 1,
+          flankStrength: 0.4 + Math.random() * 0.6, // 0.4 – 1.0
+          dashUntil: 0,
+          nextDashCheckTime: 0,
+          nextGrenadeTime: 0,
+          markerKind: null,
+          markerUntil: 0,
         }
       }
 
@@ -1938,6 +3116,61 @@ export default function ThreeWorld({
       }
 
       // ── Bot label sprite (name floats above head) ─────────────────────────
+      // Overhead "!" alert sprite / "?" search sprite, drawn always-on-top.
+      // We reuse a single texture per glyph (cached on the function) since
+      // a sprite material can share the same texture across many sprites.
+      const markerTextureCache = new Map<string, THREE.Texture>()
+      function makeMarkerSprite(kind: "alert" | "search"): THREE.Sprite {
+        const key = kind === "alert" ? "!" : "?"
+        const color = kind === "alert" ? "#ffcc00" : "#88ccff"
+        let tex = markerTextureCache.get(key)
+        if (!tex) {
+          const canvas = document.createElement("canvas")
+          canvas.width = 128
+          canvas.height = 128
+          const ctx = canvas.getContext("2d")
+          if (ctx) {
+            ctx.font = "bold 110px sans-serif"
+            ctx.textAlign = "center"
+            ctx.textBaseline = "middle"
+            ctx.lineWidth = 8
+            ctx.strokeStyle = "rgba(0,0,0,0.85)"
+            ctx.strokeText(key, 64, 70)
+            ctx.fillStyle = color
+            ctx.fillText(key, 64, 70)
+          }
+          tex = new THREE.CanvasTexture(canvas)
+          tex.needsUpdate = true
+          markerTextureCache.set(key, tex)
+        }
+        const mat = new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true })
+        const sprite = new THREE.Sprite(mat)
+        sprite.scale.set(0.7, 0.7, 1)
+        sprite.renderOrder = 1100
+        return sprite
+      }
+
+      function setEnemyMarker(enemy: CombatEnemy, kind: "alert" | "search" | null, durMs: number) {
+        if (kind === null) {
+          if (enemy.markerSprite) enemy.markerSprite.visible = false
+          enemy.markerKind = null
+          enemy.markerUntil = 0
+          return
+        }
+        if (!enemy.markerSprite || enemy.markerKind !== kind) {
+          if (enemy.markerSprite) enemy.mesh.remove(enemy.markerSprite)
+          const sprite = makeMarkerSprite(kind)
+          // Position above head — head is roughly at y ≈ 2.0 for a default
+          // humanoid; sit the marker comfortably above it.
+          sprite.position.set(0, 2.85, 0)
+          enemy.mesh.add(sprite)
+          enemy.markerSprite = sprite
+        }
+        enemy.markerSprite.visible = true
+        enemy.markerKind = kind
+        enemy.markerUntil = Date.now() + durMs
+      }
+
       function makeNameSprite(text: string, color: string): THREE.Sprite {
         const canvas = document.createElement("canvas")
         canvas.width = 256
@@ -2012,6 +3245,9 @@ export default function ThreeWorld({
           bot.botAccuracyMult = tuning.accuracyMult
           bot.botReactMult = tuning.reactMult
           bot.botRespawnMs = tuning.respawnMs
+          // Store the full tuning so the AI state machine doesn't have to
+          // map back from accuracy/respawn numbers to a difficulty.
+          bot.aiTuning = tuning
 
           // Team assignment
           if (gameMode === "tdm") {
@@ -2192,6 +3428,10 @@ export default function ThreeWorld({
         aimedEnemyId: null,
         explosionParticles,
         goalMarkers,
+        floors,
+        ceilings,
+        climbZones,
+        entries,
       }
 
       setEnemyStatus([])
@@ -2333,6 +3573,17 @@ export default function ThreeWorld({
 
         // Play shot sound
         SOUNDS[weapon.id]()
+        // Broadcast a "noise" event from the player position. The enemy AI
+        // reads this each tick: any patrol within `noiseRange` abandons its
+        // waypoint and converges on the source. ADS-suppressed pistol shots
+        // travel a shorter distance via the per-weapon noiseRadius override.
+        lastNoiseRef.current = {
+          x: focalPoint.x,
+          z: focalPoint.z,
+          // Stay "interesting" for 3.5s — long enough to commit to a search,
+          // short enough that holding fire eventually de-aggros patrols.
+          expires: Date.now() + 3500,
+        }
 
         // Center-ray hit detection (recursive through humanoid groups)
         pointer.set(0, 0)
@@ -2428,6 +3679,26 @@ export default function ThreeWorld({
                 const fzs = Math.cos(hitEnemy.smoothedYaw)
                 const dot = -dxs * fxs - dzs * fzs // >0 if shooter is in front
                 hitEnemy.deathFallDir = dot > 0 ? -1 : 1
+              }
+              // Alert nearby allies — seeing a teammate drop gives them a
+              // hard reason to investigate the player's last position.
+              {
+                const killerTuning = hitEnemy.aiTuning ?? MISSION_AI_TUNING
+                if (killerTuning.groupTactics) {
+                  for (const ally of enemies) {
+                    if (ally === hitEnemy || ally.hp <= 0) continue
+                    const ad = Math.hypot(
+                      ally.mesh.position.x - hitEnemy.mesh.position.x,
+                      ally.mesh.position.z - hitEnemy.mesh.position.z,
+                    )
+                    if (ad < 25 && (ally.state === "patrol" || ally.state === "search")) {
+                      ally.state = "search"
+                      ally.searchTimer = 7.0
+                      ally.lastSeenPlayer = { x: focalPoint.x, z: focalPoint.z }
+                      setEnemyMarker(ally, "search", 7000)
+                    }
+                  }
+                }
               }
               killsRef.current += 1
               setKills(killsRef.current)
@@ -2545,9 +3816,9 @@ export default function ThreeWorld({
       // ── PointerLock ────────────────────────────────────────────────────────
       function onDocMouseMove(e: MouseEvent) {
         if (document.pointerLockElement !== renderer.domElement) return
-        camState.yaw -= e.movementX * 0.002
-        camState.pitch = clampPitch(camState.pitch - e.movementY * 0.002)
-        updateCamera()
+        // Accumulate; the animate loop applies (and lightly smooths) it.
+        mouseDeltaRef.current.x += e.movementX
+        mouseDeltaRef.current.y += e.movementY
       }
       function onPointerLockChange() {
         setIsPointerLocked(document.pointerLockElement === renderer.domElement)
@@ -2611,9 +3882,7 @@ export default function ThreeWorld({
         const refs = sceneRef.current
         if (!refs) return
 
-        // Low-pass filter the joystick inputs (mouse stays raw — smoothing
-        // mice would add input lag, but a finger on glass jitters and the
-        // micro-noise reads as camera shake without smoothing).
+        // Low-pass filter the joystick inputs (finger jitter on glass).
         const joyBlend = 1 - Math.exp(-dt * 22)
         joySmoothRef.current.vx += (joystickRef.current.vx - joySmoothRef.current.vx) * joyBlend
         joySmoothRef.current.vy += (joystickRef.current.vy - joySmoothRef.current.vy) * joyBlend
@@ -2621,8 +3890,34 @@ export default function ThreeWorld({
         lookSmoothRef.current.vx += (lookJoyRef.current.vx - lookSmoothRef.current.vx) * lookBlend
         lookSmoothRef.current.vy += (lookJoyRef.current.vy - lookSmoothRef.current.vy) * lookBlend
 
-        // ADS FOV interpolation
-        const targetFov = isAimingRef.current ? (currentWeaponIdxRef.current === 2 ? 28 : 50) : 75
+        // Drain accumulated mouse delta with a light smoothing tail. We
+        // apply ~75% of the buffered movement this frame and roll the
+        // remainder into next frame — eliminates the spiky single-event
+        // jumps on high-Hz mice without adding noticeable input lag.
+        {
+          // Drain 55% of buffered mouse movement this frame and roll the
+          // rest forward. Lower than the previous 0.75 → stops "slide-past"
+          // when the player flicks-and-stops, which read as motion-sickness
+          // jitter for some players.
+          const APPLY = 0.55
+          const mdx = mouseDeltaRef.current.x * APPLY
+          const mdy = mouseDeltaRef.current.y * APPLY
+          mouseDeltaRef.current.x -= mdx
+          mouseDeltaRef.current.y -= mdy
+          if (mdx !== 0 || mdy !== 0) {
+            // Base sensitivity dropped 0.002 → 0.0012 (≈40% slower default).
+            // Player can scale 0.5x–2.0x via the settings panel.
+            const sens = 0.0012 * mouseSensRef.current
+            camState.yaw -= mdx * sens
+            camState.pitch = clampPitch(camState.pitch - mdy * sens)
+            updateCamera()
+          }
+        }
+
+        // ADS FOV interpolation. Base FOV bumped 75 → 80 — wider field of
+        // view trades a touch of zoom for less peripheral motion-shear
+        // when the player rotates quickly.
+        const targetFov = isAimingRef.current ? (currentWeaponIdxRef.current === 2 ? 28 : 50) : 80
         if (Math.abs(camera.fov - targetFov) > 0.3) {
           camera.fov += (targetFov - camera.fov) * Math.min(1, dt * 12)
           camera.updateProjectionMatrix()
@@ -2637,6 +3932,13 @@ export default function ThreeWorld({
           const explosionPos = origin.clone().add(fwd.multiplyScalar(8))
           explosionPos.y = Math.max(0.5, explosionPos.y)
           spawnExplosion(explosionPos)
+          // Grenade is even louder than a gunshot — bigger noise radius via
+          // the longer expiry plus the AI's own distance check.
+          lastNoiseRef.current = {
+            x: explosionPos.x,
+            z: explosionPos.z,
+            expires: Date.now() + 5000,
+          }
           for (const enemy of enemies) {
             if (enemy.hp <= 0) continue
             const dx = enemy.mesh.position.x - explosionPos.x
@@ -2659,9 +3961,17 @@ export default function ThreeWorld({
             }
           }
         }
-        // Tick grenade cooldown display (rounded to 100ms so React bails out)
-        const sinceG = Date.now() - lastGrenadeRef.current
-        setGrenadeCooldownMs(Math.max(0, Math.round((5000 - sinceG) / 100) * 100))
+        // Tick grenade cooldown display. Rounded to 100ms; also gated by
+        // an "only if changed" ref so React's setState isn't invoked at
+        // 60Hz when the displayed value is unchanged for 6 frames.
+        {
+          const sinceG = Date.now() - lastGrenadeRef.current
+          const cd = Math.max(0, Math.round((5000 - sinceG) / 100) * 100)
+          if (cd !== prevGrenadeCdRef.current) {
+            prevGrenadeCdRef.current = cd
+            setGrenadeCooldownMs(cd)
+          }
+        }
 
         // Input → desired movement direction. Joystick is filtered; WASD
         // contributes raw ±1 components clamped to unit length.
@@ -2708,43 +4018,185 @@ export default function ThreeWorld({
 
         // Look joystick: rotate the camera using the smoothed value. A mild
         // square-curve makes small inputs precise without losing top speed.
+        // Multiplied by the user's look-sensitivity preference.
         const slook = lookSmoothRef.current
         if (Math.abs(slook.vx) > 0.001 || Math.abs(slook.vy) > 0.001) {
           const curveX = slook.vx * Math.abs(slook.vx)
           const curveY = slook.vy * Math.abs(slook.vy)
-          camState.yaw -= curveX * 3.4 * dt
-          camState.pitch = clampPitch(camState.pitch - curveY * 2.6 * dt)
+          const ls = lookSensRef.current
+          camState.yaw -= curveX * 3.4 * dt * ls
+          camState.pitch = clampPitch(camState.pitch - curveY * 2.6 * dt * ls)
           updateCamera()
         }
 
-        // Walk-bob: subtle vertical head sway when actually moving. Phase
-        // freezes when standing still so it doesn't bob while idle.
-        if (playerSpeed > 0.5) {
-          walkBobRef.current += dt * (4 + playerSpeed * 0.6)
-          const bobAmp = isAimingRef.current ? 0.012 : 0.03
-          camera.position.y = EYE_HEIGHT + Math.sin(walkBobRef.current * 2) * bobAmp
-        } else {
-          // Decay back to neutral so we don't snap.
-          camera.position.y += (EYE_HEIGHT - camera.position.y) * (1 - Math.exp(-dt * 10))
+        // ── Vertical update: floor sampling + gravity + E-key climb ─────
+        // Highest walkable floor under the player's (x, z). Default ground
+        // is y=0. Floors stored higher than the player's current head +
+        // STEP_UP_MAX are ignored (we don't snap *up* onto rooftops just
+        // by walking under them — those require an E-key climb zone).
+        let groundY = 0
+        for (const f of refs.floors) {
+          if (
+            refs.focalPoint.x > f.x1 &&
+            refs.focalPoint.x < f.x2 &&
+            refs.focalPoint.z > f.z1 &&
+            refs.focalPoint.z < f.z2 &&
+            f.y > groundY &&
+            f.y <= refs.focalPoint.y + STEP_UP_MAX
+          ) {
+            groundY = f.y
+          }
         }
 
-        // HP auto-recovery (5s no damage → 2 HP/s)
+        // Is the player standing inside any climb zone right now? Powers
+        // the bottom-of-screen "[E] 登る" prompt. We push to React state
+        // only on boundary changes (entering / leaving the zone) so the
+        // HUD doesn't re-render every frame while the player loiters.
+        let nearClimbNow = false
+        for (const zone of refs.climbZones) {
+          if (
+            refs.focalPoint.x > zone.x1 - CLIMB_INTERACT_PAD &&
+            refs.focalPoint.x < zone.x2 + CLIMB_INTERACT_PAD &&
+            refs.focalPoint.z > zone.z1 - CLIMB_INTERACT_PAD &&
+            refs.focalPoint.z < zone.z2 + CLIMB_INTERACT_PAD
+          ) {
+            nearClimbNow = true
+            break
+          }
+        }
+        if (nearClimbNow !== prevNearClimbRef.current) {
+          prevNearClimbRef.current = nearClimbNow
+          setNearClimb(nearClimbNow)
+        }
+
+        // E-key climb (consumed once per press in the keydown handler).
+        if (climbRequestRef.current) {
+          climbRequestRef.current = false
+          if (Date.now() > climbCooldownUntilRef.current) {
+            for (const zone of refs.climbZones) {
+              if (
+                refs.focalPoint.x > zone.x1 - CLIMB_INTERACT_PAD &&
+                refs.focalPoint.x < zone.x2 + CLIMB_INTERACT_PAD &&
+                refs.focalPoint.z > zone.z1 - CLIMB_INTERACT_PAD &&
+                refs.focalPoint.z < zone.z2 + CLIMB_INTERACT_PAD
+              ) {
+                // If already roughly at the top, descend back down; else
+                // climb up. Avoids "press E and bounce back instantly"
+                // when the player keeps the key tapped at the top.
+                const atTop = Math.abs(refs.focalPoint.y - zone.targetY) < 0.6
+                if (atTop && zone.downY !== undefined) {
+                  refs.focalPoint.y = zone.downY
+                  playerVelYRef.current = 0
+                  groundY = zone.downY
+                  climbCooldownUntilRef.current = Date.now() + 600
+                } else if (!atTop) {
+                  refs.focalPoint.y = zone.targetY
+                  playerVelYRef.current = 0
+                  groundY = zone.targetY
+                  climbCooldownUntilRef.current = Date.now() + 600
+                }
+                break
+              }
+            }
+          }
+        }
+
+        // Apply gravity / floor snap.
+        if (refs.focalPoint.y > groundY + 0.01) {
+          playerVelYRef.current -= GRAVITY * dt
+          refs.focalPoint.y += playerVelYRef.current * dt
+          if (refs.focalPoint.y <= groundY) {
+            // Landed. Fall damage based on impact vertical speed.
+            const vy = -playerVelYRef.current
+            if (
+              vy > FALL_SAFE_SPEED &&
+              gamePhaseRef.current === "playing" &&
+              Date.now() > spawnInvulnUntilRef.current
+            ) {
+              const t = Math.min(1, (vy - FALL_SAFE_SPEED) / (FALL_LETHAL_SPEED - FALL_SAFE_SPEED))
+              const dmg = Math.round(FALL_MAX_DAMAGE * t)
+              if (dmg > 0) {
+                playerHpRef.current = Math.max(0, playerHpRef.current - dmg)
+                setPlayerHp(playerHpRef.current)
+                lastDamageTimeRef.current = Date.now()
+                // Reduced shake (was 5 + t*8). Tones down the motion-
+                // sickness spike on fall-damage landings.
+                cameraShakeRef.current.intensity = 2.5 + t * 4
+                setDamageFlash(true)
+                SOUNDS.damage()
+                setTimeout(() => setDamageFlash(false), 320)
+                if (playerHpRef.current <= 0) {
+                  gamePhaseRef.current = "gameover"
+                  setGamePhase("gameover")
+                  deathsRef.current += 1
+                  setDeaths(deathsRef.current)
+                }
+              }
+            }
+            refs.focalPoint.y = groundY
+            playerVelYRef.current = 0
+          }
+        } else {
+          // Snap to floor (handles walking onto a new floor at the same Y
+          // and the small auto step-up of low geometry).
+          refs.focalPoint.y = groundY
+          playerVelYRef.current = 0
+        }
+        updateCamera()
+
+        // Pulse the entry decal rings (door / ladder ground markers) so
+        // they're spottable peripherally. Shared sine wave keeps the
+        // pulse in lockstep across all decals — reads as deliberate
+        // signage rather than per-light flicker.
+        {
+          const pulse = 0.7 + Math.sin(Date.now() * 0.004) * 0.45
+          for (const d of entryDecals) {
+            const mm = d.material as THREE.MeshStandardMaterial
+            mm.emissiveIntensity = pulse
+          }
+        }
+
+        // Walk-bob: subtle vertical head sway when actually moving. Phase
+        // freezes when standing still so it doesn't bob while idle. Base Y
+        // is now the focal point's altitude (0 on ground, raised on roof).
+        // Gated by the user preference (defaults off — common motion-sickness
+        // trigger). When off, the camera stays locked to baseY.
+        const baseY = refs.focalPoint.y + EYE_HEIGHT
+        if (walkBobOnRef.current && playerSpeed > 0.5) {
+          walkBobRef.current += dt * (4 + playerSpeed * 0.6)
+          const bobAmp = isAimingRef.current ? 0.012 : 0.03
+          camera.position.y = baseY + Math.sin(walkBobRef.current * 2) * bobAmp
+        } else {
+          // Snap toward baseY (slightly faster decay when bob is off so
+          // toggling mid-game settles quickly).
+          camera.position.y += (baseY - camera.position.y) * (1 - Math.exp(-dt * 14))
+        }
+
+        // HP auto-recovery (5s no damage → 2 HP/s). Push to React state
+        // only when the *rounded* HP changes — was firing setState every
+        // frame during recovery (≈30 re-renders/sec for a 0.5 HP/frame tick).
         {
           const nowMs = Date.now()
           if (gamePhaseRef.current === "playing" && playerHpRef.current < PLAYER_MAX_HP) {
             if (nowMs - lastDamageTimeRef.current > AUTO_RECOVER_DELAY * 1000) {
               playerHpRef.current = Math.min(PLAYER_MAX_HP, playerHpRef.current + RECOVER_RATE * dt)
-              setPlayerHp(Math.round(playerHpRef.current))
+              const hpInt = Math.round(playerHpRef.current)
+              if (hpInt !== prevDisplayHpRef.current) {
+                prevDisplayHpRef.current = hpInt
+                setPlayerHp(hpInt)
+              }
             }
           }
         }
 
-        // Camera shake (applied directly, not baked into camState)
+        // Camera shake (applied directly, not baked into camState).
+        // Per-axis multipliers halved (0.008 → 0.004, 0.006 → 0.003) to
+        // cut the motion-sickness load on damage / fall landings.
         if (cameraShakeRef.current.intensity > 0) {
           const shk = cameraShakeRef.current.intensity
           const t = Date.now() * 0.05
-          camera.rotation.y += Math.sin(t) * shk * 0.008
-          camera.rotation.x += Math.cos(t * 1.3) * shk * 0.006
+          camera.rotation.y += Math.sin(t) * shk * 0.004
+          camera.rotation.x += Math.cos(t * 1.3) * shk * 0.003
           cameraShakeRef.current.intensity = Math.max(0, shk - CAM_SHAKE_DECAY * dt)
         }
 
@@ -2784,11 +4236,56 @@ export default function ThreeWorld({
         for (let i = refs.bullets.length - 1; i >= 0; i--) {
           const b = refs.bullets[i]
           if (!b) continue
+          // Grenades arc under gravity (plain bullets travel in straight
+          // lines — flag-gated so we don't pay this cost on every shot).
+          if (b.isGrenade) b.velocity.y -= 12 * dt
           b.mesh.position.addScaledVector(b.velocity, dt)
           b.life -= dt
+          // Grenade ground/wall hit → detonate now (rather than waiting
+          // for the fuse) so it doesn't roll under buildings.
+          if (b.isGrenade && b.life > 0) {
+            const ground = b.mesh.position.y <= 0.15
+            const inWall = pointInsideWall(b.mesh.position.x, b.mesh.position.y, b.mesh.position.z)
+            if (ground || inWall) {
+              const center = b.mesh.position.clone()
+              center.y = Math.max(0.4, center.y)
+              spawnExplosion(center)
+              lastNoiseRef.current = { x: center.x, z: center.z, expires: Date.now() + 4000 }
+              const R = b.grenadeRadius ?? 4
+              const dxp = refs.focalPoint.x - center.x
+              const dzp = refs.focalPoint.z - center.z
+              const dpDist = Math.hypot(dxp, dzp)
+              if (
+                dpDist < R &&
+                gamePhaseRef.current === "playing" &&
+                Date.now() > spawnInvulnUntilRef.current
+              ) {
+                const dmg = Math.max(15, Math.floor(60 * (1 - dpDist / R)))
+                playerHpRef.current = Math.max(0, playerHpRef.current - dmg)
+                setPlayerHp(playerHpRef.current)
+                lastDamageTimeRef.current = Date.now()
+                cameraShakeRef.current.intensity = 3
+                setDamageFlash(true)
+                SOUNDS.damage()
+                setTimeout(() => setDamageFlash(false), 320)
+                if (playerHpRef.current <= 0) {
+                  gamePhaseRef.current = "gameover"
+                  setGamePhase("gameover")
+                  deathsRef.current += 1
+                  setDeaths(deathsRef.current)
+                }
+              }
+              refs.scene.remove(b.mesh)
+              b.mesh.geometry.dispose()
+              refs.bullets.splice(i, 1)
+              continue
+            }
+          }
           // Wall impact: if the bullet just entered a wall's 3D AABB, sink it
           // with a small spark instead of letting it punch through cover.
+          // Grenades are handled by the dedicated branch above.
           if (
+            !b.isGrenade &&
             b.life > 0 &&
             pointInsideWall(b.mesh.position.x, b.mesh.position.y, b.mesh.position.z)
           ) {
@@ -2798,8 +4295,10 @@ export default function ThreeWorld({
             refs.bullets.splice(i, 1)
             continue
           }
-          // Enemy bullet hits player
-          if (b.isEnemy && b.life > 0) {
+          // Enemy bullet hits player. Skipped for grenades — they damage
+          // via the AOE detonation, not direct contact (avoids the toss
+          // being eaten mid-arc if it brushes the player).
+          if (b.isEnemy && !b.isGrenade && b.life > 0) {
             const dx = b.mesh.position.x - refs.focalPoint.x
             const dy = b.mesh.position.y - EYE_HEIGHT
             const dz = b.mesh.position.z - refs.focalPoint.z
@@ -2811,7 +4310,7 @@ export default function ThreeWorld({
                 playerHpRef.current = Math.max(0, playerHpRef.current - b.damage)
                 setPlayerHp(playerHpRef.current)
                 lastDamageTimeRef.current = Date.now()
-                cameraShakeRef.current.intensity = 4
+                cameraShakeRef.current.intensity = 2
                 setDamageFlash(true)
                 SOUNDS.damage()
                 setTimeout(() => setDamageFlash(false), 300)
@@ -2826,7 +4325,37 @@ export default function ThreeWorld({
             }
           }
           if (b.life <= 0) {
-            if (!b.isEnemy) spawnExplosion(b.mesh.position.clone(), true)
+            // Fuse-expired grenade air-bursts (covers the rare "stays
+            // airborne the whole fuse" case — apartment-balcony-trajectory).
+            if (b.isGrenade) {
+              const center = b.mesh.position.clone()
+              center.y = Math.max(0.4, center.y)
+              spawnExplosion(center)
+              const R = b.grenadeRadius ?? 4
+              const dpDist = Math.hypot(refs.focalPoint.x - center.x, refs.focalPoint.z - center.z)
+              if (
+                dpDist < R &&
+                gamePhaseRef.current === "playing" &&
+                Date.now() > spawnInvulnUntilRef.current
+              ) {
+                const dmg = Math.max(15, Math.floor(60 * (1 - dpDist / R)))
+                playerHpRef.current = Math.max(0, playerHpRef.current - dmg)
+                setPlayerHp(playerHpRef.current)
+                lastDamageTimeRef.current = Date.now()
+                cameraShakeRef.current.intensity = 3
+                setDamageFlash(true)
+                SOUNDS.damage()
+                setTimeout(() => setDamageFlash(false), 320)
+                if (playerHpRef.current <= 0) {
+                  gamePhaseRef.current = "gameover"
+                  setGamePhase("gameover")
+                  deathsRef.current += 1
+                  setDeaths(deathsRef.current)
+                }
+              }
+            } else if (!b.isEnemy) {
+              spawnExplosion(b.mesh.position.clone(), true)
+            }
             refs.scene.remove(b.mesh)
             b.mesh.geometry.dispose()
             refs.bullets.splice(i, 1)
@@ -2997,6 +4526,33 @@ export default function ThreeWorld({
             const toPz = fp.z - ez
             const distToPlayer = Math.sqrt(toPx * toPx + toPz * toPz)
 
+            // ── Pre-state-machine: read difficulty tuning + sensory input ─
+            // Mission enemies have no botDifficulty selector → fall back to
+            // the "normal" aggressive profile.
+            const tuning: BotDifficultyTuning = enemy.aiTuning ?? MISSION_AI_TUNING
+
+            // Hide overhead "!"/"?" marker once its time-window expires.
+            if (enemy.markerKind && now > enemy.markerUntil) {
+              setEnemyMarker(enemy, null, 0)
+            }
+
+            // Noise alert: if the player fired/exploded recently within
+            // `noiseRange`, a patrolling enemy commits to a search at the
+            // noise origin. Already-alert/attacking enemies ignore this
+            // (they have better info — direct LOS).
+            const noise = lastNoiseRef.current
+            if (
+              noise &&
+              now < noise.expires &&
+              enemy.state === "patrol" &&
+              Math.hypot(noise.x - ex, noise.z - ez) < tuning.noiseRange
+            ) {
+              enemy.state = "search"
+              enemy.searchTimer = 5.5
+              enemy.lastSeenPlayer = { x: noise.x, z: noise.z }
+              setEnemyMarker(enemy, "search", 5500)
+            }
+
             if (enemy.state === "patrol") {
               const wp = enemy.patrolWaypoints[enemy.patrolIndex % enemy.patrolWaypoints.length]
               if (wp) {
@@ -3019,6 +4575,26 @@ export default function ThreeWorld({
               ) {
                 enemy.state = "alert"
                 enemy.lastSeenPlayer = { x: fp.x, z: fp.z }
+                // Overhead "!" sting (COD-style spot indicator).
+                setEnemyMarker(enemy, "alert", 800)
+                // Group tactics: this enemy spotted the player — broadcast
+                // the position to nearby allies so they converge from their
+                // own flanks instead of needing to see independently.
+                if (tuning.groupTactics) {
+                  for (const ally of refs.enemies) {
+                    if (ally === enemy || ally.hp <= 0) continue
+                    const allyDist = Math.hypot(
+                      ally.mesh.position.x - ex,
+                      ally.mesh.position.z - ez,
+                    )
+                    if (allyDist < 20 && ally.state === "patrol") {
+                      ally.state = "search"
+                      ally.searchTimer = 6.0
+                      ally.lastSeenPlayer = { x: fp.x, z: fp.z }
+                      setEnemyMarker(ally, "search", 6000)
+                    }
+                  }
+                }
                 // Stealth mission: detected = fail
                 if (selectedMissionRef.current === "stealth" && !stealthDetectedRef.current) {
                   stealthDetectedRef.current = true
@@ -3036,18 +4612,53 @@ export default function ThreeWorld({
               if (distToPlayer <= enemy.config.attackRange) {
                 enemy.state = "attack"
               } else {
-                // Cover AI: stop moving and only shoot when near a wall/cover
-                const nearCover = ALL_AABBS.some((w) => {
-                  const cx2 = (w.x1 + w.x2) / 2
-                  const cz2 = (w.z1 + w.z2) / 2
-                  const ddx = ex - cx2
-                  const ddz = ez - cz2
-                  return Math.sqrt(ddx * ddx + ddz * ddz) < 2.5
-                })
-                if (!nearCover || distToPlayer > enemy.config.fireRange) {
-                  const spd = enemy.config.speed * dt
-                  const nx = ex + (toPx / distToPlayer) * spd
-                  const nz = ez + (toPz / distToPlayer) * spd
+                // Flank offset: aim toward a point perpendicular to the
+                // bee-line so different enemies arc around the player from
+                // different sides. Magnitude scales with distance (more
+                // arcing while far, straight push when close).
+                const perpX = -toPz / Math.max(0.001, distToPlayer)
+                const perpZ = toPx / Math.max(0.001, distToPlayer)
+                const flankScale =
+                  tuning.flankFactor *
+                  enemy.flankStrength *
+                  enemy.flankSide *
+                  Math.min(8, distToPlayer * 0.5)
+                const targetX = fp.x + perpX * flankScale
+                const targetZ = fp.z + perpZ * flankScale
+                const tx = targetX - ex
+                const tz = targetZ - ez
+                const tDist = Math.max(0.001, Math.hypot(tx, tz))
+
+                // Grunt close-range dash: every ~3s, decide whether to
+                // sprint at the player (1.6x speed for 1.4s) if we're at
+                // medium-close range. The actual dash cycle is bounded so
+                // bots don't permanently sprint into the player's gun.
+                if (tuning.dashEnabled && enemy.type === "grunt" && now > enemy.nextDashCheckTime) {
+                  enemy.nextDashCheckTime = now + 3000
+                  if (distToPlayer > 3 && distToPlayer < 14 && Math.random() < 0.55) {
+                    enemy.dashUntil = now + 1400
+                  }
+                }
+                const dashing = now < enemy.dashUntil
+                const dashMult = dashing ? 1.6 : 1.0
+
+                // Cover AI: stop *only* when actually behind cover that
+                // breaks LOS to the player. Previously any nearby AABB
+                // counted as cover, which made enemies stall in the open.
+                const losClear = enemyCanSee(
+                  toPx / distToPlayer,
+                  toPz / distToPlayer,
+                  toPx,
+                  toPz,
+                  distToPlayer,
+                  enemy.config,
+                )
+                const shouldPushIn = !losClear || distToPlayer > enemy.config.fireRange || dashing
+
+                if (shouldPushIn) {
+                  const spd = enemy.config.speed * tuning.speedMult * dashMult * dt
+                  const nx = ex + (tx / tDist) * spd
+                  const nz = ez + (tz / tDist) * spd
                   if (!collidesWithWall(nx, ez, ENEMY_RADIUS)) enemy.mesh.position.x = nx
                   if (!collidesWithWall(ex, nz, ENEMY_RADIUS)) enemy.mesh.position.z = nz
                 }
@@ -3063,8 +4674,58 @@ export default function ThreeWorld({
                   )
                 ) {
                   enemy.state = "search"
-                  enemy.searchTimer = 3.5
+                  enemy.searchTimer = 4.5
+                  setEnemyMarker(enemy, "search", 4500)
                 }
+              }
+              // Heavy grenade throw: parabolic toss toward where the player
+              // *will be* in ~1s. Only fires when LOS is clear and the
+              // player is at mid-range (too close = friendly-fire risk; too
+              // far = arc gets weird).
+              if (
+                tuning.grenadeEnabled &&
+                enemy.type === "heavy" &&
+                now > enemy.nextGrenadeTime &&
+                distToPlayer > 5 &&
+                distToPlayer < 22 &&
+                enemyCanSee(
+                  toPx / distToPlayer,
+                  toPz / distToPlayer,
+                  toPx,
+                  toPz,
+                  distToPlayer,
+                  enemy.config,
+                )
+              ) {
+                enemy.nextGrenadeTime = now + 6000 + Math.random() * 3000
+                // Lead the player by their current velocity (approx via the
+                // smoothed player velocity ref).
+                const leadT = 1.0
+                const aimX = fp.x + playerVelRef.current.x * leadT - ex
+                const aimZ = fp.z + playerVelRef.current.z * leadT - ez
+                const aimDist = Math.max(0.001, Math.hypot(aimX, aimZ))
+                // Solve for a velocity that lands roughly at aim distance
+                // with a fixed ~1.0s air time under -12 gravity.
+                const SPEED_H = aimDist / leadT
+                const upInitial = 12 * leadT * 0.5 + 1.2 // small extra arc
+                const gGeo = new THREE.SphereGeometry(0.14, 8, 6)
+                const gMat = new THREE.MeshBasicMaterial({ color: 0x556633 })
+                const gMesh = new THREE.Mesh(gGeo, gMat)
+                gMesh.position.set(enemy.mesh.position.x, EYE_HEIGHT * 0.85, enemy.mesh.position.z)
+                refs.scene.add(gMesh)
+                refs.bullets.push({
+                  mesh: gMesh,
+                  velocity: new THREE.Vector3(
+                    (aimX / aimDist) * SPEED_H,
+                    upInitial,
+                    (aimZ / aimDist) * SPEED_H,
+                  ),
+                  life: leadT + 0.8,
+                  isEnemy: true,
+                  damage: 0, // damage comes from the AOE on detonation
+                  isGrenade: true,
+                  grenadeRadius: 4.5,
+                })
               }
               // Shoot while chasing (alert range fire)
               if (
@@ -3105,7 +4766,7 @@ export default function ThreeWorld({
                 playerHpRef.current = Math.max(0, playerHpRef.current - enemy.config.attackDamage)
                 setPlayerHp(playerHpRef.current)
                 lastDamageTimeRef.current = Date.now()
-                cameraShakeRef.current.intensity = 4
+                cameraShakeRef.current.intensity = 2
                 setDamageFlash(true)
                 SOUNDS.damage()
                 setTimeout(() => setDamageFlash(false), 300)
@@ -3174,6 +4835,8 @@ export default function ThreeWorld({
               ) {
                 enemy.state = "alert"
                 enemy.lastSeenPlayer = { x: fp.x, z: fp.z }
+                // Search → alert: replace the "?" with an "!" sting.
+                setEnemyMarker(enemy, "alert", 800)
               }
             }
 
@@ -3518,9 +5181,28 @@ export default function ThreeWorld({
             ctx.fillRect(33 * SCALE, 0, 33 * SCALE, W)
             ctx.fillStyle = "#4a3a1a"
             ctx.fillRect(66 * SCALE, 0, 34 * SCALE, W)
-            ctx.fillStyle = "#555545"
-            for (const [wx, wz, ww, wd] of WALL_DEFS) {
-              ctx.fillRect(wx * SCALE, wz * SCALE, Math.max(1, ww * SCALE), Math.max(1, wd * SCALE))
+            // Buildings — draw all wall AABBs (dynamic ones too, like the
+            // hollow buildings + roof towers that didn't come from
+            // MAP_OBJECTS). Big AABBs get a darker building fill so the
+            // city's silhouette reads at a glance; small ones (props /
+            // wall slabs) get a thin lighter tone.
+            for (const wAabb of ALL_AABBS) {
+              const ww = wAabb.x2 - wAabb.x1
+              const wd = wAabb.z2 - wAabb.z1
+              const area = ww * wd
+              if (area > 8) {
+                ctx.fillStyle = "#6a6a55"
+              } else if (area > 1.5) {
+                ctx.fillStyle = "#55534a"
+              } else {
+                continue // skip tiny lamp posts etc — keeps the map clean
+              }
+              ctx.fillRect(
+                wAabb.x1 * SCALE,
+                wAabb.z1 * SCALE,
+                Math.max(1, ww * SCALE),
+                Math.max(1, wd * SCALE),
+              )
             }
             // Goal markers
             for (const marker of refs.goalMarkers) {
@@ -3529,6 +5211,34 @@ export default function ThreeWorld({
               ctx.beginPath()
               ctx.arc(marker.x * SCALE, marker.z * SCALE, 4, 0, Math.PI * 2)
               ctx.fill()
+            }
+            // Doors (green ▲) and ladders (yellow square) — navigational
+            // aids so the player can spot interactive entries on the map.
+            for (const ent of refs.entries) {
+              const ex = ent.x * SCALE
+              const ez = ent.z * SCALE
+              if (ent.kind === "door") {
+                ctx.fillStyle = "#44ff88"
+                ctx.strokeStyle = "rgba(0,0,0,0.85)"
+                ctx.lineWidth = 1
+                ctx.beginPath()
+                ctx.moveTo(ex, ez - 4)
+                ctx.lineTo(ex + 3.4, ez + 2.5)
+                ctx.lineTo(ex - 3.4, ez + 2.5)
+                ctx.closePath()
+                ctx.fill()
+                ctx.stroke()
+              } else {
+                ctx.fillStyle = "#ffcc22"
+                ctx.strokeStyle = "rgba(0,0,0,0.85)"
+                ctx.lineWidth = 1
+                ctx.fillRect(ex - 3, ez - 3, 6, 6)
+                ctx.strokeRect(ex - 3, ez - 3, 6, 6)
+                // Tiny rung mark inside (visual hint at "ladder").
+                ctx.fillStyle = "rgba(0,0,0,0.6)"
+                ctx.fillRect(ex - 2, ez - 1, 4, 1)
+                ctx.fillRect(ex - 2, ez + 1, 4, 1)
+              }
             }
             // Draw enemies on minimap (color by type/state)
             for (const enemy of refs.enemies) {
@@ -3564,10 +5274,29 @@ export default function ThreeWorld({
               )
               ctx.fill()
             }
-            ctx.fillStyle = "#00ff41"
-            ctx.beginPath()
-            ctx.arc(refs.focalPoint.x * SCALE, refs.focalPoint.z * SCALE, 3, 0, Math.PI * 2)
-            ctx.fill()
+            // Player marker — green triangle pointing in the camera's yaw
+            // direction so the user knows which way they're facing on the
+            // minimap. yaw = -π/2 means "facing +x" in world space, so the
+            // triangle "forward" must rotate by yaw + π/2 on canvas.
+            {
+              const px = refs.focalPoint.x * SCALE
+              const pz = refs.focalPoint.z * SCALE
+              const yaw = camState.yaw + Math.PI / 2
+              ctx.save()
+              ctx.translate(px, pz)
+              ctx.rotate(yaw)
+              ctx.fillStyle = "#00ff41"
+              ctx.strokeStyle = "rgba(0,0,0,0.85)"
+              ctx.lineWidth = 1
+              ctx.beginPath()
+              ctx.moveTo(0, -5)
+              ctx.lineTo(3.5, 3)
+              ctx.lineTo(-3.5, 3)
+              ctx.closePath()
+              ctx.fill()
+              ctx.stroke()
+              ctx.restore()
+            }
           }
         }
 
@@ -3665,6 +5394,11 @@ export default function ThreeWorld({
       if (e.key === "1") switchWeapon(0)
       if (e.key === "2") switchWeapon(1)
       if (e.key === "3") switchWeapon(2)
+      if (e.key === "e" || e.key === "E") {
+        // Climb interaction — animate loop consumes the request and only
+        // fires if the player is currently inside a climb zone.
+        climbRequestRef.current = true
+      }
       if (e.key === "F8") {
         e.preventDefault()
         setScanlinesOn((prev) => {
@@ -4034,6 +5768,217 @@ export default function ThreeWorld({
       <div style={{ position: "relative", flex: 1, overflow: "hidden" }}>
         <div ref={mountRef} style={{ width: "100%", height: "100%" }} />
 
+        {/* Settings button — small gear that opens the sensitivity modal.
+            Releases pointer lock on click so the slider is grabbable. */}
+        {!isLoading && !error && (
+          <button
+            type="button"
+            onClick={() => {
+              if (document.pointerLockElement) document.exitPointerLock()
+              setShowSettings(true)
+            }}
+            style={{
+              position: "absolute",
+              top: "0.5rem",
+              right: "0.5rem",
+              width: "2.1rem",
+              height: "2.1rem",
+              border: "1px solid rgba(255,255,255,0.18)",
+              background: "rgba(0,0,0,0.55)",
+              color: "#bcd",
+              fontSize: "1.1rem",
+              cursor: "pointer",
+              borderRadius: "2px",
+              zIndex: 90,
+              pointerEvents: "auto",
+            }}
+            aria-label="settings"
+          >
+            ⚙
+          </button>
+        )}
+
+        {/* Settings modal: sensitivity sliders + walk-bob + scanline toggle */}
+        {showSettings && (
+          <div
+            style={{
+              position: "absolute",
+              inset: 0,
+              background: "rgba(0,5,15,0.78)",
+              zIndex: 200,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              fontFamily: "monospace",
+            }}
+            onClick={(e) => {
+              if (e.target === e.currentTarget) setShowSettings(false)
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") setShowSettings(false)
+            }}
+            // biome-ignore lint/a11y/noNoninteractiveTabindex: modal backdrop
+            tabIndex={0}
+          >
+            <div
+              style={{
+                background: "rgba(0,15,30,0.96)",
+                border: "1px solid rgba(100,180,255,0.5)",
+                padding: "1.6rem 1.8rem",
+                minWidth: "320px",
+                maxWidth: "92vw",
+                boxShadow: "0 0 24px rgba(80,160,255,0.18)",
+                color: "#fff",
+              }}
+            >
+              <div
+                style={{
+                  fontSize: "1.1rem",
+                  letterSpacing: "0.3em",
+                  marginBottom: "1rem",
+                  color: "#88aaff",
+                }}
+              >
+                ⚙ SETTINGS
+              </div>
+
+              <label
+                style={{
+                  display: "block",
+                  fontSize: "0.7rem",
+                  letterSpacing: "0.15em",
+                  marginTop: "0.6rem",
+                  color: "#bcd",
+                }}
+              >
+                MOUSE SENS · {mouseSens.toFixed(2)}x
+                <input
+                  type="range"
+                  min="0.5"
+                  max="2.0"
+                  step="0.05"
+                  value={mouseSens}
+                  onChange={(e) => {
+                    const v = Number.parseFloat(e.currentTarget.value)
+                    setMouseSens(v)
+                    try {
+                      localStorage.setItem("fps_mouse_sens", v.toString())
+                    } catch {
+                      /* ignore */
+                    }
+                  }}
+                  style={{ display: "block", width: "100%", marginTop: "0.25rem" }}
+                />
+              </label>
+
+              <label
+                style={{
+                  display: "block",
+                  fontSize: "0.7rem",
+                  letterSpacing: "0.15em",
+                  marginTop: "0.8rem",
+                  color: "#bcd",
+                }}
+              >
+                LOOK STICK SENS · {lookSens.toFixed(2)}x
+                <input
+                  type="range"
+                  min="0.5"
+                  max="2.0"
+                  step="0.05"
+                  value={lookSens}
+                  onChange={(e) => {
+                    const v = Number.parseFloat(e.currentTarget.value)
+                    setLookSens(v)
+                    try {
+                      localStorage.setItem("fps_look_sens", v.toString())
+                    } catch {
+                      /* ignore */
+                    }
+                  }}
+                  style={{ display: "block", width: "100%", marginTop: "0.25rem" }}
+                />
+              </label>
+
+              <label
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "0.5rem",
+                  marginTop: "1rem",
+                  fontSize: "0.78rem",
+                  letterSpacing: "0.12em",
+                  color: "#bcd",
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={walkBobOn}
+                  onChange={(e) => {
+                    const v = e.currentTarget.checked
+                    setWalkBobOn(v)
+                    try {
+                      localStorage.setItem("fps_walkbob", v ? "1" : "0")
+                    } catch {
+                      /* ignore */
+                    }
+                  }}
+                />
+                WALK BOB
+                <span style={{ color: "#666", fontSize: "0.65rem" }}>
+                  (motion-sickness; default off)
+                </span>
+              </label>
+
+              <label
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "0.5rem",
+                  marginTop: "0.6rem",
+                  fontSize: "0.78rem",
+                  letterSpacing: "0.12em",
+                  color: "#bcd",
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={scanlinesOn}
+                  onChange={(e) => {
+                    const v = e.currentTarget.checked
+                    setScanlinesOn(v)
+                    try {
+                      localStorage.setItem("fps_scanlines", v ? "1" : "0")
+                    } catch {
+                      /* ignore */
+                    }
+                  }}
+                />
+                CRT SCANLINES (F8)
+              </label>
+
+              <button
+                type="button"
+                onClick={() => setShowSettings(false)}
+                style={{
+                  marginTop: "1.4rem",
+                  width: "100%",
+                  padding: "0.55rem",
+                  background: "rgba(60,100,160,0.35)",
+                  border: "1px solid rgba(100,180,255,0.55)",
+                  color: "#88aaff",
+                  letterSpacing: "0.25em",
+                  fontFamily: "monospace",
+                  cursor: "pointer",
+                  fontSize: "0.78rem",
+                }}
+              >
+                CLOSE
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Team score (TDM) */}
         {mode === "tdm" && !isLoading && !error && (
           <div
@@ -4195,6 +6140,34 @@ export default function ThreeWorld({
             }}
           >
             {killStreakMsg}
+          </div>
+        )}
+
+        {/* Climb prompt — shown while the player is inside a ladder/stairs
+            ClimbZone. The animate loop flips the state on entry/exit so this
+            doesn't re-render every frame. */}
+        {nearClimb && !isLoading && !error && gamePhase === "playing" && (
+          <div
+            style={{
+              position: "absolute",
+              bottom: "20%",
+              left: "50%",
+              transform: "translateX(-50%)",
+              zIndex: 25,
+              pointerEvents: "none",
+              fontFamily: "monospace",
+              fontSize: "1rem",
+              color: "#ffcc22",
+              background: "rgba(0,0,0,0.78)",
+              border: "1px solid #ffcc22",
+              padding: "0.45rem 1.1rem",
+              letterSpacing: "0.15em",
+              textShadow: "0 0 8px rgba(255,200,40,0.6)",
+              boxShadow: "0 0 14px rgba(255,200,40,0.3)",
+              borderRadius: "2px",
+            }}
+          >
+            [E] 登る
           </div>
         )}
 
