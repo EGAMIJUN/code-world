@@ -209,32 +209,13 @@ const SOUNDS = {
 
 // ── Map object definitions [x, z, width, depth, type]
 // type: 0=building, 1=car, 2=barricade, 3=tank/pipe, 4=tree, 5=trench
+//
+// Urban-zone buildings (x < 32, type 0) used to live here as solid boxes
+// that the player could only hide *behind*. They've been pulled out and
+// replaced with proper hollow buildings — see BATTLE_CITY_BUILDINGS at
+// the bottom of this module + the makeHollowBuilding pass in init().
 const MAP_OBJECTS: [number, number, number, number, number][] = [
-  // ── Urban zone (x: 3–28) ─────────────────────────────────────────────────
-  // Buildings
-  [3, 3, 7, 8, 0],
-  [14, 3, 8, 6, 0],
-  [3, 14, 6, 7, 0],
-  [13, 13, 7, 6, 0],
-  [24, 5, 5, 6, 0],
-  [22, 14, 5, 7, 0],
-  [3, 24, 7, 8, 0],
-  [14, 24, 6, 7, 0],
-  [24, 26, 5, 5, 0],
-  [3, 35, 8, 6, 0],
-  [15, 35, 7, 5, 0],
-  [25, 35, 4, 8, 0],
-  [3, 45, 6, 7, 0],
-  [13, 44, 8, 6, 0],
-  [24, 46, 5, 6, 0],
-  [3, 56, 7, 8, 0],
-  [14, 56, 6, 7, 0],
-  [24, 58, 5, 5, 0],
-  [3, 68, 8, 6, 0],
-  [15, 68, 7, 5, 0],
-  [3, 77, 7, 8, 0],
-  [14, 78, 6, 6, 0],
-  [24, 76, 5, 7, 0],
+  // ── Urban zone (x: 3–28) ─ buildings now in BATTLE_CITY_BUILDINGS ──
   // Cars
   [12, 11, 2, 1, 1],
   [20, 21, 2, 1, 1],
@@ -335,8 +316,10 @@ const MAP_OBJECTS: [number, number, number, number, number][] = [
   [25, 92, 6, 5, 0],
 ]
 
-// WALL_DEFS for backward compat (minimap, cover AI)
-const WALL_DEFS: [number, number, number, number][] = MAP_OBJECTS.map(([x, z, w, d]) => [
+// WALL_DEFS — formerly used by the minimap draw loop. Now superseded by
+// ALL_AABBS sweeping (picks up dynamic walls / hollow buildings), but left
+// here so any external reference (debug overlays etc.) keeps compiling.
+const _WALL_DEFS: [number, number, number, number][] = MAP_OBJECTS.map(([x, z, w, d]) => [
   x,
   z,
   w,
@@ -521,6 +504,35 @@ const SPAWN_POINTS = [
   { x: 18, z: 82 },
   { x: 50, z: 82 },
   { x: 82, z: 82 },
+]
+
+// ── Battle-city building layout ────────────────────────────────────────────────
+// Replaces the 23 solid urban boxes deleted from MAP_OBJECTS. A central
+// east–west avenue runs through z ≈ 44–58; buildings flank it on the
+// north side (z < 44) and south side (z > 58), so running east from the
+// west-edge spawn always leads past explorable interiors.
+//   doorSide is *outward-facing* toward the avenue.
+//   bldKind chooses material at render time (concrete vs industrial).
+interface BattleCityBuilding {
+  x: number
+  z: number
+  w: number
+  d: number
+  h?: number
+  doorSide: "north" | "south" | "east" | "west"
+  bldKind: "concrete" | "industrial"
+}
+const BATTLE_CITY_BUILDINGS: BattleCityBuilding[] = [
+  // North flank (door faces +z / south toward the avenue).
+  { x: 6, z: 18, w: 14, d: 12, h: 4.5, doorSide: "south", bldKind: "concrete" },
+  { x: 24, z: 14, w: 14, d: 14, h: 5.5, doorSide: "south", bldKind: "concrete" },
+  { x: 44, z: 18, w: 16, d: 14, h: 5.0, doorSide: "south", bldKind: "industrial" },
+  { x: 66, z: 16, w: 12, d: 16, h: 4.5, doorSide: "south", bldKind: "concrete" },
+  // South flank (door faces -z / north toward the avenue).
+  { x: 6, z: 62, w: 14, d: 14, h: 4.5, doorSide: "north", bldKind: "concrete" },
+  { x: 24, z: 64, w: 16, d: 14, h: 5.0, doorSide: "north", bldKind: "concrete" },
+  { x: 46, z: 62, w: 14, d: 16, h: 5.5, doorSide: "north", bldKind: "industrial" },
+  { x: 66, z: 64, w: 12, d: 14, h: 4.5, doorSide: "north", bldKind: "concrete" },
 ]
 
 // ── Mission system ─────────────────────────────────────────────────────────────
@@ -1036,6 +1048,15 @@ export default function ThreeWorld({
   // rising (currently only via E-key climb), negative = falling. Sampled
   // each frame against the floor heightmap.
   const playerVelYRef = useRef(0)
+  // ── Sensitivity / motion-sickness refs ───────────────────────────────
+  // Multipliers applied to mouse + look-stick deltas inside the animate
+  // loop. Mirrored from React state via dedicated useEffects so the loop
+  // never closes over stale state.
+  const mouseSensRef = useRef(1.0)
+  const lookSensRef = useRef(1.0)
+  // Walk-bob feels great for some players, motion-sick others. Default
+  // off (CLAUDE.md's stated tolerance) — toggleable in settings.
+  const walkBobOnRef = useRef(false)
   // E-key climb request — set in keydown, consumed and cleared inside the
   // animate loop (so the climb only fires once per press, even if the key
   // remains held).
@@ -1140,6 +1161,14 @@ export default function ThreeWorld({
   // CRT scanlines: default off (was too distracting). F8 toggles, persisted
   // in localStorage so the choice survives refresh.
   const [scanlinesOn, setScanlinesOn] = useState(false)
+  // ── Sensitivity (motion-sickness controls) ─────────────────────────────
+  // mouseSens / lookSens are multipliers on top of the (now-lowered) base
+  // sensitivity. Range 0.5–2.0 in the settings UI. walkBobOn gates the
+  // head-bob effect. All persisted under "fps_*" localStorage keys.
+  const [mouseSens, setMouseSens] = useState(1.0)
+  const [lookSens, setLookSens] = useState(1.0)
+  const [walkBobOn, setWalkBobOn] = useState(false)
+  const [showSettings, setShowSettings] = useState(false)
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
   const [chatInput, setChatInput] = useState("")
   const chatEndRef = useRef<HTMLDivElement>(null)
@@ -1196,11 +1225,32 @@ export default function ThreeWorld({
     } catch {
       /* ignore */
     }
+    // Sensitivity + walk-bob preferences. Stored as decimals (e.g. "1.25").
+    try {
+      const ms = Number.parseFloat(localStorage.getItem("fps_mouse_sens") ?? "")
+      if (Number.isFinite(ms) && ms > 0.1 && ms < 3.5) setMouseSens(ms)
+      const ls = Number.parseFloat(localStorage.getItem("fps_look_sens") ?? "")
+      if (Number.isFinite(ls) && ls > 0.1 && ls < 3.5) setLookSens(ls)
+      if (localStorage.getItem("fps_walkbob") === "1") setWalkBobOn(true)
+    } catch {
+      /* ignore */
+    }
     return () => {
       window.removeEventListener("resize", detectLandscape)
       window.removeEventListener("orientationchange", detectLandscape)
     }
   }, [])
+
+  // Mirror sensitivity state into refs (animate loop reads refs).
+  useEffect(() => {
+    mouseSensRef.current = mouseSens
+  }, [mouseSens])
+  useEffect(() => {
+    lookSensRef.current = lookSens
+  }, [lookSens])
+  useEffect(() => {
+    walkBobOnRef.current = walkBobOn
+  }, [walkBobOn])
   useEffect(() => {
     if (gamePhase === "gameover") {
       SOUNDS.gameover()
@@ -1293,11 +1343,13 @@ export default function ThreeWorld({
       scene.fog = new THREE.Fog(theme.fog, 80, 280)
 
       // ── Camera (FPS) ───────────────────────────────────────────────────────
+      // FOV 80 (was 75): wider field reduces peripheral motion-shear when
+      // the player whips around, a common motion-sickness trigger.
       const camera = new THREE.PerspectiveCamera(
-        75,
+        80,
         container.clientWidth / container.clientHeight,
         0.1,
-        300,
+        320,
       )
       camera.rotation.order = "YXZ"
 
@@ -1950,6 +2002,63 @@ export default function ThreeWorld({
         })
       }
 
+      // ── Battle city: hollow buildings flanking the central avenue ─────
+      // Generated from the BATTLE_CITY_BUILDINGS module-level spec so the
+      // layout is editable in one place. Each gets 2–3 interior cover
+      // props placed deterministically (seeded by position) so the same
+      // building always renders the same crates / desks.
+      for (const b of BATTLE_CITY_BUILDINGS) {
+        const matB = b.bldKind === "concrete" ? concreteMat : industrialMat
+        const matR = b.bldKind === "concrete" ? concreteRoofMat : industrialRoofMat
+        const h = b.h ?? 4.5
+        makeHollowBuilding({
+          x: b.x,
+          z: b.z,
+          w: b.w,
+          d: b.d,
+          h,
+          doorSide: b.doorSide,
+          doorWidth: 2.4,
+          bldMat: matB,
+          roofMat: matR,
+        })
+        // Interior cover — quantize position by a fixed seed so the inner
+        // layout reads as "designed" rather than random.
+        const seed = (b.x * 13 + b.z * 7) & 0xff
+        const cx = b.x + b.w * 0.35
+        const cz = b.z + b.d * 0.5
+        placeProp({
+          x: cx,
+          y: 0,
+          z: cz,
+          w: 1.4,
+          h: 1.0,
+          d: 1.4,
+          color: 0x6a4a26,
+        })
+        placeProp({
+          x: b.x + b.w * 0.7,
+          y: 0,
+          z: b.z + b.d * (0.3 + ((seed >> 4) & 1) * 0.4),
+          w: 2.0,
+          h: 0.85,
+          d: 1.0,
+          color: 0x444444,
+        })
+        // A tall shelf only in larger buildings.
+        if (b.w >= 14) {
+          placeProp({
+            x: b.x + b.w * 0.85,
+            y: 0,
+            z: b.z + b.d * 0.7,
+            w: 1.0,
+            h: 1.8,
+            d: 0.4,
+            color: 0x333333,
+          })
+        }
+      }
+
       // Hollow building #1 — warehouse on south urban edge.
       {
         const x = 16
@@ -2378,11 +2487,104 @@ export default function ThreeWorld({
         scene.add(pl)
       }
 
+      // ── Distant skyline silhouette ─────────────────────────────────────
+      // Tall dark blocks placed *outside* the playable map. Purely
+      // cosmetic — no collision, no shadow casting — but it sells the
+      // "city street" framing instead of an open arena vibe.
+      const skylineMat = new THREE.MeshLambertMaterial({
+        color: 0x202833,
+        emissive: 0x080a14,
+      })
+      // Use a single InstancedMesh per orientation strip to keep draw
+      // calls low. Each row is a fixed pattern with per-instance scale.
+      const skylineRows: { z: number; baseX: number; n: number; depth: number }[] = [
+        { z: -25, baseX: -15, n: 18, depth: 6 }, // far north
+        { z: MAP_SIZE + 25, baseX: -15, n: 18, depth: 6 }, // far south
+      ]
+      for (const row of skylineRows) {
+        const inst = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), skylineMat, row.n)
+        inst.castShadow = false
+        inst.receiveShadow = false
+        const dummy = new THREE.Object3D()
+        for (let i = 0; i < row.n; i++) {
+          const w = 5 + ((i * 7) % 5)
+          const h = 14 + ((i * 13) % 18)
+          const x = row.baseX + i * 7.5 + ((i * 5) % 3)
+          dummy.position.set(x, h / 2, row.z)
+          dummy.scale.set(w, h, row.depth)
+          dummy.updateMatrix()
+          inst.setMatrixAt(i, dummy.matrix)
+        }
+        inst.instanceMatrix.needsUpdate = true
+        scene.add(inst)
+      }
+      // Sky lanes (east-west far ends) — give depth along the avenue too.
+      for (const xFar of [-22, MAP_SIZE + 22]) {
+        const inst = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), skylineMat, 12)
+        const dummy = new THREE.Object3D()
+        for (let i = 0; i < 12; i++) {
+          const w = 5 + ((i * 11) % 6)
+          const h = 12 + ((i * 9) % 22)
+          const z = -10 + i * 10 + ((i * 3) % 4)
+          dummy.position.set(xFar, h / 2, z)
+          dummy.scale.set(w, h, 6)
+          dummy.updateMatrix()
+          inst.setMatrixAt(i, dummy.matrix)
+        }
+        inst.instanceMatrix.needsUpdate = true
+        scene.add(inst)
+      }
+
+      // ── Street lamps along the central avenue ──────────────────────────
+      // Tall cylinder with a glowing top — gives the avenue a clear
+      // "road" reading at a distance. Lamps alternate sides.
+      const lampPostMat = new THREE.MeshStandardMaterial({
+        color: 0x2a2e36,
+        roughness: 0.55,
+        metalness: 0.55,
+      })
+      const lampHeadMat = new THREE.MeshStandardMaterial({
+        color: 0xffe9aa,
+        emissive: 0xffd060,
+        emissiveIntensity: 1.6,
+        roughness: 0.4,
+        metalness: 0,
+      })
+      for (let lx = 8; lx <= 92; lx += 12) {
+        for (const lz of [44, 56]) {
+          const post = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.12, 5, 8), lampPostMat)
+          post.position.set(lx, 2.5, lz)
+          post.castShadow = true
+          scene.add(post)
+          // Arm overhanging the avenue
+          const arm = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.08, 0.08), lampPostMat)
+          arm.position.set(lx + (lz < 50 ? 0.5 : -0.5), 4.8, lz)
+          scene.add(arm)
+          // Glowing head
+          const head = new THREE.Mesh(new THREE.SphereGeometry(0.22, 10, 8), lampHeadMat)
+          head.position.set(lx + (lz < 50 ? 1.0 : -1.0), 4.65, lz)
+          scene.add(head)
+          // Subtle warm point light (low range so we don't run out of
+          // dynamic lights — 12 lamps total).
+          const lampLight = new THREE.PointLight(0xffd060, 0.4, 7)
+          lampLight.position.set(head.position.x, head.position.y, head.position.z)
+          scene.add(lampLight)
+          // Cylinder gets minimal collision — a thin AABB at the base.
+          ALL_AABBS.push({
+            x1: lx - 0.18,
+            x2: lx + 0.18,
+            z1: lz - 0.18,
+            z2: lz + 0.18,
+            h: 5,
+          })
+        }
+      }
+
       // ── FPS camera state ───────────────────────────────────────────────────
-      // West edge of map, facing east into the urban zone. (Previously (8, 48)
-      // which sat *inside* building AABB [3,45,6,7] — collidesWithWall blocked
-      // every step, so the player could never leave spawn.)
-      const focalPoint = new THREE.Vector3(2, 0, 48)
+      // West edge of the central avenue, facing east straight down the
+      // strip. The BATTLE_CITY_BUILDINGS layout puts hollow buildings on
+      // both flanks of this line so walking forward = arriving at cover.
+      const focalPoint = new THREE.Vector3(2, 0, 50)
       const camState = { yaw: -Math.PI / 2, pitch: 0 } // facing +X (east)
 
       function clampPitch(p: number) {
@@ -3683,20 +3885,29 @@ export default function ThreeWorld({
         // remainder into next frame — eliminates the spiky single-event
         // jumps on high-Hz mice without adding noticeable input lag.
         {
-          const APPLY = 0.75
+          // Drain 55% of buffered mouse movement this frame and roll the
+          // rest forward. Lower than the previous 0.75 → stops "slide-past"
+          // when the player flicks-and-stops, which read as motion-sickness
+          // jitter for some players.
+          const APPLY = 0.55
           const mdx = mouseDeltaRef.current.x * APPLY
           const mdy = mouseDeltaRef.current.y * APPLY
           mouseDeltaRef.current.x -= mdx
           mouseDeltaRef.current.y -= mdy
           if (mdx !== 0 || mdy !== 0) {
-            camState.yaw -= mdx * 0.002
-            camState.pitch = clampPitch(camState.pitch - mdy * 0.002)
+            // Base sensitivity dropped 0.002 → 0.0012 (≈40% slower default).
+            // Player can scale 0.5x–2.0x via the settings panel.
+            const sens = 0.0012 * mouseSensRef.current
+            camState.yaw -= mdx * sens
+            camState.pitch = clampPitch(camState.pitch - mdy * sens)
             updateCamera()
           }
         }
 
-        // ADS FOV interpolation
-        const targetFov = isAimingRef.current ? (currentWeaponIdxRef.current === 2 ? 28 : 50) : 75
+        // ADS FOV interpolation. Base FOV bumped 75 → 80 — wider field of
+        // view trades a touch of zoom for less peripheral motion-shear
+        // when the player rotates quickly.
+        const targetFov = isAimingRef.current ? (currentWeaponIdxRef.current === 2 ? 28 : 50) : 80
         if (Math.abs(camera.fov - targetFov) > 0.3) {
           camera.fov += (targetFov - camera.fov) * Math.min(1, dt * 12)
           camera.updateProjectionMatrix()
@@ -3797,12 +4008,14 @@ export default function ThreeWorld({
 
         // Look joystick: rotate the camera using the smoothed value. A mild
         // square-curve makes small inputs precise without losing top speed.
+        // Multiplied by the user's look-sensitivity preference.
         const slook = lookSmoothRef.current
         if (Math.abs(slook.vx) > 0.001 || Math.abs(slook.vy) > 0.001) {
           const curveX = slook.vx * Math.abs(slook.vx)
           const curveY = slook.vy * Math.abs(slook.vy)
-          camState.yaw -= curveX * 3.4 * dt
-          camState.pitch = clampPitch(camState.pitch - curveY * 2.6 * dt)
+          const ls = lookSensRef.current
+          camState.yaw -= curveX * 3.4 * dt * ls
+          camState.pitch = clampPitch(camState.pitch - curveY * 2.6 * dt * ls)
           updateCamera()
         }
 
@@ -3896,7 +4109,9 @@ export default function ThreeWorld({
                 playerHpRef.current = Math.max(0, playerHpRef.current - dmg)
                 setPlayerHp(playerHpRef.current)
                 lastDamageTimeRef.current = Date.now()
-                cameraShakeRef.current.intensity = 5 + t * 8
+                // Reduced shake (was 5 + t*8). Tones down the motion-
+                // sickness spike on fall-damage landings.
+                cameraShakeRef.current.intensity = 2.5 + t * 4
                 setDamageFlash(true)
                 SOUNDS.damage()
                 setTimeout(() => setDamageFlash(false), 320)
@@ -3934,14 +4149,17 @@ export default function ThreeWorld({
         // Walk-bob: subtle vertical head sway when actually moving. Phase
         // freezes when standing still so it doesn't bob while idle. Base Y
         // is now the focal point's altitude (0 on ground, raised on roof).
+        // Gated by the user preference (defaults off — common motion-sickness
+        // trigger). When off, the camera stays locked to baseY.
         const baseY = refs.focalPoint.y + EYE_HEIGHT
-        if (playerSpeed > 0.5) {
+        if (walkBobOnRef.current && playerSpeed > 0.5) {
           walkBobRef.current += dt * (4 + playerSpeed * 0.6)
           const bobAmp = isAimingRef.current ? 0.012 : 0.03
           camera.position.y = baseY + Math.sin(walkBobRef.current * 2) * bobAmp
         } else {
-          // Decay back to neutral so we don't snap.
-          camera.position.y += (baseY - camera.position.y) * (1 - Math.exp(-dt * 10))
+          // Snap toward baseY (slightly faster decay when bob is off so
+          // toggling mid-game settles quickly).
+          camera.position.y += (baseY - camera.position.y) * (1 - Math.exp(-dt * 14))
         }
 
         // HP auto-recovery (5s no damage → 2 HP/s). Push to React state
@@ -3961,12 +4179,14 @@ export default function ThreeWorld({
           }
         }
 
-        // Camera shake (applied directly, not baked into camState)
+        // Camera shake (applied directly, not baked into camState).
+        // Per-axis multipliers halved (0.008 → 0.004, 0.006 → 0.003) to
+        // cut the motion-sickness load on damage / fall landings.
         if (cameraShakeRef.current.intensity > 0) {
           const shk = cameraShakeRef.current.intensity
           const t = Date.now() * 0.05
-          camera.rotation.y += Math.sin(t) * shk * 0.008
-          camera.rotation.x += Math.cos(t * 1.3) * shk * 0.006
+          camera.rotation.y += Math.sin(t) * shk * 0.004
+          camera.rotation.x += Math.cos(t * 1.3) * shk * 0.003
           cameraShakeRef.current.intensity = Math.max(0, shk - CAM_SHAKE_DECAY * dt)
         }
 
@@ -4034,7 +4254,7 @@ export default function ThreeWorld({
                 playerHpRef.current = Math.max(0, playerHpRef.current - dmg)
                 setPlayerHp(playerHpRef.current)
                 lastDamageTimeRef.current = Date.now()
-                cameraShakeRef.current.intensity = 6
+                cameraShakeRef.current.intensity = 3
                 setDamageFlash(true)
                 SOUNDS.damage()
                 setTimeout(() => setDamageFlash(false), 320)
@@ -4080,7 +4300,7 @@ export default function ThreeWorld({
                 playerHpRef.current = Math.max(0, playerHpRef.current - b.damage)
                 setPlayerHp(playerHpRef.current)
                 lastDamageTimeRef.current = Date.now()
-                cameraShakeRef.current.intensity = 4
+                cameraShakeRef.current.intensity = 2
                 setDamageFlash(true)
                 SOUNDS.damage()
                 setTimeout(() => setDamageFlash(false), 300)
@@ -4112,7 +4332,7 @@ export default function ThreeWorld({
                 playerHpRef.current = Math.max(0, playerHpRef.current - dmg)
                 setPlayerHp(playerHpRef.current)
                 lastDamageTimeRef.current = Date.now()
-                cameraShakeRef.current.intensity = 6
+                cameraShakeRef.current.intensity = 3
                 setDamageFlash(true)
                 SOUNDS.damage()
                 setTimeout(() => setDamageFlash(false), 320)
@@ -4536,7 +4756,7 @@ export default function ThreeWorld({
                 playerHpRef.current = Math.max(0, playerHpRef.current - enemy.config.attackDamage)
                 setPlayerHp(playerHpRef.current)
                 lastDamageTimeRef.current = Date.now()
-                cameraShakeRef.current.intensity = 4
+                cameraShakeRef.current.intensity = 2
                 setDamageFlash(true)
                 SOUNDS.damage()
                 setTimeout(() => setDamageFlash(false), 300)
@@ -4951,9 +5171,28 @@ export default function ThreeWorld({
             ctx.fillRect(33 * SCALE, 0, 33 * SCALE, W)
             ctx.fillStyle = "#4a3a1a"
             ctx.fillRect(66 * SCALE, 0, 34 * SCALE, W)
-            ctx.fillStyle = "#555545"
-            for (const [wx, wz, ww, wd] of WALL_DEFS) {
-              ctx.fillRect(wx * SCALE, wz * SCALE, Math.max(1, ww * SCALE), Math.max(1, wd * SCALE))
+            // Buildings — draw all wall AABBs (dynamic ones too, like the
+            // hollow buildings + roof towers that didn't come from
+            // MAP_OBJECTS). Big AABBs get a darker building fill so the
+            // city's silhouette reads at a glance; small ones (props /
+            // wall slabs) get a thin lighter tone.
+            for (const wAabb of ALL_AABBS) {
+              const ww = wAabb.x2 - wAabb.x1
+              const wd = wAabb.z2 - wAabb.z1
+              const area = ww * wd
+              if (area > 8) {
+                ctx.fillStyle = "#6a6a55"
+              } else if (area > 1.5) {
+                ctx.fillStyle = "#55534a"
+              } else {
+                continue // skip tiny lamp posts etc — keeps the map clean
+              }
+              ctx.fillRect(
+                wAabb.x1 * SCALE,
+                wAabb.z1 * SCALE,
+                Math.max(1, ww * SCALE),
+                Math.max(1, wd * SCALE),
+              )
             }
             // Goal markers
             for (const marker of refs.goalMarkers) {
@@ -5025,10 +5264,29 @@ export default function ThreeWorld({
               )
               ctx.fill()
             }
-            ctx.fillStyle = "#00ff41"
-            ctx.beginPath()
-            ctx.arc(refs.focalPoint.x * SCALE, refs.focalPoint.z * SCALE, 3, 0, Math.PI * 2)
-            ctx.fill()
+            // Player marker — green triangle pointing in the camera's yaw
+            // direction so the user knows which way they're facing on the
+            // minimap. yaw = -π/2 means "facing +x" in world space, so the
+            // triangle "forward" must rotate by yaw + π/2 on canvas.
+            {
+              const px = refs.focalPoint.x * SCALE
+              const pz = refs.focalPoint.z * SCALE
+              const yaw = camState.yaw + Math.PI / 2
+              ctx.save()
+              ctx.translate(px, pz)
+              ctx.rotate(yaw)
+              ctx.fillStyle = "#00ff41"
+              ctx.strokeStyle = "rgba(0,0,0,0.85)"
+              ctx.lineWidth = 1
+              ctx.beginPath()
+              ctx.moveTo(0, -5)
+              ctx.lineTo(3.5, 3)
+              ctx.lineTo(-3.5, 3)
+              ctx.closePath()
+              ctx.fill()
+              ctx.stroke()
+              ctx.restore()
+            }
           }
         }
 
@@ -5499,6 +5757,217 @@ export default function ThreeWorld({
       {/* ── Canvas + COD-style overlays ───────────────────────────────────── */}
       <div style={{ position: "relative", flex: 1, overflow: "hidden" }}>
         <div ref={mountRef} style={{ width: "100%", height: "100%" }} />
+
+        {/* Settings button — small gear that opens the sensitivity modal.
+            Releases pointer lock on click so the slider is grabbable. */}
+        {!isLoading && !error && (
+          <button
+            type="button"
+            onClick={() => {
+              if (document.pointerLockElement) document.exitPointerLock()
+              setShowSettings(true)
+            }}
+            style={{
+              position: "absolute",
+              top: "0.5rem",
+              right: "0.5rem",
+              width: "2.1rem",
+              height: "2.1rem",
+              border: "1px solid rgba(255,255,255,0.18)",
+              background: "rgba(0,0,0,0.55)",
+              color: "#bcd",
+              fontSize: "1.1rem",
+              cursor: "pointer",
+              borderRadius: "2px",
+              zIndex: 90,
+              pointerEvents: "auto",
+            }}
+            aria-label="settings"
+          >
+            ⚙
+          </button>
+        )}
+
+        {/* Settings modal: sensitivity sliders + walk-bob + scanline toggle */}
+        {showSettings && (
+          <div
+            style={{
+              position: "absolute",
+              inset: 0,
+              background: "rgba(0,5,15,0.78)",
+              zIndex: 200,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              fontFamily: "monospace",
+            }}
+            onClick={(e) => {
+              if (e.target === e.currentTarget) setShowSettings(false)
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") setShowSettings(false)
+            }}
+            // biome-ignore lint/a11y/noNoninteractiveTabindex: modal backdrop
+            tabIndex={0}
+          >
+            <div
+              style={{
+                background: "rgba(0,15,30,0.96)",
+                border: "1px solid rgba(100,180,255,0.5)",
+                padding: "1.6rem 1.8rem",
+                minWidth: "320px",
+                maxWidth: "92vw",
+                boxShadow: "0 0 24px rgba(80,160,255,0.18)",
+                color: "#fff",
+              }}
+            >
+              <div
+                style={{
+                  fontSize: "1.1rem",
+                  letterSpacing: "0.3em",
+                  marginBottom: "1rem",
+                  color: "#88aaff",
+                }}
+              >
+                ⚙ SETTINGS
+              </div>
+
+              <label
+                style={{
+                  display: "block",
+                  fontSize: "0.7rem",
+                  letterSpacing: "0.15em",
+                  marginTop: "0.6rem",
+                  color: "#bcd",
+                }}
+              >
+                MOUSE SENS · {mouseSens.toFixed(2)}x
+                <input
+                  type="range"
+                  min="0.5"
+                  max="2.0"
+                  step="0.05"
+                  value={mouseSens}
+                  onChange={(e) => {
+                    const v = Number.parseFloat(e.currentTarget.value)
+                    setMouseSens(v)
+                    try {
+                      localStorage.setItem("fps_mouse_sens", v.toString())
+                    } catch {
+                      /* ignore */
+                    }
+                  }}
+                  style={{ display: "block", width: "100%", marginTop: "0.25rem" }}
+                />
+              </label>
+
+              <label
+                style={{
+                  display: "block",
+                  fontSize: "0.7rem",
+                  letterSpacing: "0.15em",
+                  marginTop: "0.8rem",
+                  color: "#bcd",
+                }}
+              >
+                LOOK STICK SENS · {lookSens.toFixed(2)}x
+                <input
+                  type="range"
+                  min="0.5"
+                  max="2.0"
+                  step="0.05"
+                  value={lookSens}
+                  onChange={(e) => {
+                    const v = Number.parseFloat(e.currentTarget.value)
+                    setLookSens(v)
+                    try {
+                      localStorage.setItem("fps_look_sens", v.toString())
+                    } catch {
+                      /* ignore */
+                    }
+                  }}
+                  style={{ display: "block", width: "100%", marginTop: "0.25rem" }}
+                />
+              </label>
+
+              <label
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "0.5rem",
+                  marginTop: "1rem",
+                  fontSize: "0.78rem",
+                  letterSpacing: "0.12em",
+                  color: "#bcd",
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={walkBobOn}
+                  onChange={(e) => {
+                    const v = e.currentTarget.checked
+                    setWalkBobOn(v)
+                    try {
+                      localStorage.setItem("fps_walkbob", v ? "1" : "0")
+                    } catch {
+                      /* ignore */
+                    }
+                  }}
+                />
+                WALK BOB
+                <span style={{ color: "#666", fontSize: "0.65rem" }}>
+                  (motion-sickness; default off)
+                </span>
+              </label>
+
+              <label
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "0.5rem",
+                  marginTop: "0.6rem",
+                  fontSize: "0.78rem",
+                  letterSpacing: "0.12em",
+                  color: "#bcd",
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={scanlinesOn}
+                  onChange={(e) => {
+                    const v = e.currentTarget.checked
+                    setScanlinesOn(v)
+                    try {
+                      localStorage.setItem("fps_scanlines", v ? "1" : "0")
+                    } catch {
+                      /* ignore */
+                    }
+                  }}
+                />
+                CRT SCANLINES (F8)
+              </label>
+
+              <button
+                type="button"
+                onClick={() => setShowSettings(false)}
+                style={{
+                  marginTop: "1.4rem",
+                  width: "100%",
+                  padding: "0.55rem",
+                  background: "rgba(60,100,160,0.35)",
+                  border: "1px solid rgba(100,180,255,0.55)",
+                  color: "#88aaff",
+                  letterSpacing: "0.25em",
+                  fontFamily: "monospace",
+                  cursor: "pointer",
+                  fontSize: "0.78rem",
+                }}
+              >
+                CLOSE
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Team score (TDM) */}
         {mode === "tdm" && !isLoading && !error && (
