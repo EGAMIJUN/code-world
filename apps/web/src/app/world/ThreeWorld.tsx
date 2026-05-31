@@ -913,6 +913,9 @@ interface SceneRefs {
   floors: FloorAABB[]
   ceilings: CeilingAABB[]
   climbZones: ClimbZone[]
+  // Door / ladder annotations — drawn on the minimap so the player can
+  // navigate to interactable entries without hunting along walls.
+  entries: { x: number; z: number; kind: "door" | "ladder" }[]
 }
 
 export type BotDifficulty = "easy" | "normal" | "hard"
@@ -1128,6 +1131,12 @@ export default function ThreeWorld({
   const [onlineCount, setOnlineCount] = useState(1)
   const [isMobile, setIsMobile] = useState(false)
   const [isLandscape, setIsLandscape] = useState(false)
+  // True while the player is inside (or right next to) any ClimbZone — the
+  // "[E] 登る" prompt at the bottom of the HUD watches this. State is
+  // pushed from the animate loop via prevNearClimbRef so we only flip on
+  // boundary changes, not every frame.
+  const [nearClimb, setNearClimb] = useState(false)
+  const prevNearClimbRef = useRef(false)
   // CRT scanlines: default off (was too distracting). F8 toggles, persisted
   // in localStorage so the choice survives refresh.
   const [scanlinesOn, setScanlinesOn] = useState(false)
@@ -1727,6 +1736,62 @@ export default function ThreeWorld({
       const floors: FloorAABB[] = []
       const ceilings: CeilingAABB[] = []
       const climbZones: ClimbZone[] = []
+      const entries: { x: number; z: number; kind: "door" | "ladder" }[] = []
+
+      // Reusable "ENTER" sign sprite — drawn above hollow-building doors
+      // and rebuilt per-call so we can vary text/color later if needed.
+      // Always-on-top via depthTest:false so cover doesn't hide it.
+      function makeEntrySign(label: string, color: string): THREE.Sprite {
+        const canvas = document.createElement("canvas")
+        canvas.width = 256
+        canvas.height = 96
+        const ctx = canvas.getContext("2d")
+        if (ctx) {
+          ctx.fillStyle = "rgba(0,0,0,0.7)"
+          ctx.fillRect(0, 0, 256, 96)
+          ctx.strokeStyle = color
+          ctx.lineWidth = 4
+          ctx.strokeRect(4, 4, 248, 88)
+          ctx.font = "bold 52px monospace"
+          ctx.textAlign = "center"
+          ctx.textBaseline = "middle"
+          ctx.lineWidth = 6
+          ctx.strokeStyle = "rgba(0,0,0,0.9)"
+          ctx.strokeText(label, 128, 50)
+          ctx.fillStyle = color
+          ctx.fillText(label, 128, 50)
+        }
+        const tex = new THREE.CanvasTexture(canvas)
+        tex.needsUpdate = true
+        const mat = new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true })
+        const sprite = new THREE.Sprite(mat)
+        sprite.scale.set(2.4, 0.9, 1)
+        sprite.renderOrder = 1050
+        return sprite
+      }
+
+      // Pulsing yellow ground disc — placed under entries so the player
+      // can spot them peripherally even without looking up at the sign.
+      // We tag the mesh with userData.pulse so the animate loop can find
+      // them by name and modulate their emissiveIntensity.
+      function makeEntryDecal(x: number, z: number, color: number): THREE.Mesh {
+        const mat = new THREE.MeshStandardMaterial({
+          color,
+          emissive: color,
+          emissiveIntensity: 1.0,
+          roughness: 0.4,
+          metalness: 0.1,
+          transparent: true,
+          opacity: 0.85,
+        })
+        const ring = new THREE.Mesh(new THREE.CircleGeometry(0.75, 24), mat)
+        ring.rotation.x = -Math.PI / 2
+        ring.position.set(x, 0.025, z)
+        ring.userData.pulse = true
+        scene.add(ring)
+        return ring
+      }
+      const entryDecals: THREE.Mesh[] = []
 
       // Default ceiling height used for hollow buildings.
       const INTERIOR_H = 4.0
@@ -1834,6 +1899,21 @@ export default function ThreeWorld({
         interiorFloor.position.set(x + w / 2, 0.015, z + d / 2)
         interiorFloor.receiveShadow = true
         scene.add(interiorFloor)
+        // ── Door cue: "ENTER" sprite above the gap + ground decal below.
+        // Position is the door's outside footprint so the player sees the
+        // sign before stepping through. Entry record drives the minimap icon.
+        let doorX = x + w / 2
+        let doorZ = z + d / 2
+        const doorClearance = 0.6 // outside the wall plane
+        if (doorSide === "north") doorZ = z - doorClearance
+        else if (doorSide === "south") doorZ = z + d + doorClearance
+        else if (doorSide === "west") doorX = x - doorClearance
+        else doorX = x + w + doorClearance
+        const enterSign = makeEntrySign("ENTER", "#44ff88")
+        enterSign.position.set(doorX, h + 0.7, doorZ)
+        scene.add(enterSign)
+        entryDecals.push(makeEntryDecal(doorX, doorZ, 0x44ff88))
+        entries.push({ x: doorX, z: doorZ, kind: "door" })
       }
 
       // Place a prop crate / table / shelf with collision.
@@ -2037,6 +2117,15 @@ export default function ThreeWorld({
           }
         })()
         climbZones.push(cz)
+        // Ladder cue: yellow ground disc at the base + "[E] CLIMB" sprite
+        // a bit above eye height so it pops against the tower wall.
+        const decalX = (cz.x1 + cz.x2) / 2
+        const decalZ = (cz.z1 + cz.z2) / 2
+        entryDecals.push(makeEntryDecal(decalX, decalZ, 0xffcc22))
+        const climbSign = makeEntrySign("[E] CLIMB", "#ffcc22")
+        climbSign.position.set(decalX, 2.3, decalZ)
+        scene.add(climbSign)
+        entries.push({ x: decalX, z: decalZ, kind: "ladder" })
         // Roof prop.
         if (opts.roofProp === "tank") {
           const tank = new THREE.Mesh(
@@ -3130,6 +3219,7 @@ export default function ThreeWorld({
         floors,
         ceilings,
         climbZones,
+        entries,
       }
 
       setEnemyStatus([])
@@ -3735,6 +3825,27 @@ export default function ThreeWorld({
           }
         }
 
+        // Is the player standing inside any climb zone right now? Powers
+        // the bottom-of-screen "[E] 登る" prompt. We push to React state
+        // only on boundary changes (entering / leaving the zone) so the
+        // HUD doesn't re-render every frame while the player loiters.
+        let nearClimbNow = false
+        for (const zone of refs.climbZones) {
+          if (
+            refs.focalPoint.x > zone.x1 - CLIMB_INTERACT_PAD &&
+            refs.focalPoint.x < zone.x2 + CLIMB_INTERACT_PAD &&
+            refs.focalPoint.z > zone.z1 - CLIMB_INTERACT_PAD &&
+            refs.focalPoint.z < zone.z2 + CLIMB_INTERACT_PAD
+          ) {
+            nearClimbNow = true
+            break
+          }
+        }
+        if (nearClimbNow !== prevNearClimbRef.current) {
+          prevNearClimbRef.current = nearClimbNow
+          setNearClimb(nearClimbNow)
+        }
+
         // E-key climb (consumed once per press in the keydown handler).
         if (climbRequestRef.current) {
           climbRequestRef.current = false
@@ -3807,6 +3918,18 @@ export default function ThreeWorld({
           playerVelYRef.current = 0
         }
         updateCamera()
+
+        // Pulse the entry decal rings (door / ladder ground markers) so
+        // they're spottable peripherally. Shared sine wave keeps the
+        // pulse in lockstep across all decals — reads as deliberate
+        // signage rather than per-light flicker.
+        {
+          const pulse = 0.7 + Math.sin(Date.now() * 0.004) * 0.45
+          for (const d of entryDecals) {
+            const mm = d.material as THREE.MeshStandardMaterial
+            mm.emissiveIntensity = pulse
+          }
+        }
 
         // Walk-bob: subtle vertical head sway when actually moving. Phase
         // freezes when standing still so it doesn't bob while idle. Base Y
@@ -4840,6 +4963,34 @@ export default function ThreeWorld({
               ctx.arc(marker.x * SCALE, marker.z * SCALE, 4, 0, Math.PI * 2)
               ctx.fill()
             }
+            // Doors (green ▲) and ladders (yellow square) — navigational
+            // aids so the player can spot interactive entries on the map.
+            for (const ent of refs.entries) {
+              const ex = ent.x * SCALE
+              const ez = ent.z * SCALE
+              if (ent.kind === "door") {
+                ctx.fillStyle = "#44ff88"
+                ctx.strokeStyle = "rgba(0,0,0,0.85)"
+                ctx.lineWidth = 1
+                ctx.beginPath()
+                ctx.moveTo(ex, ez - 4)
+                ctx.lineTo(ex + 3.4, ez + 2.5)
+                ctx.lineTo(ex - 3.4, ez + 2.5)
+                ctx.closePath()
+                ctx.fill()
+                ctx.stroke()
+              } else {
+                ctx.fillStyle = "#ffcc22"
+                ctx.strokeStyle = "rgba(0,0,0,0.85)"
+                ctx.lineWidth = 1
+                ctx.fillRect(ex - 3, ez - 3, 6, 6)
+                ctx.strokeRect(ex - 3, ez - 3, 6, 6)
+                // Tiny rung mark inside (visual hint at "ladder").
+                ctx.fillStyle = "rgba(0,0,0,0.6)"
+                ctx.fillRect(ex - 2, ez - 1, 4, 1)
+                ctx.fillRect(ex - 2, ez + 1, 4, 1)
+              }
+            }
             // Draw enemies on minimap (color by type/state)
             for (const enemy of refs.enemies) {
               if (enemy.hp <= 0) continue
@@ -5510,6 +5661,34 @@ export default function ThreeWorld({
             }}
           >
             {killStreakMsg}
+          </div>
+        )}
+
+        {/* Climb prompt — shown while the player is inside a ladder/stairs
+            ClimbZone. The animate loop flips the state on entry/exit so this
+            doesn't re-render every frame. */}
+        {nearClimb && !isLoading && !error && gamePhase === "playing" && (
+          <div
+            style={{
+              position: "absolute",
+              bottom: "20%",
+              left: "50%",
+              transform: "translateX(-50%)",
+              zIndex: 25,
+              pointerEvents: "none",
+              fontFamily: "monospace",
+              fontSize: "1rem",
+              color: "#ffcc22",
+              background: "rgba(0,0,0,0.78)",
+              border: "1px solid #ffcc22",
+              padding: "0.45rem 1.1rem",
+              letterSpacing: "0.15em",
+              textShadow: "0 0 8px rgba(255,200,40,0.6)",
+              boxShadow: "0 0 14px rgba(255,200,40,0.3)",
+              borderRadius: "2px",
+            }}
+          >
+            [E] 登る
           </div>
         )}
 
