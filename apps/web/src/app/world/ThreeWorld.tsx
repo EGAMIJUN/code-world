@@ -230,26 +230,25 @@ const MAP_OBJECTS: [number, number, number, number, number][] = [
   [10, 62, 3, 0.4, 2],
   [25, 72, 3, 0.4, 2],
   // ── Industrial zone (x: 33–64) ───────────────────────────────────────────
-  // Warehouses / factory buildings
+  // Warehouses / factory buildings. Six entries in the z = 32–67 band
+  // were removed — they either sat *inside* the new BATTLE_CITY_BUILDINGS
+  // flanks or blocked the central avenue at z ≈ 44–55. The remaining
+  // four (z=5–28 and z=71–79) sit outside the avenue and still serve as
+  // cover/skyline backdrop.
   [33, 5, 10, 9, 0],
   [47, 5, 12, 8, 0],
   [33, 18, 9, 10, 0],
   [46, 18, 11, 9, 0],
-  [33, 32, 10, 8, 0],
-  [47, 32, 10, 9, 0],
-  [33, 44, 9, 10, 0],
-  [46, 45, 11, 8, 0],
-  [33, 58, 10, 9, 0],
-  [47, 58, 10, 8, 0],
   [33, 71, 9, 8, 0],
   [46, 72, 11, 7, 0],
-  // Tanks & pipes
+  // Tanks & pipes. Pipe at [63, 46, 1, 10, 3] removed — it was a tall
+  // 1m-wide 7m-tall slab sitting in the middle of the central avenue,
+  // blocking the spawn-to-terminus walking path.
   [60, 5, 2, 2, 3],
   [63, 10, 1, 10, 3],
   [60, 24, 2, 2, 3],
   [63, 28, 8, 1, 3],
   [60, 42, 2, 2, 3],
-  [63, 46, 1, 10, 3],
   [60, 60, 2, 2, 3],
   [63, 65, 8, 1, 3],
   // ── Outdoor zone (x: 68–92) ──────────────────────────────────────────────
@@ -523,16 +522,26 @@ interface BattleCityBuilding {
   bldKind: "concrete" | "industrial"
 }
 const BATTLE_CITY_BUILDINGS: BattleCityBuilding[] = [
-  // North flank (door faces +z / south toward the avenue).
-  { x: 6, z: 18, w: 14, d: 12, h: 4.5, doorSide: "south", bldKind: "concrete" },
-  { x: 24, z: 14, w: 14, d: 14, h: 5.5, doorSide: "south", bldKind: "concrete" },
-  { x: 44, z: 18, w: 16, d: 14, h: 5.0, doorSide: "south", bldKind: "industrial" },
-  { x: 66, z: 16, w: 12, d: 16, h: 4.5, doorSide: "south", bldKind: "concrete" },
-  // South flank (door faces -z / north toward the avenue).
-  { x: 6, z: 62, w: 14, d: 14, h: 4.5, doorSide: "north", bldKind: "concrete" },
-  { x: 24, z: 64, w: 16, d: 14, h: 5.0, doorSide: "north", bldKind: "concrete" },
-  { x: 46, z: 62, w: 14, d: 16, h: 5.5, doorSide: "north", bldKind: "industrial" },
-  { x: 66, z: 64, w: 12, d: 14, h: 4.5, doorSide: "north", bldKind: "concrete" },
+  // North flank — buildings ride right against the avenue (z2 reaches
+  // ≈44) so they read as the *wall* of the street, not distant scenery.
+  // Doors face +z (south) so the player sees them while walking down
+  // the avenue. The first building is intentionally close to spawn so
+  // it's visible the instant the camera unlocks.
+  { x: 10, z: 32, w: 12, d: 11, h: 4.5, doorSide: "south", bldKind: "concrete" },
+  { x: 26, z: 30, w: 14, d: 13, h: 5.5, doorSide: "south", bldKind: "concrete" },
+  { x: 44, z: 32, w: 14, d: 11, h: 5.0, doorSide: "south", bldKind: "industrial" },
+  { x: 62, z: 30, w: 14, d: 13, h: 4.5, doorSide: "south", bldKind: "concrete" },
+  // South flank — mirror image; doors face -z (north toward the avenue).
+  { x: 10, z: 57, w: 12, d: 12, h: 4.5, doorSide: "north", bldKind: "concrete" },
+  { x: 26, z: 57, w: 14, d: 13, h: 5.0, doorSide: "north", bldKind: "concrete" },
+  { x: 46, z: 57, w: 14, d: 13, h: 5.5, doorSide: "north", bldKind: "industrial" },
+  { x: 64, z: 57, w: 14, d: 13, h: 4.5, doorSide: "north", bldKind: "concrete" },
+  // ── Avenue terminus ─────────────────────────────────────────────────
+  // A 9th building positioned across the east end of the avenue with a
+  // door on the *west* face. Walking straight east from spawn now ends
+  // at a clearly visible building — no more "endless empty road".
+  // Sized + positioned to clear the outdoor-zone perimeter ruin at x≈91.
+  { x: 74, z: 45, w: 12, d: 12, h: 5.5, doorSide: "west", bldKind: "industrial" },
 ]
 
 // ── Mission system ─────────────────────────────────────────────────────────────
@@ -2581,10 +2590,11 @@ export default function ThreeWorld({
       }
 
       // ── FPS camera state ───────────────────────────────────────────────────
-      // West edge of the central avenue, facing east straight down the
-      // strip. The BATTLE_CITY_BUILDINGS layout puts hollow buildings on
-      // both flanks of this line so walking forward = arriving at cover.
-      const focalPoint = new THREE.Vector3(2, 0, 50)
+      // West end of the central avenue, with the avenue terminus building
+      // visible dead-ahead. Buildings flanking at z=32–44 (north) and
+      // z=57–70 (south) sit tight against the avenue (z≈44–57) so they
+      // read as "the city's street walls" — no more "off in the distance".
+      const focalPoint = new THREE.Vector3(4, 0, 50)
       const camState = { yaw: -Math.PI / 2, pitch: 0 } // facing +X (east)
 
       function clampPitch(p: number) {
