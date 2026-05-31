@@ -901,6 +901,11 @@ export default function ThreeWorld({
   const playerVelRef = useRef({ x: 0, z: 0 })
   // Walk-bob: vertical head sway phase, advances only while moving.
   const walkBobRef = useRef(0)
+  // Pointer-locked mouse delta accumulates here per event, then drains in
+  // the animate loop with a tiny low-pass blend. Decouples mouse-event rate
+  // (which can spike >500Hz on gaming mice) from frame rate, and removes
+  // sub-pixel jitter without adding perceivable input lag.
+  const mouseDeltaRef = useRef({ x: 0, y: 0 })
   const wsRef = useRef<WebSocket | null>(null)
   const usernameRef = useRef("Player")
   const remotePosRef = useRef<Record<string, RemotePlayer>>({})
@@ -964,6 +969,13 @@ export default function ThreeWorld({
   const [mvpName, setMvpName] = useState<string | null>(null)
   const [grenadeCooldownMs, setGrenadeCooldownMs] = useState(0)
   const lastGrenadeRef = useRef(0)
+  // Last value pushed to setGrenadeCooldownMs — guards against re-renders
+  // when the rounded display value hasn't changed (animate loop calls this
+  // every frame).
+  const prevGrenadeCdRef = useRef(0)
+  // Mirror of `playerHp` (the rendered React state). Animate loop uses this
+  // to bail out of setPlayerHp calls while regen is ticking sub-integer.
+  const prevDisplayHpRef = useRef(PLAYER_MAX_HP)
   const requestGrenadeRef = useRef(false)
   const modeRef = useRef(mode)
   // initialize spawn invuln (3s grace at match start)
@@ -1143,17 +1155,37 @@ export default function ThreeWorld({
       camera.rotation.order = "YXZ"
 
       // ── Renderer ───────────────────────────────────────────────────────────
-      const renderer = new THREE.WebGLRenderer({ antialias: true })
+      const renderer = new THREE.WebGLRenderer({
+        antialias: true,
+        powerPreference: "high-performance",
+      })
       renderer.setSize(container.clientWidth, container.clientHeight)
-      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
+      // Cap at 1.75 instead of 2 — on retina the extra 14% pixels rarely
+      // shows visually but costs ~30% GPU. Keeps perf room for shadows.
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.75))
       renderer.shadowMap.enabled = true
       renderer.shadowMap.type = THREE.PCFSoftShadowMap
+      // ACESFilmic + linear→sRGB output gives the "cinematic" desaturated
+      // highlight rolloff that COD/Battlefield use; exposure < 1 keeps the
+      // bright sky from blowing out against PBR-lit concrete.
+      renderer.toneMapping = THREE.ACESFilmicToneMapping
+      renderer.toneMappingExposure = 0.95
+      renderer.outputColorSpace = THREE.SRGBColorSpace
       container.appendChild(renderer.domElement)
       rendererDomRef.current = renderer.domElement
+      // Max anisotropy is read once and reused for every procedural texture
+      // below — saves repeated capability lookups.
+      const maxAniso = renderer.capabilities.getMaxAnisotropy()
 
       // ── Lights (daytime battlefield) ───────────────────────────────────────
-      scene.add(new THREE.AmbientLight(theme.ambient, 2.4))
-      const sun = new THREE.DirectionalLight(theme.sun, 3.5)
+      // Ambient was 2.4 — washed out shadows entirely. Drop it to 0.45 and
+      // let a HemisphereLight handle the sky-vs-ground gradient (gives
+      // "outdoor day" feel without crushing shadow contrast).
+      scene.add(new THREE.AmbientLight(theme.ambient, 0.45))
+      const hemi = new THREE.HemisphereLight(theme.sky, 0x4a4030, 0.55)
+      hemi.position.set(0, 50, 0)
+      scene.add(hemi)
+      const sun = new THREE.DirectionalLight(theme.sun, 2.8)
       sun.position.set(60, 80, 40)
       sun.castShadow = true
       sun.shadow.mapSize.set(2048, 2048)
@@ -1163,11 +1195,64 @@ export default function ThreeWorld({
       sun.shadow.camera.right = 80
       sun.shadow.camera.bottom = -80
       sun.shadow.camera.top = 80
+      // Bias fights shadow acne on the flat building walls; normal bias
+      // handles the bands where the sun grazes a vertical surface.
+      sun.shadow.bias = -0.0005
+      sun.shadow.normalBias = 0.04
+      sun.shadow.radius = 2
       scene.add(sun)
-      // Fill light from opposite side
-      const fillLight = new THREE.DirectionalLight(0xb0c8ff, 0.8)
+      // Fill light from opposite side (gentle bounce-light proxy)
+      const fillLight = new THREE.DirectionalLight(0xb0c8ff, 0.45)
       fillLight.position.set(-40, 30, -20)
       scene.add(fillLight)
+
+      // ── Procedural noise textures ──────────────────────────────────────────
+      // Pure flat-colored boxes shimmer at distance (moire from mipmap aliasing
+      // of the constant color against fog). A subtle multi-octave noise
+      // texture per material breaks up the surface, gives mipmaps something
+      // to filter, and reads as "concrete/metal weathering".
+      function makeNoiseTexture(
+        size: number,
+        baseHex: number,
+        contrast: number,
+        repeat: number,
+      ): THREE.CanvasTexture {
+        const canvas = document.createElement("canvas")
+        canvas.width = size
+        canvas.height = size
+        const ctx = canvas.getContext("2d")
+        if (ctx) {
+          const baseR = (baseHex >> 16) & 0xff
+          const baseG = (baseHex >> 8) & 0xff
+          const baseB = baseHex & 0xff
+          const img = ctx.createImageData(size, size)
+          for (let i = 0; i < size * size; i++) {
+            // Mix two noise scales for fake fractal feel.
+            const coarse = Math.random()
+            const fine = Math.random()
+            const n = (coarse * 0.7 + fine * 0.3 - 0.5) * 2 // [-1, 1]
+            const k = 1 + n * contrast
+            img.data[i * 4 + 0] = Math.max(0, Math.min(255, baseR * k))
+            img.data[i * 4 + 1] = Math.max(0, Math.min(255, baseG * k))
+            img.data[i * 4 + 2] = Math.max(0, Math.min(255, baseB * k))
+            img.data[i * 4 + 3] = 255
+          }
+          ctx.putImageData(img, 0, 0)
+        }
+        const tex = new THREE.CanvasTexture(canvas)
+        tex.wrapS = THREE.RepeatWrapping
+        tex.wrapT = THREE.RepeatWrapping
+        tex.repeat.set(repeat, repeat)
+        tex.generateMipmaps = true
+        tex.minFilter = THREE.LinearMipmapLinearFilter
+        tex.magFilter = THREE.LinearFilter
+        tex.anisotropy = maxAniso
+        tex.colorSpace = THREE.SRGBColorSpace
+        return tex
+      }
+      const concreteNoise = makeNoiseTexture(128, 0xffffff, 0.12, 6)
+      const industrialNoise = makeNoiseTexture(128, 0xffffff, 0.09, 5)
+      const groundNoise = makeNoiseTexture(256, 0xffffff, 0.07, 24)
 
       // ── Ground zones ───────────────────────────────────────────────────────
       const zoneTint = (base: number): number => {
@@ -1188,7 +1273,14 @@ export default function ThreeWorld({
       for (const zone of ZONES) {
         const zw = (zone.endTX - zone.startTX + 1) * TILE_UNIT
         const geo = new THREE.PlaneGeometry(zw, MAP_SIZE * TILE_UNIT)
-        const mat = new THREE.MeshLambertMaterial({ color: zoneTint(zone.color) })
+        // Standard material + the shared ground noise texture so the floor
+        // doesn't look like a flat painted plane under directional light.
+        const mat = new THREE.MeshStandardMaterial({
+          color: zoneTint(zone.color),
+          map: groundNoise,
+          roughness: 0.95,
+          metalness: 0,
+        })
         const mesh = new THREE.Mesh(geo, mat)
         mesh.rotation.x = -Math.PI / 2
         mesh.position.set(
@@ -1210,13 +1302,45 @@ export default function ThreeWorld({
       // ── War-zone buildings / obstacles ─────────────────────────────────────
       const wallMeshes: THREE.Mesh[] = []
 
-      // Shared materials
-      const concreteMat = new THREE.MeshLambertMaterial({ color: 0x8a8878 })
-      const concreteRoofMat = new THREE.MeshLambertMaterial({ color: 0x7a7868 })
-      const industrialMat = new THREE.MeshLambertMaterial({ color: 0x787878 })
-      const industrialRoofMat = new THREE.MeshLambertMaterial({ color: 0x686868 })
-      const windowMat = new THREE.MeshLambertMaterial({ color: 0x1a2833, emissive: 0x050a10 })
-      const barricadeMat = new THREE.MeshLambertMaterial({ color: 0x888870 })
+      // Shared materials. Buildings use MeshStandardMaterial (PBR) with the
+      // procedural noise as albedo so they read as weathered concrete/metal
+      // under tone mapping. Roughness near 1 keeps the specular subtle.
+      const concreteMat = new THREE.MeshStandardMaterial({
+        color: 0x8a8878,
+        map: concreteNoise,
+        roughness: 0.92,
+        metalness: 0,
+      })
+      const concreteRoofMat = new THREE.MeshStandardMaterial({
+        color: 0x7a7868,
+        map: concreteNoise,
+        roughness: 0.95,
+        metalness: 0,
+      })
+      const industrialMat = new THREE.MeshStandardMaterial({
+        color: 0x787878,
+        map: industrialNoise,
+        roughness: 0.7,
+        metalness: 0.25,
+      })
+      const industrialRoofMat = new THREE.MeshStandardMaterial({
+        color: 0x686868,
+        map: industrialNoise,
+        roughness: 0.75,
+        metalness: 0.25,
+      })
+      const windowMat = new THREE.MeshStandardMaterial({
+        color: 0x1a2833,
+        emissive: 0x050a10,
+        roughness: 0.1,
+        metalness: 0.6,
+      })
+      const barricadeMat = new THREE.MeshStandardMaterial({
+        color: 0x888870,
+        map: concreteNoise,
+        roughness: 0.9,
+        metalness: 0,
+      })
       const tankMat = new THREE.MeshLambertMaterial({ color: 0x6a7060 })
       const pipeMat = new THREE.MeshLambertMaterial({ color: 0x888878 })
       const trenchMat = new THREE.MeshLambertMaterial({ color: 0x706050 })
@@ -1260,12 +1384,20 @@ export default function ThreeWorld({
           mesh.receiveShadow = true
           scene.add(mesh)
           wallMeshes.push(mesh)
-          // Sandbag texture strips
-          const bagGeo = new THREE.BoxGeometry(ow * 0.9, 0.22, od * 0.9)
-          const bagMat = new THREE.MeshLambertMaterial({ color: 0x9a8a6a })
+          // Sandbag strips — stacked *on top of* the trench (previously
+          // their geometry sat inside the trench body, z-fighting both
+          // top and side faces of the parent box).
+          const bagGeo = new THREE.BoxGeometry(ow * 0.9, 0.16, od * 0.9)
+          const bagMat = new THREE.MeshStandardMaterial({
+            color: 0x9a8a6a,
+            roughness: 0.95,
+            metalness: 0,
+          })
           for (let bi = 0; bi < 2; bi++) {
             const bag = new THREE.Mesh(bagGeo, bagMat)
-            bag.position.set(cx, trenchH - 0.11 - bi * 0.24, cz)
+            bag.position.set(cx, trenchH + 0.08 + bi * 0.17, cz)
+            bag.castShadow = true
+            bag.receiveShadow = true
             scene.add(bag)
           }
           continue
@@ -1282,9 +1414,11 @@ export default function ThreeWorld({
           body.receiveShadow = true
           scene.add(body)
           wallMeshes.push(body)
-          // Windshield
+          // Windshield — sit it *on* the front face (z = oz, slight offset)
+          // instead of buried inside the body (was at oz + od*0.3, fully
+          // inside the box — flickered through the body's front face).
           const windshield = new THREE.Mesh(new THREE.BoxGeometry(ow * 0.6, 0.38, 0.05), windowMat)
-          windshield.position.set(cx, carH * 0.85, oz + od * 0.3)
+          windshield.position.set(cx, carH * 0.85, oz - 0.03)
           scene.add(windshield)
           // Tires (4 wheels)
           const tireMat = new THREE.MeshLambertMaterial({ color: 0x1a1a1a })
@@ -1322,9 +1456,16 @@ export default function ThreeWorld({
           mesh.receiveShadow = true
           scene.add(mesh)
           wallMeshes.push(mesh)
-          // Stripe markings
-          const stripeMat = new THREE.MeshLambertMaterial({ color: 0xffaa00 })
-          const stripeGeo = new THREE.BoxGeometry(ow, 0.08, od + 0.02)
+          // Stripe markings — protrude meaningfully on all 4 sides so no
+          // face is coplanar with the parent barricade (was only +0.01 on
+          // z and identical on x, which flickered at distance).
+          const stripeMat = new THREE.MeshStandardMaterial({
+            color: 0xffaa00,
+            emissive: 0x301800,
+            roughness: 0.6,
+            metalness: 0,
+          })
+          const stripeGeo = new THREE.BoxGeometry(ow + 0.06, 0.08, od + 0.06)
           const stripe = new THREE.Mesh(stripeGeo, stripeMat)
           stripe.position.set(cx, bH * 0.6, cz)
           scene.add(stripe)
@@ -1342,8 +1483,12 @@ export default function ThreeWorld({
             )
             tankBody.position.set(cx, tankH / 2, cz)
             tankBody.castShadow = true
+            tankBody.receiveShadow = true
             scene.add(tankBody)
-            wallMeshes.push(new THREE.Mesh(new THREE.BoxGeometry(ow, tankH, od), tankMat))
+            // Was pushing a dummy box at position (0,0,0) — never matched
+            // the real tank's location, so wall-occlusion raycasts and
+            // bullet checks missed tanks entirely. Push the cylinder itself.
+            wallMeshes.push(tankBody)
             // Top dome
             const dome = new THREE.Mesh(
               new THREE.SphereGeometry(1.1, 8, 5, 0, Math.PI * 2, 0, Math.PI / 2),
@@ -1378,11 +1523,14 @@ export default function ThreeWorld({
         scene.add(bodyMesh)
         wallMeshes.push(bodyMesh)
 
-        // Roof
+        // Roof — small upward offset so the roof's bottom face doesn't
+        // sit *exactly* on the body's top face (used to z-fight at the
+        // joint when viewed from a distance).
         const roofGeo = new THREE.BoxGeometry(ow + 0.2, 0.2, od + 0.2)
         const roof = new THREE.Mesh(roofGeo, roofBldMat)
-        roof.position.set(cx, wallH + 0.1, cz)
+        roof.position.set(cx, wallH + 0.12, cz)
         roof.castShadow = true
+        roof.receiveShadow = true
         scene.add(roof)
 
         // Windows on large buildings
@@ -1393,12 +1541,15 @@ export default function ThreeWorld({
             for (let wCol = 0; wCol < wCols; wCol++) {
               const winX = ox + (wCol + 0.5) * (ow / wCols)
               const winY = 1.0 + wRow * ((wallH - 1.0) / wRows)
-              const winGeo = new THREE.BoxGeometry((ow / wCols) * 0.5, 0.7, 0.06)
+              const winGeo = new THREE.BoxGeometry((ow / wCols) * 0.5, 0.7, 0.08)
+              // Centered ON the wall face (slight protrusion outward) so
+              // the inner face is clearly inside the wall — eliminates the
+              // earlier 0.01 hairline-gap z-fight.
               const winF = new THREE.Mesh(winGeo, windowMat)
-              winF.position.set(winX, winY, oz - 0.04)
+              winF.position.set(winX, winY, oz - 0.02)
               scene.add(winF)
               const winB = winF.clone()
-              winB.position.set(winX, winY, oz + od + 0.04)
+              winB.position.set(winX, winY, oz + od + 0.02)
               scene.add(winB)
             }
           }
@@ -2545,9 +2696,9 @@ export default function ThreeWorld({
       // ── PointerLock ────────────────────────────────────────────────────────
       function onDocMouseMove(e: MouseEvent) {
         if (document.pointerLockElement !== renderer.domElement) return
-        camState.yaw -= e.movementX * 0.002
-        camState.pitch = clampPitch(camState.pitch - e.movementY * 0.002)
-        updateCamera()
+        // Accumulate; the animate loop applies (and lightly smooths) it.
+        mouseDeltaRef.current.x += e.movementX
+        mouseDeltaRef.current.y += e.movementY
       }
       function onPointerLockChange() {
         setIsPointerLocked(document.pointerLockElement === renderer.domElement)
@@ -2611,15 +2762,30 @@ export default function ThreeWorld({
         const refs = sceneRef.current
         if (!refs) return
 
-        // Low-pass filter the joystick inputs (mouse stays raw — smoothing
-        // mice would add input lag, but a finger on glass jitters and the
-        // micro-noise reads as camera shake without smoothing).
+        // Low-pass filter the joystick inputs (finger jitter on glass).
         const joyBlend = 1 - Math.exp(-dt * 22)
         joySmoothRef.current.vx += (joystickRef.current.vx - joySmoothRef.current.vx) * joyBlend
         joySmoothRef.current.vy += (joystickRef.current.vy - joySmoothRef.current.vy) * joyBlend
         const lookBlend = 1 - Math.exp(-dt * 28)
         lookSmoothRef.current.vx += (lookJoyRef.current.vx - lookSmoothRef.current.vx) * lookBlend
         lookSmoothRef.current.vy += (lookJoyRef.current.vy - lookSmoothRef.current.vy) * lookBlend
+
+        // Drain accumulated mouse delta with a light smoothing tail. We
+        // apply ~75% of the buffered movement this frame and roll the
+        // remainder into next frame — eliminates the spiky single-event
+        // jumps on high-Hz mice without adding noticeable input lag.
+        {
+          const APPLY = 0.75
+          const mdx = mouseDeltaRef.current.x * APPLY
+          const mdy = mouseDeltaRef.current.y * APPLY
+          mouseDeltaRef.current.x -= mdx
+          mouseDeltaRef.current.y -= mdy
+          if (mdx !== 0 || mdy !== 0) {
+            camState.yaw -= mdx * 0.002
+            camState.pitch = clampPitch(camState.pitch - mdy * 0.002)
+            updateCamera()
+          }
+        }
 
         // ADS FOV interpolation
         const targetFov = isAimingRef.current ? (currentWeaponIdxRef.current === 2 ? 28 : 50) : 75
@@ -2659,9 +2825,17 @@ export default function ThreeWorld({
             }
           }
         }
-        // Tick grenade cooldown display (rounded to 100ms so React bails out)
-        const sinceG = Date.now() - lastGrenadeRef.current
-        setGrenadeCooldownMs(Math.max(0, Math.round((5000 - sinceG) / 100) * 100))
+        // Tick grenade cooldown display. Rounded to 100ms; also gated by
+        // an "only if changed" ref so React's setState isn't invoked at
+        // 60Hz when the displayed value is unchanged for 6 frames.
+        {
+          const sinceG = Date.now() - lastGrenadeRef.current
+          const cd = Math.max(0, Math.round((5000 - sinceG) / 100) * 100)
+          if (cd !== prevGrenadeCdRef.current) {
+            prevGrenadeCdRef.current = cd
+            setGrenadeCooldownMs(cd)
+          }
+        }
 
         // Input → desired movement direction. Joystick is filtered; WASD
         // contributes raw ±1 components clamped to unit length.
@@ -2728,13 +2902,19 @@ export default function ThreeWorld({
           camera.position.y += (EYE_HEIGHT - camera.position.y) * (1 - Math.exp(-dt * 10))
         }
 
-        // HP auto-recovery (5s no damage → 2 HP/s)
+        // HP auto-recovery (5s no damage → 2 HP/s). Push to React state
+        // only when the *rounded* HP changes — was firing setState every
+        // frame during recovery (≈30 re-renders/sec for a 0.5 HP/frame tick).
         {
           const nowMs = Date.now()
           if (gamePhaseRef.current === "playing" && playerHpRef.current < PLAYER_MAX_HP) {
             if (nowMs - lastDamageTimeRef.current > AUTO_RECOVER_DELAY * 1000) {
               playerHpRef.current = Math.min(PLAYER_MAX_HP, playerHpRef.current + RECOVER_RATE * dt)
-              setPlayerHp(Math.round(playerHpRef.current))
+              const hpInt = Math.round(playerHpRef.current)
+              if (hpInt !== prevDisplayHpRef.current) {
+                prevDisplayHpRef.current = hpInt
+                setPlayerHp(hpInt)
+              }
             }
           }
         }
