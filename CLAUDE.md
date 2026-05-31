@@ -116,14 +116,15 @@ Hono ルーターで `/api/*` 配下にマウント。すべて JSON、共通エ
 |---|---|
 | `/` | ランディングページ |
 | `/login` / `/signup` | フォーム認証 UI |
-| `/world` | メインの FPS ゲーム。`WorldClient` がモード/マップ選択画面 → `ThreeWorld.tsx` (5,000行超) |
+| `/world` | メインの FPS ゲーム。`WorldClient` がモード/マップ選択画面 → `ThreeWorld.tsx` (約5,900行) |
 | `/leaderboard` | totalScore ランキング |
 | `/profile` / `/profile/[id]` | プロフィール表示 |
 
 `ThreeWorld.tsx` は単一巨大コンポーネント。主要要素:
 - 100×100 ユニットの戦場マップ（市街地 / 工業 / 屋外の3ゾーン）
 - マップテーマ: urban (青空) / desert (砂色) / snow (白い空)
-- ヒューマノイド型エネミー（grunt / sniper / heavy）
+- プレイヤースポーン: `focalPoint = (2, 0, 48)` (西端で東向き)。`(8, 48)` は建物 `[3,45,6,7]` の内側にあって動けなくなる罠だったので避けてある
+- ヒューマノイド型エネミー（grunt / sniper / heavy）。`root.rotation.order = "YXZ"` で死亡チルトが体の左右軸基準
 - 10種類のミッション (Wave Defense モード時のみ表示)
 - 武器3種（pistol 無限弾, shotgun 8発, sniper 5発）+ グレネード（Gキー, AOE, 5秒CD）
 - 右クリック (またはモバイル ADS ボタン) で ADS — Sniper は FOV 28、その他は 50 にズーム
@@ -131,6 +132,24 @@ Hono ルーターで `/api/*` 配下にマウント。すべて JSON、共通エ
 - WebSocket でルーム内位置同期 + PvP ヒット同期
 - モバイル: 左ジョイスティック (移動) + 右ジョイスティック (視点) + FIRE/RELOAD/ADS/GRENADE/武器スワップ ボタン
 - COD 風演出: ヘッドショット (2倍ダメージ + 表示) / Double/Triple Kill / Rampage / Unstoppable / Godlike キルストリーク / MVP リザルト / 3秒スポーン無敵
+- 入力スムージング: `playerVelRef` で WASD/ジョイスティックの希望速度に指数補間、`joySmoothRef`/`lookSmoothRef` で指のジッタを低域フィルタ、ウォークボブ
+- 壁衝突: `WALL_AABBS` にタイプ別高さ `h` を持たせ、`pointInsideWall(x,y,z)` で弾の壁着弾、`fire()` の raycast は `wallMeshes` も対象にしてカバー越し射撃を遮断 (PvP も同様)
+- 安全スポーン: `findSafeSpawnNear(x, z, radius)` (同心円スパイラル探索) を `spawnEnemiesFromDef` / `spawnBots` / bot respawn 全てに通して建物内スポーンを回避
+- 死亡アニメ: `DEATH_ANIM_TOTAL = 4.0s` (`FALL 1.2s` で 0→π/2 を ease-out でプローン化 + 膝崩れ → `LIE 1.8s` 地面接地 → `FADE 1.0s` 不透明度フェード)。`deathFallDir` をキル時に shooter とのドット積で決定し、撃たれた方向へ倒れる。`mesh.position.y = sin(tilt) * 0.18` で胴体が地面に乗る
+
+### 操作キー (PC)
+
+| キー | 用途 |
+|---|---|
+| `WASD` / 矢印 | 移動 (ジッタ吸収のため指数補間) |
+| `Shift` | スプリント (1.5x) |
+| マウス | 視点 (pointer lock) |
+| 左クリック | 射撃 |
+| 右クリック | ADS (ズーム + 反動低下) |
+| `R` | リロード |
+| `1` / `2` / `3` | 武器切替 (pistol / shotgun / sniper) |
+| `G` | グレネード (5秒CD) |
+| `F8` | CRT スキャンライントグル (デフォルト OFF、`localStorage["fps_scanlines"]` 永続化) |
 
 ## Executor (apps/executor)
 
