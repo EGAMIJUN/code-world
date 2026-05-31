@@ -1370,7 +1370,10 @@ export default function ThreeWorld({
       renderer.setSize(container.clientWidth, container.clientHeight)
       // Cap at 1.75 instead of 2 — on retina the extra 14% pixels rarely
       // shows visually but costs ~30% GPU. Keeps perf room for shadows.
-      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.75))
+      // Mobile gets a tighter pixel-ratio cap — retina phones rendered at
+      // ~2.5× pixel count of desktop while having a fraction of the GPU.
+      const isTouch = typeof navigator !== "undefined" && navigator.maxTouchPoints > 0
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, isTouch ? 1.25 : 1.75))
       renderer.shadowMap.enabled = true
       renderer.shadowMap.type = THREE.PCFSoftShadowMap
       // ACESFilmic + linear→sRGB output gives the "cinematic" desaturated
@@ -1396,7 +1399,9 @@ export default function ThreeWorld({
       const sun = new THREE.DirectionalLight(theme.sun, 2.8)
       sun.position.set(60, 80, 40)
       sun.castShadow = true
-      sun.shadow.mapSize.set(2048, 2048)
+      // Shadow map 1024 (was 2048) — quarter the memory + sampling cost.
+      // Soft PCF blur covers the precision loss on most viewing angles.
+      sun.shadow.mapSize.set(1024, 1024)
       sun.shadow.camera.near = 0.5
       sun.shadow.camera.far = 200
       sun.shadow.camera.left = -80
@@ -1604,8 +1609,6 @@ export default function ThreeWorld({
           for (let bi = 0; bi < 2; bi++) {
             const bag = new THREE.Mesh(bagGeo, bagMat)
             bag.position.set(cx, trenchH + 0.08 + bi * 0.17, cz)
-            bag.castShadow = true
-            bag.receiveShadow = true
             scene.add(bag)
           }
           continue
@@ -1960,9 +1963,12 @@ export default function ThreeWorld({
         interiorFloor.position.set(x + w / 2, 0.015, z + d / 2)
         interiorFloor.receiveShadow = true
         scene.add(interiorFloor)
-        // ── Door cue: "ENTER" sprite above the gap + ground decal below.
-        // Position is the door's outside footprint so the player sees the
-        // sign before stepping through. Entry record drives the minimap icon.
+        // ── Door cue: green ground decal in front of the gap. The
+        // overhead "ENTER" sprite was dropped — the pulsing disc + the
+        // visible door gap + the minimap arrow already make entries
+        // findable, and the always-on-top sprite stack was visually busy
+        // (every building had one floating). Kept the entry record so
+        // the minimap icon still works.
         let doorX = x + w / 2
         let doorZ = z + d / 2
         const doorClearance = 0.6 // outside the wall plane
@@ -1970,9 +1976,6 @@ export default function ThreeWorld({
         else if (doorSide === "south") doorZ = z + d + doorClearance
         else if (doorSide === "west") doorX = x - doorClearance
         else doorX = x + w + doorClearance
-        const enterSign = makeEntrySign("ENTER", "#44ff88")
-        enterSign.position.set(doorX, h + 0.7, doorZ)
-        scene.add(enterSign)
         entryDecals.push(makeEntryDecal(doorX, doorZ, 0x44ff88))
         entries.push({ x: doorX, z: doorZ, kind: "door" })
       }
@@ -2340,8 +2343,8 @@ export default function ThreeWorld({
       for (const [dx, dz] of drumSpots) {
         const drum = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.35, 0.95, 10), drumMat)
         drum.position.set(dx, 0.475, dz)
-        drum.castShadow = true
-        drum.receiveShadow = true
+        drum.castShadow = false
+        drum.receiveShadow = false
         scene.add(drum)
         wallMeshes.push(drum)
         ALL_AABBS.push({ x1: dx - 0.4, x2: dx + 0.4, z1: dz - 0.4, z2: dz + 0.4, h: 0.95 })
@@ -2370,8 +2373,8 @@ export default function ThreeWorld({
         const pal = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.15, 0.8), palletMat)
         pal.position.set(px, 0.075, pz)
         pal.rotation.y = rot
-        pal.castShadow = true
-        pal.receiveShadow = true
+        pal.castShadow = false
+        pal.receiveShadow = false
         scene.add(pal)
         // No AABB — players step over flat pallets.
       }
@@ -2391,7 +2394,7 @@ export default function ThreeWorld({
       for (const [tx, tz] of trashSpots) {
         const can = new THREE.Mesh(new THREE.CylinderGeometry(0.28, 0.32, 0.85, 10), trashMat)
         can.position.set(tx, 0.425, tz)
-        can.castShadow = true
+        can.castShadow = false
         scene.add(can)
         wallMeshes.push(can)
         ALL_AABBS.push({ x1: tx - 0.32, x2: tx + 0.32, z1: tz - 0.32, z2: tz + 0.32, h: 0.85 })
@@ -2559,33 +2562,23 @@ export default function ThreeWorld({
         roughness: 0.4,
         metalness: 0,
       })
-      for (let lx = 8; lx <= 92; lx += 12) {
+      // Doubled spacing (12→18) — 24 lamps was overkill and dominated the
+      // PointLight per-pixel cost. No more castShadow (thin posts barely
+      // showed shadow anyway) and no more PointLights (emissive on the
+      // head already glows; sun + hemisphere handle the lit pixels).
+      // AABB also dropped — bullets at eye-height were getting eaten by
+      // the lamp's 5m-tall stop-volume; lamps are now pure decoration.
+      for (let lx = 12; lx <= 90; lx += 18) {
         for (const lz of [44, 56]) {
-          const post = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.12, 5, 8), lampPostMat)
+          const post = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.12, 5, 6), lampPostMat)
           post.position.set(lx, 2.5, lz)
-          post.castShadow = true
           scene.add(post)
-          // Arm overhanging the avenue
           const arm = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.08, 0.08), lampPostMat)
           arm.position.set(lx + (lz < 50 ? 0.5 : -0.5), 4.8, lz)
           scene.add(arm)
-          // Glowing head
-          const head = new THREE.Mesh(new THREE.SphereGeometry(0.22, 10, 8), lampHeadMat)
+          const head = new THREE.Mesh(new THREE.SphereGeometry(0.22, 8, 6), lampHeadMat)
           head.position.set(lx + (lz < 50 ? 1.0 : -1.0), 4.65, lz)
           scene.add(head)
-          // Subtle warm point light (low range so we don't run out of
-          // dynamic lights — 12 lamps total).
-          const lampLight = new THREE.PointLight(0xffd060, 0.4, 7)
-          lampLight.position.set(head.position.x, head.position.y, head.position.z)
-          scene.add(lampLight)
-          // Cylinder gets minimal collision — a thin AABB at the base.
-          ALL_AABBS.push({
-            x1: lx - 0.18,
-            x2: lx + 0.18,
-            z1: lz - 0.18,
-            z2: lz + 0.18,
-            h: 5,
-          })
         }
       }
 
@@ -3873,6 +3866,12 @@ export default function ThreeWorld({
       const fwd3 = new THREE.Vector3()
       const right3 = new THREE.Vector3()
 
+      // Frame counter — used to throttle non-critical per-frame work
+      // (aim raycast, minimap redraw). 60Hz visuals don't need these at
+      // 60Hz; running them every 4th frame is the cheapest perf win in
+      // the loop.
+      let frameCount = 0
+
       function animate() {
         animFrameRef.current = requestAnimationFrame(animate)
         // Cap dt to 50ms so a tab refocus / long pause doesn't yank everything
@@ -3881,6 +3880,7 @@ export default function ThreeWorld({
         const dt = Math.min(clock.getDelta(), 0.05)
         const refs = sceneRef.current
         if (!refs) return
+        frameCount = (frameCount + 1) | 0
 
         // Low-pass filter the joystick inputs (finger jitter on glass).
         const joyBlend = 1 - Math.exp(-dt * 22)
@@ -5023,12 +5023,18 @@ export default function ThreeWorld({
           }
         }
 
-        // ── Aimed enemy detection (crosshair highlight, recursive) ──────────
-        {
+        // ── Aimed enemy detection (crosshair highlight) ─────────────────
+        // Runs every 4 frames (~15Hz) — purely UI feedback, not gameplay
+        // critical, and the old per-frame "filter + traverse-every-enemy-
+        // skeleton + raycast against ~20*N parts" was the single most
+        // expensive thing in the loop. Also skipped on mobile (no
+        // crosshair shown there).
+        if (!isMobile && frameCount % 4 === 0) {
           pointer.set(0, 0)
           raycaster.setFromCamera(pointer, camera)
           const aimParts: THREE.Object3D[] = []
-          for (const e of refs.enemies.filter((e2) => e2.hp > 0)) {
+          for (const e of refs.enemies) {
+            if (e.hp <= 0) continue
             e.mesh.traverse((child) => {
               if (child instanceof THREE.Mesh && child.userData.enemyId) aimParts.push(child)
             })
@@ -5164,9 +5170,11 @@ export default function ThreeWorld({
           if (rmat.color.getHex() !== wantHex) rmat.color.setHex(wantHex)
         }
 
-        // Minimap
+        // Minimap — redraw every 4 frames (~15Hz). Player movement is
+        // smooth in 3D; the corner minimap doesn't need 60Hz canvas
+        // repaints, and the wall/enemy/player draws cost real time.
         const mcanvas = minimapRef.current
-        if (mcanvas) {
+        if (mcanvas && frameCount % 4 === 0) {
           const ctx = mcanvas.getContext("2d")
           if (ctx) {
             const W = mcanvas.width
@@ -5275,16 +5283,17 @@ export default function ThreeWorld({
               ctx.fill()
             }
             // Player marker — green triangle pointing in the camera's yaw
-            // direction so the user knows which way they're facing on the
-            // minimap. yaw = -π/2 means "facing +x" in world space, so the
-            // triangle "forward" must rotate by yaw + π/2 on canvas.
+            // direction. Canvas rotate is clockwise from up; world forward
+            // for yaw is (-sin(yaw), -cos(yaw)). Solving: the canvas angle
+            // that maps forward to the up-pointing triangle is -yaw.
+            // (Previously +π/2 was applied which made the arrow point 90°
+            // off — north when facing east, etc.)
             {
               const px = refs.focalPoint.x * SCALE
               const pz = refs.focalPoint.z * SCALE
-              const yaw = camState.yaw + Math.PI / 2
               ctx.save()
               ctx.translate(px, pz)
-              ctx.rotate(yaw)
+              ctx.rotate(-camState.yaw)
               ctx.fillStyle = "#00ff41"
               ctx.strokeStyle = "rgba(0,0,0,0.85)"
               ctx.lineWidth = 1
@@ -5360,11 +5369,15 @@ export default function ThreeWorld({
       setCurrentWeaponIdx(idx)
     }
 
-    function isTypingInInput(): boolean {
+    function isTypingInInput(e?: KeyboardEvent): boolean {
       const a = document.activeElement
-      if (!a) return false
       if (a instanceof HTMLInputElement || a instanceof HTMLTextAreaElement) return true
       if (a instanceof HTMLElement && a.isContentEditable) return true
+      // Defensive second-check: some browsers (and the chat panel after
+      // Tab-cycling) leave activeElement on <body>, but the keydown is
+      // still bubbling from the input. Read it off the event target too.
+      const t = e?.target
+      if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement) return true
       return false
     }
 
@@ -5385,7 +5398,7 @@ export default function ThreeWorld({
     ])
 
     function onKeyDown(e: KeyboardEvent) {
-      if (isTypingInInput()) return
+      if (isTypingInInput(e)) return
       // Prevent browser default (scroll / focus shift) for movement keys
       if (MOVEMENT_KEYS.has(e.key)) e.preventDefault()
       // Normalize so Shift+WASD still triggers movement
