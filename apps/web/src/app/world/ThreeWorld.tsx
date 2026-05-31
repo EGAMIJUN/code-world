@@ -230,17 +230,11 @@ const MAP_OBJECTS: [number, number, number, number, number][] = [
   [10, 62, 3, 0.4, 2],
   [25, 72, 3, 0.4, 2],
   // ── Industrial zone (x: 33–64) ───────────────────────────────────────────
-  // Warehouses / factory buildings. Six entries in the z = 32–67 band
-  // were removed — they either sat *inside* the new BATTLE_CITY_BUILDINGS
-  // flanks or blocked the central avenue at z ≈ 44–55. The remaining
-  // four (z=5–28 and z=71–79) sit outside the avenue and still serve as
-  // cover/skyline backdrop.
-  [33, 5, 10, 9, 0],
-  [47, 5, 12, 8, 0],
-  [33, 18, 9, 10, 0],
-  [46, 18, 11, 9, 0],
-  [33, 71, 9, 8, 0],
-  [46, 72, 11, 7, 0],
+  // All warehouse / factory buildings have been moved out of MAP_OBJECTS
+  // and into BATTLE_CITY_BUILDINGS-style hollow shells (see the
+  // INDUSTRIAL_HOLLOW_BUILDINGS pass in init). The avenue terminus
+  // building covers the z≈44–55 strip; the 6 industrial buildings here
+  // (z=5–28, z=71–79) are now enterable cover beyond the main flanks.
   // Tanks & pipes. Pipe at [63, 46, 1, 10, 3] removed — it was a tall
   // 1m-wide 7m-tall slab sitting in the middle of the central avenue,
   // blocking the spawn-to-terminus walking path.
@@ -309,10 +303,11 @@ const MAP_OBJECTS: [number, number, number, number, number][] = [
   [55, 50, 1, 2, 1],
   [70, 30, 2, 1, 1],
   [80, 55, 1, 2, 1],
-  // Extra rubble buildings outer ring
-  [3, 90, 8, 6, 0],
-  [15, 91, 7, 5, 0],
-  [25, 92, 6, 5, 0],
+  // Extra rubble buildings outer ring. Three south-urban entries
+  // ([3,90], [15,91], [25,92]) were removed — they intersected the
+  // existing hollow buildings + roof towers (16,86) / (28,86) / (43,85)
+  // / (60,86), creating "solid box jutting through hollow shell" visual
+  // glitches.
 ]
 
 // WALL_DEFS — formerly used by the minimap draw loop. Now superseded by
@@ -503,6 +498,17 @@ const SPAWN_POINTS = [
   { x: 18, z: 82 },
   { x: 50, z: 82 },
   { x: 82, z: 82 },
+  // Interior spawn points — pick the geometric centers of a handful of
+  // hollow buildings so a fraction of bots spawn *inside* and the player
+  // has to "clear rooms" instead of just battling on the street. Position
+  // values match the BATTLE_CITY / INDUSTRIAL_HOLLOW layouts above.
+  { x: 16, z: 37 }, // BATTLE N1 interior
+  { x: 51, z: 37 }, // BATTLE N3 interior
+  { x: 17, z: 63 }, // BATTLE S1 interior
+  { x: 53, z: 63 }, // BATTLE S3 interior
+  { x: 80, z: 51 }, // Avenue terminus interior
+  { x: 38, z: 9 }, // Industrial north-row interior
+  { x: 38, z: 75 }, // Industrial south-row interior
 ]
 
 // ── Battle-city building layout ────────────────────────────────────────────────
@@ -542,6 +548,22 @@ const BATTLE_CITY_BUILDINGS: BattleCityBuilding[] = [
   // at a clearly visible building — no more "endless empty road".
   // Sized + positioned to clear the outdoor-zone perimeter ruin at x≈91.
   { x: 74, z: 45, w: 12, d: 12, h: 5.5, doorSide: "west", bldKind: "industrial" },
+]
+
+// ── Industrial zone hollow buildings ───────────────────────────────────────
+// The six warehouses that used to live in MAP_OBJECTS as solid boxes. Moved
+// here so they go through makeHollowBuilding (door + interior + ENTER decal
+// + AABB + minimap entry). Positions match the original layout — the player
+// still finds factories where they always were, but can now go inside.
+//   - North row (z=5–28): doors face south, toward the avenue.
+//   - South row (z=71–79): doors face north, toward the avenue.
+const INDUSTRIAL_HOLLOW_BUILDINGS: BattleCityBuilding[] = [
+  { x: 33, z: 5, w: 10, d: 9, h: 5.5, doorSide: "south", bldKind: "industrial" },
+  { x: 47, z: 5, w: 12, d: 8, h: 5.0, doorSide: "south", bldKind: "industrial" },
+  { x: 33, z: 18, w: 9, d: 10, h: 5.0, doorSide: "south", bldKind: "industrial" },
+  { x: 46, z: 18, w: 11, d: 9, h: 5.5, doorSide: "south", bldKind: "industrial" },
+  { x: 33, z: 71, w: 9, d: 8, h: 5.0, doorSide: "north", bldKind: "industrial" },
+  { x: 46, z: 72, w: 11, d: 7, h: 5.5, doorSide: "north", bldKind: "industrial" },
 ]
 
 // ── Mission system ─────────────────────────────────────────────────────────────
@@ -2069,6 +2091,45 @@ export default function ThreeWorld({
             color: 0x333333,
           })
         }
+      }
+
+      // ── Industrial-zone hollow buildings (formerly solid type-0 boxes) ─
+      // Same generator path so they pick up ENTER decals, AABB walls with
+      // door gaps, ceiling, etc. Slightly sparser interior (just a desk +
+      // a crate) since these aren't the primary engagement zone.
+      for (const b of INDUSTRIAL_HOLLOW_BUILDINGS) {
+        const matB = industrialMat
+        const matR = industrialRoofMat
+        const h = b.h ?? 5.0
+        makeHollowBuilding({
+          x: b.x,
+          z: b.z,
+          w: b.w,
+          d: b.d,
+          h,
+          doorSide: b.doorSide,
+          doorWidth: 2.2,
+          bldMat: matB,
+          roofMat: matR,
+        })
+        placeProp({
+          x: b.x + b.w * 0.4,
+          y: 0,
+          z: b.z + b.d * 0.5,
+          w: 1.6,
+          h: 0.9,
+          d: 1.0,
+          color: 0x4a4032,
+        })
+        placeProp({
+          x: b.x + b.w * 0.75,
+          y: 0,
+          z: b.z + b.d * 0.4,
+          w: 1.2,
+          h: 1.1,
+          d: 1.2,
+          color: 0x5a4226,
+        })
       }
 
       // Hollow building #1 — warehouse on south urban edge.
