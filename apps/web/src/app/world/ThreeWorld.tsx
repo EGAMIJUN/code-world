@@ -26,6 +26,11 @@ const SPRINT_MULTIPLIER = 1.5
 const AUTO_RECOVER_DELAY = 5
 const RECOVER_RATE = 2
 const CAM_SHAKE_DECAY = 6
+// Death animation: 1.2s collapse → 1.8s lying on ground → 1.0s fade out.
+const DEATH_ANIM_FALL = 1.2
+const DEATH_ANIM_LIE = 1.8
+const DEATH_ANIM_FADE = 1.0
+const DEATH_ANIM_TOTAL = DEATH_ANIM_FALL + DEATH_ANIM_LIE + DEATH_ANIM_FADE
 
 // ── Weapon definitions ─────────────────────────────────────────────────────────
 interface WeaponDef {
@@ -321,12 +326,26 @@ const WALL_DEFS: [number, number, number, number][] = MAP_OBJECTS.map(([x, z, w,
   w,
   d,
 ])
-type WallAABB = { x1: number; z1: number; x2: number; z2: number }
-const WALL_AABBS: WallAABB[] = WALL_DEFS.map(([x, z, w, d]) => ({
+// Heights mirror what the renderer actually places (see the MAP_OBJECTS loop):
+// type 0 building height scales with area, low cover is ~0.75–0.85, tanks ~3.
+function wallHeightFor(type: number, w: number, d: number): number {
+  if (type === 0) {
+    const area = w * d
+    return area > 60 ? 7.0 : area > 35 ? 5.5 : area > 12 ? 3.8 : 2.5
+  }
+  if (type === 1) return 0.75 // car
+  if (type === 2) return 0.85 // barricade
+  if (type === 3) return w >= 2 && d >= 2 ? 3.0 : 0.85 // tank vs pipe
+  if (type === 5) return 0.85 // trench/sandbag
+  return 0.6 // tree (rough trunk hitbox; lets shots pass over)
+}
+type WallAABB = { x1: number; z1: number; x2: number; z2: number; h: number }
+const WALL_AABBS: WallAABB[] = MAP_OBJECTS.map(([x, z, w, d, type]) => ({
   x1: x,
   z1: z,
   x2: x + w,
   z2: z + d,
+  h: wallHeightFor(type, w, d),
 }))
 const ALL_AABBS: WallAABB[] = WALL_AABBS
 
@@ -338,6 +357,42 @@ function collidesWithWall(px: number, pz: number, radius: number): boolean {
       return true
   }
   return false
+}
+
+// True if a point is inside *any* wall's 3D AABB. Used for bullet-vs-wall:
+// y is checked so a barricade doesn't stop a shot flying over it at eye height.
+function pointInsideWall(px: number, py: number, pz: number): boolean {
+  for (const w of ALL_AABBS) {
+    if (px > w.x1 && px < w.x2 && pz > w.z1 && pz < w.z2 && py >= 0 && py <= w.h) return true
+  }
+  return false
+}
+
+// Spiral search for a clear (no-wall) position near (x, z). Returns the input
+// when it's already clear; otherwise pushes outward in concentric rings.
+function findSafeSpawnNear(x: number, z: number, radius: number): { x: number; z: number } {
+  if (!collidesWithWall(x, z, radius)) return { x, z }
+  const STEP = 0.9
+  for (let ring = 1; ring <= 12; ring++) {
+    const r = ring * STEP
+    // 8 sample points per ring; first clear hit wins.
+    for (let i = 0; i < 8; i++) {
+      const a = (i / 8) * Math.PI * 2
+      const nx = x + Math.cos(a) * r
+      const nz = z + Math.sin(a) * r
+      if (
+        nx > radius &&
+        nx < MAP_SIZE - radius &&
+        nz > radius &&
+        nz < MAP_SIZE - radius &&
+        !collidesWithWall(nx, nz, radius)
+      ) {
+        return { x: nx, z: nz }
+      }
+    }
+  }
+  // Fallback: map center (always clear in our layouts).
+  return { x: MAP_SIZE / 2, z: MAP_SIZE / 2 }
 }
 
 // ── Enemy type system ──────────────────────────────────────────────────────────
@@ -669,6 +724,10 @@ interface CombatEnemy {
   spawnX: number
   spawnZ: number
   dyingTimer: number
+  // +1 = face-plant forward, -1 = fall on back. Computed from the shooter's
+  // relative position at the moment of kill so the corpse falls *away* from
+  // the bullet. Default 1 if unset (no shooter info, e.g. self-destruct).
+  deathFallDir: number
   animTime: number // walking animation phase
   leftArm: THREE.Object3D | null
   rightArm: THREE.Object3D | null
@@ -919,6 +978,9 @@ export default function ThreeWorld({
   const [onlineCount, setOnlineCount] = useState(1)
   const [isMobile, setIsMobile] = useState(false)
   const [isLandscape, setIsLandscape] = useState(false)
+  // CRT scanlines: default off (was too distracting). F8 toggles, persisted
+  // in localStorage so the choice survives refresh.
+  const [scanlinesOn, setScanlinesOn] = useState(false)
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
   const [chatInput, setChatInput] = useState("")
   const chatEndRef = useRef<HTMLDivElement>(null)
@@ -967,6 +1029,11 @@ export default function ThreeWorld({
         const list = JSON.parse(stored) as string[]
         setUnlockedWeapons(new Set(list))
       }
+    } catch {
+      /* ignore */
+    }
+    try {
+      if (localStorage.getItem("fps_scanlines") === "1") setScanlinesOn(true)
     } catch {
       /* ignore */
     }
@@ -1436,6 +1503,10 @@ export default function ThreeWorld({
         const enemyIdStr = `enemy_${eid}`
 
         const root = new THREE.Group()
+        // YXZ so death-anim's rotation.x tips around the *body's* lateral
+        // axis (after yaw), giving a clean forward/backward fall regardless
+        // of the direction the enemy was facing.
+        root.rotation.order = "YXZ"
         root.position.set(x, 0, z)
         scene.add(root)
 
@@ -1784,6 +1855,7 @@ export default function ThreeWorld({
           spawnX: x,
           spawnZ: z,
           dyingTimer: -1,
+          deathFallDir: 1,
           animTime: Math.random() * Math.PI * 2,
           leftArm: leftArm.shoulder,
           rightArm: rightArm.shoulder,
@@ -1852,11 +1924,12 @@ export default function ThreeWorld({
           const sp = shuffled[i % shuffled.length] ?? shuffled[0]
           if (!sp) continue
           const type = types[i] ?? "grunt"
-          const ex = Math.max(2, Math.min(MAP_SIZE - 2, sp.x + (Math.random() - 0.5) * 3))
-          const ez = Math.max(2, Math.min(MAP_SIZE - 2, sp.z + (Math.random() - 0.5) * 3))
+          const rx = Math.max(2, Math.min(MAP_SIZE - 2, sp.x + (Math.random() - 0.5) * 3))
+          const rz = Math.max(2, Math.min(MAP_SIZE - 2, sp.z + (Math.random() - 0.5) * 3))
+          const safe = findSafeSpawnNear(rx, rz, ENEMY_RADIUS)
           const isCmd = commandersSpawned < commanderCount && type === "sniper"
           if (isCmd) commandersSpawned++
-          enemies.push(makeEnemy(type, ex, ez, isCmd))
+          enemies.push(makeEnemy(type, safe.x, safe.z, isCmd))
         }
         setAliveEnemyCount(enemies.length)
         setEnemyStatus(
@@ -1916,9 +1989,10 @@ export default function ThreeWorld({
           // 70% grunt, 20% sniper, 10% heavy
           const r = Math.random()
           const type: EnemyType = r < 0.7 ? "grunt" : r < 0.9 ? "sniper" : "heavy"
-          const ex = Math.max(3, Math.min(MAP_SIZE - 3, sp.x + (Math.random() - 0.5) * 4))
-          const ez = Math.max(3, Math.min(MAP_SIZE - 3, sp.z + (Math.random() - 0.5) * 4))
-          const bot = makeEnemy(type, ex, ez, false)
+          const rx = Math.max(3, Math.min(MAP_SIZE - 3, sp.x + (Math.random() - 0.5) * 4))
+          const rz = Math.max(3, Math.min(MAP_SIZE - 3, sp.z + (Math.random() - 0.5) * 4))
+          const safe = findSafeSpawnNear(rx, rz, ENEMY_RADIUS)
+          const bot = makeEnemy(type, safe.x, safe.z, false)
 
           // Per-bot config clone with difficulty applied (don't mutate shared ENEMY_CONFIGS)
           const baseCfg = bot.config
@@ -2272,7 +2346,18 @@ export default function ThreeWorld({
             }
           })
         }
-        const enemyHits = raycaster.intersectObjects(allEnemyParts, false)
+        let enemyHits = raycaster.intersectObjects(allEnemyParts, false)
+        // Wall occlusion: if a wall sits between the camera and the closest
+        // enemy hit, the shot stops at the wall (no shooting through cover).
+        const wallHits = raycaster.intersectObjects(wallMeshes, false)
+        const nearestWall = wallHits[0]
+        if (nearestWall && enemyHits[0] && nearestWall.distance < enemyHits[0].distance) {
+          spawnExplosion(nearestWall.point.clone(), true)
+          enemyHits = []
+        } else if (nearestWall && enemyHits.length === 0) {
+          // Pure miss into a wall — show an impact spark for feedback.
+          spawnExplosion(nearestWall.point.clone(), true)
+        }
 
         // PvP hit: check remote players
         const sceneRefsLocal = sceneRef.current
@@ -2285,7 +2370,11 @@ export default function ThreeWorld({
           }
           if (remoteMeshList.length > 0) {
             const pvpHits = raycaster.intersectObjects(remoteMeshList, false)
-            if (pvpHits.length > 0 && pvpHits[0]) {
+            // Same wall-occlusion rule as for AI enemies: a wall between
+            // camera and remote player blocks the shot.
+            const wallBlocks =
+              nearestWall && pvpHits[0] && nearestWall.distance < pvpHits[0].distance
+            if (!wallBlocks && pvpHits.length > 0 && pvpHits[0]) {
               const targetId = remoteIdMap.get(pvpHits[0].object)
               if (targetId) {
                 const wpId = weapon.id
@@ -2327,8 +2416,19 @@ export default function ThreeWorld({
             setScore(scoreRef.current)
             if (hitEnemy.hp <= 0) {
               hitEnemy.hp = 0
-              hitEnemy.dyingTimer = 2.0
+              hitEnemy.dyingTimer = DEATH_ANIM_TOTAL
               hitEnemy.state = "patrol"
+              // Fall direction: project enemy→shooter onto the enemy's facing.
+              // If the shooter is in front (dot > 0 means enemy looking at
+              // shooter), the body tips backward (-1). Otherwise face-plant.
+              {
+                const dxs = hitEnemy.mesh.position.x - focalPoint.x
+                const dzs = hitEnemy.mesh.position.z - focalPoint.z
+                const fxs = Math.sin(hitEnemy.smoothedYaw)
+                const fzs = Math.cos(hitEnemy.smoothedYaw)
+                const dot = -dxs * fxs - dzs * fzs // >0 if shooter is in front
+                hitEnemy.deathFallDir = dot > 0 ? -1 : 1
+              }
               killsRef.current += 1
               setKills(killsRef.current)
               scoreRef.current += hitEnemy.config.score
@@ -2686,6 +2786,18 @@ export default function ThreeWorld({
           if (!b) continue
           b.mesh.position.addScaledVector(b.velocity, dt)
           b.life -= dt
+          // Wall impact: if the bullet just entered a wall's 3D AABB, sink it
+          // with a small spark instead of letting it punch through cover.
+          if (
+            b.life > 0 &&
+            pointInsideWall(b.mesh.position.x, b.mesh.position.y, b.mesh.position.z)
+          ) {
+            spawnExplosion(b.mesh.position.clone(), true)
+            refs.scene.remove(b.mesh)
+            b.mesh.geometry.dispose()
+            refs.bullets.splice(i, 1)
+            continue
+          }
           // Enemy bullet hits player
           if (b.isEnemy && b.life > 0) {
             const dx = b.mesh.position.x - refs.focalPoint.x
@@ -2765,41 +2877,53 @@ export default function ThreeWorld({
             // Respawn dead enemies (with death animation)
             if (enemy.hp <= 0) {
               if (enemy.dyingTimer >= 0) {
-                // Knee-collapse death animation:
-                //   Phase 1 (progress 0→0.5): knees buckle forward, body drops.
-                //   Phase 2 (progress 0.5→1.0): torso/whole rig falls prone.
-                // Then fade out the last ~1s before hiding the mesh.
+                // Death animation timeline:
+                //   t∈[0, FALL]:        knees buckle, body rotates to prone.
+                //   t∈[FALL, FALL+LIE]: corpse lies still on the ground.
+                //   final FADE seconds: opacity fades to 0, then mesh hides.
                 enemy.dyingTimer -= dt
-                const progress = Math.max(0, 1 - enemy.dyingTimer / 2.0)
-                const buckle = Math.min(1, progress * 2) // 0→1 over first half
-                const fallPhase = Math.max(0, (progress - 0.5) * 2) // 0→1 over second half
-                if (enemy.leftLeg) enemy.leftLeg.rotation.x = buckle * 1.0
-                if (enemy.rightLeg) enemy.rightLeg.rotation.x = buckle * 0.7
-                if (enemy.leftShin) enemy.leftShin.rotation.x = buckle * 1.4
-                if (enemy.rightShin) enemy.rightShin.rotation.x = buckle * 1.2
-                if (enemy.leftArm) enemy.leftArm.rotation.x = -buckle * 0.6
-                if (enemy.rightArm) enemy.rightArm.rotation.x = -buckle * 0.4
+                const tElapsed = DEATH_ANIM_TOTAL - Math.max(0, enemy.dyingTimer)
+                const fallRaw = Math.min(1, tElapsed / DEATH_ANIM_FALL)
+                // Ease-out (1 - (1-x)^2): fast collapse, gentle settle.
+                const fallEased = 1 - (1 - fallRaw) * (1 - fallRaw)
+                const tilt = fallEased * (Math.PI / 2)
+                // Knees buckle slightly faster than the body tips.
+                const buckle = Math.min(1, tElapsed / (DEATH_ANIM_FALL * 0.6))
+                if (enemy.leftLeg) enemy.leftLeg.rotation.x = buckle * 0.45
+                if (enemy.rightLeg) enemy.rightLeg.rotation.x = buckle * 0.35
+                if (enemy.leftShin) enemy.leftShin.rotation.x = buckle * 1.1
+                if (enemy.rightShin) enemy.rightShin.rotation.x = buckle * 0.95
+                if (enemy.leftArm) enemy.leftArm.rotation.x = -buckle * 0.7
+                if (enemy.rightArm) enemy.rightArm.rotation.x = -buckle * 0.45
                 if (enemy.torso) {
-                  enemy.torso.rotation.x = fallPhase * 1.1
+                  enemy.torso.rotation.x = 0
                   enemy.torso.scale.y = 1
                 }
-                enemy.mesh.rotation.x = fallPhase * (Math.PI / 2 - 1.1)
-                enemy.mesh.position.y =
-                  (enemy.config.bodyH / 2) * Math.cos((progress * Math.PI) / 2)
-                const opacity = enemy.dyingTimer < 1.0 ? enemy.dyingTimer : 1.0
-                enemy.mesh.traverse((child) => {
-                  if (child instanceof THREE.Mesh) {
-                    const m = child.material as THREE.MeshLambertMaterial | THREE.MeshBasicMaterial
-                    m.transparent = true
-                    m.opacity = opacity
+                // YXZ rotation order means rotation.x tips the body around its
+                // own lateral axis *after* yaw — clean forward/back fall.
+                enemy.mesh.rotation.x = enemy.deathFallDir * tilt
+                // Lift the root slightly as it lies flat so the prone torso
+                // rests *on* the ground rather than half-buried in it.
+                enemy.mesh.position.y = Math.sin(tilt) * 0.18
+                // Fade only during the final FADE seconds.
+                const fadeT = Math.max(0, tElapsed - (DEATH_ANIM_TOTAL - DEATH_ANIM_FADE))
+                const opacity = fadeT > 0 ? Math.max(0, 1 - fadeT / DEATH_ANIM_FADE) : 1
+                if (fadeT > 0) {
+                  enemy.mesh.traverse((child) => {
+                    if (child instanceof THREE.Mesh) {
+                      const m = child.material as
+                        | THREE.MeshLambertMaterial
+                        | THREE.MeshBasicMaterial
+                      m.transparent = true
+                      m.opacity = opacity
+                    }
+                  })
+                  if (enemy.shadowMesh) {
+                    const sm = enemy.shadowMesh.material as THREE.MeshBasicMaterial
+                    sm.opacity = 0.45 * opacity
                   }
-                })
-                if (enemy.shadowMesh) {
-                  const sm = enemy.shadowMesh.material as THREE.MeshBasicMaterial
-                  sm.opacity = 0.45 * opacity
                 }
                 if (enemy.dyingTimer <= 0) {
-                  spawnExplosion(enemy.mesh.position.clone())
                   enemy.dyingTimer = -1
                   enemy.mesh.visible = false
                   enemy.mesh.traverse((child) => {
@@ -2843,9 +2967,10 @@ export default function ThreeWorld({
                     x: enemy.spawnX,
                     z: enemy.spawnZ,
                   }
-                  const nx = Math.max(3, Math.min(MAP_SIZE - 3, sp.x + (Math.random() - 0.5) * 4))
-                  const nz = Math.max(3, Math.min(MAP_SIZE - 3, sp.z + (Math.random() - 0.5) * 4))
-                  enemy.mesh.position.set(nx, 0, nz)
+                  const rx = Math.max(3, Math.min(MAP_SIZE - 3, sp.x + (Math.random() - 0.5) * 4))
+                  const rz = Math.max(3, Math.min(MAP_SIZE - 3, sp.z + (Math.random() - 0.5) * 4))
+                  const safe = findSafeSpawnNear(rx, rz, ENEMY_RADIUS)
+                  enemy.mesh.position.set(safe.x, 0, safe.z)
                   enemy.mesh.rotation.x = 0
                   enemy.mesh.visible = true
                   if (enemy.shadowMesh) {
@@ -3540,6 +3665,19 @@ export default function ThreeWorld({
       if (e.key === "1") switchWeapon(0)
       if (e.key === "2") switchWeapon(1)
       if (e.key === "3") switchWeapon(2)
+      if (e.key === "F8") {
+        e.preventDefault()
+        setScanlinesOn((prev) => {
+          const next = !prev
+          try {
+            localStorage.setItem("fps_scanlines", next ? "1" : "0")
+          } catch {
+            /* ignore */
+          }
+          showNotification(next ? "CRT SCANLINES ON" : "CRT SCANLINES OFF")
+          return next
+        })
+      }
       if (e.key === "g" || e.key === "G") {
         const now = Date.now()
         if (now - lastGrenadeRef.current > 5000) {
@@ -4731,14 +4869,16 @@ export default function ThreeWorld({
           </div>
         )}
 
-        {/* CRT scanline overlay */}
-        {!isLoading && !error && (
+        {/* CRT scanline overlay — disabled by default; was distracting at
+            full strength. Re-enable via the F8 toggle (sets `crtScanlines`
+            in localStorage) if you want the retro look back. */}
+        {!isLoading && !error && scanlinesOn && (
           <div
             style={{
               position: "absolute",
               inset: 0,
               backgroundImage:
-                "repeating-linear-gradient(0deg, transparent, transparent 3px, rgba(0,0,0,0.18) 3px, rgba(0,0,0,0.18) 4px)",
+                "repeating-linear-gradient(0deg, transparent, transparent 3px, rgba(0,0,0,0.04) 3px, rgba(0,0,0,0.04) 4px)",
               pointerEvents: "none",
               zIndex: 4,
             }}
