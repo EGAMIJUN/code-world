@@ -1359,8 +1359,10 @@ export default function ThreeWorld({
       }
 
       // ── FPS camera state ───────────────────────────────────────────────────
-      // Start in urban zone (x=8, z=48), facing east toward the battlefield
-      const focalPoint = new THREE.Vector3(8, 0, 48)
+      // West edge of map, facing east into the urban zone. (Previously (8, 48)
+      // which sat *inside* building AABB [3,45,6,7] — collidesWithWall blocked
+      // every step, so the player could never leave spawn.)
+      const focalPoint = new THREE.Vector3(2, 0, 48)
       const camState = { yaw: -Math.PI / 2, pitch: 0 } // facing +X (east)
 
       function clampPitch(p: number) {
@@ -2593,8 +2595,14 @@ export default function ThreeWorld({
         if (playerSpeed > 0.01) {
           const nx = refs.focalPoint.x + pv.x * dt
           const nz = refs.focalPoint.z + pv.z * dt
-          if (!collidesWithWall(nx, refs.focalPoint.z, PLAYER_RADIUS)) refs.focalPoint.x = nx
-          if (!collidesWithWall(refs.focalPoint.x, nz, PLAYER_RADIUS)) refs.focalPoint.z = nz
+          // Failsafe: if the player is somehow already inside a wall (bad
+          // spawn, physics push-in), let any step through so they can escape
+          // — otherwise the gate latches shut and they're stuck forever.
+          const stuck = collidesWithWall(refs.focalPoint.x, refs.focalPoint.z, PLAYER_RADIUS)
+          if (stuck || !collidesWithWall(nx, refs.focalPoint.z, PLAYER_RADIUS))
+            refs.focalPoint.x = nx
+          if (stuck || !collidesWithWall(refs.focalPoint.x, nz, PLAYER_RADIUS))
+            refs.focalPoint.z = nz
           updateCamera()
         }
 
