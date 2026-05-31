@@ -771,6 +771,33 @@ interface CombatEnemy {
   botReactMult?: number // 1.0 = stock; higher = slower fire interval
   botRespawnMs?: number // ms between death and respawn
   nameSprite?: THREE.Sprite | null
+
+  // ── Aggressive-AI fields ────────────────────────────────────────────────
+  // Until-when this enemy reacts to *external* stimulus (heard a shot or
+  // saw a teammate die). Patrol uses this to abandon waypoints and move
+  // toward the last noise; alert uses it to extend pursuit beyond LOS loss.
+  alertedUntil: number
+  // Sticky flank offset chosen when this enemy enters alert. -1/+1 picks a
+  // side; magnitude (0–1) scales perpendicular offset to the bee-line path
+  // so groups of enemies arc around the player instead of stacking.
+  flankSide: -1 | 1
+  flankStrength: number
+  // Grunt sprint window: until-when the enemy moves at dash speed toward
+  // the player. Re-armed via `nextDashCheckTime`.
+  dashUntil: number
+  nextDashCheckTime: number
+  // Heavy grenade cooldown (timestamp when the next throw is allowed).
+  nextGrenadeTime: number
+  // Overhead "!" / "?" / null marker — alert sting / search marker. Hidden
+  // when `markerUntil < now`. Sprite stays attached to the mesh group so it
+  // moves with the enemy.
+  markerSprite?: THREE.Sprite | null
+  markerKind?: "alert" | "search" | null
+  markerUntil: number
+  // Difficulty tuning the AI reads from. Bots: assigned from selected
+  // difficulty in spawnBots. Mission enemies: left undefined (state machine
+  // falls back to MISSION_AI_TUNING — currently the "normal" profile).
+  aiTuning?: BotDifficultyTuning
 }
 
 interface Bullet {
@@ -779,6 +806,10 @@ interface Bullet {
   life: number
   isEnemy: boolean
   damage: number
+  // Thrown enemy grenade — arcs under gravity and AOE-explodes on impact /
+  // expiry. Plain bullets ignore this field.
+  isGrenade?: boolean
+  grenadeRadius?: number
 }
 
 interface GoalMarker {
@@ -836,9 +867,18 @@ interface BotDifficultyTuning {
   damageMult: number
   sightMult: number
   respawnMs: number
+  // Aggressive-AI knobs — read by the enemy state machine each tick.
+  flankFactor: number // 0 = bee-line, 1 = full side-step toward flanks
+  speedMult: number // baseline multiplier on enemy.config.speed
+  dashEnabled: boolean // close-range grunts sprint at dash speed
+  grenadeEnabled: boolean // heavies throw arc grenades
+  groupTactics: boolean // pursue/share lastSeenPlayer with nearby allies
+  noiseRange: number // m: how far a fired-shot noise alerts patrols
 }
 
 const BOT_DIFFICULTY_CONFIGS: Record<BotDifficulty, BotDifficultyTuning> = {
+  // EASY is intentionally "old AI": no flank, no dash, no grenade, narrow
+  // noise-radius. Players new to FPS still get a tactical pace.
   easy: {
     hpMult: 0.65,
     accuracyMult: 0.45,
@@ -846,7 +886,16 @@ const BOT_DIFFICULTY_CONFIGS: Record<BotDifficulty, BotDifficultyTuning> = {
     damageMult: 0.6,
     sightMult: 0.85,
     respawnMs: 5000,
+    flankFactor: 0.2,
+    speedMult: 0.9,
+    dashEnabled: false,
+    grenadeEnabled: false,
+    groupTactics: false,
+    noiseRange: 14,
   },
+  // NORMAL is the full new AI: flanking, dashing grunts, grenade-tossing
+  // heavies, allies share last-seen player position on hearing a shot or
+  // a teammate die.
   normal: {
     hpMult: 1.0,
     accuracyMult: 1.0,
@@ -854,7 +903,14 @@ const BOT_DIFFICULTY_CONFIGS: Record<BotDifficulty, BotDifficultyTuning> = {
     damageMult: 1.0,
     sightMult: 1.0,
     respawnMs: 4000,
+    flankFactor: 0.7,
+    speedMult: 1.0,
+    dashEnabled: true,
+    grenadeEnabled: true,
+    groupTactics: true,
+    noiseRange: 24,
   },
+  // HARD: tighter aim, faster reflexes, near-constant pressure.
   hard: {
     hpMult: 1.3,
     accuracyMult: 1.6,
@@ -862,8 +918,18 @@ const BOT_DIFFICULTY_CONFIGS: Record<BotDifficulty, BotDifficultyTuning> = {
     damageMult: 1.3,
     sightMult: 1.2,
     respawnMs: 3000,
+    flankFactor: 1.0,
+    speedMult: 1.2,
+    dashEnabled: true,
+    grenadeEnabled: true,
+    groupTactics: true,
+    noiseRange: 32,
   },
 }
+
+// Mission enemies (non-bot) don't carry a difficulty selector. They run on
+// the "normal" aggressive profile so the FPS missions feel modern.
+const MISSION_AI_TUNING: BotDifficultyTuning = BOT_DIFFICULTY_CONFIGS.normal
 
 const BOT_NAMES = ["Bot_α", "Bot_β", "Bot_γ", "Bot_δ", "Bot_ε", "Bot_ζ", "Bot_η", "Bot_θ", "Bot_ι"]
 
@@ -976,6 +1042,10 @@ export default function ThreeWorld({
   // Mirror of `playerHp` (the rendered React state). Animate loop uses this
   // to bail out of setPlayerHp calls while regen is ticking sub-integer.
   const prevDisplayHpRef = useRef(PLAYER_MAX_HP)
+  // Most recent loud event from the player (gunshot, explosion). Patrolling
+  // enemies within `noiseRange` of (x, z) drop their patrol and move toward
+  // this point. `expires` is a Date.now() ms timestamp — past it = stale.
+  const lastNoiseRef = useRef<{ x: number; z: number; expires: number } | null>(null)
   const requestGrenadeRef = useRef(false)
   const modeRef = useRef(mode)
   // initialize spawn invuln (3s grace at match start)
@@ -2047,6 +2117,17 @@ export default function ThreeWorld({
           breathPhase: Math.random() * Math.PI * 2,
           microIdleSeed: Math.random() * 1000,
           isCommander,
+          // Aggressive-AI bookkeeping (initial values).
+          alertedUntil: 0,
+          // Random side at spawn so groups arc around the player from both
+          // sides rather than stacking on a single flank.
+          flankSide: Math.random() < 0.5 ? -1 : 1,
+          flankStrength: 0.4 + Math.random() * 0.6, // 0.4 – 1.0
+          dashUntil: 0,
+          nextDashCheckTime: 0,
+          nextGrenadeTime: 0,
+          markerKind: null,
+          markerUntil: 0,
         }
       }
 
@@ -2089,6 +2170,61 @@ export default function ThreeWorld({
       }
 
       // ── Bot label sprite (name floats above head) ─────────────────────────
+      // Overhead "!" alert sprite / "?" search sprite, drawn always-on-top.
+      // We reuse a single texture per glyph (cached on the function) since
+      // a sprite material can share the same texture across many sprites.
+      const markerTextureCache = new Map<string, THREE.Texture>()
+      function makeMarkerSprite(kind: "alert" | "search"): THREE.Sprite {
+        const key = kind === "alert" ? "!" : "?"
+        const color = kind === "alert" ? "#ffcc00" : "#88ccff"
+        let tex = markerTextureCache.get(key)
+        if (!tex) {
+          const canvas = document.createElement("canvas")
+          canvas.width = 128
+          canvas.height = 128
+          const ctx = canvas.getContext("2d")
+          if (ctx) {
+            ctx.font = "bold 110px sans-serif"
+            ctx.textAlign = "center"
+            ctx.textBaseline = "middle"
+            ctx.lineWidth = 8
+            ctx.strokeStyle = "rgba(0,0,0,0.85)"
+            ctx.strokeText(key, 64, 70)
+            ctx.fillStyle = color
+            ctx.fillText(key, 64, 70)
+          }
+          tex = new THREE.CanvasTexture(canvas)
+          tex.needsUpdate = true
+          markerTextureCache.set(key, tex)
+        }
+        const mat = new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true })
+        const sprite = new THREE.Sprite(mat)
+        sprite.scale.set(0.7, 0.7, 1)
+        sprite.renderOrder = 1100
+        return sprite
+      }
+
+      function setEnemyMarker(enemy: CombatEnemy, kind: "alert" | "search" | null, durMs: number) {
+        if (kind === null) {
+          if (enemy.markerSprite) enemy.markerSprite.visible = false
+          enemy.markerKind = null
+          enemy.markerUntil = 0
+          return
+        }
+        if (!enemy.markerSprite || enemy.markerKind !== kind) {
+          if (enemy.markerSprite) enemy.mesh.remove(enemy.markerSprite)
+          const sprite = makeMarkerSprite(kind)
+          // Position above head — head is roughly at y ≈ 2.0 for a default
+          // humanoid; sit the marker comfortably above it.
+          sprite.position.set(0, 2.85, 0)
+          enemy.mesh.add(sprite)
+          enemy.markerSprite = sprite
+        }
+        enemy.markerSprite.visible = true
+        enemy.markerKind = kind
+        enemy.markerUntil = Date.now() + durMs
+      }
+
       function makeNameSprite(text: string, color: string): THREE.Sprite {
         const canvas = document.createElement("canvas")
         canvas.width = 256
@@ -2163,6 +2299,9 @@ export default function ThreeWorld({
           bot.botAccuracyMult = tuning.accuracyMult
           bot.botReactMult = tuning.reactMult
           bot.botRespawnMs = tuning.respawnMs
+          // Store the full tuning so the AI state machine doesn't have to
+          // map back from accuracy/respawn numbers to a difficulty.
+          bot.aiTuning = tuning
 
           // Team assignment
           if (gameMode === "tdm") {
@@ -2484,6 +2623,17 @@ export default function ThreeWorld({
 
         // Play shot sound
         SOUNDS[weapon.id]()
+        // Broadcast a "noise" event from the player position. The enemy AI
+        // reads this each tick: any patrol within `noiseRange` abandons its
+        // waypoint and converges on the source. ADS-suppressed pistol shots
+        // travel a shorter distance via the per-weapon noiseRadius override.
+        lastNoiseRef.current = {
+          x: focalPoint.x,
+          z: focalPoint.z,
+          // Stay "interesting" for 3.5s — long enough to commit to a search,
+          // short enough that holding fire eventually de-aggros patrols.
+          expires: Date.now() + 3500,
+        }
 
         // Center-ray hit detection (recursive through humanoid groups)
         pointer.set(0, 0)
@@ -2579,6 +2729,26 @@ export default function ThreeWorld({
                 const fzs = Math.cos(hitEnemy.smoothedYaw)
                 const dot = -dxs * fxs - dzs * fzs // >0 if shooter is in front
                 hitEnemy.deathFallDir = dot > 0 ? -1 : 1
+              }
+              // Alert nearby allies — seeing a teammate drop gives them a
+              // hard reason to investigate the player's last position.
+              {
+                const killerTuning = hitEnemy.aiTuning ?? MISSION_AI_TUNING
+                if (killerTuning.groupTactics) {
+                  for (const ally of enemies) {
+                    if (ally === hitEnemy || ally.hp <= 0) continue
+                    const ad = Math.hypot(
+                      ally.mesh.position.x - hitEnemy.mesh.position.x,
+                      ally.mesh.position.z - hitEnemy.mesh.position.z,
+                    )
+                    if (ad < 25 && (ally.state === "patrol" || ally.state === "search")) {
+                      ally.state = "search"
+                      ally.searchTimer = 7.0
+                      ally.lastSeenPlayer = { x: focalPoint.x, z: focalPoint.z }
+                      setEnemyMarker(ally, "search", 7000)
+                    }
+                  }
+                }
               }
               killsRef.current += 1
               setKills(killsRef.current)
@@ -2803,6 +2973,13 @@ export default function ThreeWorld({
           const explosionPos = origin.clone().add(fwd.multiplyScalar(8))
           explosionPos.y = Math.max(0.5, explosionPos.y)
           spawnExplosion(explosionPos)
+          // Grenade is even louder than a gunshot — bigger noise radius via
+          // the longer expiry plus the AI's own distance check.
+          lastNoiseRef.current = {
+            x: explosionPos.x,
+            z: explosionPos.z,
+            expires: Date.now() + 5000,
+          }
           for (const enemy of enemies) {
             if (enemy.hp <= 0) continue
             const dx = enemy.mesh.position.x - explosionPos.x
@@ -2964,11 +3141,56 @@ export default function ThreeWorld({
         for (let i = refs.bullets.length - 1; i >= 0; i--) {
           const b = refs.bullets[i]
           if (!b) continue
+          // Grenades arc under gravity (plain bullets travel in straight
+          // lines — flag-gated so we don't pay this cost on every shot).
+          if (b.isGrenade) b.velocity.y -= 12 * dt
           b.mesh.position.addScaledVector(b.velocity, dt)
           b.life -= dt
+          // Grenade ground/wall hit → detonate now (rather than waiting
+          // for the fuse) so it doesn't roll under buildings.
+          if (b.isGrenade && b.life > 0) {
+            const ground = b.mesh.position.y <= 0.15
+            const inWall = pointInsideWall(b.mesh.position.x, b.mesh.position.y, b.mesh.position.z)
+            if (ground || inWall) {
+              const center = b.mesh.position.clone()
+              center.y = Math.max(0.4, center.y)
+              spawnExplosion(center)
+              lastNoiseRef.current = { x: center.x, z: center.z, expires: Date.now() + 4000 }
+              const R = b.grenadeRadius ?? 4
+              const dxp = refs.focalPoint.x - center.x
+              const dzp = refs.focalPoint.z - center.z
+              const dpDist = Math.hypot(dxp, dzp)
+              if (
+                dpDist < R &&
+                gamePhaseRef.current === "playing" &&
+                Date.now() > spawnInvulnUntilRef.current
+              ) {
+                const dmg = Math.max(15, Math.floor(60 * (1 - dpDist / R)))
+                playerHpRef.current = Math.max(0, playerHpRef.current - dmg)
+                setPlayerHp(playerHpRef.current)
+                lastDamageTimeRef.current = Date.now()
+                cameraShakeRef.current.intensity = 6
+                setDamageFlash(true)
+                SOUNDS.damage()
+                setTimeout(() => setDamageFlash(false), 320)
+                if (playerHpRef.current <= 0) {
+                  gamePhaseRef.current = "gameover"
+                  setGamePhase("gameover")
+                  deathsRef.current += 1
+                  setDeaths(deathsRef.current)
+                }
+              }
+              refs.scene.remove(b.mesh)
+              b.mesh.geometry.dispose()
+              refs.bullets.splice(i, 1)
+              continue
+            }
+          }
           // Wall impact: if the bullet just entered a wall's 3D AABB, sink it
           // with a small spark instead of letting it punch through cover.
+          // Grenades are handled by the dedicated branch above.
           if (
+            !b.isGrenade &&
             b.life > 0 &&
             pointInsideWall(b.mesh.position.x, b.mesh.position.y, b.mesh.position.z)
           ) {
@@ -2978,8 +3200,10 @@ export default function ThreeWorld({
             refs.bullets.splice(i, 1)
             continue
           }
-          // Enemy bullet hits player
-          if (b.isEnemy && b.life > 0) {
+          // Enemy bullet hits player. Skipped for grenades — they damage
+          // via the AOE detonation, not direct contact (avoids the toss
+          // being eaten mid-arc if it brushes the player).
+          if (b.isEnemy && !b.isGrenade && b.life > 0) {
             const dx = b.mesh.position.x - refs.focalPoint.x
             const dy = b.mesh.position.y - EYE_HEIGHT
             const dz = b.mesh.position.z - refs.focalPoint.z
@@ -3006,7 +3230,37 @@ export default function ThreeWorld({
             }
           }
           if (b.life <= 0) {
-            if (!b.isEnemy) spawnExplosion(b.mesh.position.clone(), true)
+            // Fuse-expired grenade air-bursts (covers the rare "stays
+            // airborne the whole fuse" case — apartment-balcony-trajectory).
+            if (b.isGrenade) {
+              const center = b.mesh.position.clone()
+              center.y = Math.max(0.4, center.y)
+              spawnExplosion(center)
+              const R = b.grenadeRadius ?? 4
+              const dpDist = Math.hypot(refs.focalPoint.x - center.x, refs.focalPoint.z - center.z)
+              if (
+                dpDist < R &&
+                gamePhaseRef.current === "playing" &&
+                Date.now() > spawnInvulnUntilRef.current
+              ) {
+                const dmg = Math.max(15, Math.floor(60 * (1 - dpDist / R)))
+                playerHpRef.current = Math.max(0, playerHpRef.current - dmg)
+                setPlayerHp(playerHpRef.current)
+                lastDamageTimeRef.current = Date.now()
+                cameraShakeRef.current.intensity = 6
+                setDamageFlash(true)
+                SOUNDS.damage()
+                setTimeout(() => setDamageFlash(false), 320)
+                if (playerHpRef.current <= 0) {
+                  gamePhaseRef.current = "gameover"
+                  setGamePhase("gameover")
+                  deathsRef.current += 1
+                  setDeaths(deathsRef.current)
+                }
+              }
+            } else if (!b.isEnemy) {
+              spawnExplosion(b.mesh.position.clone(), true)
+            }
             refs.scene.remove(b.mesh)
             b.mesh.geometry.dispose()
             refs.bullets.splice(i, 1)
@@ -3177,6 +3431,33 @@ export default function ThreeWorld({
             const toPz = fp.z - ez
             const distToPlayer = Math.sqrt(toPx * toPx + toPz * toPz)
 
+            // ── Pre-state-machine: read difficulty tuning + sensory input ─
+            // Mission enemies have no botDifficulty selector → fall back to
+            // the "normal" aggressive profile.
+            const tuning: BotDifficultyTuning = enemy.aiTuning ?? MISSION_AI_TUNING
+
+            // Hide overhead "!"/"?" marker once its time-window expires.
+            if (enemy.markerKind && now > enemy.markerUntil) {
+              setEnemyMarker(enemy, null, 0)
+            }
+
+            // Noise alert: if the player fired/exploded recently within
+            // `noiseRange`, a patrolling enemy commits to a search at the
+            // noise origin. Already-alert/attacking enemies ignore this
+            // (they have better info — direct LOS).
+            const noise = lastNoiseRef.current
+            if (
+              noise &&
+              now < noise.expires &&
+              enemy.state === "patrol" &&
+              Math.hypot(noise.x - ex, noise.z - ez) < tuning.noiseRange
+            ) {
+              enemy.state = "search"
+              enemy.searchTimer = 5.5
+              enemy.lastSeenPlayer = { x: noise.x, z: noise.z }
+              setEnemyMarker(enemy, "search", 5500)
+            }
+
             if (enemy.state === "patrol") {
               const wp = enemy.patrolWaypoints[enemy.patrolIndex % enemy.patrolWaypoints.length]
               if (wp) {
@@ -3199,6 +3480,26 @@ export default function ThreeWorld({
               ) {
                 enemy.state = "alert"
                 enemy.lastSeenPlayer = { x: fp.x, z: fp.z }
+                // Overhead "!" sting (COD-style spot indicator).
+                setEnemyMarker(enemy, "alert", 800)
+                // Group tactics: this enemy spotted the player — broadcast
+                // the position to nearby allies so they converge from their
+                // own flanks instead of needing to see independently.
+                if (tuning.groupTactics) {
+                  for (const ally of refs.enemies) {
+                    if (ally === enemy || ally.hp <= 0) continue
+                    const allyDist = Math.hypot(
+                      ally.mesh.position.x - ex,
+                      ally.mesh.position.z - ez,
+                    )
+                    if (allyDist < 20 && ally.state === "patrol") {
+                      ally.state = "search"
+                      ally.searchTimer = 6.0
+                      ally.lastSeenPlayer = { x: fp.x, z: fp.z }
+                      setEnemyMarker(ally, "search", 6000)
+                    }
+                  }
+                }
                 // Stealth mission: detected = fail
                 if (selectedMissionRef.current === "stealth" && !stealthDetectedRef.current) {
                   stealthDetectedRef.current = true
@@ -3216,18 +3517,53 @@ export default function ThreeWorld({
               if (distToPlayer <= enemy.config.attackRange) {
                 enemy.state = "attack"
               } else {
-                // Cover AI: stop moving and only shoot when near a wall/cover
-                const nearCover = ALL_AABBS.some((w) => {
-                  const cx2 = (w.x1 + w.x2) / 2
-                  const cz2 = (w.z1 + w.z2) / 2
-                  const ddx = ex - cx2
-                  const ddz = ez - cz2
-                  return Math.sqrt(ddx * ddx + ddz * ddz) < 2.5
-                })
-                if (!nearCover || distToPlayer > enemy.config.fireRange) {
-                  const spd = enemy.config.speed * dt
-                  const nx = ex + (toPx / distToPlayer) * spd
-                  const nz = ez + (toPz / distToPlayer) * spd
+                // Flank offset: aim toward a point perpendicular to the
+                // bee-line so different enemies arc around the player from
+                // different sides. Magnitude scales with distance (more
+                // arcing while far, straight push when close).
+                const perpX = -toPz / Math.max(0.001, distToPlayer)
+                const perpZ = toPx / Math.max(0.001, distToPlayer)
+                const flankScale =
+                  tuning.flankFactor *
+                  enemy.flankStrength *
+                  enemy.flankSide *
+                  Math.min(8, distToPlayer * 0.5)
+                const targetX = fp.x + perpX * flankScale
+                const targetZ = fp.z + perpZ * flankScale
+                const tx = targetX - ex
+                const tz = targetZ - ez
+                const tDist = Math.max(0.001, Math.hypot(tx, tz))
+
+                // Grunt close-range dash: every ~3s, decide whether to
+                // sprint at the player (1.6x speed for 1.4s) if we're at
+                // medium-close range. The actual dash cycle is bounded so
+                // bots don't permanently sprint into the player's gun.
+                if (tuning.dashEnabled && enemy.type === "grunt" && now > enemy.nextDashCheckTime) {
+                  enemy.nextDashCheckTime = now + 3000
+                  if (distToPlayer > 3 && distToPlayer < 14 && Math.random() < 0.55) {
+                    enemy.dashUntil = now + 1400
+                  }
+                }
+                const dashing = now < enemy.dashUntil
+                const dashMult = dashing ? 1.6 : 1.0
+
+                // Cover AI: stop *only* when actually behind cover that
+                // breaks LOS to the player. Previously any nearby AABB
+                // counted as cover, which made enemies stall in the open.
+                const losClear = enemyCanSee(
+                  toPx / distToPlayer,
+                  toPz / distToPlayer,
+                  toPx,
+                  toPz,
+                  distToPlayer,
+                  enemy.config,
+                )
+                const shouldPushIn = !losClear || distToPlayer > enemy.config.fireRange || dashing
+
+                if (shouldPushIn) {
+                  const spd = enemy.config.speed * tuning.speedMult * dashMult * dt
+                  const nx = ex + (tx / tDist) * spd
+                  const nz = ez + (tz / tDist) * spd
                   if (!collidesWithWall(nx, ez, ENEMY_RADIUS)) enemy.mesh.position.x = nx
                   if (!collidesWithWall(ex, nz, ENEMY_RADIUS)) enemy.mesh.position.z = nz
                 }
@@ -3243,8 +3579,58 @@ export default function ThreeWorld({
                   )
                 ) {
                   enemy.state = "search"
-                  enemy.searchTimer = 3.5
+                  enemy.searchTimer = 4.5
+                  setEnemyMarker(enemy, "search", 4500)
                 }
+              }
+              // Heavy grenade throw: parabolic toss toward where the player
+              // *will be* in ~1s. Only fires when LOS is clear and the
+              // player is at mid-range (too close = friendly-fire risk; too
+              // far = arc gets weird).
+              if (
+                tuning.grenadeEnabled &&
+                enemy.type === "heavy" &&
+                now > enemy.nextGrenadeTime &&
+                distToPlayer > 5 &&
+                distToPlayer < 22 &&
+                enemyCanSee(
+                  toPx / distToPlayer,
+                  toPz / distToPlayer,
+                  toPx,
+                  toPz,
+                  distToPlayer,
+                  enemy.config,
+                )
+              ) {
+                enemy.nextGrenadeTime = now + 6000 + Math.random() * 3000
+                // Lead the player by their current velocity (approx via the
+                // smoothed player velocity ref).
+                const leadT = 1.0
+                const aimX = fp.x + playerVelRef.current.x * leadT - ex
+                const aimZ = fp.z + playerVelRef.current.z * leadT - ez
+                const aimDist = Math.max(0.001, Math.hypot(aimX, aimZ))
+                // Solve for a velocity that lands roughly at aim distance
+                // with a fixed ~1.0s air time under -12 gravity.
+                const SPEED_H = aimDist / leadT
+                const upInitial = 12 * leadT * 0.5 + 1.2 // small extra arc
+                const gGeo = new THREE.SphereGeometry(0.14, 8, 6)
+                const gMat = new THREE.MeshBasicMaterial({ color: 0x556633 })
+                const gMesh = new THREE.Mesh(gGeo, gMat)
+                gMesh.position.set(enemy.mesh.position.x, EYE_HEIGHT * 0.85, enemy.mesh.position.z)
+                refs.scene.add(gMesh)
+                refs.bullets.push({
+                  mesh: gMesh,
+                  velocity: new THREE.Vector3(
+                    (aimX / aimDist) * SPEED_H,
+                    upInitial,
+                    (aimZ / aimDist) * SPEED_H,
+                  ),
+                  life: leadT + 0.8,
+                  isEnemy: true,
+                  damage: 0, // damage comes from the AOE on detonation
+                  isGrenade: true,
+                  grenadeRadius: 4.5,
+                })
               }
               // Shoot while chasing (alert range fire)
               if (
@@ -3354,6 +3740,8 @@ export default function ThreeWorld({
               ) {
                 enemy.state = "alert"
                 enemy.lastSeenPlayer = { x: fp.x, z: fp.z }
+                // Search → alert: replace the "?" with an "!" sting.
+                setEnemyMarker(enemy, "alert", 800)
               }
             }
 
