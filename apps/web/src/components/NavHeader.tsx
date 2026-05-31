@@ -52,7 +52,7 @@ export default function NavHeader() {
             textShadow: "0 0 10px #00ff41",
           }}
         >
-          ⚡ CODE WORLD
+          鉄火 TEKKA
         </Link>
 
         <nav style={{ display: "flex", alignItems: "center", gap: "0.25rem", flex: 1 }}>

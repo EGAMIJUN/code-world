@@ -86,7 +86,7 @@ export default function SignupPage() {
               marginBottom: "0.5rem",
             }}
           >
-            ⚡ CODE WORLD
+            鉄火 TEKKA
           </div>
           <div style={{ fontSize: "0.75rem", color: "#00aa2a", letterSpacing: "0.2em" }}>
             CREATE NEW PLAYER ACCOUNT
