@@ -26,6 +26,22 @@ const SPRINT_MULTIPLIER = 1.5
 const AUTO_RECOVER_DELAY = 5
 const RECOVER_RATE = 2
 const CAM_SHAKE_DECAY = 6
+// ── Vertical movement ──────────────────────────────────────────────────────────
+// Real gravity in m/s². Picked to feel snappy (a 4m drop = ~0.6s in air),
+// not a perfect-physics simulation. Tuned by feel under EYE_HEIGHT.
+const GRAVITY = 22
+// Auto step-up: when the new floor below the player is at most this many
+// metres higher than the current foot position, we silently snap up (small
+// curbs, low stairs). Larger climbs require an E-key climb zone.
+const STEP_UP_MAX = 0.4
+// Vertical speeds (m/s) for fall-damage interpolation. Below SAFE: no
+// damage. Above LETHAL: full damage. Linear ramp in between.
+const FALL_SAFE_SPEED = 7
+const FALL_LETHAL_SPEED = 18
+const FALL_MAX_DAMAGE = 75
+// How close the player has to be to a climb zone for E to lift them up.
+// Radius around the zone's center.
+const CLIMB_INTERACT_PAD = 0.2 // extra slack on the climb-zone AABB
 // Death animation: 1.2s collapse → 1.8s lying on ground → 1.0s fade out.
 const DEATH_ANIM_FALL = 1.2
 const DEATH_ANIM_LIE = 1.8
@@ -836,6 +852,41 @@ interface ExplosionParticle {
   isSpark: boolean
 }
 
+// ── Vertical-world geometry ────────────────────────────────────────────────────
+// A horizontal walkable surface at altitude y. The ground is implicit
+// (y = 0 everywhere); these are added on top for rooftops and any interior
+// upper floors.
+interface FloorAABB {
+  x1: number
+  z1: number
+  x2: number
+  z2: number
+  y: number
+}
+// A ceiling: above-head obstruction the player can't pass through while
+// rising vertically (rarely needed today but reserved so future jump/lift
+// mechanics don't pop through interior roofs).
+interface CeilingAABB {
+  x1: number
+  z1: number
+  x2: number
+  z2: number
+  y: number
+}
+// E-key interactable lift. Entering the AABB on foot and pressing E
+// teleports the player up to targetY (used for ladders / external stairs
+// to a rooftop). A short cooldown stops accidental double-fires.
+interface ClimbZone {
+  x1: number
+  z1: number
+  x2: number
+  z2: number
+  targetY: number
+  // Down-climb target — when the player is *on the elevated platform*
+  // and presses E inside the zone, they descend back to this Y.
+  downY?: number
+}
+
 // ── Three.js scene refs ────────────────────────────────────────────────────────
 interface SceneRefs {
   scene: THREE.Scene
@@ -856,6 +907,12 @@ interface SceneRefs {
   aimedEnemyId: string | null
   explosionParticles: ExplosionParticle[]
   goalMarkers: GoalMarker[]
+  // Vertical-world: rooftops + interior floors + ladder/staircase lifts.
+  // Module-level state lives here so the animate loop can sample without
+  // capturing fresh closures every frame.
+  floors: FloorAABB[]
+  ceilings: CeilingAABB[]
+  climbZones: ClimbZone[]
 }
 
 export type BotDifficulty = "easy" | "normal" | "hard"
@@ -972,6 +1029,17 @@ export default function ThreeWorld({
   // (which can spike >500Hz on gaming mice) from frame rate, and removes
   // sub-pixel jitter without adding perceivable input lag.
   const mouseDeltaRef = useRef({ x: 0, y: 0 })
+  // Vertical movement: ground-relative foot Y velocity in m/s. Positive =
+  // rising (currently only via E-key climb), negative = falling. Sampled
+  // each frame against the floor heightmap.
+  const playerVelYRef = useRef(0)
+  // E-key climb request — set in keydown, consumed and cleared inside the
+  // animate loop (so the climb only fires once per press, even if the key
+  // remains held).
+  const climbRequestRef = useRef(false)
+  // Cooldown timestamp after a climb fires; blocks chaining a second climb
+  // for half a second so you can't jitter up and down a ladder.
+  const climbCooldownUntilRef = useRef(0)
   const wsRef = useRef<WebSocket | null>(null)
   const usernameRef = useRef("Player")
   const remotePosRef = useRef<Record<string, RemotePlayer>>({})
@@ -1646,6 +1714,581 @@ export default function ThreeWorld({
         }
       }
 
+      // ── Vertical city: interiors + rooftops + props + signage ─────────────
+      // Everything below extends the city beyond the flat-box MAP_OBJECTS:
+      //   - 2 hollow buildings with doors + interior props + ceiling
+      //   - 2 rooftop towers with ladder climb zones + parapets + roof props
+      //   - street props (drums / pallets / trash / broken cars)
+      //   - crosswalk markings
+      //   - neon signage
+      // All collision is appended to ALL_AABBS so collidesWithWall / bullet
+      // checks just see them as regular walls. Floors + climb zones go into
+      // the new dedicated arrays that the gravity loop samples each frame.
+      const floors: FloorAABB[] = []
+      const ceilings: CeilingAABB[] = []
+      const climbZones: ClimbZone[] = []
+
+      // Default ceiling height used for hollow buildings.
+      const INTERIOR_H = 4.0
+      const WALL_T = 0.3 // wall slab thickness
+
+      // Build a single thin wall slab and register it for collision + raycast.
+      function addWallSlab(
+        cxw: number,
+        cy: number,
+        czw: number,
+        sx: number,
+        sy: number,
+        sz: number,
+        mat: THREE.Material,
+      ) {
+        const m = new THREE.Mesh(new THREE.BoxGeometry(sx, sy, sz), mat)
+        m.position.set(cxw, cy, czw)
+        m.castShadow = true
+        m.receiveShadow = true
+        scene.add(m)
+        wallMeshes.push(m)
+        ALL_AABBS.push({
+          x1: cxw - sx / 2,
+          x2: cxw + sx / 2,
+          z1: czw - sz / 2,
+          z2: czw + sz / 2,
+          h: cy + sy / 2, // top of slab
+        })
+        return m
+      }
+
+      // Build a hollow building (4 perimeter walls with a door gap on one
+      // side, plus ceiling). Interior props are added separately by caller.
+      function makeHollowBuilding(opts: {
+        x: number
+        z: number
+        w: number
+        d: number
+        h?: number
+        doorSide: "north" | "south" | "east" | "west"
+        doorWidth?: number
+        bldMat: THREE.Material
+        roofMat: THREE.Material
+      }) {
+        const { x, z, w, d, doorSide, bldMat, roofMat } = opts
+        const h = opts.h ?? INTERIOR_H
+        const doorW = opts.doorWidth ?? 2.0
+        // West wall (low-x)
+        if (doorSide === "west") {
+          const gapStart = z + d / 2 - doorW / 2
+          const gapEnd = z + d / 2 + doorW / 2
+          // North half (z < gapStart)
+          addWallSlab(x, h / 2, (z + gapStart) / 2, WALL_T, h, gapStart - z, bldMat)
+          // South half (z > gapEnd)
+          addWallSlab(x, h / 2, (gapEnd + (z + d)) / 2, WALL_T, h, z + d - gapEnd, bldMat)
+        } else {
+          addWallSlab(x, h / 2, z + d / 2, WALL_T, h, d, bldMat)
+        }
+        // East wall (high-x)
+        if (doorSide === "east") {
+          const gapStart = z + d / 2 - doorW / 2
+          const gapEnd = z + d / 2 + doorW / 2
+          addWallSlab(x + w, h / 2, (z + gapStart) / 2, WALL_T, h, gapStart - z, bldMat)
+          addWallSlab(x + w, h / 2, (gapEnd + (z + d)) / 2, WALL_T, h, z + d - gapEnd, bldMat)
+        } else {
+          addWallSlab(x + w, h / 2, z + d / 2, WALL_T, h, d, bldMat)
+        }
+        // North wall (low-z)
+        if (doorSide === "north") {
+          const gapStart = x + w / 2 - doorW / 2
+          const gapEnd = x + w / 2 + doorW / 2
+          addWallSlab((x + gapStart) / 2, h / 2, z, gapStart - x, h, WALL_T, bldMat)
+          addWallSlab((gapEnd + (x + w)) / 2, h / 2, z, x + w - gapEnd, h, WALL_T, bldMat)
+        } else {
+          addWallSlab(x + w / 2, h / 2, z, w, h, WALL_T, bldMat)
+        }
+        // South wall (high-z)
+        if (doorSide === "south") {
+          const gapStart = x + w / 2 - doorW / 2
+          const gapEnd = x + w / 2 + doorW / 2
+          addWallSlab((x + gapStart) / 2, h / 2, z + d, gapStart - x, h, WALL_T, bldMat)
+          addWallSlab((gapEnd + (x + w)) / 2, h / 2, z + d, x + w - gapEnd, h, WALL_T, bldMat)
+        } else {
+          addWallSlab(x + w / 2, h / 2, z + d, w, h, WALL_T, bldMat)
+        }
+        // Roof / ceiling slab — interior visible from below, doubles as
+        // potential rooftop walkable surface (we don't add it to floors[]
+        // since these hollow buildings don't have roof access in this PR).
+        const roof = new THREE.Mesh(new THREE.BoxGeometry(w + 0.3, 0.25, d + 0.3), roofMat)
+        roof.position.set(x + w / 2, h + 0.12, z + d / 2)
+        roof.castShadow = true
+        roof.receiveShadow = true
+        scene.add(roof)
+        // Interior floor patch (slightly darker) so it reads as "inside".
+        const floorMat = new THREE.MeshStandardMaterial({
+          color: 0x554a3a,
+          roughness: 0.95,
+          metalness: 0,
+        })
+        const interiorFloor = new THREE.Mesh(
+          new THREE.PlaneGeometry(w - WALL_T, d - WALL_T),
+          floorMat,
+        )
+        interiorFloor.rotation.x = -Math.PI / 2
+        interiorFloor.position.set(x + w / 2, 0.015, z + d / 2)
+        interiorFloor.receiveShadow = true
+        scene.add(interiorFloor)
+      }
+
+      // Place a prop crate / table / shelf with collision.
+      function placeProp(opts: {
+        x: number
+        y: number
+        z: number
+        w: number
+        h: number
+        d: number
+        color: number
+        roughness?: number
+        metalness?: number
+        emissive?: number
+      }) {
+        const mat = new THREE.MeshStandardMaterial({
+          color: opts.color,
+          roughness: opts.roughness ?? 0.8,
+          metalness: opts.metalness ?? 0.05,
+          emissive: opts.emissive ?? 0x000000,
+        })
+        const mesh = new THREE.Mesh(new THREE.BoxGeometry(opts.w, opts.h, opts.d), mat)
+        mesh.position.set(opts.x, opts.y + opts.h / 2, opts.z)
+        mesh.castShadow = true
+        mesh.receiveShadow = true
+        scene.add(mesh)
+        wallMeshes.push(mesh)
+        ALL_AABBS.push({
+          x1: opts.x - opts.w / 2,
+          x2: opts.x + opts.w / 2,
+          z1: opts.z - opts.d / 2,
+          z2: opts.z + opts.d / 2,
+          h: opts.y + opts.h,
+        })
+      }
+
+      // Hollow building #1 — warehouse on south urban edge.
+      {
+        const x = 16
+        const z = 86
+        const w = 10
+        const d = 8
+        makeHollowBuilding({
+          x,
+          z,
+          w,
+          d,
+          doorSide: "north",
+          doorWidth: 2.0,
+          bldMat: concreteMat,
+          roofMat: concreteRoofMat,
+        })
+        // Interior props
+        placeProp({ x: x + 2, y: 0, z: z + 2.5, w: 1.4, h: 1.0, d: 1.4, color: 0x6a4a26 })
+        placeProp({ x: x + 2, y: 1.0, z: z + 2.5, w: 1.2, h: 0.9, d: 1.2, color: 0x5a3a1c })
+        placeProp({ x: x + 7.5, y: 0, z: z + 5.5, w: 2.5, h: 0.85, d: 1.0, color: 0x444444 })
+        placeProp({ x: x + 5, y: 0, z: z + 5.5, w: 1.0, h: 1.8, d: 0.4, color: 0x333333 })
+      }
+
+      // Hollow building #2 — office on industrial / outdoor border.
+      {
+        const x = 43
+        const z = 85
+        const w = 10
+        const d = 8
+        makeHollowBuilding({
+          x,
+          z,
+          w,
+          d,
+          doorSide: "north",
+          doorWidth: 1.8,
+          bldMat: industrialMat,
+          roofMat: industrialRoofMat,
+        })
+        placeProp({ x: x + 2, y: 0, z: z + 4, w: 2.0, h: 0.85, d: 1.0, color: 0x333333 })
+        placeProp({ x: x + 7, y: 0, z: z + 6.5, w: 1.0, h: 1.7, d: 0.4, color: 0x222222 })
+        placeProp({ x: x + 7, y: 0, z: z + 2.0, w: 1.0, h: 1.7, d: 0.4, color: 0x222222 })
+      }
+
+      // Build a roof-access tower: solid box you can't enter, with an
+      // exterior ladder, a walkable roof, parapets, and one roof prop.
+      // The ladder is purely cosmetic + a climb zone; pressing E inside the
+      // zone teleports the player up (or back down).
+      function makeRoofTower(opts: {
+        x: number
+        z: number
+        w: number
+        d: number
+        h: number
+        ladderSide: "north" | "south" | "east" | "west"
+        bldMat: THREE.Material
+        roofMat: THREE.Material
+        roofProp?: "tank" | "vent"
+      }) {
+        const { x, z, w, d, h, ladderSide, bldMat, roofMat } = opts
+        const body = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), bldMat)
+        body.position.set(x + w / 2, h / 2, z + d / 2)
+        body.castShadow = true
+        body.receiveShadow = true
+        scene.add(body)
+        wallMeshes.push(body)
+        ALL_AABBS.push({ x1: x, z1: z, x2: x + w, z2: z + d, h })
+        // Roof slab (slightly larger than body)
+        const roof = new THREE.Mesh(new THREE.BoxGeometry(w + 0.3, 0.25, d + 0.3), roofMat)
+        roof.position.set(x + w / 2, h + 0.12, z + d / 2)
+        roof.castShadow = true
+        roof.receiveShadow = true
+        scene.add(roof)
+        // Walkable floor on top.
+        floors.push({ x1: x, z1: z, x2: x + w, z2: z + d, y: h + 0.25 })
+        // Parapets (low walls on each edge) — 0.8m tall.
+        const para = 0.8
+        const paraT = 0.2
+        const paraMat = bldMat
+        const paraY = h + 0.25 + para / 2
+        addWallSlab(x + w / 2, paraY, z, w, para, paraT, paraMat) // north
+        addWallSlab(x + w / 2, paraY, z + d, w, para, paraT, paraMat) // south
+        addWallSlab(x, paraY, z + d / 2, paraT, para, d, paraMat) // west
+        addWallSlab(x + w, paraY, z + d / 2, paraT, para, d, paraMat) // east
+        // Ladder mesh — vertical rails + rungs on the chosen side.
+        const railMat = new THREE.MeshStandardMaterial({
+          color: 0x444444,
+          roughness: 0.4,
+          metalness: 0.9,
+        })
+        const ladderH = h + 0.25
+        let lx = 0
+        let lz = 0
+        if (ladderSide === "west") {
+          lx = x - 0.15
+          lz = z + d / 2
+        } else if (ladderSide === "east") {
+          lx = x + w + 0.15
+          lz = z + d / 2
+        } else if (ladderSide === "north") {
+          lx = x + w / 2
+          lz = z - 0.15
+        } else {
+          lx = x + w / 2
+          lz = z + d + 0.15
+        }
+        // Two rails — orient along Y, offset 0.3m apart laterally.
+        const railW = 0.06
+        const sideOffset = ladderSide === "west" || ladderSide === "east" ? 0 : 0.3
+        const otherOffset = ladderSide === "west" || ladderSide === "east" ? 0.3 : 0
+        for (const s of [-1, 1]) {
+          const rail = new THREE.Mesh(new THREE.BoxGeometry(railW, ladderH, railW), railMat)
+          rail.position.set(lx + s * sideOffset, ladderH / 2, lz + s * otherOffset)
+          rail.castShadow = true
+          scene.add(rail)
+        }
+        // Rungs every 0.35m.
+        for (let yy = 0.3; yy < ladderH - 0.1; yy += 0.4) {
+          const rung = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.05, 0.05), railMat)
+          rung.position.set(lx, yy, lz)
+          if (ladderSide === "north" || ladderSide === "south") {
+            rung.rotation.y = Math.PI / 2
+          }
+          scene.add(rung)
+        }
+        // Climb zone — small rectangle in front of the ladder base.
+        const cz: ClimbZone = (() => {
+          if (ladderSide === "west") {
+            return {
+              x1: lx - 1.2,
+              x2: lx + 0.2,
+              z1: lz - 0.7,
+              z2: lz + 0.7,
+              targetY: h + 0.25,
+              downY: 0,
+            }
+          }
+          if (ladderSide === "east") {
+            return {
+              x1: lx - 0.2,
+              x2: lx + 1.2,
+              z1: lz - 0.7,
+              z2: lz + 0.7,
+              targetY: h + 0.25,
+              downY: 0,
+            }
+          }
+          if (ladderSide === "north") {
+            return {
+              x1: lx - 0.7,
+              x2: lx + 0.7,
+              z1: lz - 1.2,
+              z2: lz + 0.2,
+              targetY: h + 0.25,
+              downY: 0,
+            }
+          }
+          return {
+            x1: lx - 0.7,
+            x2: lx + 0.7,
+            z1: lz - 0.2,
+            z2: lz + 1.2,
+            targetY: h + 0.25,
+            downY: 0,
+          }
+        })()
+        climbZones.push(cz)
+        // Roof prop.
+        if (opts.roofProp === "tank") {
+          const tank = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.9, 1.0, 1.6, 12),
+            new THREE.MeshStandardMaterial({
+              color: 0x6a8a8a,
+              roughness: 0.55,
+              metalness: 0.35,
+            }),
+          )
+          tank.position.set(x + w / 2 + 0.8, h + 0.25 + 0.8, z + d / 2 - 0.6)
+          tank.castShadow = true
+          scene.add(tank)
+          ALL_AABBS.push({
+            x1: tank.position.x - 1.0,
+            x2: tank.position.x + 1.0,
+            z1: tank.position.z - 1.0,
+            z2: tank.position.z + 1.0,
+            h: h + 0.25 + 1.6,
+          })
+        } else if (opts.roofProp === "vent") {
+          const vent = new THREE.Mesh(
+            new THREE.BoxGeometry(1.4, 0.9, 1.0),
+            new THREE.MeshStandardMaterial({
+              color: 0x6a6a6a,
+              roughness: 0.4,
+              metalness: 0.5,
+            }),
+          )
+          vent.position.set(x + w / 2 - 0.5, h + 0.25 + 0.45, z + d / 2 + 0.5)
+          vent.castShadow = true
+          scene.add(vent)
+          ALL_AABBS.push({
+            x1: vent.position.x - 0.7,
+            x2: vent.position.x + 0.7,
+            z1: vent.position.z - 0.5,
+            z2: vent.position.z + 0.5,
+            h: h + 0.25 + 0.9,
+          })
+        }
+      }
+
+      // Roof tower #1 — west-facing ladder, water tank on top.
+      makeRoofTower({
+        x: 28,
+        z: 86,
+        w: 5,
+        d: 5,
+        h: 6,
+        ladderSide: "west",
+        bldMat: concreteMat,
+        roofMat: concreteRoofMat,
+        roofProp: "tank",
+      })
+      // Roof tower #2 — east-facing ladder, AC vent on top.
+      makeRoofTower({
+        x: 60,
+        z: 86,
+        w: 5,
+        d: 5,
+        h: 5,
+        ladderSide: "east",
+        bldMat: industrialMat,
+        roofMat: industrialRoofMat,
+        roofProp: "vent",
+      })
+
+      // ── Street props ───────────────────────────────────────────────────────
+      // Drum barrels (cylinders) clustered at key choke points.
+      const drumMat = new THREE.MeshStandardMaterial({
+        color: 0x8a3a2a,
+        roughness: 0.65,
+        metalness: 0.35,
+      })
+      const drumStripeMat = new THREE.MeshStandardMaterial({
+        color: 0xffd84a,
+        emissive: 0x3a2200,
+        roughness: 0.6,
+        metalness: 0,
+      })
+      const drumSpots: [number, number][] = [
+        [12, 36],
+        [12.7, 36.6],
+        [13.4, 36],
+        [40, 30],
+        [40.7, 30.7],
+        [55, 50],
+        [56, 50.6],
+        [70, 70],
+        [70.7, 70.6],
+        [85, 30],
+        [85.7, 30.7],
+      ]
+      for (const [dx, dz] of drumSpots) {
+        const drum = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.35, 0.95, 10), drumMat)
+        drum.position.set(dx, 0.475, dz)
+        drum.castShadow = true
+        drum.receiveShadow = true
+        scene.add(drum)
+        wallMeshes.push(drum)
+        ALL_AABBS.push({ x1: dx - 0.4, x2: dx + 0.4, z1: dz - 0.4, z2: dz + 0.4, h: 0.95 })
+        // Yellow stripe band around the drum.
+        const stripe = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.36, 0.36, 0.12, 10),
+          drumStripeMat,
+        )
+        stripe.position.set(dx, 0.65, dz)
+        scene.add(stripe)
+      }
+
+      // Wood pallets (low flat boxes).
+      const palletMat = new THREE.MeshStandardMaterial({
+        color: 0x886a3a,
+        roughness: 0.95,
+        metalness: 0,
+      })
+      const palletSpots: [number, number, number][] = [
+        [38, 40, 0],
+        [38, 41.1, 0],
+        [52, 70, Math.PI / 6],
+        [82, 22, 0],
+      ]
+      for (const [px, pz, rot] of palletSpots) {
+        const pal = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.15, 0.8), palletMat)
+        pal.position.set(px, 0.075, pz)
+        pal.rotation.y = rot
+        pal.castShadow = true
+        pal.receiveShadow = true
+        scene.add(pal)
+        // No AABB — players step over flat pallets.
+      }
+
+      // Trash cans (small cylinders).
+      const trashMat = new THREE.MeshStandardMaterial({
+        color: 0x2a2e22,
+        roughness: 0.7,
+        metalness: 0.2,
+      })
+      const trashSpots: [number, number][] = [
+        [10, 28],
+        [10, 60],
+        [10, 78],
+        [27, 66],
+      ]
+      for (const [tx, tz] of trashSpots) {
+        const can = new THREE.Mesh(new THREE.CylinderGeometry(0.28, 0.32, 0.85, 10), trashMat)
+        can.position.set(tx, 0.425, tz)
+        can.castShadow = true
+        scene.add(can)
+        wallMeshes.push(can)
+        ALL_AABBS.push({ x1: tx - 0.32, x2: tx + 0.32, z1: tz - 0.32, z2: tz + 0.32, h: 0.85 })
+      }
+
+      // A wrecked car / hulk in the south plaza — bigger silhouette than
+      // the existing patrol cars; clearly broken (no windshield, tilted).
+      {
+        const wreckMat = new THREE.MeshStandardMaterial({
+          color: 0x3a3a32,
+          roughness: 0.85,
+          metalness: 0.2,
+        })
+        const wx = 33
+        const wz = 88
+        const wreck = new THREE.Mesh(new THREE.BoxGeometry(3.0, 0.9, 1.5), wreckMat)
+        wreck.position.set(wx, 0.45, wz)
+        wreck.rotation.z = 0.12
+        wreck.castShadow = true
+        wreck.receiveShadow = true
+        scene.add(wreck)
+        wallMeshes.push(wreck)
+        ALL_AABBS.push({ x1: wx - 1.6, x2: wx + 1.6, z1: wz - 0.8, z2: wz + 0.8, h: 0.9 })
+        // Tires (4)
+        const tireMat = new THREE.MeshStandardMaterial({
+          color: 0x141414,
+          roughness: 0.95,
+          metalness: 0,
+        })
+        const tireOffsets: [number, number][] = [
+          [wx - 1.1, wz - 0.65],
+          [wx + 1.1, wz - 0.65],
+          [wx - 1.1, wz + 0.65],
+          [wx + 1.1, wz + 0.65],
+        ]
+        for (const [tox, toz] of tireOffsets) {
+          const tire = new THREE.Mesh(new THREE.CylinderGeometry(0.24, 0.24, 0.14, 8), tireMat)
+          tire.position.set(tox, 0.24, toz)
+          tire.rotation.z = Math.PI / 2
+          scene.add(tire)
+        }
+      }
+
+      // ── Crosswalk markings ────────────────────────────────────────────────
+      // Painted white stripes on the ground; no collision, slight y-lift so
+      // they sit on top of the ground plane without z-fighting.
+      const crosswalkMat = new THREE.MeshStandardMaterial({
+        color: 0xeae8d8,
+        roughness: 0.9,
+        metalness: 0,
+        emissive: 0x1a1814,
+      })
+      const crosswalks: { cx: number; cz: number; rot: number }[] = [
+        { cx: 12, cz: 22, rot: 0 },
+        { cx: 31, cz: 43, rot: Math.PI / 2 },
+        { cx: 60, cz: 22, rot: 0 },
+      ]
+      for (const cw of crosswalks) {
+        for (let s = -2; s <= 2; s++) {
+          const stripe = new THREE.Mesh(new THREE.PlaneGeometry(0.45, 3.5), crosswalkMat)
+          stripe.rotation.x = -Math.PI / 2
+          stripe.rotation.z = cw.rot
+          const off = s * 0.85
+          stripe.position.set(cw.cx + Math.cos(cw.rot) * off, 0.018, cw.cz + Math.sin(cw.rot) * off)
+          stripe.receiveShadow = true
+          scene.add(stripe)
+        }
+      }
+
+      // ── Neon signage ──────────────────────────────────────────────────────
+      // Wall-mounted emissive boxes near major buildings — readable from
+      // far away thanks to the high emissiveIntensity under ACESFilmic.
+      const neonSpec: {
+        x: number
+        z: number
+        rot: number
+        w: number
+        h: number
+        color: number
+      }[] = [
+        { x: 11, z: 14.5, rot: 0, w: 4, h: 0.9, color: 0xff4488 }, // pink
+        { x: 47, z: 4.5, rot: 0, w: 5, h: 1.0, color: 0x44ffcc }, // teal
+        { x: 22.5, z: 14, rot: Math.PI / 2, w: 3, h: 0.7, color: 0xffcc44 }, // amber
+        { x: 70, z: 5.5, rot: 0, w: 4, h: 0.8, color: 0x8844ff }, // violet
+      ]
+      for (const n of neonSpec) {
+        const neonMat = new THREE.MeshStandardMaterial({
+          color: n.color,
+          emissive: n.color,
+          emissiveIntensity: 1.4,
+          roughness: 0.4,
+          metalness: 0.2,
+        })
+        const sign = new THREE.Mesh(new THREE.BoxGeometry(n.w, n.h, 0.12), neonMat)
+        sign.position.set(n.x, 3.2, n.z)
+        sign.rotation.y = n.rot
+        scene.add(sign)
+        // Add a small point light so the neon casts a colored wash on the
+        // nearby wall (subtle but adds the "wet street" cyberpunk feel).
+        const pl = new THREE.PointLight(n.color, 0.55, 8)
+        pl.position.set(n.x, 3.5, n.z + 0.3)
+        scene.add(pl)
+      }
+
       // ── FPS camera state ───────────────────────────────────────────────────
       // West edge of map, facing east into the urban zone. (Previously (8, 48)
       // which sat *inside* building AABB [3,45,6,7] — collidesWithWall blocked
@@ -1658,7 +2301,9 @@ export default function ThreeWorld({
       }
 
       function updateCamera() {
-        camera.position.set(focalPoint.x, EYE_HEIGHT, focalPoint.z)
+        // focalPoint.y is now the player's foot Y (0 on ground, raised when
+        // standing on a rooftop / climbed ladder). Eye sits above feet.
+        camera.position.set(focalPoint.x, focalPoint.y + EYE_HEIGHT, focalPoint.z)
         camera.rotation.y = camState.yaw
         camera.rotation.x = camState.pitch
       }
@@ -2482,6 +3127,9 @@ export default function ThreeWorld({
         aimedEnemyId: null,
         explosionParticles,
         goalMarkers,
+        floors,
+        ceilings,
+        climbZones,
       }
 
       setEnemyStatus([])
@@ -3068,15 +3716,109 @@ export default function ThreeWorld({
           updateCamera()
         }
 
+        // ── Vertical update: floor sampling + gravity + E-key climb ─────
+        // Highest walkable floor under the player's (x, z). Default ground
+        // is y=0. Floors stored higher than the player's current head +
+        // STEP_UP_MAX are ignored (we don't snap *up* onto rooftops just
+        // by walking under them — those require an E-key climb zone).
+        let groundY = 0
+        for (const f of refs.floors) {
+          if (
+            refs.focalPoint.x > f.x1 &&
+            refs.focalPoint.x < f.x2 &&
+            refs.focalPoint.z > f.z1 &&
+            refs.focalPoint.z < f.z2 &&
+            f.y > groundY &&
+            f.y <= refs.focalPoint.y + STEP_UP_MAX
+          ) {
+            groundY = f.y
+          }
+        }
+
+        // E-key climb (consumed once per press in the keydown handler).
+        if (climbRequestRef.current) {
+          climbRequestRef.current = false
+          if (Date.now() > climbCooldownUntilRef.current) {
+            for (const zone of refs.climbZones) {
+              if (
+                refs.focalPoint.x > zone.x1 - CLIMB_INTERACT_PAD &&
+                refs.focalPoint.x < zone.x2 + CLIMB_INTERACT_PAD &&
+                refs.focalPoint.z > zone.z1 - CLIMB_INTERACT_PAD &&
+                refs.focalPoint.z < zone.z2 + CLIMB_INTERACT_PAD
+              ) {
+                // If already roughly at the top, descend back down; else
+                // climb up. Avoids "press E and bounce back instantly"
+                // when the player keeps the key tapped at the top.
+                const atTop = Math.abs(refs.focalPoint.y - zone.targetY) < 0.6
+                if (atTop && zone.downY !== undefined) {
+                  refs.focalPoint.y = zone.downY
+                  playerVelYRef.current = 0
+                  groundY = zone.downY
+                  climbCooldownUntilRef.current = Date.now() + 600
+                } else if (!atTop) {
+                  refs.focalPoint.y = zone.targetY
+                  playerVelYRef.current = 0
+                  groundY = zone.targetY
+                  climbCooldownUntilRef.current = Date.now() + 600
+                }
+                break
+              }
+            }
+          }
+        }
+
+        // Apply gravity / floor snap.
+        if (refs.focalPoint.y > groundY + 0.01) {
+          playerVelYRef.current -= GRAVITY * dt
+          refs.focalPoint.y += playerVelYRef.current * dt
+          if (refs.focalPoint.y <= groundY) {
+            // Landed. Fall damage based on impact vertical speed.
+            const vy = -playerVelYRef.current
+            if (
+              vy > FALL_SAFE_SPEED &&
+              gamePhaseRef.current === "playing" &&
+              Date.now() > spawnInvulnUntilRef.current
+            ) {
+              const t = Math.min(1, (vy - FALL_SAFE_SPEED) / (FALL_LETHAL_SPEED - FALL_SAFE_SPEED))
+              const dmg = Math.round(FALL_MAX_DAMAGE * t)
+              if (dmg > 0) {
+                playerHpRef.current = Math.max(0, playerHpRef.current - dmg)
+                setPlayerHp(playerHpRef.current)
+                lastDamageTimeRef.current = Date.now()
+                cameraShakeRef.current.intensity = 5 + t * 8
+                setDamageFlash(true)
+                SOUNDS.damage()
+                setTimeout(() => setDamageFlash(false), 320)
+                if (playerHpRef.current <= 0) {
+                  gamePhaseRef.current = "gameover"
+                  setGamePhase("gameover")
+                  deathsRef.current += 1
+                  setDeaths(deathsRef.current)
+                }
+              }
+            }
+            refs.focalPoint.y = groundY
+            playerVelYRef.current = 0
+          }
+        } else {
+          // Snap to floor (handles walking onto a new floor at the same Y
+          // and the small auto step-up of low geometry).
+          refs.focalPoint.y = groundY
+          playerVelYRef.current = 0
+        }
+        updateCamera()
+
         // Walk-bob: subtle vertical head sway when actually moving. Phase
-        // freezes when standing still so it doesn't bob while idle.
+        // freezes when standing still so it doesn't bob while idle. Base Y
+        // is now the focal point's altitude (0 on ground, raised on roof).
+        const baseY = refs.focalPoint.y + EYE_HEIGHT
         if (playerSpeed > 0.5) {
           walkBobRef.current += dt * (4 + playerSpeed * 0.6)
           const bobAmp = isAimingRef.current ? 0.012 : 0.03
-          camera.position.y = EYE_HEIGHT + Math.sin(walkBobRef.current * 2) * bobAmp
+          camera.position.y = baseY + Math.sin(walkBobRef.current * 2) * bobAmp
         } else {
           // Decay back to neutral so we don't snap.
-          camera.position.y += (EYE_HEIGHT - camera.position.y) * (1 - Math.exp(-dt * 10))
+          camera.position.y += (baseY - camera.position.y) * (1 - Math.exp(-dt * 10))
         }
 
         // HP auto-recovery (5s no damage → 2 HP/s). Push to React state
@@ -4233,6 +4975,11 @@ export default function ThreeWorld({
       if (e.key === "1") switchWeapon(0)
       if (e.key === "2") switchWeapon(1)
       if (e.key === "3") switchWeapon(2)
+      if (e.key === "e" || e.key === "E") {
+        // Climb interaction — animate loop consumes the request and only
+        // fires if the player is currently inside a climb zone.
+        climbRequestRef.current = true
+      }
       if (e.key === "F8") {
         e.preventDefault()
         setScanlinesOn((prev) => {
