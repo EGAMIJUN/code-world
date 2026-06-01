@@ -80,7 +80,7 @@ profileRouter.get("/:id/matches", async (c: Context) => {
   return c.json({ data: rows })
 })
 
-const VALID_MODES = new Set(["wave_defense", "ffa", "tdm", "mission"])
+const VALID_MODES = new Set(["wave_defense", "ffa", "tdm", "mission", "zombie"])
 const VALID_MAPS = new Set(["urban", "desert", "snow"])
 
 profileRouter.post("/stats", async (c: Context) => {
