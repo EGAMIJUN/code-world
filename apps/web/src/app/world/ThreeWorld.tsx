@@ -6288,8 +6288,9 @@ export default function ThreeWorld({
 
         {/* Climb prompt — shown while the player is inside a ladder/stairs
             ClimbZone. The animate loop flips the state on entry/exit so this
-            doesn't re-render every frame. */}
-        {nearClimb && !isLoading && !error && gamePhase === "playing" && (
+            doesn't re-render every frame. Desktop only ("[E]" is meaningless
+            on touch); mobile shows a tappable CLIMB button instead. */}
+        {nearClimb && !isLoading && !error && !isMobile && gamePhase === "playing" && (
           <div
             style={{
               position: "absolute",
@@ -7846,6 +7847,48 @@ export default function ThreeWorld({
                 )
               })}
             </div>
+
+            {/* CLIMB button — only while inside a ladder ClimbZone. Fires the
+                same climbRequestRef path as the PC "E" key (the animate loop
+                consumes it and honours the cooldown). Real <button> with its
+                own pointer events + high z-index, so the touch is captured
+                here and never reaches the canvas drag-look listener. Centered
+                in the lower-middle, clear of FIRE (right) / RELOAD (bottom-
+                center) / move stick (bottom-left). */}
+            {nearClimb && (
+              <button
+                type="button"
+                onPointerDown={(e) => {
+                  e.preventDefault()
+                  climbRequestRef.current = true
+                }}
+                style={{
+                  position: "absolute",
+                  bottom: isLandscape ? "9rem" : "13rem",
+                  left: "50%",
+                  transform: "translateX(-50%)",
+                  width: isLandscape ? "68px" : "76px",
+                  height: isLandscape ? "68px" : "76px",
+                  borderRadius: "50%",
+                  background: "rgba(255,200,40,0.22)",
+                  border: "3px solid #ffcc22",
+                  boxShadow: "0 0 16px rgba(255,200,40,0.4)",
+                  color: "#ffe79a",
+                  fontFamily: "monospace",
+                  fontSize: isLandscape ? "0.8rem" : "0.9rem",
+                  letterSpacing: "0.12em",
+                  fontWeight: "bold",
+                  textShadow: "0 0 10px rgba(255,200,40,0.7)",
+                  lineHeight: 1.15,
+                  touchAction: "none",
+                  userSelect: "none",
+                  zIndex: 32,
+                }}
+              >
+                ↑<br />
+                登る
+              </button>
+            )}
           </>
         )}
 
