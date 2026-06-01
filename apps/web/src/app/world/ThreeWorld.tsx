@@ -5721,9 +5721,16 @@ export default function ThreeWorld({
   // swallowed. Binding addEventListener with passive:false dodges both bugs.
   useEffect(() => {
     if (!isMobile) return
+    // This effect must re-run once the joystick DOM actually mounts. isMobile
+    // flips true on mount while isLoading is still true (scene not ready), so
+    // the stick <div>s don't exist yet and the refs are null. If we only
+    // depended on [isMobile] we'd bail here and never bind — the sticks would
+    // stay dead for the whole session. Gating on the same state the JSX uses
+    // (and listing it in the deps) makes us rebind the moment they appear.
+    if (isLoading || error !== null || gamePhase !== "playing") return
     const moveEl = joyContainerRef.current
     const lookEl = lookJoyContainerRef.current
-    if (!moveEl || !lookEl) return
+    if (!moveEl && !lookEl) return
     const MAX_DIST = 52
 
     function bindStick(
@@ -5789,13 +5796,15 @@ export default function ThreeWorld({
       }
     }
 
-    const cleanupMove = bindStick(moveEl, joystickRef, joyThumbRef)
-    const cleanupLook = bindStick(lookEl, lookJoyRef, lookJoyThumbRef)
+    // Bind each stick independently — the look stick is gated on gamePhase
+    // while the move stick isn't, so they can mount at different times.
+    const cleanupMove = moveEl ? bindStick(moveEl, joystickRef, joyThumbRef) : undefined
+    const cleanupLook = lookEl ? bindStick(lookEl, lookJoyRef, lookJoyThumbRef) : undefined
     return () => {
-      cleanupMove()
-      cleanupLook()
+      cleanupMove?.()
+      cleanupLook?.()
     }
-  }, [isMobile])
+  }, [isMobile, isLoading, error, gamePhase])
 
   const sendChat = useCallback(
     (e: React.FormEvent) => {
@@ -6120,8 +6129,9 @@ export default function ThreeWorld({
           />
         )}
 
-        {/* ── Top-center: Score / Kills ─────────────────────────────────── */}
-        {!isLoading && !error && gamePhase === "playing" && (
+        {/* ── Top-center: Score / Kills (desktop only — mobile shows these in
+            the compact top HUD bar below to avoid stacking two panels) ──── */}
+        {!isLoading && !error && !isMobile && gamePhase === "playing" && (
           <div
             style={{
               position: "absolute",
@@ -6360,6 +6370,13 @@ export default function ThreeWorld({
             <span style={{ color: "#ffcc00", fontSize: "1.05rem", fontWeight: "bold" }}>
               {score}
             </span>
+            <span style={{ color: "rgba(255,255,255,0.2)" }}>·</span>
+            <span style={{ color: "rgba(255,255,255,0.45)", fontSize: "0.55rem" }}>K/D</span>
+            <span style={{ color: "#ff5555", fontSize: "1.05rem", fontWeight: "bold" }}>
+              {kills}
+            </span>
+            <span style={{ color: "rgba(255,255,255,0.3)", fontSize: "0.8rem" }}>/</span>
+            <span style={{ color: "#aaa", fontSize: "1.05rem", fontWeight: "bold" }}>{deaths}</span>
             <span style={{ color: "rgba(255,255,255,0.2)" }}>·</span>
             <span
               style={{
@@ -6645,30 +6662,45 @@ export default function ThreeWorld({
             <div
               style={{
                 position: "absolute",
-                top: "1rem",
-                left: "1rem",
+                // On mobile the top-center bar (top 0.5rem) and the centered
+                // weapon-swap row (top 2.8rem, ~60px tall) own the upper strip,
+                // so drop the objective into the clear left column below them
+                // and give it a chip background so it reads over the scene.
+                top: isMobile ? "6.8rem" : "1rem",
+                left: isMobile ? "0.5rem" : "1rem",
                 zIndex: 20,
                 pointerEvents: "none",
                 fontFamily: "monospace",
+                ...(isMobile
+                  ? {
+                      maxWidth: "44vw",
+                      background: "rgba(0,0,0,0.5)",
+                      border: "1px solid rgba(136,170,255,0.25)",
+                      borderRadius: "6px",
+                      padding: "0.25rem 0.45rem",
+                    }
+                  : {}),
               }}
             >
-              <div
-                style={{
-                  color: "#88aaff",
-                  fontSize: "0.55rem",
-                  letterSpacing: "0.18em",
-                  marginBottom: "0.2rem",
-                }}
-              >
-                MISSION OBJECTIVE
-              </div>
+              {!isMobile && (
+                <div
+                  style={{
+                    color: "#88aaff",
+                    fontSize: "0.55rem",
+                    letterSpacing: "0.18em",
+                    marginBottom: "0.2rem",
+                  }}
+                >
+                  MISSION OBJECTIVE
+                </div>
+              )}
               <div
                 style={{
                   color: "white",
-                  fontSize: "0.72rem",
+                  fontSize: isMobile ? "0.6rem" : "0.72rem",
                   fontWeight: "bold",
                   letterSpacing: "0.06em",
-                  marginBottom: "0.3rem",
+                  marginBottom: isMobile ? "0.15rem" : "0.3rem",
                 }}
               >
                 {missionObjective
@@ -6680,7 +6712,7 @@ export default function ThreeWorld({
                 <div
                   style={{
                     color: defenseTimer < 10 ? "#ff3333" : "#ffcc00",
-                    fontSize: "1.4rem",
+                    fontSize: isMobile ? "1rem" : "1.4rem",
                     fontWeight: "bold",
                   }}
                 >
@@ -7213,8 +7245,9 @@ export default function ThreeWorld({
           </div>
         )}
 
-        {/* Crosshair */}
-        {!isLoading && !error && (isPointerLocked || isMobile) && gamePhase === "playing" && (
+        {/* Crosshair (legacy duplicate — desktop only; mobile uses the
+            crosshair above so the two don't stack on the touch HUD) */}
+        {!isLoading && !error && isPointerLocked && !isMobile && gamePhase === "playing" && (
           <svg
             width="24"
             height="24"
@@ -7287,8 +7320,9 @@ export default function ThreeWorld({
           </svg>
         )}
 
-        {/* Enemy status (top-right) */}
-        {!isLoading && !error && gamePhase === "playing" && (
+        {/* Enemy status (top-right) — hidden on mobile: the E1–E8 HP rows
+            collide with the top HUD bar and there's no room on a phone. */}
+        {!isLoading && !error && !isMobile && gamePhase === "playing" && (
           <div
             style={{
               position: "absolute",
@@ -7360,8 +7394,10 @@ export default function ThreeWorld({
           </div>
         )}
 
-        {/* Minimap */}
-        {!isLoading && !error && (
+        {/* Minimap (legacy square — desktop only. On mobile the dedicated
+            hidden canvas above keeps minimapRef alive for the draw loop, so
+            this visible one would just overlap the top HUD.) */}
+        {!isLoading && !error && !isMobile && (
           <canvas
             ref={minimapRef}
             width={80}
@@ -7377,8 +7413,9 @@ export default function ThreeWorld({
           />
         )}
 
-        {/* Weapon selector (bottom-right) */}
-        {!isLoading && !error && gamePhase === "playing" && (
+        {/* Weapon selector (bottom-right) — desktop only; mobile switches
+            weapons with the [1][2][3] row in the action buttons below. */}
+        {!isLoading && !error && !isMobile && gamePhase === "playing" && (
           <div
             style={{
               position: "absolute",
