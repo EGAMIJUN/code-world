@@ -342,11 +342,23 @@ const WALL_AABBS: WallAABB[] = MAP_OBJECTS.map(([x, z, w, d, type]) => ({
 }))
 const ALL_AABBS: WallAABB[] = WALL_AABBS
 
-function collidesWithWall(px: number, pz: number, radius: number): boolean {
+// Height-aware AABB sweep. `feetY` is the mover's foot altitude (default 0 =
+// ground). A wall only blocks if its top rises more than a step above the
+// feet — so a player standing ON a rooftop (feetY ≈ roof Y) is no longer
+// blocked by the building's own footprint and can walk across it. Ground
+// movers (enemies, spawn search) pass feetY=0 and, since every wall here is
+// ≥0.6m tall (> STEP_UP_MAX), behave exactly as the old 2D check did.
+function collidesWithWall(px: number, pz: number, radius: number, feetY = 0): boolean {
   if (px - radius < 0 || px + radius > MAP_SIZE || pz - radius < 0 || pz + radius > MAP_SIZE)
     return true
   for (const w of ALL_AABBS) {
-    if (px + radius > w.x1 && px - radius < w.x2 && pz + radius > w.z1 && pz - radius < w.z2)
+    if (
+      px + radius > w.x1 &&
+      px - radius < w.x2 &&
+      pz + radius > w.z1 &&
+      pz - radius < w.z2 &&
+      w.h > feetY + STEP_UP_MAX
+    )
       return true
   }
   return false
@@ -928,6 +940,15 @@ interface ClimbZone {
   // Down-climb target — when the player is *on the elevated platform*
   // and presses E inside the zone, they descend back to this Y.
   downY?: number
+  // Landing footprint. Climbing up snaps the player to (topX, topZ) so they
+  // land *on* the roof (inside its floor bounds) instead of beside the tower
+  // where there's no floor and they'd immediately fall. Climbing down snaps
+  // to (baseX, baseZ): clear ground outside the footprint so they don't end
+  // up embedded in the solid tower body.
+  topX?: number
+  topZ?: number
+  baseX?: number
+  baseZ?: number
 }
 
 // ── Three.js scene refs ────────────────────────────────────────────────────────
@@ -1058,13 +1079,10 @@ export default function ThreeWorld({
   const joystickRef = useRef({ vx: 0, vy: 0 })
   const joyContainerRef = useRef<HTMLDivElement>(null)
   const joyThumbRef = useRef<HTMLDivElement>(null)
-  const lookJoyRef = useRef({ vx: 0, vy: 0 })
-  const lookJoyContainerRef = useRef<HTMLDivElement>(null)
-  const lookJoyThumbRef = useRef<HTMLDivElement>(null)
-  // Low-pass filtered stick values — kills finger micro-jitter while staying
-  // responsive. Mouse input intentionally stays raw (smoothing mice adds lag).
+  // Low-pass filtered move-stick value — kills finger micro-jitter while
+  // staying responsive. (Look is drag-driven on mobile and feeds the mouse
+  // delta path directly, so it needs no separate smoothing ref here.)
   const joySmoothRef = useRef({ vx: 0, vy: 0 })
-  const lookSmoothRef = useRef({ vx: 0, vy: 0 })
   // Player movement velocity (smoothed). Position += vel * dt each frame so
   // there's a tiny accel/decel instead of an instant snap when input changes.
   const playerVelRef = useRef({ x: 0, z: 0 })
@@ -1080,11 +1098,10 @@ export default function ThreeWorld({
   // each frame against the floor heightmap.
   const playerVelYRef = useRef(0)
   // ── Sensitivity / motion-sickness refs ───────────────────────────────
-  // Multipliers applied to mouse + look-stick deltas inside the animate
-  // loop. Mirrored from React state via dedicated useEffects so the loop
+  // Multiplier applied to mouse / touch-drag look deltas inside the animate
+  // loop. Mirrored from React state via a dedicated useEffect so the loop
   // never closes over stale state.
   const mouseSensRef = useRef(1.0)
-  const lookSensRef = useRef(1.0)
   // Walk-bob feels great for some players, motion-sick others. Default
   // off (CLAUDE.md's stated tolerance) — toggleable in settings.
   const walkBobOnRef = useRef(false)
@@ -1193,11 +1210,10 @@ export default function ThreeWorld({
   // in localStorage so the choice survives refresh.
   const [scanlinesOn, setScanlinesOn] = useState(false)
   // ── Sensitivity (motion-sickness controls) ─────────────────────────────
-  // mouseSens / lookSens are multipliers on top of the (now-lowered) base
-  // sensitivity. Range 0.5–2.0 in the settings UI. walkBobOn gates the
-  // head-bob effect. All persisted under "fps_*" localStorage keys.
+  // mouseSens is a multiplier on top of the (now-lowered) base sensitivity,
+  // applied to both mouse and mobile touch-drag look. Range 0.5–2.0 in the
+  // settings UI. walkBobOn gates the head-bob effect. Persisted under "fps_*".
   const [mouseSens, setMouseSens] = useState(1.0)
-  const [lookSens, setLookSens] = useState(1.0)
   const [walkBobOn, setWalkBobOn] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
@@ -1260,8 +1276,6 @@ export default function ThreeWorld({
     try {
       const ms = Number.parseFloat(localStorage.getItem("fps_mouse_sens") ?? "")
       if (Number.isFinite(ms) && ms > 0.1 && ms < 3.5) setMouseSens(ms)
-      const ls = Number.parseFloat(localStorage.getItem("fps_look_sens") ?? "")
-      if (Number.isFinite(ls) && ls > 0.1 && ls < 3.5) setLookSens(ls)
       if (localStorage.getItem("fps_walkbob") === "1") setWalkBobOn(true)
     } catch {
       /* ignore */
@@ -1276,9 +1290,6 @@ export default function ThreeWorld({
   useEffect(() => {
     mouseSensRef.current = mouseSens
   }, [mouseSens])
-  useEffect(() => {
-    lookSensRef.current = lookSens
-  }, [lookSens])
   useEffect(() => {
     walkBobOnRef.current = walkBobOn
   }, [walkBobOn])
@@ -2257,26 +2268,39 @@ export default function ThreeWorld({
           }
           scene.add(rung)
         }
-        // Climb zone — small rectangle in front of the ladder base.
+        // Climb zone — straddles the ladder base AND a strip of the roof edge
+        // so the same zone serves both the ground-level "press E to go up" and
+        // the roof-level "press E to come down" (disambiguated by altitude).
+        // topX/topZ land the player firmly on the roof; baseX/baseZ on clear
+        // ground beside the tower.
+        const top = h + 0.25
         const cz: ClimbZone = (() => {
           if (ladderSide === "west") {
             return {
               x1: lx - 1.2,
-              x2: lx + 0.2,
+              x2: x + 1.4,
               z1: lz - 0.7,
               z2: lz + 0.7,
-              targetY: h + 0.25,
+              targetY: top,
               downY: 0,
+              topX: x + 1.1,
+              topZ: lz,
+              baseX: x - 0.8,
+              baseZ: lz,
             }
           }
           if (ladderSide === "east") {
             return {
-              x1: lx - 0.2,
+              x1: x + w - 1.4,
               x2: lx + 1.2,
               z1: lz - 0.7,
               z2: lz + 0.7,
-              targetY: h + 0.25,
+              targetY: top,
               downY: 0,
+              topX: x + w - 1.1,
+              topZ: lz,
+              baseX: x + w + 0.8,
+              baseZ: lz,
             }
           }
           if (ladderSide === "north") {
@@ -2284,25 +2308,34 @@ export default function ThreeWorld({
               x1: lx - 0.7,
               x2: lx + 0.7,
               z1: lz - 1.2,
-              z2: lz + 0.2,
-              targetY: h + 0.25,
+              z2: z + 1.4,
+              targetY: top,
               downY: 0,
+              topX: lx,
+              topZ: z + 1.1,
+              baseX: lx,
+              baseZ: z - 0.8,
             }
           }
           return {
             x1: lx - 0.7,
             x2: lx + 0.7,
-            z1: lz - 0.2,
+            z1: z + d - 1.4,
             z2: lz + 1.2,
-            targetY: h + 0.25,
+            targetY: top,
             downY: 0,
+            topX: lx,
+            topZ: z + d - 1.1,
+            baseX: lx,
+            baseZ: z + d + 0.8,
           }
         })()
         climbZones.push(cz)
         // Ladder cue: yellow ground disc at the base + "[E] CLIMB" sprite
-        // a bit above eye height so it pops against the tower wall.
-        const decalX = (cz.x1 + cz.x2) / 2
-        const decalZ = (cz.z1 + cz.z2) / 2
+        // a bit above eye height so it pops against the tower wall. Anchored
+        // at the ground base (the zone now also covers the roof edge).
+        const decalX = cz.baseX ?? (cz.x1 + cz.x2) / 2
+        const decalZ = cz.baseZ ?? (cz.z1 + cz.z2) / 2
         entryDecals.push(makeEntryDecal(decalX, decalZ, 0xffcc22))
         const climbSign = makeEntrySign("[E] CLIMB", "#ffcc22")
         climbSign.position.set(decalX, 2.3, decalZ)
@@ -3943,13 +3976,10 @@ export default function ThreeWorld({
         if (!refs) return
         frameCount = (frameCount + 1) | 0
 
-        // Low-pass filter the joystick inputs (finger jitter on glass).
+        // Low-pass filter the move-stick input (finger jitter on glass).
         const joyBlend = 1 - Math.exp(-dt * 22)
         joySmoothRef.current.vx += (joystickRef.current.vx - joySmoothRef.current.vx) * joyBlend
         joySmoothRef.current.vy += (joystickRef.current.vy - joySmoothRef.current.vy) * joyBlend
-        const lookBlend = 1 - Math.exp(-dt * 28)
-        lookSmoothRef.current.vx += (lookJoyRef.current.vx - lookSmoothRef.current.vx) * lookBlend
-        lookSmoothRef.current.vy += (lookJoyRef.current.vy - lookSmoothRef.current.vy) * lookBlend
 
         // Drain accumulated mouse delta with a light smoothing tail. We
         // apply ~75% of the buffered movement this frame and roll the
@@ -4069,26 +4099,19 @@ export default function ThreeWorld({
           // Failsafe: if the player is somehow already inside a wall (bad
           // spawn, physics push-in), let any step through so they can escape
           // — otherwise the gate latches shut and they're stuck forever.
-          const stuck = collidesWithWall(refs.focalPoint.x, refs.focalPoint.z, PLAYER_RADIUS)
-          if (stuck || !collidesWithWall(nx, refs.focalPoint.z, PLAYER_RADIUS))
+          // Pass the player's foot Y so walls below them (their own rooftop)
+          // don't block lateral movement across the roof.
+          const fy = refs.focalPoint.y
+          const stuck = collidesWithWall(refs.focalPoint.x, refs.focalPoint.z, PLAYER_RADIUS, fy)
+          if (stuck || !collidesWithWall(nx, refs.focalPoint.z, PLAYER_RADIUS, fy))
             refs.focalPoint.x = nx
-          if (stuck || !collidesWithWall(refs.focalPoint.x, nz, PLAYER_RADIUS))
+          if (stuck || !collidesWithWall(refs.focalPoint.x, nz, PLAYER_RADIUS, fy))
             refs.focalPoint.z = nz
           updateCamera()
         }
 
-        // Look joystick: rotate the camera using the smoothed value. A mild
-        // square-curve makes small inputs precise without losing top speed.
-        // Multiplied by the user's look-sensitivity preference.
-        const slook = lookSmoothRef.current
-        if (Math.abs(slook.vx) > 0.001 || Math.abs(slook.vy) > 0.001) {
-          const curveX = slook.vx * Math.abs(slook.vx)
-          const curveY = slook.vy * Math.abs(slook.vy)
-          const ls = lookSensRef.current
-          camState.yaw -= curveX * 3.4 * dt * ls
-          camState.pitch = clampPitch(camState.pitch - curveY * 2.6 * dt * ls)
-          updateCamera()
-        }
+        // (Mobile look is handled via the drag→mouseDelta path above; there
+        // is no separate look-stick integration step anymore.)
 
         // ── Vertical update: floor sampling + gravity + E-key climb ─────
         // Highest walkable floor under the player's (x, z). Default ground
@@ -4146,12 +4169,21 @@ export default function ThreeWorld({
                 // when the player keeps the key tapped at the top.
                 const atTop = Math.abs(refs.focalPoint.y - zone.targetY) < 0.6
                 if (atTop && zone.downY !== undefined) {
+                  // Descend: drop onto clear ground beside the tower so we
+                  // don't land embedded in the solid tower footprint.
                   refs.focalPoint.y = zone.downY
+                  if (zone.baseX !== undefined) refs.focalPoint.x = zone.baseX
+                  if (zone.baseZ !== undefined) refs.focalPoint.z = zone.baseZ
                   playerVelYRef.current = 0
                   groundY = zone.downY
                   climbCooldownUntilRef.current = Date.now() + 600
                 } else if (!atTop) {
+                  // Ascend: step onto the roof itself (inside the floor
+                  // bounds) — landing beside the tower would leave no floor
+                  // underfoot and the player would just fall back down.
                   refs.focalPoint.y = zone.targetY
+                  if (zone.topX !== undefined) refs.focalPoint.x = zone.topX
+                  if (zone.topZ !== undefined) refs.focalPoint.z = zone.topZ
                   playerVelYRef.current = 0
                   groundY = zone.targetY
                   climbCooldownUntilRef.current = Date.now() + 600
@@ -5729,8 +5761,8 @@ export default function ThreeWorld({
     // (and listing it in the deps) makes us rebind the moment they appear.
     if (isLoading || error !== null || gamePhase !== "playing") return
     const moveEl = joyContainerRef.current
-    const lookEl = lookJoyContainerRef.current
-    if (!moveEl && !lookEl) return
+    const dragEl = mountRef.current
+    if (!moveEl && !dragEl) return
     const MAX_DIST = 52
 
     function bindStick(
@@ -5796,10 +5828,64 @@ export default function ThreeWorld({
       }
     }
 
-    // Bind each stick independently — the look stick is gated on gamePhase
-    // while the move stick isn't, so they can mount at different times.
+    // Drag-to-look: any touch that lands on the 3D canvas (i.e. NOT on the
+    // move stick or an action button — those capture their own touches, and
+    // pointer-events:none HUD lets touches fall through to the canvas) drives
+    // the camera by finger delta. Feeds the same mouseDelta drain the mouse
+    // uses, so the look-sensitivity slider and smoothing apply for free. A
+    // conservative scale keeps it gentle (motion-sickness) — the slider can
+    // raise it. Touch events stay bound to their origin element, so a look
+    // drag and a move-stick drag run independently as separate fingers.
+    function bindDragLook(el: HTMLElement): () => void {
+      let activeId = -1
+      let lastX = 0
+      let lastY = 0
+      const TOUCH_LOOK_SCALE = 2.0
+      const onStart = (e: TouchEvent) => {
+        if (activeId !== -1) return
+        const t = e.changedTouches[0]
+        if (!t) return
+        e.preventDefault()
+        activeId = t.identifier
+        lastX = t.clientX
+        lastY = t.clientY
+      }
+      const onMove = (e: TouchEvent) => {
+        if (activeId === -1) return
+        for (let i = 0; i < e.changedTouches.length; i++) {
+          const t = e.changedTouches.item(i)
+          if (!t || t.identifier !== activeId) continue
+          e.preventDefault()
+          mouseDeltaRef.current.x += (t.clientX - lastX) * TOUCH_LOOK_SCALE
+          mouseDeltaRef.current.y += (t.clientY - lastY) * TOUCH_LOOK_SCALE
+          lastX = t.clientX
+          lastY = t.clientY
+        }
+      }
+      const onEnd = (e: TouchEvent) => {
+        if (activeId === -1) return
+        for (let i = 0; i < e.changedTouches.length; i++) {
+          const t = e.changedTouches.item(i)
+          if (t && t.identifier === activeId) {
+            activeId = -1
+            return
+          }
+        }
+      }
+      el.addEventListener("touchstart", onStart, { passive: false })
+      el.addEventListener("touchmove", onMove, { passive: false })
+      el.addEventListener("touchend", onEnd, { passive: false })
+      el.addEventListener("touchcancel", onEnd, { passive: false })
+      return () => {
+        el.removeEventListener("touchstart", onStart)
+        el.removeEventListener("touchmove", onMove)
+        el.removeEventListener("touchend", onEnd)
+        el.removeEventListener("touchcancel", onEnd)
+      }
+    }
+
     const cleanupMove = moveEl ? bindStick(moveEl, joystickRef, joyThumbRef) : undefined
-    const cleanupLook = lookEl ? bindStick(lookEl, lookJoyRef, lookJoyThumbRef) : undefined
+    const cleanupLook = dragEl ? bindDragLook(dragEl) : undefined
     return () => {
       cleanupMove?.()
       cleanupLook?.()
@@ -5863,7 +5949,9 @@ export default function ThreeWorld({
             style={{
               position: "absolute",
               top: "0.5rem",
-              right: "0.5rem",
+              // On mobile the top-right corner is taken by the minimap, so the
+              // gear moves to the top-left (clear there).
+              ...(isMobile ? { left: "0.5rem" } : { right: "0.5rem" }),
               width: "2.1rem",
               height: "2.1rem",
               border: "1px solid rgba(255,255,255,0.18)",
@@ -5934,7 +6022,7 @@ export default function ThreeWorld({
                   color: "#bcd",
                 }}
               >
-                MOUSE SENS · {mouseSens.toFixed(2)}x
+                {isMobile ? "LOOK SENS" : "MOUSE SENS"} · {mouseSens.toFixed(2)}x
                 <input
                   type="range"
                   min="0.5"
@@ -5946,35 +6034,6 @@ export default function ThreeWorld({
                     setMouseSens(v)
                     try {
                       localStorage.setItem("fps_mouse_sens", v.toString())
-                    } catch {
-                      /* ignore */
-                    }
-                  }}
-                  style={{ display: "block", width: "100%", marginTop: "0.25rem" }}
-                />
-              </label>
-
-              <label
-                style={{
-                  display: "block",
-                  fontSize: "0.7rem",
-                  letterSpacing: "0.15em",
-                  marginTop: "0.8rem",
-                  color: "#bcd",
-                }}
-              >
-                LOOK STICK SENS · {lookSens.toFixed(2)}x
-                <input
-                  type="range"
-                  min="0.5"
-                  max="2.0"
-                  step="0.05"
-                  value={lookSens}
-                  onChange={(e) => {
-                    const v = Number.parseFloat(e.currentTarget.value)
-                    setLookSens(v)
-                    try {
-                      localStorage.setItem("fps_look_sens", v.toString())
                     } catch {
                       /* ignore */
                     }
@@ -6576,9 +6635,36 @@ export default function ThreeWorld({
             />
           </div>
         )}
-        {/* Mobile keeps a hidden minimap canvas so the draw loop keeps running without errors */}
+        {/* Compact mobile minimap — small circular version in the top-right
+            corner (enough to read enemies, own heading, buildings) above the
+            ADS button. */}
         {!isLoading && !error && isMobile && (
-          <canvas ref={minimapRef} width={92} height={92} style={{ display: "none" }} aria-hidden />
+          <div
+            style={{
+              position: "absolute",
+              top: "0.5rem",
+              right: "0.5rem",
+              zIndex: 20,
+              width: "62px",
+              height: "62px",
+              borderRadius: "50%",
+              overflow: "hidden",
+              border: "2px solid rgba(255,255,255,0.28)",
+              boxShadow: "0 0 10px rgba(0,0,0,0.7)",
+            }}
+          >
+            <canvas
+              ref={minimapRef}
+              width={92}
+              height={92}
+              style={{
+                display: "block",
+                width: "100%",
+                height: "100%",
+                imageRendering: "pixelated",
+              }}
+            />
+          </div>
         )}
 
         {/* Online count + tag (below minimap; hidden on mobile to make room for action buttons) */}
@@ -6951,7 +7037,7 @@ export default function ThreeWorld({
         {/* CRT scanline overlay — disabled by default; was distracting at
             full strength. Re-enable via the F8 toggle (sets `crtScanlines`
             in localStorage) if you want the retro look back. */}
-        {!isLoading && !error && scanlinesOn && (
+        {!isLoading && !error && scanlinesOn && !isMobile && (
           <div
             style={{
               position: "absolute",
@@ -7520,43 +7606,9 @@ export default function ThreeWorld({
           </div>
         )}
 
-        {/* Look joystick (bottom-right symmetric; rotates the camera) */}
-        {isMobile && !isLoading && !error && gamePhase === "playing" && (
-          <div
-            ref={lookJoyContainerRef}
-            style={{
-              position: "absolute",
-              bottom: isLandscape ? "0.6rem" : "1.2rem",
-              right: isLandscape ? "0.6rem" : "1.2rem",
-              width: isLandscape ? "108px" : "130px",
-              height: isLandscape ? "108px" : "130px",
-              borderRadius: "50%",
-              background: "rgba(0,40,80,0.35)",
-              border: "2px solid rgba(120,180,255,0.45)",
-              boxShadow: "0 0 14px rgba(0,80,160,0.5)",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              touchAction: "none",
-              WebkitTapHighlightColor: "transparent",
-              zIndex: 30,
-              userSelect: "none",
-            }}
-          >
-            <div
-              ref={lookJoyThumbRef}
-              style={{
-                width: "50px",
-                height: "50px",
-                borderRadius: "50%",
-                background: "rgba(120,180,255,0.35)",
-                border: "1px solid rgba(160,210,255,0.65)",
-                pointerEvents: "none",
-                transition: "background 0.15s",
-              }}
-            />
-          </div>
-        )}
+        {/* Look: drag anywhere on the screen (except the move stick / action
+            buttons) to rotate the camera — listeners are attached to the
+            canvas mount in the twin-control useEffect. No on-screen stick. */}
 
         {/* Mobile action buttons */}
         {isMobile && !isLoading && !error && gamePhase === "playing" && (
@@ -7672,7 +7724,10 @@ export default function ThreeWorld({
               }}
               style={{
                 position: "absolute",
-                top: isLandscape ? "0.6rem" : "3.6rem",
+                // Portrait: pushed below the top-right minimap (62px) so they
+                // don't overlap. Landscape ADS sits further left (right 7.5rem)
+                // clear of the corner minimap already.
+                top: isLandscape ? "0.6rem" : "4.7rem",
                 right: isLandscape ? "7.5rem" : "1.2rem",
                 width: isLandscape ? "56px" : "64px",
                 height: isLandscape ? "56px" : "64px",
