@@ -1,8 +1,8 @@
-# CLAUDE.md — 鉄火 TEKKA
+# CLAUDE.md — BANG BANG
 
 ## プロジェクト概要
 
-**鉄火 TEKKA** は Turborepo + Bun モノレポで構成された純粋な FPS ゲーム。
+**BANG BANG** は Turborepo + Bun モノレポで構成された純粋な FPS ゲーム。
 オープンワールドの戦場マップで人型兵士エネミーを排除するミッション型 FPS + マルチプレイヤー PvP。
 （初期構想の「SQL・コード問題を解くサンドボックス学習ゲーム」は Phase 1 でコード要素を撤去し、現在は純 FPS に振り切っている。executor のジョブ実行はスタブ状態。）
 

@@ -98,7 +98,7 @@ export default function LoginPage() {
               marginBottom: "0.5rem",
             }}
           >
-            鉄火 TEKKA
+            BANG BANG
           </div>
           <div style={{ fontSize: "0.75rem", color: "#00aa2a", letterSpacing: "0.2em" }}>
             LOGIN OR PLAY AS GUEST

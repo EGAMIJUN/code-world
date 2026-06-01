@@ -29,7 +29,7 @@ export default function HomePage() {
             marginBottom: "0.75rem",
           }}
         >
-          鉄火 TEKKA
+          BANG BANG
         </div>
         <div
           style={{

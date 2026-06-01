@@ -1206,6 +1206,11 @@ export default function ThreeWorld({
   // boundary changes, not every frame.
   const [nearClimb, setNearClimb] = useState(false)
   const prevNearClimbRef = useRef(false)
+  // True when the player is in a ClimbZone *and already on the elevated
+  // platform* — flips the climb prompt/button from "登る" (up) to "降りる"
+  // (down). Pushed on boundary changes only, like nearClimb.
+  const [climbAtTop, setClimbAtTop] = useState(false)
+  const prevClimbAtTopRef = useRef(false)
   // CRT scanlines: default off (was too distracting). F8 toggles, persisted
   // in localStorage so the choice survives refresh.
   const [scanlinesOn, setScanlinesOn] = useState(false)
@@ -4137,6 +4142,7 @@ export default function ThreeWorld({
         // only on boundary changes (entering / leaving the zone) so the
         // HUD doesn't re-render every frame while the player loiters.
         let nearClimbNow = false
+        let atTopNow = false
         for (const zone of refs.climbZones) {
           if (
             refs.focalPoint.x > zone.x1 - CLIMB_INTERACT_PAD &&
@@ -4145,12 +4151,19 @@ export default function ThreeWorld({
             refs.focalPoint.z < zone.z2 + CLIMB_INTERACT_PAD
           ) {
             nearClimbNow = true
+            // Same "already on top" test the climb action uses, so the label
+            // matches what pressing the button will actually do.
+            atTopNow = Math.abs(refs.focalPoint.y - zone.targetY) < 0.6
             break
           }
         }
         if (nearClimbNow !== prevNearClimbRef.current) {
           prevNearClimbRef.current = nearClimbNow
           setNearClimb(nearClimbNow)
+        }
+        if (atTopNow !== prevClimbAtTopRef.current) {
+          prevClimbAtTopRef.current = atTopNow
+          setClimbAtTop(atTopNow)
         }
 
         // E-key climb (consumed once per press in the keydown handler).
@@ -6311,7 +6324,7 @@ export default function ThreeWorld({
               borderRadius: "2px",
             }}
           >
-            [E] 登る
+            {climbAtTop ? "[E] 降りる" : "[E] 登る"}
           </div>
         )}
 
@@ -7885,8 +7898,9 @@ export default function ThreeWorld({
                   zIndex: 32,
                 }}
               >
-                ↑<br />
-                登る
+                {climbAtTop ? "↓" : "↑"}
+                <br />
+                {climbAtTop ? "降りる" : "登る"}
               </button>
             )}
           </>
