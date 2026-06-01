@@ -2,7 +2,7 @@ import type { Metadata } from "next"
 import WorldClient from "./WorldClient"
 
 export const metadata: Metadata = {
-  title: "ゲームワールド — 鉄火 TEKKA",
+  title: "ゲームワールド — BANG BANG",
 }
 
 export default function WorldPage() {

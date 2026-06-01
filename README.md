@@ -1,4 +1,4 @@
-# 鉄火 TEKKA
+# BANG BANG
 
 > 純粋なオンライン FPS。 — BATTLE · RANK · SURVIVE
 
