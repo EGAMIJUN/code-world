@@ -50,7 +50,7 @@ const DEATH_ANIM_TOTAL = DEATH_ANIM_FALL + DEATH_ANIM_LIE + DEATH_ANIM_FADE
 
 // ── Weapon definitions ─────────────────────────────────────────────────────────
 interface WeaponDef {
-  id: "pistol" | "shotgun" | "sniper"
+  id: "pistol" | "shotgun" | "sniper" | "knife"
   name: string
   maxAmmo: number // -1 = infinite
   hitDamage: number
@@ -60,7 +60,18 @@ interface WeaponDef {
   bulletLifetime: number
   bulletColor: number
   recoil: number
+  // Melee weapon (knife): no projectiles. fire() routes to a forward-cone
+  // melee swing instead of spawning bullets. Optional so the existing ranged
+  // weapon literals stay untouched.
+  melee?: boolean
 }
+
+// Knife melee tuning — forward fan-shaped hitbox.
+const KNIFE_RANGE = 1.8
+const KNIFE_HALF_ANGLE = Math.PI / 6 // ±30°
+const KNIFE_DAMAGE = 80
+const KNIFE_SWING_TIME = 0.3 // seconds of swing animation
+const KNIFE_COOLDOWN_MS = 480 // swing + recovery; blocks re-input during anim
 
 const WEAPONS: WeaponDef[] = [
   {
@@ -98,6 +109,19 @@ const WEAPONS: WeaponDef[] = [
     bulletLifetime: 1.6,
     bulletColor: 0x00ffff,
     recoil: 0.28,
+  },
+  {
+    id: "knife",
+    name: "KNIFE",
+    maxAmmo: -1, // infinite (∞) — no ammo / reload
+    hitDamage: KNIFE_DAMAGE,
+    reloadTime: 0,
+    spread: 0,
+    pellets: 0,
+    bulletLifetime: 0,
+    bulletColor: 0xcccccc,
+    recoil: 0.05,
+    melee: true,
   },
 ]
 
@@ -161,6 +185,34 @@ const SOUNDS = {
   sniper() {
     _noise(0.07, 0.45, "highpass", 2800)
     _tone(180, 0.32, 0.22, "sine")
+  },
+  // Knife swing — fast airy whoosh (high-passed noise sweep).
+  knife() {
+    _noise(0.16, 0.4, "highpass", 1800)
+    _tone(620, 0.1, 0.14, "sine", 220)
+  },
+  // Distant zombie groan — low growl + filtered noise rumble. Used as the
+  // sparse ambient sting at the start of each zombie wave.
+  zombieGroan() {
+    const ctx = _getCtx()
+    const now = ctx.currentTime
+    const osc = ctx.createOscillator()
+    osc.type = "sawtooth"
+    osc.frequency.setValueAtTime(70, now)
+    osc.frequency.linearRampToValueAtTime(48, now + 0.9)
+    const g = ctx.createGain()
+    g.gain.setValueAtTime(0.0001, now)
+    g.gain.exponentialRampToValueAtTime(0.16, now + 0.25)
+    g.gain.exponentialRampToValueAtTime(0.001, now + 1.1)
+    const f = ctx.createBiquadFilter()
+    f.type = "lowpass"
+    f.frequency.value = 320
+    osc.connect(f)
+    f.connect(g)
+    g.connect(ctx.destination)
+    osc.start(now)
+    osc.stop(now + 1.15)
+    _noise(0.9, 0.12, "bandpass", 240)
   },
   hit() {
     _tone(950, 0.07, 0.28, "square")
@@ -401,7 +453,7 @@ function findSafeSpawnNear(x: number, z: number, radius: number): { x: number; z
 }
 
 // ── Enemy type system ──────────────────────────────────────────────────────────
-type EnemyType = "grunt" | "sniper" | "heavy"
+type EnemyType = "grunt" | "sniper" | "heavy" | "zombie"
 type EnemyState = "patrol" | "alert" | "attack" | "search"
 
 interface EnemyConfig {
@@ -477,6 +529,30 @@ const ENEMY_CONFIGS: Record<EnemyType, EnemyConfig> = {
     fovAngle: Math.PI * 0.85,
     score: 480,
     blockReward: 6,
+  },
+  // ── Zombie (ZOMBIE mode only) ──────────────────────────────────────────────
+  // Unarmed, super-agile melee chaser. fireRange 0 → never shoots (the AI
+  // ranged-fire blocks gate on distToPlayer <= fireRange). Huge sightRange +
+  // 360° FOV → always homes on the player (LOS isn't wall-checked, matching
+  // the "always takes the shortest path" spec). The actual per-zombie move
+  // speed is overridden per wave in spawnZombieWave (this base is a fallback).
+  zombie: {
+    hp: 40,
+    speed: 9.0,
+    attackDamage: 12,
+    attackInterval: 1100,
+    attackRange: 1.9,
+    fireRange: 0,
+    fireInterval: 999999,
+    fireDamage: 0,
+    color: 0x9fb4c8, // pale, sickly blue-white
+    emissive: 0x1c2838,
+    bodyW: 0.52,
+    bodyH: 1.8,
+    sightRange: 200,
+    fovAngle: Math.PI * 2,
+    score: 120,
+    blockReward: 1,
   },
 }
 
@@ -865,6 +941,10 @@ interface CombatEnemy {
   markerSprite?: THREE.Sprite | null
   markerKind?: "alert" | "search" | null
   markerUntil: number
+  // Timestamp (ms) until which a melee swing animation plays — set the moment
+  // this enemy lands a close-range melee hit so the right arm visibly swings
+  // (knife-style) instead of the static aim pose. 0 = no swing.
+  meleeAnimUntil: number
   // Difficulty tuning the AI reads from. Bots: assigned from selected
   // difficulty in spawnBots. Mission enemies: left undefined (state machine
   // falls back to MISSION_AI_TUNING — currently the "normal" profile).
@@ -1019,16 +1099,19 @@ const BOT_DIFFICULTY_CONFIGS: Record<BotDifficulty, BotDifficultyTuning> = {
   },
   // NORMAL is the full new AI: flanking, dashing grunts, grenade-tossing
   // heavies, allies share last-seen player position on hearing a shot or
-  // a teammate die.
+  // a teammate die. Tuned more aggressive (NEXT_STEPS "敵がトロい" fix):
+  // speedMult 1.0→1.15 (15% faster pursuit) and reactMult 1.0→0.8 (fires
+  // ~20% sooner after spotting). EASY is intentionally left at the old,
+  // slower values below so it still reads as a tutorial pace.
   normal: {
     hpMult: 1.0,
     accuracyMult: 1.0,
-    reactMult: 1.0,
+    reactMult: 0.8,
     damageMult: 1.0,
     sightMult: 1.0,
     respawnMs: 4000,
     flankFactor: 0.7,
-    speedMult: 1.0,
+    speedMult: 1.15,
     dashEnabled: true,
     grenadeEnabled: true,
     groupTactics: true,
@@ -1055,10 +1138,29 @@ const BOT_DIFFICULTY_CONFIGS: Record<BotDifficulty, BotDifficultyTuning> = {
 // the "normal" aggressive profile so the FPS missions feel modern.
 const MISSION_AI_TUNING: BotDifficultyTuning = BOT_DIFFICULTY_CONFIGS.normal
 
+// Zombies (ZOMBIE mode) get a bespoke profile: no flank (they bee-line on
+// the shortest path), no dash/grenade (they're already faster than the
+// player and unarmed), no group radio. speedMult is 1.0 because the real
+// chase speed is baked straight into each zombie's per-wave config.speed.
+const ZOMBIE_AI_TUNING: BotDifficultyTuning = {
+  hpMult: 1.0,
+  accuracyMult: 1.0,
+  reactMult: 1.0,
+  damageMult: 1.0,
+  sightMult: 1.0,
+  respawnMs: 0,
+  flankFactor: 0,
+  speedMult: 1.0,
+  dashEnabled: false,
+  grenadeEnabled: false,
+  groupTactics: false,
+  noiseRange: 0,
+}
+
 const BOT_NAMES = ["Bot_α", "Bot_β", "Bot_γ", "Bot_δ", "Bot_ε", "Bot_ζ", "Bot_η", "Bot_θ", "Bot_ι"]
 
 export interface ThreeWorldProps {
-  mode?: "wave_defense" | "ffa" | "tdm"
+  mode?: "wave_defense" | "ffa" | "tdm" | "zombie"
   mapId?: "urban" | "desert" | "snow"
   botCount?: number
   botDifficulty?: BotDifficulty
@@ -1153,7 +1255,15 @@ export default function ThreeWorld({
   const lastFireTimeRef = useRef(0)
   // Weapon refs
   const currentWeaponIdxRef = useRef(0)
-  const weaponAmmoRef = useRef<[number, number, number]>([-1, 8, 5])
+  // 4-slot: pistol(∞) / shotgun(8) / sniper(5) / knife(∞). -1 = infinite.
+  const weaponAmmoRef = useRef<[number, number, number, number]>([-1, 8, 5, -1])
+  // Knife: timestamp gate (anti re-input during swing) + active swing timer
+  // (seconds remaining, drives the first-person swing animation).
+  const lastMeleeRef = useRef(0)
+  const knifeSwingRef = useRef(0)
+  // Zombie mode wave controller state.
+  const zombieWaveRef = useRef(0)
+  const zombieActiveRef = useRef(false)
 
   // Phase 3: extended stat refs
   const maxKillstreakRef = useRef(0)
@@ -1163,6 +1273,7 @@ export default function ThreeWorld({
     shotgun: 0,
     sniper: 0,
     grenade: 0,
+    knife: 0,
   })
   const matchStartRef = useRef(Date.now())
   const spawnInvulnUntilRef = useRef(0)
@@ -1231,7 +1342,9 @@ export default function ThreeWorld({
   const [playerHp, setPlayerHp] = useState(PLAYER_MAX_HP)
   const [ammo, setAmmo] = useState(-1) // -1 = infinite
   const [currentWeaponIdx, setCurrentWeaponIdx] = useState(0)
-  const [unlockedWeapons, setUnlockedWeapons] = useState<Set<string>>(new Set(["pistol"]))
+  // Knife is always available as the fallback melee — bundle it with the
+  // starter pistol so it's usable regardless of stored unlock progression.
+  const [unlockedWeapons, setUnlockedWeapons] = useState<Set<string>>(new Set(["pistol", "knife"]))
   const [score, setScore] = useState(0)
   const [kills, setKills] = useState(0)
   const [deaths, setDeaths] = useState(0)
@@ -1267,7 +1380,8 @@ export default function ThreeWorld({
       const stored = localStorage.getItem("fps_unlocked_weapons")
       if (stored) {
         const list = JSON.parse(stored) as string[]
-        setUnlockedWeapons(new Set(list))
+        // Always keep pistol + knife available even if older saves omit them.
+        setUnlockedWeapons(new Set([...list, "pistol", "knife"]))
       }
     } catch {
       /* ignore */
@@ -2741,10 +2855,37 @@ export default function ThreeWorld({
         m.renderOrder = 999
         return m
       }
-      gunGroup.add(makePart(0.08, 0.055, 0.28, 0, 0, 0)) // body
-      gunGroup.add(makePart(0.032, 0.032, 0.22, 0, 0.016, -0.18)) // barrel
-      gunGroup.add(makePart(0.055, 0.1, 0.058, 0, -0.075, 0.065)) // grip
-      gunGroup.add(makePart(0.065, 0.012, 0.12, 0, 0.035, 0.04)) // slide top
+      // Gun parts live in their own sub-group so we can hide the whole gun and
+      // show the knife when slot [4] is equipped (toggled in the animate loop).
+      const gunParts = new THREE.Group()
+      gunParts.add(makePart(0.08, 0.055, 0.28, 0, 0, 0)) // body
+      gunParts.add(makePart(0.032, 0.032, 0.22, 0, 0.016, -0.18)) // barrel
+      gunParts.add(makePart(0.055, 0.1, 0.058, 0, -0.075, 0.065)) // grip
+      gunParts.add(makePart(0.065, 0.012, 0.12, 0, 0.035, 0.04)) // slide top
+      gunGroup.add(gunParts)
+
+      // Knife viewmodel — a short blade + handle. Hidden until slot [4] is
+      // selected. The blade pivots from `knifePivot` so the swing animation
+      // (driven in the animate loop) rotates the whole knife about the wrist.
+      const knifePivot = new THREE.Group()
+      const bladeMat = new THREE.MeshLambertMaterial({ color: 0xcdd4dc, depthTest: false })
+      const handleMat = new THREE.MeshLambertMaterial({ color: 0x20242a, depthTest: false })
+      const blade = new THREE.Mesh(new THREE.BoxGeometry(0.018, 0.05, 0.26), bladeMat)
+      blade.position.set(0, 0.02, -0.16)
+      blade.renderOrder = 999
+      knifePivot.add(blade)
+      const guard = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.02, 0.03), handleMat)
+      guard.position.set(0, 0.0, -0.02)
+      guard.renderOrder = 999
+      knifePivot.add(guard)
+      const handle = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.035, 0.11), handleMat)
+      handle.position.set(0, -0.02, 0.05)
+      handle.renderOrder = 999
+      knifePivot.add(handle)
+      knifePivot.position.set(0.02, -0.04, 0.02)
+      knifePivot.visible = false
+      gunGroup.add(knifePivot)
+
       gunGroup.renderOrder = 999
       scene.add(gunGroup)
 
@@ -2756,6 +2897,7 @@ export default function ThreeWorld({
       let enemyIdCounter = 0
       function makeEnemy(type: EnemyType, x: number, z: number, isCommander = false): CombatEnemy {
         const cfg = ENEMY_CONFIGS[type]
+        const isZombie = type === "zombie"
         const scale = type === "heavy" ? 1.25 : type === "sniper" ? 1.03 : 1.0
         const bodyColor = isCommander ? 0xff6600 : cfg.color
         const eid = enemyIdCounter++
@@ -2773,10 +2915,21 @@ export default function ThreeWorld({
         const bodyMat = new THREE.MeshLambertMaterial({ color: bodyColor, emissive: cfg.emissive })
         const darkColor = type === "grunt" ? 0x2a3027 : type === "sniper" ? 0x18241b : 0x080808
         const darkMat = new THREE.MeshLambertMaterial({ color: darkColor })
-        const skinMat = new THREE.MeshLambertMaterial({ color: 0xc8a878 })
+        // Zombies have undead, ashen-pale skin; everyone else is normal skin.
+        const skinMat = new THREE.MeshLambertMaterial({
+          color: isZombie ? 0xaeb9b0 : 0xc8a878,
+          emissive: isZombie ? 0x223027 : 0x000000,
+        })
         const gloveMat = new THREE.MeshLambertMaterial({ color: 0x141414 })
-        // Eye glow varies by archetype (sniper green NV, grunt blue, heavy red).
-        const eyeHex = type === "heavy" ? 0xff3333 : type === "sniper" ? 0x55ff99 : 0x88ddff
+        // Eye glow varies by archetype (sniper green NV, grunt blue, heavy red,
+        // zombie a hot menacing red).
+        const eyeHex = isZombie
+          ? 0xff1a1a
+          : type === "heavy"
+            ? 0xff3333
+            : type === "sniper"
+              ? 0x55ff99
+              : 0x88ddff
         const eyeMat = new THREE.MeshBasicMaterial({ color: eyeHex })
 
         const lodDetails: THREE.Object3D[] = []
@@ -2899,52 +3052,55 @@ export default function ThreeWorld({
         lodDetails.push(mouth)
 
         // ── Helmet / Visor (per archetype) ───────────────────────────────────
-        const helmetColor = type === "grunt" ? 0x3a4230 : type === "sniper" ? 0x4a5535 : 0x101010
-        const helmetMat = new THREE.MeshLambertMaterial({ color: helmetColor })
-        if (type === "heavy") {
-          const helmet = hit(new THREE.Mesh(box(0.36, 0.24, 0.34), helmetMat))
-          helmet.position.y = 0.06 * scale
-          helmet.castShadow = true
-          head.add(helmet)
-          // Translucent wraparound visor (LOD: keep but always visible since it ID's the unit)
-          const visor = new THREE.Mesh(
-            box(0.32, 0.08, 0.04),
-            new THREE.MeshLambertMaterial({
-              color: eyeHex,
-              emissive: eyeHex,
-              emissiveIntensity: 0.8,
-              transparent: true,
-              opacity: 0.75,
-            }),
-          )
-          visor.position.set(0, 0.02 * scale, -0.18 * scale)
-          head.add(visor)
-        } else {
-          const helmet = hit(
-            new THREE.Mesh(
-              new THREE.SphereGeometry(0.2 * scale, 12, 8, 0, Math.PI * 2, 0, Math.PI * 0.55),
-              helmetMat,
-            ),
-          )
-          helmet.position.y = 0.04 * scale
-          helmet.castShadow = true
-          head.add(helmet)
-          const brim = new THREE.Mesh(box(0.36, 0.04, 0.08), helmetMat)
-          brim.position.set(0, 0.0, -0.17 * scale)
-          head.add(brim)
-          // Translucent visor band (snipers get a darker tint, grunts a faint glow)
-          const visor = new THREE.Mesh(
-            box(0.28, 0.06, 0.03),
-            new THREE.MeshLambertMaterial({
-              color: eyeHex,
-              emissive: eyeHex,
-              emissiveIntensity: type === "sniper" ? 0.4 : 0.6,
-              transparent: true,
-              opacity: 0.7,
-            }),
-          )
-          visor.position.set(0, 0.0, -0.18 * scale)
-          head.add(visor)
+        // Zombies are bare-headed (no helmet/visor) — just the exposed skull.
+        if (!isZombie) {
+          const helmetColor = type === "grunt" ? 0x3a4230 : type === "sniper" ? 0x4a5535 : 0x101010
+          const helmetMat = new THREE.MeshLambertMaterial({ color: helmetColor })
+          if (type === "heavy") {
+            const helmet = hit(new THREE.Mesh(box(0.36, 0.24, 0.34), helmetMat))
+            helmet.position.y = 0.06 * scale
+            helmet.castShadow = true
+            head.add(helmet)
+            // Translucent wraparound visor (LOD: keep but always visible since it ID's the unit)
+            const visor = new THREE.Mesh(
+              box(0.32, 0.08, 0.04),
+              new THREE.MeshLambertMaterial({
+                color: eyeHex,
+                emissive: eyeHex,
+                emissiveIntensity: 0.8,
+                transparent: true,
+                opacity: 0.75,
+              }),
+            )
+            visor.position.set(0, 0.02 * scale, -0.18 * scale)
+            head.add(visor)
+          } else {
+            const helmet = hit(
+              new THREE.Mesh(
+                new THREE.SphereGeometry(0.2 * scale, 12, 8, 0, Math.PI * 2, 0, Math.PI * 0.55),
+                helmetMat,
+              ),
+            )
+            helmet.position.y = 0.04 * scale
+            helmet.castShadow = true
+            head.add(helmet)
+            const brim = new THREE.Mesh(box(0.36, 0.04, 0.08), helmetMat)
+            brim.position.set(0, 0.0, -0.17 * scale)
+            head.add(brim)
+            // Translucent visor band (snipers get a darker tint, grunts a faint glow)
+            const visor = new THREE.Mesh(
+              box(0.28, 0.06, 0.03),
+              new THREE.MeshLambertMaterial({
+                color: eyeHex,
+                emissive: eyeHex,
+                emissiveIntensity: type === "sniper" ? 0.4 : 0.6,
+                transparent: true,
+                opacity: 0.7,
+              }),
+            )
+            visor.position.set(0, 0.0, -0.18 * scale)
+            head.add(visor)
+          }
         }
 
         // ── Shoulders + Arms (upper arm → forearm → hand; rifle on right) ────
@@ -2989,47 +3145,50 @@ export default function ThreeWorld({
         const rightArm = buildArm(1)
 
         // ── Rifle (parented to right elbow so it tracks aim) ─────────────────
-        const rifleMat = new THREE.MeshLambertMaterial({
-          color: type === "sniper" ? 0x1a1812 : 0x2a2a2a,
-        })
-        const rifleLen = type === "sniper" ? 0.95 : type === "heavy" ? 0.7 : 0.55
-        const rifleGrp = new THREE.Group()
-        // Position rifle in front of forearm, slight outward offset
-        rifleGrp.position.set(0.04 * scale, -0.3 * scale, -rifleLen * 0.3 * scale)
-        rightArm.elbow.add(rifleGrp)
-        const rifleBody = new THREE.Mesh(box(0.06, 0.08, rifleLen), rifleMat)
-        rifleBody.castShadow = true
-        rifleGrp.add(rifleBody)
-        const rifleBarrel = new THREE.Mesh(
-          new THREE.CylinderGeometry(0.022 * scale, 0.022 * scale, rifleLen * 0.5 * scale, 6),
-          rifleMat,
-        )
-        rifleBarrel.rotation.x = Math.PI / 2
-        rifleBarrel.position.set(0, 0.02 * scale, -rifleLen * 0.42 * scale)
-        rifleGrp.add(rifleBarrel)
-        const rifleMag = new THREE.Mesh(box(0.05, 0.12, 0.08), rifleMat)
-        rifleMag.position.y = -0.1 * scale
-        rifleGrp.add(rifleMag)
-        if (type === "sniper") {
-          const scope = new THREE.Mesh(cyl(0.04, 0.04, 0.18), darkMat)
-          scope.rotation.x = Math.PI / 2
-          scope.position.set(0, 0.08 * scale, 0)
-          rifleGrp.add(scope)
-          lodDetails.push(scope)
-          const bipodGeo = cyl(0.012, 0.012, 0.15, 6)
-          const bipodL = new THREE.Mesh(bipodGeo, darkMat)
-          bipodL.rotation.z = 0.3
-          bipodL.position.set(-0.04 * scale, -0.1 * scale, -rifleLen * 0.4 * scale)
-          rifleGrp.add(bipodL)
-          const bipodR = new THREE.Mesh(bipodGeo, darkMat)
-          bipodR.rotation.z = -0.3
-          bipodR.position.set(0.04 * scale, -0.1 * scale, -rifleLen * 0.4 * scale)
-          rifleGrp.add(bipodR)
-        }
-        if (type === "heavy") {
-          const drum = new THREE.Mesh(cyl(0.07, 0.07, 0.06, 10), rifleMat)
-          drum.position.y = -0.1 * scale
-          rifleGrp.add(drum)
+        // Zombies are unarmed (素手) — they get no rifle at all.
+        if (!isZombie) {
+          const rifleMat = new THREE.MeshLambertMaterial({
+            color: type === "sniper" ? 0x1a1812 : 0x2a2a2a,
+          })
+          const rifleLen = type === "sniper" ? 0.95 : type === "heavy" ? 0.7 : 0.55
+          const rifleGrp = new THREE.Group()
+          // Position rifle in front of forearm, slight outward offset
+          rifleGrp.position.set(0.04 * scale, -0.3 * scale, -rifleLen * 0.3 * scale)
+          rightArm.elbow.add(rifleGrp)
+          const rifleBody = new THREE.Mesh(box(0.06, 0.08, rifleLen), rifleMat)
+          rifleBody.castShadow = true
+          rifleGrp.add(rifleBody)
+          const rifleBarrel = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.022 * scale, 0.022 * scale, rifleLen * 0.5 * scale, 6),
+            rifleMat,
+          )
+          rifleBarrel.rotation.x = Math.PI / 2
+          rifleBarrel.position.set(0, 0.02 * scale, -rifleLen * 0.42 * scale)
+          rifleGrp.add(rifleBarrel)
+          const rifleMag = new THREE.Mesh(box(0.05, 0.12, 0.08), rifleMat)
+          rifleMag.position.y = -0.1 * scale
+          rifleGrp.add(rifleMag)
+          if (type === "sniper") {
+            const scope = new THREE.Mesh(cyl(0.04, 0.04, 0.18), darkMat)
+            scope.rotation.x = Math.PI / 2
+            scope.position.set(0, 0.08 * scale, 0)
+            rifleGrp.add(scope)
+            lodDetails.push(scope)
+            const bipodGeo = cyl(0.012, 0.012, 0.15, 6)
+            const bipodL = new THREE.Mesh(bipodGeo, darkMat)
+            bipodL.rotation.z = 0.3
+            bipodL.position.set(-0.04 * scale, -0.1 * scale, -rifleLen * 0.4 * scale)
+            rifleGrp.add(bipodL)
+            const bipodR = new THREE.Mesh(bipodGeo, darkMat)
+            bipodR.rotation.z = -0.3
+            bipodR.position.set(0.04 * scale, -0.1 * scale, -rifleLen * 0.4 * scale)
+            rifleGrp.add(bipodR)
+          }
+          if (type === "heavy") {
+            const drum = new THREE.Mesh(cyl(0.07, 0.07, 0.06, 10), rifleMat)
+            drum.position.y = -0.1 * scale
+            rifleGrp.add(drum)
+          }
         }
 
         // Sniper ghillie strips (purely cosmetic; LOD-hidden when far)
@@ -3166,6 +3325,7 @@ export default function ThreeWorld({
           nextGrenadeTime: 0,
           markerKind: null,
           markerUntil: 0,
+          meleeAnimUntil: 0,
         }
       }
 
@@ -3489,12 +3649,78 @@ export default function ThreeWorld({
       }
       spawnWaveRef.current = spawnWave
 
+      // ── Zombie wave spawner (ZOMBIE mode) ─────────────────────────────────
+      // waveNum is 1-based. Count = 5 + 3·(n−1). Move speed ramps slightly
+      // each wave and is baked straight into each zombie's per-instance config
+      // (cloned so the shared ENEMY_CONFIGS isn't mutated). Spawns ring the
+      // map perimeter and the zombie starts already homing on the player.
+      function spawnZombieWave(waveNum: number) {
+        const count = 5 + (waveNum - 1) * 3
+        // Player sprint is MOVE_SPEED·SPRINT_MULTIPLIER (=9). Base chase speed
+        // ≈1.3× that, +0.5 m/s per wave so later waves outrun you harder.
+        const chaseSpeed = MOVE_SPEED * SPRINT_MULTIPLIER * 1.3 + (waveNum - 1) * 0.5
+        const margin = 4
+        for (let i = 0; i < count; i++) {
+          const edge = Math.floor(Math.random() * 4)
+          const along = margin + Math.random() * (MAP_SIZE - 2 * margin)
+          let sx: number
+          let sz: number
+          if (edge === 0) {
+            sx = along
+            sz = margin
+          } else if (edge === 1) {
+            sx = MAP_SIZE - margin
+            sz = along
+          } else if (edge === 2) {
+            sx = along
+            sz = MAP_SIZE - margin
+          } else {
+            sx = margin
+            sz = along
+          }
+          const safe = findSafeSpawnNear(sx, sz, ENEMY_RADIUS)
+          const zb = makeEnemy("zombie", safe.x, safe.z, false)
+          // Per-instance config clone with the wave's chase speed.
+          zb.config = { ...zb.config, speed: chaseSpeed }
+          zb.aiTuning = ZOMBIE_AI_TUNING
+          // Start already hunting so they bee-line from the edge immediately.
+          zb.state = "alert"
+          zb.lastSeenPlayer = { x: focalPoint.x, z: focalPoint.z }
+          enemies.push(zb)
+        }
+        setAliveEnemyCount(enemies.filter((e) => e.hp > 0).length)
+        setEnemyStatus(
+          enemies.map((e) => ({
+            id: e.id,
+            hp: e.hp,
+            maxHp: e.maxHp,
+            type: e.type,
+            alive: e.hp > 0,
+          })),
+        )
+        SOUNDS.zombieGroan()
+      }
+
       // Auto-spawn bots for FFA/TDM modes (wave_defense uses mission select).
       if ((modeRef.current === "ffa" || modeRef.current === "tdm") && botCount > 0) {
         spawnBots(botCount, botDifficulty, modeRef.current)
         showNotification(
           `${botCount} BOT${botCount === 1 ? "" : "S"} ENGAGED · ${botDifficulty.toUpperCase()}`,
         )
+      }
+
+      // Zombie mode: kick off wave 1 immediately, flag active after the intro.
+      if (modeRef.current === "zombie") {
+        zombieWaveRef.current = 1
+        zombieActiveRef.current = false
+        setCurrentWave(1)
+        setWaveMessage("WAVE 1 — ゾンビ接近中")
+        spawnZombieWave(1)
+        setTimeout(() => {
+          setWaveMessage(null)
+          zombieActiveRef.current = true
+        }, 3000)
+        showNotification("ZOMBIE MODE — 生き延びろ")
       }
 
       const bullets: Bullet[] = []
@@ -3631,11 +3857,242 @@ export default function ThreeWorld({
         }
       }
 
+      // ── Register an enemy kill ─────────────────────────────────────────────
+      // Shared by both the bullet path (fire) and the melee path (knife). The
+      // caller has already driven hp to ≤0; this handles death animation, fall
+      // direction (away from the player), ally aggro, score / kills / killfeed,
+      // streak counter, mission progress and per-weapon kill stats. weaponKey
+      // is one of "pistol"/"shotgun"/"sniper"/"knife"/"grenade".
+      function applyEnemyKill(hitEnemy: CombatEnemy, weaponKey: string) {
+        hitEnemy.hp = 0
+        hitEnemy.dyingTimer = DEATH_ANIM_TOTAL
+        hitEnemy.state = "patrol"
+        // Fall direction: project enemy→shooter onto the enemy's facing.
+        // If the shooter is in front (dot > 0 means enemy looking at
+        // shooter), the body tips backward (-1). Otherwise face-plant.
+        {
+          const dxs = hitEnemy.mesh.position.x - focalPoint.x
+          const dzs = hitEnemy.mesh.position.z - focalPoint.z
+          const fxs = Math.sin(hitEnemy.smoothedYaw)
+          const fzs = Math.cos(hitEnemy.smoothedYaw)
+          const dot = -dxs * fxs - dzs * fzs // >0 if shooter is in front
+          hitEnemy.deathFallDir = dot > 0 ? -1 : 1
+        }
+        // Alert nearby allies — seeing a teammate drop gives them a
+        // hard reason to investigate the player's last position.
+        {
+          const killerTuning = hitEnemy.aiTuning ?? MISSION_AI_TUNING
+          if (killerTuning.groupTactics) {
+            for (const ally of enemies) {
+              if (ally === hitEnemy || ally.hp <= 0) continue
+              const ad = Math.hypot(
+                ally.mesh.position.x - hitEnemy.mesh.position.x,
+                ally.mesh.position.z - hitEnemy.mesh.position.z,
+              )
+              if (ad < 25 && (ally.state === "patrol" || ally.state === "search")) {
+                ally.state = "search"
+                ally.searchTimer = 7.0
+                ally.lastSeenPlayer = { x: focalPoint.x, z: focalPoint.z }
+                setEnemyMarker(ally, "search", 7000)
+              }
+            }
+          }
+        }
+        killsRef.current += 1
+        setKills(killsRef.current)
+        scoreRef.current += hitEnemy.config.score
+        setScore(scoreRef.current)
+        // TDM: opposite-team bot kill awards a point to the player's team locally.
+        if (
+          hitEnemy.isBot &&
+          modeRef.current === "tdm" &&
+          hitEnemy.botTeam &&
+          hitEnemy.botTeam !== myTeamRef.current &&
+          myTeamRef.current !== "ffa"
+        ) {
+          const team = myTeamRef.current
+          const next = {
+            red: teamScoreRef.current.red + (team === "red" ? 1 : 0),
+            blue: teamScoreRef.current.blue + (team === "blue" ? 1 : 0),
+          }
+          teamScoreRef.current = next
+          setTeamScore(next)
+        }
+        const tag = hitEnemy.isBot
+          ? `${usernameRef.current} ▶ ${hitEnemy.botName}`
+          : hitEnemy.type === "heavy"
+            ? "HEAVY ELIMINATED"
+            : hitEnemy.type === "sniper"
+              ? "SNIPER ELIMINATED"
+              : hitEnemy.type === "zombie"
+                ? "ZOMBIE DOWN"
+                : hitEnemy.isCommander
+                  ? "COMMANDER ELIMINATED"
+                  : "GRUNT ELIMINATED"
+        showNotification(`${tag} +${hitEnemy.config.score}pt`)
+        // Kill feed
+        const feedColor = hitEnemy.isBot
+          ? hitEnemy.botTeam === "red"
+            ? "#ff6677"
+            : hitEnemy.botTeam === "blue"
+              ? "#66aaff"
+              : "#ffd55a"
+          : hitEnemy.type === "heavy"
+            ? "#cc44ff"
+            : hitEnemy.type === "sniper"
+              ? "#88cc44"
+              : hitEnemy.type === "zombie"
+                ? "#88dd66"
+                : "#ff5555"
+        const feedEntry = { id: Date.now(), text: tag, color: feedColor }
+        killFeedRef.current = [...killFeedRef.current, feedEntry].slice(-6)
+        setKillFeed([...killFeedRef.current])
+        setTimeout(() => {
+          killFeedRef.current = killFeedRef.current.filter((e) => e.id !== feedEntry.id)
+          setKillFeed([...killFeedRef.current])
+        }, 4000)
+        // Mission-specific progress
+        const mission = selectedMissionRef.current
+        if (mission === "sniper" && weaponKey === "sniper") {
+          sniperKillsRef.current += 1
+          missionProgressRef.current = sniperKillsRef.current
+          setMissionProgress(sniperKillsRef.current)
+        } else if (mission === "destroy" && hitEnemy.isCommander) {
+          missionProgressRef.current += 1
+          setMissionProgress(missionProgressRef.current)
+        } else if (mission === "boss" && hitEnemy.type === "heavy") {
+          missionProgressRef.current = 1
+          setMissionProgress(1)
+        }
+        // Check alive enemy count
+        const stillAlive = enemies.filter((e) => e.hp > 0).length
+        setAliveEnemyCount(stillAlive)
+        // Kill streak tracking
+        const nowKill = Date.now()
+        if (nowKill - lastKillTimeRef.current < 4000) {
+          consecutiveKillsRef.current += 1
+        } else {
+          consecutiveKillsRef.current = 1
+        }
+        lastKillTimeRef.current = nowKill
+        maxKillstreakRef.current = Math.max(maxKillstreakRef.current, consecutiveKillsRef.current)
+        const cs = consecutiveKillsRef.current
+        if (cs >= 2) {
+          const streakMsg =
+            cs >= 10
+              ? "GODLIKE!"
+              : cs >= 7
+                ? "UNSTOPPABLE!"
+                : cs >= 5
+                  ? "RAMPAGE!"
+                  : cs >= 3
+                    ? "TRIPLE KILL!"
+                    : "DOUBLE KILL!"
+          if (killStreakTimerRef.current) clearTimeout(killStreakTimerRef.current)
+          setKillStreakMsg(streakMsg)
+          killStreakTimerRef.current = setTimeout(() => setKillStreakMsg(null), 2500)
+        }
+        // Per-weapon kill tracking
+        weaponKillsRef.current[weaponKey] = (weaponKillsRef.current[weaponKey] ?? 0) + 1
+      }
+
+      // ── Knife melee ────────────────────────────────────────────────────────
+      // Forward fan-shaped (±30°, 1.8m) sweep. Big damage; a hit on a target
+      // whose head is in view (player aiming up) is a one-shot. Anti-spam
+      // gated by KNIFE_COOLDOWN_MS so a held FIRE / mouse can't chain swings
+      // mid-animation. Also melees remote players in PvP-enabled modes.
+      function meleeAttack() {
+        if (gamePhaseRef.current !== "playing") return
+        const now = Date.now()
+        if (now - lastMeleeRef.current < KNIFE_COOLDOWN_MS) return
+        lastMeleeRef.current = now
+        knifeSwingRef.current = KNIFE_SWING_TIME
+        recoilRef.current = 0.05
+        SOUNDS.knife()
+
+        // Horizontal camera forward.
+        camera.getWorldDirection(fwd3)
+        const flen = Math.hypot(fwd3.x, fwd3.z) || 1
+        const nfx = fwd3.x / flen
+        const nfz = fwd3.z / flen
+        const cosHalf = Math.cos(KNIFE_HALF_ANGLE)
+        // Looking up enough that the cross-hair is on a target's head → the
+        // strike counts as a decapitating blow (instant kill).
+        const headHeightAim = camState.pitch > 0.12
+
+        const aliveEnemies = enemies.filter((e) => e.hp > 0)
+        let struck = false
+        for (const e of aliveEnemies) {
+          const dx = e.mesh.position.x - focalPoint.x
+          const dz = e.mesh.position.z - focalPoint.z
+          const d = Math.hypot(dx, dz)
+          if (d > KNIFE_RANGE || d < 1e-3) continue
+          const dot = (dx / d) * nfx + (dz / d) * nfz
+          if (dot < cosHalf) continue
+          struck = true
+          const dmg = headHeightAim ? 9999 : KNIFE_DAMAGE
+          e.hp -= dmg
+          scoreRef.current += Math.floor(Math.min(dmg, e.maxHp) * 10)
+          setScore(scoreRef.current)
+          const bloodAt = e.mesh.position.clone()
+          bloodAt.y = EYE_HEIGHT * (headHeightAim ? 1.1 : 0.7)
+          spawnBlood(bloodAt)
+          SOUNDS.hit()
+          if (headHeightAim) {
+            setHeadshotMsg(true)
+            headshotsRef.current += 1
+            setTimeout(() => setHeadshotMsg(false), 800)
+          }
+          if (e.hp <= 0) applyEnemyKill(e, "knife")
+        }
+        if (struck) {
+          setEnemyStatus(
+            enemies.map((e) => ({
+              id: e.id,
+              hp: e.hp,
+              maxHp: e.maxHp,
+              type: e.type,
+              alive: e.hp > 0,
+            })),
+          )
+        }
+
+        // PvP melee: stab nearby remote players (same gating as gun PvP).
+        const sceneRefsLocal = sceneRef.current
+        if (sceneRefsLocal && (myTeamRef.current !== "ffa" || modeRef.current === "ffa")) {
+          for (const [rid, rmesh] of sceneRefsLocal.remoteMeshes) {
+            const dx = rmesh.position.x - focalPoint.x
+            const dz = rmesh.position.z - focalPoint.z
+            const d = Math.hypot(dx, dz)
+            if (d > KNIFE_RANGE || d < 1e-3) continue
+            const dot = (dx / d) * nfx + (dz / d) * nfz
+            if (dot < cosHalf) continue
+            wsRef.current?.send(
+              JSON.stringify({
+                type: "pvp_hit",
+                targetId: rid,
+                dmg: KNIFE_DAMAGE,
+                headshot: headHeightAim,
+                weapon: "knife",
+              }),
+            )
+            SOUNDS.hit()
+            spawnBlood(rmesh.position.clone())
+          }
+        }
+      }
+
       // ── Fire weapon ────────────────────────────────────────────────────────
       function fire() {
         if (gamePhaseRef.current !== "playing") return
         const weapon = WEAPONS[currentWeaponIdxRef.current]
         if (!weapon) return
+        // Knife: melee swing instead of a projectile. Its own cooldown gate
+        // lives in meleeAttack so a held FIRE button can't chain swings.
+        if (weapon.melee) {
+          meleeAttack()
+          return
+        }
         if (reloadingRef.current) return
         if (weapon.maxAmmo !== -1 && ammoRef.current <= 0) {
           startReload(weapon)
@@ -3758,137 +4215,7 @@ export default function ThreeWorld({
             scoreRef.current += Math.floor(dmg * 10)
             setScore(scoreRef.current)
             if (hitEnemy.hp <= 0) {
-              hitEnemy.hp = 0
-              hitEnemy.dyingTimer = DEATH_ANIM_TOTAL
-              hitEnemy.state = "patrol"
-              // Fall direction: project enemy→shooter onto the enemy's facing.
-              // If the shooter is in front (dot > 0 means enemy looking at
-              // shooter), the body tips backward (-1). Otherwise face-plant.
-              {
-                const dxs = hitEnemy.mesh.position.x - focalPoint.x
-                const dzs = hitEnemy.mesh.position.z - focalPoint.z
-                const fxs = Math.sin(hitEnemy.smoothedYaw)
-                const fzs = Math.cos(hitEnemy.smoothedYaw)
-                const dot = -dxs * fxs - dzs * fzs // >0 if shooter is in front
-                hitEnemy.deathFallDir = dot > 0 ? -1 : 1
-              }
-              // Alert nearby allies — seeing a teammate drop gives them a
-              // hard reason to investigate the player's last position.
-              {
-                const killerTuning = hitEnemy.aiTuning ?? MISSION_AI_TUNING
-                if (killerTuning.groupTactics) {
-                  for (const ally of enemies) {
-                    if (ally === hitEnemy || ally.hp <= 0) continue
-                    const ad = Math.hypot(
-                      ally.mesh.position.x - hitEnemy.mesh.position.x,
-                      ally.mesh.position.z - hitEnemy.mesh.position.z,
-                    )
-                    if (ad < 25 && (ally.state === "patrol" || ally.state === "search")) {
-                      ally.state = "search"
-                      ally.searchTimer = 7.0
-                      ally.lastSeenPlayer = { x: focalPoint.x, z: focalPoint.z }
-                      setEnemyMarker(ally, "search", 7000)
-                    }
-                  }
-                }
-              }
-              killsRef.current += 1
-              setKills(killsRef.current)
-              scoreRef.current += hitEnemy.config.score
-              setScore(scoreRef.current)
-              // TDM: opposite-team bot kill awards a point to the player's team locally.
-              if (
-                hitEnemy.isBot &&
-                modeRef.current === "tdm" &&
-                hitEnemy.botTeam &&
-                hitEnemy.botTeam !== myTeamRef.current &&
-                myTeamRef.current !== "ffa"
-              ) {
-                const team = myTeamRef.current
-                const next = {
-                  red: teamScoreRef.current.red + (team === "red" ? 1 : 0),
-                  blue: teamScoreRef.current.blue + (team === "blue" ? 1 : 0),
-                }
-                teamScoreRef.current = next
-                setTeamScore(next)
-              }
-              const tag = hitEnemy.isBot
-                ? `${usernameRef.current} ▶ ${hitEnemy.botName}`
-                : hitEnemy.type === "heavy"
-                  ? "HEAVY ELIMINATED"
-                  : hitEnemy.type === "sniper"
-                    ? "SNIPER ELIMINATED"
-                    : hitEnemy.isCommander
-                      ? "COMMANDER ELIMINATED"
-                      : "GRUNT ELIMINATED"
-              showNotification(`${tag} +${hitEnemy.config.score}pt`)
-              // Kill feed
-              const feedColor = hitEnemy.isBot
-                ? hitEnemy.botTeam === "red"
-                  ? "#ff6677"
-                  : hitEnemy.botTeam === "blue"
-                    ? "#66aaff"
-                    : "#ffd55a"
-                : hitEnemy.type === "heavy"
-                  ? "#cc44ff"
-                  : hitEnemy.type === "sniper"
-                    ? "#88cc44"
-                    : "#ff5555"
-              const feedEntry = { id: Date.now(), text: tag, color: feedColor }
-              killFeedRef.current = [...killFeedRef.current, feedEntry].slice(-6)
-              setKillFeed([...killFeedRef.current])
-              setTimeout(() => {
-                killFeedRef.current = killFeedRef.current.filter((e) => e.id !== feedEntry.id)
-                setKillFeed([...killFeedRef.current])
-              }, 4000)
-              // Mission-specific progress
-              const mission = selectedMissionRef.current
-              if (mission === "sniper" && weapon.id === "sniper") {
-                sniperKillsRef.current += 1
-                missionProgressRef.current = sniperKillsRef.current
-                setMissionProgress(sniperKillsRef.current)
-              } else if (mission === "destroy" && hitEnemy.isCommander) {
-                missionProgressRef.current += 1
-                setMissionProgress(missionProgressRef.current)
-              } else if (mission === "boss" && hitEnemy.type === "heavy") {
-                missionProgressRef.current = 1
-                setMissionProgress(1)
-              }
-              // Check alive enemy count
-              const stillAlive = enemies.filter((e) => e.hp > 0).length
-              setAliveEnemyCount(stillAlive)
-              // Kill streak tracking
-              const nowKill = Date.now()
-              if (nowKill - lastKillTimeRef.current < 4000) {
-                consecutiveKillsRef.current += 1
-              } else {
-                consecutiveKillsRef.current = 1
-              }
-              lastKillTimeRef.current = nowKill
-              maxKillstreakRef.current = Math.max(
-                maxKillstreakRef.current,
-                consecutiveKillsRef.current,
-              )
-              const cs = consecutiveKillsRef.current
-              if (cs >= 2) {
-                const streakMsg =
-                  cs >= 10
-                    ? "GODLIKE!"
-                    : cs >= 7
-                      ? "UNSTOPPABLE!"
-                      : cs >= 5
-                        ? "RAMPAGE!"
-                        : cs >= 3
-                          ? "TRIPLE KILL!"
-                          : "DOUBLE KILL!"
-                if (killStreakTimerRef.current) clearTimeout(killStreakTimerRef.current)
-                setKillStreakMsg(streakMsg)
-                killStreakTimerRef.current = setTimeout(() => setKillStreakMsg(null), 2500)
-              }
-              // Per-weapon kill tracking
-              const widx = currentWeaponIdxRef.current
-              const wkey = widx === 0 ? "pistol" : widx === 1 ? "shotgun" : "sniper"
-              weaponKillsRef.current[wkey] = (weaponKillsRef.current[wkey] ?? 0) + 1
+              applyEnemyKill(hitEnemy, weapon.id)
             }
             setEnemyStatus(
               enemies.map((e) => ({
@@ -4326,6 +4653,27 @@ export default function ThreeWorld({
           recoilRef.current = Math.max(0, recoilRef.current - RECOIL_RECOVER * dt)
         }
 
+        // Knife viewmodel: show the blade for slot [4], hide the gun; drive
+        // the down-swing animation while a swing is active.
+        {
+          const knifeEquipped = WEAPONS[currentWeaponIdxRef.current]?.melee === true
+          gunParts.visible = !knifeEquipped
+          knifePivot.visible = knifeEquipped
+          if (knifeSwingRef.current > 0) {
+            knifeSwingRef.current = Math.max(0, knifeSwingRef.current - dt)
+            // 0 → 1 over the swing; sine arc so it whips down then recovers.
+            const prog = 1 - knifeSwingRef.current / KNIFE_SWING_TIME
+            const arc = Math.sin(prog * Math.PI)
+            knifePivot.rotation.x = arc * 1.3 // down-swing pitch
+            knifePivot.rotation.z = -arc * 0.5 // slight inward roll
+            // Lunge the blade forward at the peak of the swing.
+            refs.gunGroup.position.addScaledVector(fwd3, arc * 0.12)
+          } else {
+            knifePivot.rotation.x = 0
+            knifePivot.rotation.z = 0
+          }
+        }
+
         // Muzzle flash
         if (muzzleFlashTimerRef.current > 0) {
           refs.muzzleLight.intensity = 6
@@ -4636,6 +4984,11 @@ export default function ThreeWorld({
             // Mission enemies have no botDifficulty selector → fall back to
             // the "normal" aggressive profile.
             const tuning: BotDifficultyTuning = enemy.aiTuning ?? MISSION_AI_TUNING
+            // Bots bake reactMult into their cloned config.fireInterval at
+            // spawn, so re-applying it here would double-count. Mission/wave
+            // enemies share the base ENEMY_CONFIGS, so they instead pick up
+            // the faster reaction (reactMult) at fire time via this multiplier.
+            const fireCadenceMult = enemy.isBot ? 1 : tuning.reactMult
 
             // Hide overhead "!"/"?" marker once its time-window expires.
             if (enemy.markerKind && now > enemy.markerUntil) {
@@ -4739,8 +5092,12 @@ export default function ThreeWorld({
                 // sprint at the player (1.6x speed for 1.4s) if we're at
                 // medium-close range. The actual dash cycle is bounded so
                 // bots don't permanently sprint into the player's gun.
+                // Dash-check cadence halved (3000→1500ms) so grunts break
+                // cover and push the player roughly twice as often — the
+                // NEXT_STEPS "敵がトロい" fix. EASY never reaches here
+                // (dashEnabled=false), so the tutorial pace is unchanged.
                 if (tuning.dashEnabled && enemy.type === "grunt" && now > enemy.nextDashCheckTime) {
-                  enemy.nextDashCheckTime = now + 3000
+                  enemy.nextDashCheckTime = now + 1500
                   if (distToPlayer > 3 && distToPlayer < 14 && Math.random() < 0.55) {
                     enemy.dashUntil = now + 1400
                   }
@@ -4836,7 +5193,7 @@ export default function ThreeWorld({
               // Shoot while chasing (alert range fire)
               if (
                 distToPlayer <= enemy.config.fireRange &&
-                now - enemy.lastFireTime > enemy.config.fireInterval * 1.5
+                now - enemy.lastFireTime > enemy.config.fireInterval * 1.5 * fireCadenceMult
               ) {
                 enemy.lastFireTime = now
                 const fwd = new THREE.Vector3(toPx / distToPlayer, 0, toPz / distToPlayer)
@@ -4869,6 +5226,9 @@ export default function ThreeWorld({
                 Date.now() > spawnInvulnUntilRef.current
               ) {
                 enemy.lastAttackTime = now
+                // Visible melee swing (right arm) — same knife-style motion
+                // for grunts/heavies/zombies whenever they land a close hit.
+                enemy.meleeAnimUntil = now + 300
                 playerHpRef.current = Math.max(0, playerHpRef.current - enemy.config.attackDamage)
                 setPlayerHp(playerHpRef.current)
                 lastDamageTimeRef.current = Date.now()
@@ -4886,7 +5246,7 @@ export default function ThreeWorld({
               // Enemy ranged fire
               if (
                 distToPlayer <= enemy.config.fireRange &&
-                now - enemy.lastFireTime > enemy.config.fireInterval
+                now - enemy.lastFireTime > enemy.config.fireInterval * fireCadenceMult
               ) {
                 enemy.lastFireTime = now
                 const fwd = new THREE.Vector3(toPx / distToPlayer, 0, toPz / distToPlayer)
@@ -5024,6 +5384,27 @@ export default function ThreeWorld({
               tgtPelvisRotY = w * 0.04
               tgtLeftHip = w * 0.04
               tgtRightHip = -w * 0.04
+            }
+
+            // Zombie shamble: hunched forward, both arms reaching out for the
+            // player. Overrides the rifle-aim pose since zombies are unarmed.
+            if (enemy.type === "zombie") {
+              const zsw = Math.sin(t) * 0.22
+              tgtTorsoPitchX = 0.42
+              tgtLeftShoulder = -1.45 + zsw
+              tgtRightShoulder = -1.45 - zsw
+              tgtLeftElbow = -0.3
+              tgtRightElbow = -0.3
+            }
+
+            // Melee swing: when an enemy has just landed a close-range hit, whip
+            // the right arm down (knife-style) over the ~300ms window. Applied
+            // after the per-state pose so it reads on grunts, heavies, zombies.
+            if (now < enemy.meleeAnimUntil) {
+              const swingProg = 1 - (enemy.meleeAnimUntil - now) / 300
+              const swingArc = Math.sin(Math.max(0, Math.min(1, swingProg)) * Math.PI)
+              tgtRightShoulder = -1.9 + swingArc * 1.6
+              tgtRightElbow = -0.2 - swingArc * 0.4
             }
 
             // Strafe lean: torso rolls into the strafe direction
@@ -5232,6 +5613,31 @@ export default function ThreeWorld({
             missionCompleteRef.current = true
             setMissionComplete(true)
             SOUNDS.clear()
+          }
+        }
+
+        // ── Zombie mode wave control ───────────────────────────────────────
+        // Endless: when the current wave is fully cleared, after a short lull
+        // spawn the next (larger, faster) wave. Runs independently of the
+        // mission "wave" flow so it never touches Wave Defense behaviour.
+        if (
+          modeRef.current === "zombie" &&
+          zombieActiveRef.current &&
+          gamePhaseRef.current === "playing"
+        ) {
+          const allDead = refs.enemies.every((e) => e.hp <= 0 && e.dyingTimer < 0)
+          if (allDead) {
+            zombieActiveRef.current = false
+            const next = zombieWaveRef.current + 1
+            zombieWaveRef.current = next
+            setCurrentWave(next)
+            setWaveMessage(`WAVE ${next} — ゾンビ接近中`)
+            setTimeout(() => {
+              if (gamePhaseRef.current !== "playing") return
+              setWaveMessage(null)
+              spawnZombieWave(next)
+              zombieActiveRef.current = true
+            }, 3500)
           }
         }
 
@@ -5513,6 +5919,7 @@ export default function ThreeWorld({
       if (e.key === "1") switchWeapon(0)
       if (e.key === "2") switchWeapon(1)
       if (e.key === "3") switchWeapon(2)
+      if (e.key === "4") switchWeapon(3)
       if (e.key === "e" || e.key === "E") {
         // Climb interaction — animate loop consumes the request and only
         // fires if the player is currently inside a climb zone.
@@ -6873,7 +7280,11 @@ export default function ThreeWorld({
                   letterSpacing: "0.2em",
                 }}
               >
-                {mode === "wave_defense" ? "ENEMIES REMAINING" : "BOTS ALIVE"}
+                {mode === "zombie"
+                  ? "ZOMBIES"
+                  : mode === "wave_defense"
+                    ? "ENEMIES REMAINING"
+                    : "BOTS ALIVE"}
               </div>
               <div
                 style={{ color: "#ff5555", fontSize: "1.4rem", fontWeight: "bold", lineHeight: 1 }}
@@ -7212,7 +7623,9 @@ export default function ThreeWorld({
                   letterSpacing: "0.15em",
                 }}
               >
-                WAVE {currentWave} / {WAVE_DEFS.length}
+                {mode === "zombie"
+                  ? `WAVE ${currentWave}`
+                  : `WAVE ${currentWave} / ${WAVE_DEFS.length}`}
               </div>
             </button>
           )}
@@ -7260,7 +7673,9 @@ export default function ThreeWorld({
                 color: "rgba(255,50,50,0.6)",
               }}
             >
-              WAVE {currentWave} / {WAVE_DEFS.length}
+              {mode === "zombie"
+                ? `WAVE ${currentWave}`
+                : `WAVE ${currentWave} / ${WAVE_DEFS.length}`}
             </div>
           )}
 
@@ -7806,7 +8221,7 @@ export default function ThreeWorld({
               )}
             </button>
 
-            {/* Weapon swap row [1][2][3] (top-center, below HUD bar) */}
+            {/* Weapon swap row [1][2][3][4] (top-center, below HUD bar) */}
             <div
               style={{
                 position: "absolute",
@@ -7818,7 +8233,7 @@ export default function ThreeWorld({
                 zIndex: 22,
               }}
             >
-              {[0, 1, 2].map((idx) => {
+              {[0, 1, 2, 3].map((idx) => {
                 const w = WEAPONS[idx]
                 if (!w) return null
                 const sel = currentWeaponIdxRef.current === idx
