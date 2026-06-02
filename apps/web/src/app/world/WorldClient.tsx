@@ -175,7 +175,7 @@ export default function WorldClient() {
           }}
         >
           {[
-            { id: "urban" as GameMap, label: t.mode.urban, color: "#444444" },
+            { id: "urban" as GameMap, label: t.mode.urban, color: "#7a8aa0" },
             { id: "desert" as GameMap, label: t.mode.desert, color: "#c9a064" },
             { id: "snow" as GameMap, label: t.mode.snow, color: "#cce8ff" },
           ].map((m) => {

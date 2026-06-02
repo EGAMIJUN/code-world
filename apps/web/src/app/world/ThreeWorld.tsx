@@ -1498,10 +1498,72 @@ export default function ThreeWorld({
         mapId === "desert"
           ? { sky: 0xf0c887, fog: 0xe6c89a, ambient: 0xffe9c0, sun: 0xffd58a }
           : mapId === "snow"
-            ? { sky: 0xb4d6f0, fog: 0xd6e8f5, ambient: 0xe8f0ff, sun: 0xffffff }
+            ? { sky: 0xdce8f0, fog: 0xeaf2f8, ambient: 0xeef5ff, sun: 0xffffff }
             : { sky: 0x87ceeb, fog: 0xc0d8f0, ambient: 0xd4e8ff, sun: 0xfff4cc }
       scene.background = new THREE.Color(theme.sky)
-      scene.fog = new THREE.Fog(theme.fog, 80, 280)
+      // Snow gets a tighter fog band ("軽いフォグ" — slightly hazy whiteout
+      // without crushing visibility); desert/urban keep the long open draw.
+      scene.fog =
+        mapId === "snow" ? new THREE.Fog(theme.fog, 45, 175) : new THREE.Fog(theme.fog, 80, 280)
+
+      // ── Per-map material palette ───────────────────────────────────────────
+      // The collision footprints (ALL_AABBS / floors / climb zones) are shared
+      // across all three maps — only the *look* of buildings + props changes
+      // here so each battlefield reads as a distinct place. urban = grey
+      // concrete city, desert = sand-coloured ruined base, snow = cold concrete
+      // research station with snow-capped roofs. skyline picks the distant
+      // backdrop silhouette (city blocks / sand dunes / mountains).
+      const mapPalette =
+        mapId === "desert"
+          ? {
+              concrete: 0xc2a474,
+              concreteRoof: 0xb08f5a,
+              industrial: 0xb8a276,
+              industrialRoof: 0xa68c5c,
+              barricade: 0xb09862,
+              tank: 0x9a8a5a,
+              pipe: 0xa89c7a,
+              trench: 0xb6a06e,
+              bag: 0xc4ad77,
+              trunk: 0x9c7a4a,
+              leaves: 0xb89a64,
+              rubble: 0xc2a878,
+              skyline: 0xc9ad7a,
+              skylineStyle: "dunes" as const,
+            }
+          : mapId === "snow"
+            ? {
+                concrete: 0x9aa3ad,
+                concreteRoof: 0xe8eef2,
+                industrial: 0x8e98a2,
+                industrialRoof: 0xdfe8ee,
+                barricade: 0xc2ccd4,
+                tank: 0x8a929a,
+                pipe: 0xaab2ba,
+                trench: 0xd6dee6,
+                bag: 0xc8d2da,
+                trunk: 0x6a7078,
+                leaves: 0xeef4f8,
+                rubble: 0xc8d0d6,
+                skyline: 0xdfe8ef,
+                skylineStyle: "mountains" as const,
+              }
+            : {
+                concrete: 0x8a8878,
+                concreteRoof: 0x7a7868,
+                industrial: 0x787878,
+                industrialRoof: 0x686868,
+                barricade: 0x888870,
+                tank: 0x6a7060,
+                pipe: 0x888878,
+                trench: 0x706050,
+                bag: 0x9a8a6a,
+                trunk: 0x6b4226,
+                leaves: 0x2d5a1b,
+                rubble: 0x7a7a6a,
+                skyline: 0x202833,
+                skylineStyle: "city" as const,
+              }
 
       // ── Camera (FPS) ───────────────────────────────────────────────────────
       // FOV 80 (was 75): wider field reduces peripheral motion-shear when
@@ -1671,28 +1733,29 @@ export default function ThreeWorld({
       // procedural noise as albedo so they read as weathered concrete/metal
       // under tone mapping. Roughness near 1 keeps the specular subtle.
       const concreteMat = new THREE.MeshStandardMaterial({
-        color: 0x8a8878,
+        color: mapPalette.concrete,
         map: concreteNoise,
         roughness: 0.92,
         metalness: 0,
       })
       const concreteRoofMat = new THREE.MeshStandardMaterial({
-        color: 0x7a7868,
+        color: mapPalette.concreteRoof,
         map: concreteNoise,
-        roughness: 0.95,
+        // Snow-capped roofs read as snow (near-white, very rough/matte).
+        roughness: mapId === "snow" ? 0.98 : 0.95,
         metalness: 0,
       })
       const industrialMat = new THREE.MeshStandardMaterial({
-        color: 0x787878,
+        color: mapPalette.industrial,
         map: industrialNoise,
-        roughness: 0.7,
-        metalness: 0.25,
+        roughness: mapId === "desert" ? 0.85 : 0.7,
+        metalness: mapId === "desert" ? 0.1 : 0.25,
       })
       const industrialRoofMat = new THREE.MeshStandardMaterial({
-        color: 0x686868,
+        color: mapPalette.industrialRoof,
         map: industrialNoise,
-        roughness: 0.75,
-        metalness: 0.25,
+        roughness: mapId === "snow" ? 0.98 : 0.75,
+        metalness: mapId === "snow" ? 0.05 : 0.25,
       })
       const windowMat = new THREE.MeshStandardMaterial({
         color: 0x1a2833,
@@ -1701,17 +1764,23 @@ export default function ThreeWorld({
         metalness: 0.6,
       })
       const barricadeMat = new THREE.MeshStandardMaterial({
-        color: 0x888870,
+        color: mapPalette.barricade,
         map: concreteNoise,
         roughness: 0.9,
         metalness: 0,
       })
-      const tankMat = new THREE.MeshLambertMaterial({ color: 0x6a7060 })
-      const pipeMat = new THREE.MeshLambertMaterial({ color: 0x888878 })
-      const trenchMat = new THREE.MeshLambertMaterial({ color: 0x706050 })
-      const trunkMat = new THREE.MeshLambertMaterial({ color: 0x6b4226 })
-      const leavesMat = new THREE.MeshLambertMaterial({ color: 0x2d5a1b })
-      const carColors = [0x4a6a8a, 0x8a6a4a, 0x4a6a4a, 0x6a4a4a]
+      const tankMat = new THREE.MeshLambertMaterial({ color: mapPalette.tank })
+      const pipeMat = new THREE.MeshLambertMaterial({ color: mapPalette.pipe })
+      const trenchMat = new THREE.MeshLambertMaterial({ color: mapPalette.trench })
+      const trunkMat = new THREE.MeshLambertMaterial({ color: mapPalette.trunk })
+      const leavesMat = new THREE.MeshLambertMaterial({ color: mapPalette.leaves })
+      // Desert: sand-camo wrecks. Snow: snow-dusted hulls. Urban: painted cars.
+      const carColors =
+        mapId === "desert"
+          ? [0x9a8456, 0xa89868, 0x8c7a4e, 0xb0a070]
+          : mapId === "snow"
+            ? [0x7a828a, 0x8a929a, 0x9aa2aa, 0x6e767e]
+            : [0x4a6a8a, 0x8a6a4a, 0x4a6a4a, 0x6a4a4a]
 
       for (const [ox, oz, ow, od, otype] of MAP_OBJECTS) {
         const cx = ox + ow / 2
@@ -1721,21 +1790,53 @@ export default function ThreeWorld({
         const isIndustrial = ox >= 32 && ox < 66
 
         if (otype === 4) {
-          // Tree: trunk + leaves
-          const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.22, 2.0, 6), trunkMat)
-          trunk.position.set(cx, 1.0, cz)
-          trunk.castShadow = true
-          scene.add(trunk)
-          const leaves = new THREE.Mesh(new THREE.SphereGeometry(1.1, 7, 6), leavesMat)
-          leaves.position.set(cx, 3.1, cz)
-          leaves.castShadow = true
-          scene.add(leaves)
-          const leaves2 = new THREE.Mesh(
-            new THREE.SphereGeometry(0.75, 6, 5),
-            new THREE.MeshLambertMaterial({ color: 0x3a7a22 }),
-          )
-          leaves2.position.set(cx + 0.5, 3.5, cz - 0.3)
-          scene.add(leaves2)
+          // Outdoor-zone vegetation slot. Same footprint on every map, but the
+          // prop changes: urban gets a leafy tree, desert a sandstone boulder
+          // cluster, snow a snow-capped rock.
+          if (mapId === "desert") {
+            // Sandstone boulders — a couple of low angular rocks.
+            const rockMat = new THREE.MeshLambertMaterial({ color: mapPalette.trunk })
+            const r1 = new THREE.Mesh(new THREE.DodecahedronGeometry(0.7, 0), rockMat)
+            r1.position.set(cx, 0.45, cz)
+            r1.rotation.set(0.3, (ox + oz) % 3, 0.2)
+            r1.castShadow = true
+            scene.add(r1)
+            const r2 = new THREE.Mesh(new THREE.DodecahedronGeometry(0.45, 0), rockMat)
+            r2.position.set(cx + 0.6, 0.3, cz - 0.4)
+            r2.rotation.set(0.5, (oz % 3) + 1, 0.1)
+            r2.castShadow = true
+            scene.add(r2)
+          } else if (mapId === "snow") {
+            // Grey rock with a white snow cap.
+            const rockMat = new THREE.MeshLambertMaterial({ color: mapPalette.trunk })
+            const rock = new THREE.Mesh(new THREE.DodecahedronGeometry(0.75, 0), rockMat)
+            rock.position.set(cx, 0.5, cz)
+            rock.rotation.set(0.25, (ox + oz) % 3, 0.15)
+            rock.castShadow = true
+            scene.add(rock)
+            const cap = new THREE.Mesh(
+              new THREE.SphereGeometry(0.6, 7, 5, 0, Math.PI * 2, 0, Math.PI / 2),
+              new THREE.MeshLambertMaterial({ color: mapPalette.leaves }),
+            )
+            cap.position.set(cx, 0.85, cz)
+            scene.add(cap)
+          } else {
+            // Tree: trunk + leaves
+            const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.22, 2.0, 6), trunkMat)
+            trunk.position.set(cx, 1.0, cz)
+            trunk.castShadow = true
+            scene.add(trunk)
+            const leaves = new THREE.Mesh(new THREE.SphereGeometry(1.1, 7, 6), leavesMat)
+            leaves.position.set(cx, 3.1, cz)
+            leaves.castShadow = true
+            scene.add(leaves)
+            const leaves2 = new THREE.Mesh(
+              new THREE.SphereGeometry(0.75, 6, 5),
+              new THREE.MeshLambertMaterial({ color: 0x3a7a22 }),
+            )
+            leaves2.position.set(cx + 0.5, 3.5, cz - 0.3)
+            scene.add(leaves2)
+          }
           continue
         }
 
@@ -1754,7 +1855,7 @@ export default function ThreeWorld({
           // top and side faces of the parent box).
           const bagGeo = new THREE.BoxGeometry(ow * 0.9, 0.16, od * 0.9)
           const bagMat = new THREE.MeshStandardMaterial({
-            color: 0x9a8a6a,
+            color: mapPalette.bag,
             roughness: 0.95,
             metalness: 0,
           })
@@ -1767,7 +1868,10 @@ export default function ThreeWorld({
         }
 
         if (otype === 1) {
-          // Car: body + windshield + tires
+          // Wrecked-vehicle slot. The collision body is the same box on every
+          // map (footprint + height unchanged); only the dressing differs:
+          // urban = painted car, desert = abandoned sand-camo hull + oil drums,
+          // snow = snow-buried wreck.
           const carColor = carColors[Math.floor((ox + oz) % carColors.length)] ?? 0x4a6a8a
           const carBodyMat = new THREE.MeshLambertMaterial({ color: carColor })
           const carH = 0.75
@@ -1777,34 +1881,65 @@ export default function ThreeWorld({
           body.receiveShadow = true
           scene.add(body)
           wallMeshes.push(body)
-          // Windshield — sit it *on* the front face (z = oz, slight offset)
-          // instead of buried inside the body (was at oz + od*0.3, fully
-          // inside the box — flickered through the body's front face).
-          const windshield = new THREE.Mesh(new THREE.BoxGeometry(ow * 0.6, 0.38, 0.05), windowMat)
-          windshield.position.set(cx, carH * 0.85, oz - 0.03)
-          scene.add(windshield)
-          // Tires (4 wheels)
-          const tireMat = new THREE.MeshLambertMaterial({ color: 0x1a1a1a })
-          const tireR = 0.22
-          const tirePositions: [number, number][] =
-            ow >= od
-              ? [
-                  [ox + ow * 0.2, oz],
-                  [ox + ow * 0.8, oz],
-                  [ox + ow * 0.2, oz + od],
-                  [ox + ow * 0.8, oz + od],
-                ]
-              : [
-                  [ox, oz + od * 0.2],
-                  [ox + ow, oz + od * 0.2],
-                  [ox, oz + od * 0.8],
-                  [ox + ow, oz + od * 0.8],
-                ]
-          for (const [tx2, tz2] of tirePositions) {
-            const tire = new THREE.Mesh(new THREE.CylinderGeometry(tireR, tireR, 0.14, 8), tireMat)
-            tire.position.set(tx2, tireR, tz2)
-            tire.rotation.z = Math.PI / 2
-            scene.add(tire)
+
+          if (mapId === "desert") {
+            // A pair of rusty oil drums standing in the wreck footprint.
+            const drumMat = new THREE.MeshLambertMaterial({ color: 0x8a6a3a })
+            const drumR = Math.min(ow, od) * 0.28
+            for (const [dxo, dzo] of [
+              [-0.25, -0.2],
+              [0.25, 0.25],
+            ] as [number, number][]) {
+              const drum = new THREE.Mesh(
+                new THREE.CylinderGeometry(drumR, drumR, 0.95, 10),
+                drumMat,
+              )
+              drum.position.set(cx + dxo * ow, carH + 0.45, cz + dzo * od)
+              drum.castShadow = true
+              scene.add(drum)
+            }
+          } else if (mapId === "snow") {
+            // Snow cap on the roof of the buried wreck.
+            const snowCap = new THREE.Mesh(
+              new THREE.BoxGeometry(ow * 1.04, 0.14, od * 1.04),
+              new THREE.MeshLambertMaterial({ color: 0xeef4f8 }),
+            )
+            snowCap.position.set(cx, carH + 0.05, cz)
+            scene.add(snowCap)
+          } else {
+            // Windshield — sits on the front face.
+            const windshield = new THREE.Mesh(
+              new THREE.BoxGeometry(ow * 0.6, 0.38, 0.05),
+              windowMat,
+            )
+            windshield.position.set(cx, carH * 0.85, oz - 0.03)
+            scene.add(windshield)
+            // Tires (4 wheels)
+            const tireMat = new THREE.MeshLambertMaterial({ color: 0x1a1a1a })
+            const tireR = 0.22
+            const tirePositions: [number, number][] =
+              ow >= od
+                ? [
+                    [ox + ow * 0.2, oz],
+                    [ox + ow * 0.8, oz],
+                    [ox + ow * 0.2, oz + od],
+                    [ox + ow * 0.8, oz + od],
+                  ]
+                : [
+                    [ox, oz + od * 0.2],
+                    [ox + ow, oz + od * 0.2],
+                    [ox, oz + od * 0.8],
+                    [ox + ow, oz + od * 0.8],
+                  ]
+            for (const [tx2, tz2] of tirePositions) {
+              const tire = new THREE.Mesh(
+                new THREE.CylinderGeometry(tireR, tireR, 0.14, 8),
+                tireMat,
+              )
+              tire.position.set(tx2, tireR, tz2)
+              tire.rotation.z = Math.PI / 2
+              scene.add(tire)
+            }
           }
           continue
         }
@@ -1920,7 +2055,7 @@ export default function ThreeWorld({
 
         // Rubble around base for urban ruins effect
         if (isUrban && wallH >= 3.0 && (ox + oz) % 3 === 0) {
-          const rubbleMat2 = new THREE.MeshLambertMaterial({ color: 0x7a7a6a })
+          const rubbleMat2 = new THREE.MeshLambertMaterial({ color: mapPalette.rubble })
           for (let ri = 0; ri < 4; ri++) {
             const angle = (ri / 4) * Math.PI * 2
             const dist = 0.8 + (ri % 2) * 0.5
@@ -2665,15 +2800,22 @@ export default function ThreeWorld({
         { cx: 31, cz: 43, rot: Math.PI / 2 },
         { cx: 60, cz: 22, rot: 0 },
       ]
-      for (const cw of crosswalks) {
-        for (let s = -2; s <= 2; s++) {
-          const stripe = new THREE.Mesh(new THREE.PlaneGeometry(0.45, 3.5), crosswalkMat)
-          stripe.rotation.x = -Math.PI / 2
-          stripe.rotation.z = cw.rot
-          const off = s * 0.85
-          stripe.position.set(cw.cx + Math.cos(cw.rot) * off, 0.018, cw.cz + Math.sin(cw.rot) * off)
-          stripe.receiveShadow = true
-          scene.add(stripe)
+      // Crosswalks are an urban-only street feature.
+      if (mapId === "urban") {
+        for (const cw of crosswalks) {
+          for (let s = -2; s <= 2; s++) {
+            const stripe = new THREE.Mesh(new THREE.PlaneGeometry(0.45, 3.5), crosswalkMat)
+            stripe.rotation.x = -Math.PI / 2
+            stripe.rotation.z = cw.rot
+            const off = s * 0.85
+            stripe.position.set(
+              cw.cx + Math.cos(cw.rot) * off,
+              0.018,
+              cw.cz + Math.sin(cw.rot) * off,
+            )
+            stripe.receiveShadow = true
+            scene.add(stripe)
+          }
         }
       }
 
@@ -2693,50 +2835,78 @@ export default function ThreeWorld({
         { x: 22.5, z: 14, rot: Math.PI / 2, w: 3, h: 0.7, color: 0xffcc44 }, // amber
         { x: 70, z: 5.5, rot: 0, w: 4, h: 0.8, color: 0x8844ff }, // violet
       ]
-      for (const n of neonSpec) {
-        const neonMat = new THREE.MeshStandardMaterial({
-          color: n.color,
-          emissive: n.color,
-          emissiveIntensity: 1.4,
-          roughness: 0.4,
-          metalness: 0.2,
-        })
-        const sign = new THREE.Mesh(new THREE.BoxGeometry(n.w, n.h, 0.12), neonMat)
-        sign.position.set(n.x, 3.2, n.z)
-        sign.rotation.y = n.rot
-        scene.add(sign)
-        // Add a small point light so the neon casts a colored wash on the
-        // nearby wall (subtle but adds the "wet street" cyberpunk feel).
-        const pl = new THREE.PointLight(n.color, 0.55, 8)
-        pl.position.set(n.x, 3.5, n.z + 0.3)
-        scene.add(pl)
+      // Neon signage is urban-only (desert/snow have no power-lit storefronts).
+      if (mapId === "urban") {
+        for (const n of neonSpec) {
+          const neonMat = new THREE.MeshStandardMaterial({
+            color: n.color,
+            emissive: n.color,
+            emissiveIntensity: 1.4,
+            roughness: 0.4,
+            metalness: 0.2,
+          })
+          const sign = new THREE.Mesh(new THREE.BoxGeometry(n.w, n.h, 0.12), neonMat)
+          sign.position.set(n.x, 3.2, n.z)
+          sign.rotation.y = n.rot
+          scene.add(sign)
+          // Add a small point light so the neon casts a colored wash on the
+          // nearby wall (subtle but adds the "wet street" cyberpunk feel).
+          const pl = new THREE.PointLight(n.color, 0.55, 8)
+          pl.position.set(n.x, 3.5, n.z + 0.3)
+          scene.add(pl)
+        }
       }
 
-      // ── Distant skyline silhouette ─────────────────────────────────────
-      // Tall dark blocks placed *outside* the playable map. Purely
-      // cosmetic — no collision, no shadow casting — but it sells the
-      // "city street" framing instead of an open arena vibe.
+      // ── Distant horizon silhouette ─────────────────────────────────────
+      // Cosmetic ring of shapes *outside* the playable map (no collision, no
+      // shadows). The silhouette is what most sells the setting from afar, so
+      // it changes per map: urban = tall city blocks, desert = rolling sand
+      // dunes, snow = jagged mountain peaks.
+      const skylineStyle = mapPalette.skylineStyle
       const skylineMat = new THREE.MeshLambertMaterial({
-        color: 0x202833,
-        emissive: 0x080a14,
+        color: mapPalette.skyline,
+        emissive:
+          skylineStyle === "city" ? 0x080a14 : skylineStyle === "dunes" ? 0x2a2010 : 0x101822,
       })
-      // Use a single InstancedMesh per orientation strip to keep draw
-      // calls low. Each row is a fixed pattern with per-instance scale.
-      const skylineRows: { z: number; baseX: number; n: number; depth: number }[] = [
-        { z: -25, baseX: -15, n: 18, depth: 6 }, // far north
-        { z: MAP_SIZE + 25, baseX: -15, n: 18, depth: 6 }, // far south
+      const skylineGeo =
+        skylineStyle === "mountains"
+          ? new THREE.ConeGeometry(1, 1, 5)
+          : skylineStyle === "dunes"
+            ? new THREE.SphereGeometry(1, 10, 6)
+            : new THREE.BoxGeometry(1, 1, 1)
+      // Per-instance scale profile for the chosen style. Returns [w, h, depth].
+      const silhouetteScale = (i: number): [number, number, number] => {
+        if (skylineStyle === "mountains") {
+          const w = 14 + ((i * 7) % 10)
+          const h = 26 + ((i * 13) % 26)
+          return [w, h, w]
+        }
+        if (skylineStyle === "dunes") {
+          const w = 18 + ((i * 9) % 12)
+          const h = 5 + ((i * 7) % 5)
+          return [w, h, w * 0.8]
+        }
+        const w = 5 + ((i * 7) % 5)
+        const h = 14 + ((i * 13) % 18)
+        return [w, h, 6]
+      }
+      // Use a single InstancedMesh per orientation strip to keep draw calls low.
+      const skylineRows: { z: number; baseX: number; n: number }[] = [
+        { z: -25, baseX: -15, n: 18 }, // far north
+        { z: MAP_SIZE + 25, baseX: -15, n: 18 }, // far south
       ]
       for (const row of skylineRows) {
-        const inst = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), skylineMat, row.n)
+        const inst = new THREE.InstancedMesh(skylineGeo, skylineMat, row.n)
         inst.castShadow = false
         inst.receiveShadow = false
         const dummy = new THREE.Object3D()
         for (let i = 0; i < row.n; i++) {
-          const w = 5 + ((i * 7) % 5)
-          const h = 14 + ((i * 13) % 18)
+          const [w, h, depth] = silhouetteScale(i)
           const x = row.baseX + i * 7.5 + ((i * 5) % 3)
-          dummy.position.set(x, h / 2, row.z)
-          dummy.scale.set(w, h, row.depth)
+          // Dunes sit half-sunk so only the rounded crest shows above grade.
+          const yPos = skylineStyle === "dunes" ? h * 0.1 : h / 2
+          dummy.position.set(x, yPos, row.z)
+          dummy.scale.set(w, h, depth)
           dummy.updateMatrix()
           inst.setMatrixAt(i, dummy.matrix)
         }
@@ -2745,14 +2915,14 @@ export default function ThreeWorld({
       }
       // Sky lanes (east-west far ends) — give depth along the avenue too.
       for (const xFar of [-22, MAP_SIZE + 22]) {
-        const inst = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), skylineMat, 12)
+        const inst = new THREE.InstancedMesh(skylineGeo, skylineMat, 12)
         const dummy = new THREE.Object3D()
         for (let i = 0; i < 12; i++) {
-          const w = 5 + ((i * 11) % 6)
-          const h = 12 + ((i * 9) % 22)
+          const [w, h, depth] = silhouetteScale(i + 3)
           const z = -10 + i * 10 + ((i * 3) % 4)
-          dummy.position.set(xFar, h / 2, z)
-          dummy.scale.set(w, h, 6)
+          const yPos = skylineStyle === "dunes" ? h * 0.1 : h / 2
+          dummy.position.set(xFar, yPos, z)
+          dummy.scale.set(w, h, depth)
           dummy.updateMatrix()
           inst.setMatrixAt(i, dummy.matrix)
         }
@@ -2781,17 +2951,105 @@ export default function ThreeWorld({
       // head already glows; sun + hemisphere handle the lit pixels).
       // AABB also dropped — bullets at eye-height were getting eaten by
       // the lamp's 5m-tall stop-volume; lamps are now pure decoration.
-      for (let lx = 12; lx <= 90; lx += 18) {
-        for (const lz of [44, 56]) {
-          const post = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.12, 5, 6), lampPostMat)
-          post.position.set(lx, 2.5, lz)
+      // Avenue fixtures change per map: urban street lamps, desert lattice
+      // radio/power towers (no power-lit lamps in a ruined base), snow
+      // perimeter fence posts. Same alternating-sides cadence as the lamps so
+      // the avenue stays legible as a "road" from a distance on every map.
+      if (mapId === "urban") {
+        for (let lx = 12; lx <= 90; lx += 18) {
+          for (const lz of [44, 56]) {
+            const post = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.12, 5, 6), lampPostMat)
+            post.position.set(lx, 2.5, lz)
+            scene.add(post)
+            const arm = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.08, 0.08), lampPostMat)
+            arm.position.set(lx + (lz < 50 ? 0.5 : -0.5), 4.8, lz)
+            scene.add(arm)
+            const head = new THREE.Mesh(new THREE.SphereGeometry(0.22, 8, 6), lampHeadMat)
+            head.position.set(lx + (lz < 50 ? 1.0 : -1.0), 4.65, lz)
+            scene.add(head)
+          }
+        }
+      } else if (mapId === "desert") {
+        // Steel lattice towers — a tapering post with two cross-braces and a
+        // tip antenna. Sparser than lamps (every 24m) to keep the count down.
+        const towerMat = new THREE.MeshStandardMaterial({
+          color: 0x6a6258,
+          roughness: 0.7,
+          metalness: 0.5,
+        })
+        for (let lx = 14; lx <= 90; lx += 24) {
+          const lz = (lx / 24) % 2 < 1 ? 43 : 57
+          const post = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.3, 8, 5), towerMat)
+          post.position.set(lx, 4, lz)
+          post.castShadow = true
           scene.add(post)
-          const arm = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.08, 0.08), lampPostMat)
-          arm.position.set(lx + (lz < 50 ? 0.5 : -0.5), 4.8, lz)
-          scene.add(arm)
-          const head = new THREE.Mesh(new THREE.SphereGeometry(0.22, 8, 6), lampHeadMat)
-          head.position.set(lx + (lz < 50 ? 1.0 : -1.0), 4.65, lz)
-          scene.add(head)
+          for (const by of [2.4, 4.6]) {
+            const brace = new THREE.Mesh(new THREE.BoxGeometry(1.1, 0.06, 0.06), towerMat)
+            brace.position.set(lx, by, lz)
+            scene.add(brace)
+          }
+          const antenna = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, 1.6, 4), towerMat)
+          antenna.position.set(lx, 8.8, lz)
+          scene.add(antenna)
+        }
+      } else {
+        // Snow: chain-of-posts perimeter fence lining the avenue.
+        const fenceMat = new THREE.MeshStandardMaterial({
+          color: 0x556069,
+          roughness: 0.6,
+          metalness: 0.4,
+        })
+        for (const lz of [43, 57]) {
+          for (let lx = 10; lx <= 92; lx += 6) {
+            const post = new THREE.Mesh(new THREE.BoxGeometry(0.12, 1.3, 0.12), fenceMat)
+            post.position.set(lx, 0.65, lz)
+            post.castShadow = true
+            scene.add(post)
+          }
+          // Two horizontal rails spanning the whole run.
+          for (const ry of [0.45, 1.05]) {
+            const rail = new THREE.Mesh(new THREE.BoxGeometry(82, 0.06, 0.06), fenceMat)
+            rail.position.set(51, ry, lz)
+            scene.add(rail)
+          }
+        }
+        // Scattered snow drifts (low white mounds) across the open ground.
+        const driftMat = new THREE.MeshLambertMaterial({ color: 0xeef4f8 })
+        const driftSpots: [number, number][] = [
+          [14, 26],
+          [14, 74],
+          [72, 24],
+          [88, 70],
+          [40, 90],
+          [76, 90],
+        ]
+        for (const [dx, dz] of driftSpots) {
+          const drift = new THREE.Mesh(
+            new THREE.SphereGeometry(1.6, 8, 6, 0, Math.PI * 2, 0, Math.PI / 2),
+            driftMat,
+          )
+          drift.scale.set(1, 0.35, 1)
+          drift.position.set(dx, 0.02, dz)
+          drift.receiveShadow = true
+          scene.add(drift)
+        }
+      }
+
+      // Desert tents — simple cloth cones near the south flank, purely
+      // decorative (placed clear of building footprints + walkways).
+      if (mapId === "desert") {
+        const tentMat = new THREE.MeshLambertMaterial({ color: 0xb8a06a })
+        const tentSpots: [number, number][] = [
+          [74, 12],
+          [88, 46],
+          [76, 88],
+        ]
+        for (const [tx, tz] of tentSpots) {
+          const tent = new THREE.Mesh(new THREE.ConeGeometry(1.7, 2.2, 4), tentMat)
+          tent.position.set(tx, 1.1, tz)
+          tent.rotation.y = Math.PI / 4
+          tent.castShadow = true
+          scene.add(tent)
         }
       }
 
