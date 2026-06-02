@@ -26,6 +26,18 @@ const SPRINT_MULTIPLIER = 1.5
 const AUTO_RECOVER_DELAY = 5
 const RECOVER_RATE = 2
 const CAM_SHAKE_DECAY = 6
+// ── Vehicle (drivable car) ───────────────────────────────────────────────────
+// First-pass vehicle system: enter / drive / exit only. No run-over, no AI
+// drivers, no destruction (those are explicitly out of scope for this PR).
+const VEHICLE_RADIUS = 1.15 // collision circle (car is ~2.4 long × 1.2 wide)
+const VEHICLE_MAX_SPEED = 16 // m/s forward
+const VEHICLE_REVERSE_SPEED = 6 // m/s backward
+const VEHICLE_ACCEL = 14 // throttle response (m/s²)
+const VEHICLE_BRAKE_DRAG = 1.6 // engine-braking decay per second when coasting
+const VEHICLE_TURN_RATE = 1.9 // rad/s steering at speed
+const VEHICLE_ENTER_RADIUS = 3.4 // how close on foot to board
+const VEHICLE_CAM_DIST = 7.5 // third-person camera trail distance
+const VEHICLE_CAM_HEIGHT = 4.0 // third-person camera height
 // ── Vertical movement ──────────────────────────────────────────────────────────
 // Real gravity in m/s². Picked to feel snappy (a 4m drop = ~0.6s in air),
 // not a perfect-physics simulation. Tuned by feel under EYE_HEIGHT.
@@ -1322,6 +1334,15 @@ export default function ThreeWorld({
   // (down). Pushed on boundary changes only, like nearClimb.
   const [climbAtTop, setClimbAtTop] = useState(false)
   const prevClimbAtTopRef = useRef(false)
+  // ── Vehicle state ──────────────────────────────────────────────────────────
+  // True while the player is driving a car (camera + WASD switch to driving).
+  const drivingRef = useRef(false)
+  const [inVehicle, setInVehicle] = useState(false)
+  // True while on foot next to a boardable car (shows the "乗る" prompt).
+  const [nearVehicle, setNearVehicle] = useState(false)
+  const prevNearVehicleRef = useRef(false)
+  // Set by the E key / mobile board-exit button; consumed once in the loop.
+  const vehicleActionRef = useRef(false)
   // CRT scanlines: default off (was too distracting). F8 toggles, persisted
   // in localStorage so the choice survives refresh.
   const [scanlinesOn, setScanlinesOn] = useState(false)
@@ -3151,6 +3172,229 @@ export default function ThreeWorld({
       const muzzleLight = new THREE.PointLight(0xffee44, 0, 5)
       scene.add(muzzleLight)
 
+      // ── Drivable vehicles ──────────────────────────────────────────────────
+      // First-pass: a handful of intact cars parked on the central avenue the
+      // player can board (E / mobile button), drive (WASD / left stick), and
+      // exit. Distinct from the wrecked MAP_OBJECTS cars (those stay static
+      // cover). No run-over, no AI drivers, no destruction yet.
+      interface Vehicle {
+        group: THREE.Group
+        x: number
+        z: number
+        heading: number // yaw; forward = (-sin, -cos)
+        speed: number // m/s along heading (negative = reverse)
+      }
+      const vehicles: Vehicle[] = []
+      let activeVehicle: Vehicle | null = null
+
+      function makeVehicle(color: number): THREE.Group {
+        const g = new THREE.Group()
+        const bodyMat = new THREE.MeshStandardMaterial({
+          color,
+          roughness: 0.45,
+          metalness: 0.5,
+        })
+        const glassMat = new THREE.MeshStandardMaterial({
+          color: 0x101820,
+          roughness: 0.1,
+          metalness: 0.7,
+        })
+        const tireMat = new THREE.MeshLambertMaterial({ color: 0x111111 })
+        // Lower chassis (nose toward -z).
+        const chassis = new THREE.Mesh(new THREE.BoxGeometry(1.3, 0.5, 2.6), bodyMat)
+        chassis.position.y = 0.55
+        chassis.castShadow = true
+        chassis.receiveShadow = true
+        g.add(chassis)
+        // Cabin / greenhouse, set back from the nose.
+        const cabin = new THREE.Mesh(new THREE.BoxGeometry(1.16, 0.5, 1.25), bodyMat)
+        cabin.position.set(0, 1.02, 0.15)
+        cabin.castShadow = true
+        g.add(cabin)
+        // Windshield (front of cabin, toward -z).
+        const windshield = new THREE.Mesh(new THREE.BoxGeometry(1.04, 0.42, 0.08), glassMat)
+        windshield.position.set(0, 1.02, -0.46)
+        g.add(windshield)
+        const rearGlass = new THREE.Mesh(new THREE.BoxGeometry(1.04, 0.42, 0.08), glassMat)
+        rearGlass.position.set(0, 1.02, 0.76)
+        g.add(rearGlass)
+        // Headlights (nose).
+        const lightMat = new THREE.MeshStandardMaterial({
+          color: 0xfff2b0,
+          emissive: 0xffe070,
+          emissiveIntensity: 1.2,
+        })
+        for (const lx of [-0.42, 0.42]) {
+          const hl = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.14, 0.06), lightMat)
+          hl.position.set(lx, 0.6, -1.31)
+          g.add(hl)
+        }
+        // Four wheels.
+        for (const [wx, wz] of [
+          [-0.62, -0.85],
+          [0.62, -0.85],
+          [-0.62, 0.85],
+          [0.62, 0.85],
+        ] as [number, number][]) {
+          const wheel = new THREE.Mesh(new THREE.CylinderGeometry(0.34, 0.34, 0.24, 12), tireMat)
+          wheel.rotation.z = Math.PI / 2
+          wheel.position.set(wx, 0.34, wz)
+          wheel.castShadow = true
+          g.add(wheel)
+        }
+        return g
+      }
+
+      function spawnVehicle(x: number, z: number, heading: number, color: number) {
+        const safe = findSafeSpawnNear(x, z, VEHICLE_RADIUS)
+        const group = makeVehicle(color)
+        group.position.set(safe.x, 0, safe.z)
+        group.rotation.y = heading
+        scene.add(group)
+        vehicles.push({ group, x: safe.x, z: safe.z, heading, speed: 0 })
+      }
+
+      // Park a few intact cars along the central avenue (z ≈ 50). Heading
+      // -π/2 faces +x (east) — the same direction the player spawns looking.
+      spawnVehicle(14, 50, -Math.PI / 2, 0xbb2222)
+      spawnVehicle(40, 52, -Math.PI / 2, 0x2255bb)
+      spawnVehicle(66, 49, -Math.PI / 2, 0xddaa22)
+
+      function nearestVehicle(): Vehicle | null {
+        let best: Vehicle | null = null
+        let bestD = VEHICLE_ENTER_RADIUS
+        for (const v of vehicles) {
+          const d = Math.hypot(v.x - focalPoint.x, v.z - focalPoint.z)
+          if (d < bestD) {
+            bestD = d
+            best = v
+          }
+        }
+        return best
+      }
+
+      function enterVehicle(v: Vehicle) {
+        activeVehicle = v
+        drivingRef.current = true
+        setInVehicle(true)
+        setNearVehicle(false)
+        prevNearVehicleRef.current = false
+        // Drop any climb prompt — the vertical/climb block is skipped while
+        // driving, so clear it now or it could stay stuck on screen.
+        setNearClimb(false)
+        prevNearClimbRef.current = false
+        // Cancel any combat state so nothing leaks into driving.
+        playerVelRef.current.x = 0
+        playerVelRef.current.z = 0
+        mouseDownRef.current = false
+        isAimingRef.current = false
+        setIsAiming(false)
+        gunGroup.visible = false
+        // Snap the (hidden) player onto the car.
+        focalPoint.x = v.x
+        focalPoint.z = v.z
+        focalPoint.y = 0
+        // Place the camera behind the car immediately so the view doesn't
+        // swing in from wherever the FPS camera last sat.
+        const fx = -Math.sin(v.heading)
+        const fz = -Math.cos(v.heading)
+        camera.position.set(
+          v.x - fx * VEHICLE_CAM_DIST,
+          VEHICLE_CAM_HEIGHT,
+          v.z - fz * VEHICLE_CAM_DIST,
+        )
+        camera.lookAt(v.x + fx * 4, 1.0, v.z + fz * 4)
+      }
+
+      function exitVehicle() {
+        const v = activeVehicle
+        drivingRef.current = false
+        setInVehicle(false)
+        gunGroup.visible = true
+        if (v) {
+          v.speed = 0
+          // Step out to the left side of the car, nudged to clear ground.
+          const sideX = Math.cos(v.heading)
+          const sideZ = -Math.sin(v.heading)
+          const safe = findSafeSpawnNear(v.x + sideX * 1.9, v.z + sideZ * 1.9, PLAYER_RADIUS)
+          focalPoint.x = safe.x
+          focalPoint.z = safe.z
+          focalPoint.y = 0
+          // Resume FPS facing the car's forward direction.
+          camState.yaw = v.heading
+          camState.pitch = 0
+          updateCamera()
+        }
+        activeVehicle = null
+        playerVelRef.current.x = 0
+        playerVelRef.current.z = 0
+        playerVelYRef.current = 0
+      }
+
+      function updateVehicle(dt: number) {
+        const v = activeVehicle
+        if (!v) return
+        // Inputs: WASD / arrows + left stick (vy = throttle, vx = steer).
+        const sjoy = joySmoothRef.current
+        let throttle = 0
+        if (keysRef.current.has("w") || keysRef.current.has("ArrowUp")) throttle += 1
+        if (keysRef.current.has("s") || keysRef.current.has("ArrowDown")) throttle -= 1
+        throttle -= sjoy.vy // stick up (vy<0) = forward
+        let steer = 0
+        if (keysRef.current.has("a") || keysRef.current.has("ArrowLeft")) steer -= 1
+        if (keysRef.current.has("d") || keysRef.current.has("ArrowRight")) steer += 1
+        steer += sjoy.vx
+        throttle = Math.max(-1, Math.min(1, throttle))
+        steer = Math.max(-1, Math.min(1, steer))
+
+        // Longitudinal dynamics (accel under throttle, engine-brake when coasting).
+        if (Math.abs(throttle) > 0.01) {
+          v.speed += throttle * VEHICLE_ACCEL * dt
+        } else {
+          const decel = VEHICLE_BRAKE_DRAG * dt * (Math.abs(v.speed) + 1)
+          if (v.speed > 0) v.speed = Math.max(0, v.speed - decel)
+          else if (v.speed < 0) v.speed = Math.min(0, v.speed + decel)
+        }
+        v.speed = Math.max(-VEHICLE_REVERSE_SPEED, Math.min(VEHICLE_MAX_SPEED, v.speed))
+
+        // Steering scales with speed and flips in reverse (like a real car).
+        const speedFactor = Math.min(1, Math.abs(v.speed) / 3 + 0.12)
+        const dir = v.speed >= 0 ? 1 : -1
+        v.heading += steer * VEHICLE_TURN_RATE * dt * speedFactor * dir
+
+        // Integrate with per-axis wall collision (no tunnelling).
+        const fx = -Math.sin(v.heading)
+        const fz = -Math.cos(v.heading)
+        const nx = v.x + fx * v.speed * dt
+        const nz = v.z + fz * v.speed * dt
+        let moved = false
+        if (!collidesWithWall(nx, v.z, VEHICLE_RADIUS)) {
+          v.x = nx
+          moved = true
+        }
+        if (!collidesWithWall(v.x, nz, VEHICLE_RADIUS)) {
+          v.z = nz
+          moved = true
+        }
+        if (!moved) v.speed *= 0.2 // head-on bump bleeds momentum
+
+        v.group.position.set(v.x, 0, v.z)
+        v.group.rotation.y = v.heading
+        // Carry the (hidden) player with the car for WS sync + exit position.
+        focalPoint.x = v.x
+        focalPoint.z = v.z
+        focalPoint.y = 0
+
+        // Smoothed third-person chase camera (ぬるっと追従).
+        const camTargetX = v.x - fx * VEHICLE_CAM_DIST
+        const camTargetZ = v.z - fz * VEHICLE_CAM_DIST
+        const camBlend = 1 - Math.exp(-dt * 6)
+        camera.position.x += (camTargetX - camera.position.x) * camBlend
+        camera.position.z += (camTargetZ - camera.position.z) * camBlend
+        camera.position.y += (VEHICLE_CAM_HEIGHT - camera.position.y) * camBlend
+        camera.lookAt(v.x + fx * 4, 1.0, v.z + fz * 4)
+      }
+
       // ── Humanoid enemy factory ─────────────────────────────────────────────
       let enemyIdCounter = 0
       function makeEnemy(type: EnemyType, x: number, z: number, isCommander = false): CombatEnemy {
@@ -4261,6 +4505,7 @@ export default function ThreeWorld({
       // mid-animation. Also melees remote players in PvP-enabled modes.
       function meleeAttack() {
         if (gamePhaseRef.current !== "playing") return
+        if (drivingRef.current) return
         const now = Date.now()
         if (now - lastMeleeRef.current < KNIFE_COOLDOWN_MS) return
         lastMeleeRef.current = now
@@ -4343,6 +4588,8 @@ export default function ThreeWorld({
       // ── Fire weapon ────────────────────────────────────────────────────────
       function fire() {
         if (gamePhaseRef.current !== "playing") return
+        // Shooting is disabled while driving (運転に集中).
+        if (drivingRef.current) return
         const weapon = WEAPONS[currentWeaponIdxRef.current]
         if (!weapon) return
         // Knife: melee swing instead of a projectile. Its own cooldown gate
@@ -4585,7 +4832,10 @@ export default function ThreeWorld({
           const mdy = mouseDeltaRef.current.y * APPLY
           mouseDeltaRef.current.x -= mdx
           mouseDeltaRef.current.y -= mdy
-          if (mdx !== 0 || mdy !== 0) {
+          // Mouse look is suppressed while driving (the chase camera owns the
+          // view); the buffered delta is still drained above so it doesn't
+          // snap on exit.
+          if (!drivingRef.current && (mdx !== 0 || mdy !== 0)) {
             // Base sensitivity dropped 0.002 → 0.0012 (≈40% slower default).
             // Player can scale 0.5x–2.0x via the settings panel.
             const sens = 0.0012 * mouseSensRef.current
@@ -4597,14 +4847,22 @@ export default function ThreeWorld({
 
         // ADS FOV interpolation. Base FOV bumped 75 → 80 — wider field of
         // view trades a touch of zoom for less peripheral motion-shear
-        // when the player rotates quickly.
-        const targetFov = isAimingRef.current ? (currentWeaponIdxRef.current === 2 ? 28 : 50) : 80
+        // when the player rotates quickly. No ADS zoom while driving.
+        const targetFov =
+          isAimingRef.current && !drivingRef.current
+            ? currentWeaponIdxRef.current === 2
+              ? 28
+              : 50
+            : 80
         if (Math.abs(camera.fov - targetFov) > 0.3) {
           camera.fov += (targetFov - camera.fov) * Math.min(1, dt * 12)
           camera.updateProjectionMatrix()
         }
 
-        // Grenade request: AOE explosion ahead of player
+        // Grenade request: AOE explosion ahead of player (disabled while driving).
+        if (requestGrenadeRef.current && drivingRef.current) {
+          requestGrenadeRef.current = false
+        }
         if (requestGrenadeRef.current) {
           requestGrenadeRef.current = false
           const fwd = new THREE.Vector3()
@@ -4654,6 +4912,33 @@ export default function ThreeWorld({
           }
         }
 
+        // ── Vehicle: board / exit (E key or mobile button) + drive ──────────
+        {
+          const wantAction = climbRequestRef.current || vehicleActionRef.current
+          if (drivingRef.current) {
+            if (wantAction) {
+              climbRequestRef.current = false
+              vehicleActionRef.current = false
+              exitVehicle()
+            }
+          } else {
+            const nv = nearestVehicle()
+            const nowNear = nv !== null
+            if (nowNear !== prevNearVehicleRef.current) {
+              prevNearVehicleRef.current = nowNear
+              setNearVehicle(nowNear)
+            }
+            if (wantAction && nv) {
+              // Consume the E press so boarding doesn't also trigger a climb.
+              climbRequestRef.current = false
+              enterVehicle(nv)
+            }
+            // The mobile board button is vehicle-only — never fall through.
+            vehicleActionRef.current = false
+          }
+        }
+        if (drivingRef.current) updateVehicle(dt)
+
         // Input → desired movement direction. Joystick is filtered; WASD
         // contributes raw ±1 components clamped to unit length.
         const sjoy = joySmoothRef.current
@@ -4683,7 +4968,8 @@ export default function ThreeWorld({
         playerVelRef.current.z += (desiredVz - playerVelRef.current.z) * moveBlend
         const pv = playerVelRef.current
         const playerSpeed = Math.hypot(pv.x, pv.z)
-        if (playerSpeed > 0.01) {
+        // On-foot movement is suspended while driving (the car owns focalPoint).
+        if (!drivingRef.current && playerSpeed > 0.01) {
           const nx = refs.focalPoint.x + pv.x * dt
           const nz = refs.focalPoint.z + pv.z * dt
           // Failsafe: if the player is somehow already inside a wall (bad
@@ -4708,132 +4994,139 @@ export default function ThreeWorld({
         // is y=0. Floors stored higher than the player's current head +
         // STEP_UP_MAX are ignored (we don't snap *up* onto rooftops just
         // by walking under them — those require an E-key climb zone).
-        let groundY = 0
-        for (const f of refs.floors) {
-          if (
-            refs.focalPoint.x > f.x1 &&
-            refs.focalPoint.x < f.x2 &&
-            refs.focalPoint.z > f.z1 &&
-            refs.focalPoint.z < f.z2 &&
-            f.y > groundY &&
-            f.y <= refs.focalPoint.y + STEP_UP_MAX
-          ) {
-            groundY = f.y
-          }
-        }
-
-        // Is the player standing inside any climb zone right now? Powers
-        // the bottom-of-screen "[E] 登る" prompt. We push to React state
-        // only on boundary changes (entering / leaving the zone) so the
-        // HUD doesn't re-render every frame while the player loiters.
-        let nearClimbNow = false
-        let atTopNow = false
-        for (const zone of refs.climbZones) {
-          if (
-            refs.focalPoint.x > zone.x1 - CLIMB_INTERACT_PAD &&
-            refs.focalPoint.x < zone.x2 + CLIMB_INTERACT_PAD &&
-            refs.focalPoint.z > zone.z1 - CLIMB_INTERACT_PAD &&
-            refs.focalPoint.z < zone.z2 + CLIMB_INTERACT_PAD
-          ) {
-            nearClimbNow = true
-            // Same "already on top" test the climb action uses, so the label
-            // matches what pressing the button will actually do.
-            atTopNow = Math.abs(refs.focalPoint.y - zone.targetY) < 0.6
-            break
-          }
-        }
-        if (nearClimbNow !== prevNearClimbRef.current) {
-          prevNearClimbRef.current = nearClimbNow
-          setNearClimb(nearClimbNow)
-        }
-        if (atTopNow !== prevClimbAtTopRef.current) {
-          prevClimbAtTopRef.current = atTopNow
-          setClimbAtTop(atTopNow)
-        }
-
-        // E-key climb (consumed once per press in the keydown handler).
-        if (climbRequestRef.current) {
-          climbRequestRef.current = false
-          if (Date.now() > climbCooldownUntilRef.current) {
-            for (const zone of refs.climbZones) {
-              if (
-                refs.focalPoint.x > zone.x1 - CLIMB_INTERACT_PAD &&
-                refs.focalPoint.x < zone.x2 + CLIMB_INTERACT_PAD &&
-                refs.focalPoint.z > zone.z1 - CLIMB_INTERACT_PAD &&
-                refs.focalPoint.z < zone.z2 + CLIMB_INTERACT_PAD
-              ) {
-                // If already roughly at the top, descend back down; else
-                // climb up. Avoids "press E and bounce back instantly"
-                // when the player keeps the key tapped at the top.
-                const atTop = Math.abs(refs.focalPoint.y - zone.targetY) < 0.6
-                if (atTop && zone.downY !== undefined) {
-                  // Descend: drop onto clear ground beside the tower so we
-                  // don't land embedded in the solid tower footprint.
-                  refs.focalPoint.y = zone.downY
-                  if (zone.baseX !== undefined) refs.focalPoint.x = zone.baseX
-                  if (zone.baseZ !== undefined) refs.focalPoint.z = zone.baseZ
-                  playerVelYRef.current = 0
-                  groundY = zone.downY
-                  climbCooldownUntilRef.current = Date.now() + 600
-                } else if (!atTop) {
-                  // Ascend: step onto the roof itself (inside the floor
-                  // bounds) — landing beside the tower would leave no floor
-                  // underfoot and the player would just fall back down.
-                  refs.focalPoint.y = zone.targetY
-                  if (zone.topX !== undefined) refs.focalPoint.x = zone.topX
-                  if (zone.topZ !== undefined) refs.focalPoint.z = zone.topZ
-                  playerVelYRef.current = 0
-                  groundY = zone.targetY
-                  climbCooldownUntilRef.current = Date.now() + 600
-                }
-                break
-              }
-            }
-          }
-        }
-
-        // Apply gravity / floor snap.
-        if (refs.focalPoint.y > groundY + 0.01) {
-          playerVelYRef.current -= GRAVITY * dt
-          refs.focalPoint.y += playerVelYRef.current * dt
-          if (refs.focalPoint.y <= groundY) {
-            // Landed. Fall damage based on impact vertical speed.
-            const vy = -playerVelYRef.current
+        // Entirely skipped while driving: the car keeps the player on the
+        // ground plane and owns the camera.
+        if (!drivingRef.current) {
+          let groundY = 0
+          for (const f of refs.floors) {
             if (
-              vy > FALL_SAFE_SPEED &&
-              gamePhaseRef.current === "playing" &&
-              Date.now() > spawnInvulnUntilRef.current
+              refs.focalPoint.x > f.x1 &&
+              refs.focalPoint.x < f.x2 &&
+              refs.focalPoint.z > f.z1 &&
+              refs.focalPoint.z < f.z2 &&
+              f.y > groundY &&
+              f.y <= refs.focalPoint.y + STEP_UP_MAX
             ) {
-              const t = Math.min(1, (vy - FALL_SAFE_SPEED) / (FALL_LETHAL_SPEED - FALL_SAFE_SPEED))
-              const dmg = Math.round(FALL_MAX_DAMAGE * t)
-              if (dmg > 0) {
-                playerHpRef.current = Math.max(0, playerHpRef.current - dmg)
-                setPlayerHp(playerHpRef.current)
-                lastDamageTimeRef.current = Date.now()
-                // Reduced shake (was 5 + t*8). Tones down the motion-
-                // sickness spike on fall-damage landings.
-                cameraShakeRef.current.intensity = 2.5 + t * 4
-                setDamageFlash(true)
-                SOUNDS.damage()
-                setTimeout(() => setDamageFlash(false), 320)
-                if (playerHpRef.current <= 0) {
-                  gamePhaseRef.current = "gameover"
-                  setGamePhase("gameover")
-                  deathsRef.current += 1
-                  setDeaths(deathsRef.current)
+              groundY = f.y
+            }
+          }
+
+          // Is the player standing inside any climb zone right now? Powers
+          // the bottom-of-screen "[E] 登る" prompt. We push to React state
+          // only on boundary changes (entering / leaving the zone) so the
+          // HUD doesn't re-render every frame while the player loiters.
+          let nearClimbNow = false
+          let atTopNow = false
+          for (const zone of refs.climbZones) {
+            if (
+              refs.focalPoint.x > zone.x1 - CLIMB_INTERACT_PAD &&
+              refs.focalPoint.x < zone.x2 + CLIMB_INTERACT_PAD &&
+              refs.focalPoint.z > zone.z1 - CLIMB_INTERACT_PAD &&
+              refs.focalPoint.z < zone.z2 + CLIMB_INTERACT_PAD
+            ) {
+              nearClimbNow = true
+              // Same "already on top" test the climb action uses, so the label
+              // matches what pressing the button will actually do.
+              atTopNow = Math.abs(refs.focalPoint.y - zone.targetY) < 0.6
+              break
+            }
+          }
+          if (nearClimbNow !== prevNearClimbRef.current) {
+            prevNearClimbRef.current = nearClimbNow
+            setNearClimb(nearClimbNow)
+          }
+          if (atTopNow !== prevClimbAtTopRef.current) {
+            prevClimbAtTopRef.current = atTopNow
+            setClimbAtTop(atTopNow)
+          }
+
+          // E-key climb (consumed once per press in the keydown handler).
+          if (climbRequestRef.current) {
+            climbRequestRef.current = false
+            if (Date.now() > climbCooldownUntilRef.current) {
+              for (const zone of refs.climbZones) {
+                if (
+                  refs.focalPoint.x > zone.x1 - CLIMB_INTERACT_PAD &&
+                  refs.focalPoint.x < zone.x2 + CLIMB_INTERACT_PAD &&
+                  refs.focalPoint.z > zone.z1 - CLIMB_INTERACT_PAD &&
+                  refs.focalPoint.z < zone.z2 + CLIMB_INTERACT_PAD
+                ) {
+                  // If already roughly at the top, descend back down; else
+                  // climb up. Avoids "press E and bounce back instantly"
+                  // when the player keeps the key tapped at the top.
+                  const atTop = Math.abs(refs.focalPoint.y - zone.targetY) < 0.6
+                  if (atTop && zone.downY !== undefined) {
+                    // Descend: drop onto clear ground beside the tower so we
+                    // don't land embedded in the solid tower footprint.
+                    refs.focalPoint.y = zone.downY
+                    if (zone.baseX !== undefined) refs.focalPoint.x = zone.baseX
+                    if (zone.baseZ !== undefined) refs.focalPoint.z = zone.baseZ
+                    playerVelYRef.current = 0
+                    groundY = zone.downY
+                    climbCooldownUntilRef.current = Date.now() + 600
+                  } else if (!atTop) {
+                    // Ascend: step onto the roof itself (inside the floor
+                    // bounds) — landing beside the tower would leave no floor
+                    // underfoot and the player would just fall back down.
+                    refs.focalPoint.y = zone.targetY
+                    if (zone.topX !== undefined) refs.focalPoint.x = zone.topX
+                    if (zone.topZ !== undefined) refs.focalPoint.z = zone.topZ
+                    playerVelYRef.current = 0
+                    groundY = zone.targetY
+                    climbCooldownUntilRef.current = Date.now() + 600
+                  }
+                  break
                 }
               }
             }
+          }
+
+          // Apply gravity / floor snap.
+          if (refs.focalPoint.y > groundY + 0.01) {
+            playerVelYRef.current -= GRAVITY * dt
+            refs.focalPoint.y += playerVelYRef.current * dt
+            if (refs.focalPoint.y <= groundY) {
+              // Landed. Fall damage based on impact vertical speed.
+              const vy = -playerVelYRef.current
+              if (
+                vy > FALL_SAFE_SPEED &&
+                gamePhaseRef.current === "playing" &&
+                Date.now() > spawnInvulnUntilRef.current
+              ) {
+                const t = Math.min(
+                  1,
+                  (vy - FALL_SAFE_SPEED) / (FALL_LETHAL_SPEED - FALL_SAFE_SPEED),
+                )
+                const dmg = Math.round(FALL_MAX_DAMAGE * t)
+                if (dmg > 0) {
+                  playerHpRef.current = Math.max(0, playerHpRef.current - dmg)
+                  setPlayerHp(playerHpRef.current)
+                  lastDamageTimeRef.current = Date.now()
+                  // Reduced shake (was 5 + t*8). Tones down the motion-
+                  // sickness spike on fall-damage landings.
+                  cameraShakeRef.current.intensity = 2.5 + t * 4
+                  setDamageFlash(true)
+                  SOUNDS.damage()
+                  setTimeout(() => setDamageFlash(false), 320)
+                  if (playerHpRef.current <= 0) {
+                    gamePhaseRef.current = "gameover"
+                    setGamePhase("gameover")
+                    deathsRef.current += 1
+                    setDeaths(deathsRef.current)
+                  }
+                }
+              }
+              refs.focalPoint.y = groundY
+              playerVelYRef.current = 0
+            }
+          } else {
+            // Snap to floor (handles walking onto a new floor at the same Y
+            // and the small auto step-up of low geometry).
             refs.focalPoint.y = groundY
             playerVelYRef.current = 0
           }
-        } else {
-          // Snap to floor (handles walking onto a new floor at the same Y
-          // and the small auto step-up of low geometry).
-          refs.focalPoint.y = groundY
-          playerVelYRef.current = 0
+          updateCamera()
         }
-        updateCamera()
 
         // Pulse the entry decal rings (door / ladder ground markers) so
         // they're spottable peripherally. Shared sine wave keeps the
@@ -4853,7 +5146,9 @@ export default function ThreeWorld({
         // Gated by the user preference (defaults off — common motion-sickness
         // trigger). When off, the camera stays locked to baseY.
         const baseY = refs.focalPoint.y + EYE_HEIGHT
-        if (walkBobOnRef.current && playerSpeed > 0.5) {
+        if (drivingRef.current) {
+          // Chase camera owns Y while driving — no head-bob.
+        } else if (walkBobOnRef.current && playerSpeed > 0.5) {
           walkBobRef.current += dt * (4 + playerSpeed * 0.6)
           const bobAmp = isAimingRef.current ? 0.012 : 0.03
           camera.position.y = baseY + Math.sin(walkBobRef.current * 2) * bobAmp
@@ -4883,7 +5178,7 @@ export default function ThreeWorld({
         // Camera shake (applied directly, not baked into camState).
         // Per-axis multipliers halved (0.008 → 0.004, 0.006 → 0.003) to
         // cut the motion-sickness load on damage / fall landings.
-        if (cameraShakeRef.current.intensity > 0) {
+        if (cameraShakeRef.current.intensity > 0 && !drivingRef.current) {
           const shk = cameraShakeRef.current.intensity
           const t = Date.now() * 0.05
           camera.rotation.y += Math.sin(t) * shk * 0.004
@@ -6993,6 +7288,36 @@ export default function ThreeWorld({
           </div>
         )}
 
+        {/* Vehicle board / exit prompt (desktop) */}
+        {(nearVehicle || inVehicle) &&
+          !isLoading &&
+          !error &&
+          !isMobile &&
+          gamePhase === "playing" && (
+            <div
+              style={{
+                position: "absolute",
+                bottom: inVehicle ? "12%" : "26%",
+                left: "50%",
+                transform: "translateX(-50%)",
+                zIndex: 25,
+                pointerEvents: "none",
+                fontFamily: "monospace",
+                fontSize: "1rem",
+                color: "#33ddff",
+                background: "rgba(0,0,0,0.78)",
+                border: "1px solid #33ddff",
+                padding: "0.45rem 1.1rem",
+                letterSpacing: "0.15em",
+                textShadow: "0 0 8px rgba(60,200,255,0.6)",
+                boxShadow: "0 0 14px rgba(60,200,255,0.3)",
+                borderRadius: "2px",
+              }}
+            >
+              {inVehicle ? "[E] 降りる" : "[E] 車に乗る"}
+            </div>
+          )}
+
         {/* Notification */}
         {notification && (
           <div
@@ -8574,6 +8899,43 @@ export default function ThreeWorld({
                 {climbAtTop ? "↓" : "↑"}
                 <br />
                 {climbAtTop ? "降りる" : "登る"}
+              </button>
+            )}
+
+            {/* Vehicle board / exit button — shown near a car or while driving.
+                Routes through vehicleActionRef, the same path the PC "E" key
+                feeds into for vehicles. Sits above the climb slot so the two
+                never overlap (they rarely co-occur anyway). */}
+            {(nearVehicle || inVehicle) && (
+              <button
+                type="button"
+                onPointerDown={(e) => {
+                  e.preventDefault()
+                  vehicleActionRef.current = true
+                }}
+                style={{
+                  position: "absolute",
+                  bottom: isLandscape ? "13rem" : "17.5rem",
+                  right: isLandscape ? "1rem" : "2rem",
+                  width: isLandscape ? "64px" : "72px",
+                  height: isLandscape ? "64px" : "72px",
+                  borderRadius: "50%",
+                  background: "rgba(60,200,255,0.22)",
+                  border: "3px solid #33ddff",
+                  boxShadow: "0 0 16px rgba(60,200,255,0.4)",
+                  color: "#bfefff",
+                  fontFamily: "monospace",
+                  fontSize: isLandscape ? "0.74rem" : "0.84rem",
+                  letterSpacing: "0.08em",
+                  fontWeight: "bold",
+                  textShadow: "0 0 10px rgba(60,200,255,0.7)",
+                  lineHeight: 1.15,
+                  touchAction: "none",
+                  userSelect: "none",
+                  zIndex: 32,
+                }}
+              >
+                {inVehicle ? "降りる" : "乗る"}
               </button>
             )}
           </>
