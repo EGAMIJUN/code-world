@@ -63,6 +63,10 @@ const RUNOVER_MIN_SPEED_CAR = 4 // m/s before a car does any damage
 const RUNOVER_MIN_SPEED_TANK = 1.5 // tanks crush even at a crawl
 const RUNOVER_CAR_DMG_PER_SPEED = 16 // car contact damage = speed × this
 const RUNOVER_TANK_DAMAGE = 9999 // tanks instakill on contact
+// Enemy-driven vehicles are tuned to be a destroyable threat (lower than the
+// player's own ride): explosives are the intended counter, bullets chip.
+const ENEMY_VEH_CAR_HP = 200
+const ENEMY_VEH_TANK_HP = 600
 // ── Vertical movement ──────────────────────────────────────────────────────────
 // Real gravity in m/s². Picked to feel snappy (a 4m drop = ~0.6s in air),
 // not a perfect-physics simulation. Tuned by feel under EYE_HEIGHT.
@@ -970,6 +974,9 @@ interface CombatEnemy {
   breathPhase: number
   microIdleSeed: number
   isCommander: boolean // for destroy mission
+  // True while this enemy is the AI driver of a vehicle — its normal on-foot
+  // AI is skipped (the vehicle update drives it) and its mesh is hidden.
+  aiDriving?: boolean
   // Bot fields (FFA/TDM): set only when this enemy is a bot player
   isBot?: boolean
   botName?: string
@@ -3258,6 +3265,12 @@ export default function ThreeWorld({
         // (undefined for cars — required-but-nullable to satisfy exactOptional.)
         turret: THREE.Object3D | undefined
         barrelPivot: THREE.Object3D | undefined
+        // Set when an AI enemy has commandeered this vehicle (it then hunts the
+        // player). The player can't board it until it's destroyed.
+        aiDriver: CombatEnemy | null
+        // Tank AI cannon cadence + ram-damage cooldown timestamps (ms).
+        aiNextCannon: number
+        aiNextRam: number
       }
       const vehicles: Vehicle[] = []
       let activeVehicle: Vehicle | null = null
@@ -3419,6 +3432,9 @@ export default function ThreeWorld({
           kind,
           turret,
           barrelPivot,
+          aiDriver: null,
+          aiNextCannon: 0,
+          aiNextRam: 0,
         })
       }
 
@@ -3439,7 +3455,7 @@ export default function ThreeWorld({
         let best: Vehicle | null = null
         let bestD = VEHICLE_ENTER_RADIUS
         for (const v of vehicles) {
-          if (v.dead) continue
+          if (v.dead || v.aiDriver) continue // occupied by an enemy → can't board
           const d = Math.hypot(v.x - focalPoint.x, v.z - focalPoint.z)
           if (d < bestD) {
             bestD = d
@@ -3571,6 +3587,177 @@ export default function ThreeWorld({
         scene.remove(v.group)
       }
 
+      // ── Enemy-driven vehicles ───────────────────────────────────────────────
+      // Apply damage to the player, routed through their own vehicle if they're
+      // riding one (the shield rule from PR1). Shared by enemy rams / shells.
+      function applyPlayerDamage(dmg: number, shake = 2) {
+        if (gamePhaseRef.current !== "playing" || Date.now() <= spawnInvulnUntilRef.current) return
+        if (drivingRef.current && activeVehicle) {
+          damageActiveVehicle(dmg, "bullet")
+          return
+        }
+        playerHpRef.current = Math.max(0, playerHpRef.current - dmg)
+        setPlayerHp(playerHpRef.current)
+        lastDamageTimeRef.current = Date.now()
+        cameraShakeRef.current.intensity = shake
+        setDamageFlash(true)
+        setTimeout(() => setDamageFlash(false), 300)
+        SOUNDS.damage()
+        if (playerHpRef.current <= 0) {
+          gamePhaseRef.current = "gameover"
+          setGamePhase("gameover")
+          deathsRef.current += 1
+          setDeaths(deathsRef.current)
+        }
+      }
+
+      // An enemy commandeers a free vehicle: spawn a hidden driver enemy bound
+      // to it and start hunting the player. Full HP on takeover.
+      function commandeerVehicle(v: Vehicle, type: EnemyType) {
+        const driver = makeEnemy(type, v.x, v.z)
+        driver.aiDriving = true
+        driver.mesh.visible = false
+        enemies.push(driver)
+        v.aiDriver = driver
+        v.hp = v.kind === "tank" ? ENEMY_VEH_TANK_HP : ENEMY_VEH_CAR_HP
+        setAliveEnemyCount(enemies.filter((e) => e.hp > 0).length)
+        v.aiNextCannon = Date.now() + 2200
+        v.aiNextRam = 0
+        SOUNDS.alert()
+        showNotification(v.kind === "tank" ? "⚠ 敵戦車が出撃！" : "⚠ 敵が車両を奪った！")
+      }
+
+      // Player damaged an enemy vehicle (bullets / claws reduced for tanks,
+      // explosives full). Destroying it kills the driver.
+      function damageEnemyVehicle(v: Vehicle, dmg: number, type: "bullet" | "explosive") {
+        if (v.dead || !v.aiDriver || dmg <= 0) return
+        const applied = v.kind === "tank" && type !== "explosive" ? dmg * TANK_ARMOR_BULLET : dmg
+        v.hp = Math.max(0, v.hp - applied)
+        if (v.hp <= 0) destroyEnemyVehicle(v)
+      }
+
+      function destroyEnemyVehicle(v: Vehicle) {
+        if (v.dead) return
+        v.dead = true
+        const burst = new THREE.Vector3(v.x, 1.2, v.z)
+        spawnExplosion(burst)
+        spawnExplosion(burst)
+        SOUNDS.damage()
+        lastNoiseRef.current = { x: v.x, z: v.z, expires: Date.now() + 4000 }
+        const driver = v.aiDriver
+        v.aiDriver = null
+        scene.remove(v.group)
+        // Kill the driver (counts for score / killfeed). Show the body for a
+        // beat at the wreck — applyEnemyKill plays its death anim.
+        if (driver && driver.hp > 0) {
+          driver.aiDriving = false
+          driver.mesh.visible = true
+          driver.mesh.position.set(v.x, 0, v.z)
+          driver.hp = 1
+          applyEnemyKill(driver, "vehicle")
+        }
+      }
+
+      // One enemy-driven vehicle's per-frame AI: pursue + ram, tanks also shell.
+      function updateEnemyVehicle(v: Vehicle, dt: number) {
+        if (v.dead || !v.aiDriver) return
+        const isTank = v.kind === "tank"
+        const MAXS = isTank ? VEHICLE_TANK_MAX_SPEED : VEHICLE_MAX_SPEED
+        const ACCEL = isTank ? VEHICLE_TANK_ACCEL : VEHICLE_ACCEL
+        const TURN = isTank ? VEHICLE_TANK_TURN : VEHICLE_TURN_RATE
+        const RADIUS = isTank ? VEHICLE_TANK_RADIUS : VEHICLE_RADIUS
+        const now = Date.now()
+
+        const tx = focalPoint.x - v.x
+        const tz = focalPoint.z - v.z
+        const dist = Math.max(0.001, Math.hypot(tx, tz))
+        // Forward = (-sin h, -cos h); steer heading so forward points at player.
+        const desired = Math.atan2(-tx, -tz)
+        let dh = desired - v.heading
+        while (dh > Math.PI) dh -= Math.PI * 2
+        while (dh < -Math.PI) dh += Math.PI * 2
+        const turnStep = TURN * dt
+        v.heading += Math.max(-turnStep, Math.min(turnStep, dh))
+
+        // Throttle hard when roughly aimed at the player; ease off when it has
+        // to turn a lot so it doesn't just circle.
+        const throttle = Math.abs(dh) < 0.8 ? 1 : 0.4
+        v.speed += throttle * ACCEL * dt
+        v.speed = Math.max(-2, Math.min(MAXS, v.speed))
+
+        const fx = -Math.sin(v.heading)
+        const fz = -Math.cos(v.heading)
+        const nx = v.x + fx * v.speed * dt
+        const nz = v.z + fz * v.speed * dt
+        let moved = false
+        if (!collidesWithWall(nx, v.z, RADIUS)) {
+          v.x = nx
+          moved = true
+        }
+        if (!collidesWithWall(v.x, nz, RADIUS)) {
+          v.z = nz
+          moved = true
+        }
+        if (!moved) {
+          v.speed *= 0.3
+          v.heading += turnStep * (dh >= 0 ? 1 : -1) // wriggle off the wall
+        }
+        v.group.position.set(v.x, 0, v.z)
+        v.group.rotation.y = v.heading
+        v.aiDriver.mesh.position.set(v.x, 0, v.z)
+
+        // Tank turret/barrel track the player.
+        if (isTank && v.turret && v.barrelPivot) {
+          let ty = desired - v.heading
+          while (ty > Math.PI) ty -= Math.PI * 2
+          while (ty < -Math.PI) ty += Math.PI * 2
+          const tb = 1 - Math.exp(-dt * 8)
+          v.turret.rotation.y += (ty - v.turret.rotation.y) * tb
+          v.barrelPivot.rotation.x += (0.05 - v.barrelPivot.rotation.x) * tb
+        }
+
+        // Ram the player (cooldown-gated so contact doesn't drain every frame).
+        const ramReach = RADIUS + PLAYER_RADIUS + 0.5
+        if (dist < ramReach && Math.abs(v.speed) > 1.0 && now > v.aiNextRam) {
+          v.aiNextRam = now + 700
+          applyPlayerDamage(isTank ? 40 : 28, 5)
+        }
+
+        // Tank shells the player from range (LOS-gated, on a cadence).
+        if (
+          isTank &&
+          dist > 6 &&
+          dist < 45 &&
+          now > v.aiNextCannon &&
+          !zombieLosBlocked(v.x, v.z, focalPoint.x, focalPoint.z)
+        ) {
+          v.aiNextCannon = now + 3200 + Math.random() * 1500
+          const aimX = focalPoint.x + playerVelRef.current.x * 0.4 - v.x
+          const aimZ = focalPoint.z + playerVelRef.current.z * 0.4 - v.z
+          const ad = Math.max(0.001, Math.hypot(aimX, aimZ))
+          const shell = new THREE.Mesh(
+            new THREE.SphereGeometry(0.22, 8, 6),
+            new THREE.MeshBasicMaterial({ color: 0xffaa44 }),
+          )
+          shell.position.set(v.x + (aimX / ad) * 3.0, 1.7, v.z + (aimZ / ad) * 3.0)
+          scene.add(shell)
+          bullets.push({
+            mesh: shell,
+            velocity: new THREE.Vector3(
+              (aimX / ad) * CANNON_SHELL_SPEED,
+              3.0,
+              (aimZ / ad) * CANNON_SHELL_SPEED,
+            ),
+            life: 2.6,
+            isEnemy: true,
+            damage: 0,
+            isGrenade: true,
+            grenadeRadius: CANNON_RADIUS,
+          })
+          SOUNDS.shotgun()
+        }
+      }
+
       function updateVehicle(dt: number) {
         const v = activeVehicle
         if (!v) return
@@ -3667,7 +3854,7 @@ export default function ThreeWorld({
             const reach2 = reach * reach
             const dmg = isTank ? RUNOVER_TANK_DAMAGE : Math.floor(sp * RUNOVER_CAR_DMG_PER_SPEED)
             for (const enemy of enemies) {
-              if (enemy.hp <= 0 || enemy.dyingTimer >= 0) continue
+              if (enemy.hp <= 0 || enemy.dyingTimer >= 0 || enemy.aiDriving) continue
               const ex = enemy.mesh.position.x - v.x
               const ez = enemy.mesh.position.z - v.z
               if (ex * ex + ez * ez > reach2) continue
@@ -4415,6 +4602,15 @@ export default function ThreeWorld({
       function clearEnemies() {
         for (const e of enemies) scene.remove(e.mesh)
         enemies.length = 0
+        // Release any commandeered vehicles back to free/boardable state so a
+        // wave reset doesn't leave a driverless car circling forever.
+        for (const v of vehicles) {
+          if (v.aiDriver && !v.dead) {
+            v.aiDriver = null
+            v.speed = 0
+            v.hp = v.maxHp
+          }
+        }
       }
       function clearGoalMarkers() {
         for (const m of goalMarkers) scene.remove(m.mesh)
@@ -5122,7 +5318,7 @@ export default function ThreeWorld({
         }
         // Player-thrown: AOE-damage every living enemy in range.
         for (const enemy of enemies) {
-          if (enemy.hp <= 0) continue
+          if (enemy.hp <= 0 || enemy.aiDriving) continue // drivers hit via their vehicle
           const dx = enemy.mesh.position.x - center.x
           const dz = enemy.mesh.position.z - center.z
           const d2 = dx * dx + dz * dz
@@ -5134,6 +5330,17 @@ export default function ThreeWorld({
             spawnExplosion(enemy.mesh.position.clone())
             applyEnemyKill(enemy, "grenade")
           }
+        }
+        // Explosives also hit enemy-driven vehicles (full damage — bypasses
+        // tank armor). Player grenades + the tank cannon are the intended counter.
+        for (const vv of vehicles) {
+          if (vv.dead || !vv.aiDriver) continue
+          const dx = vv.x - center.x
+          const dz = vv.z - center.z
+          const vd2 = dx * dx + dz * dz
+          if (vd2 >= radius * radius) continue
+          const vdist = Math.sqrt(vd2)
+          damageEnemyVehicle(vv, Math.max(40, Math.floor(160 * (1 - vdist / radius))), "explosive")
         }
       }
 
@@ -5162,7 +5369,7 @@ export default function ThreeWorld({
         // strike counts as a decapitating blow (instant kill).
         const headHeightAim = camState.pitch > 0.12
 
-        const aliveEnemies = enemies.filter((e) => e.hp > 0)
+        const aliveEnemies = enemies.filter((e) => e.hp > 0 && !e.aiDriving)
         let struck = false
         for (const e of aliveEnemies) {
           const dx = e.mesh.position.x - focalPoint.x
@@ -5323,7 +5530,8 @@ export default function ThreeWorld({
         // Center-ray hit detection (recursive through humanoid groups)
         pointer.set(0, 0)
         raycaster.setFromCamera(pointer, camera)
-        const aliveEnemies = enemies.filter((e) => e.hp > 0)
+        // Exclude hidden vehicle drivers — they're damaged via their vehicle.
+        const aliveEnemies = enemies.filter((e) => e.hp > 0 && !e.aiDriving)
         const allEnemyParts: THREE.Object3D[] = []
         for (const e of aliveEnemies) {
           e.mesh.traverse((child) => {
@@ -5343,6 +5551,37 @@ export default function ThreeWorld({
         } else if (nearestWall && enemyHits.length === 0) {
           // Pure miss into a wall — show an impact spark for feedback.
           spawnExplosion(nearestWall.point.clone(), true)
+        }
+
+        // Enemy-driven vehicles are shootable. If one is the closest thing in
+        // the crosshair (nearer than any wall / enemy), the shot chips it
+        // (tank armor reduces bullets) and is consumed.
+        {
+          const vehMeshes: THREE.Object3D[] = []
+          const vehMap = new Map<THREE.Object3D, Vehicle>()
+          for (const vv of vehicles) {
+            if (vv.dead || !vv.aiDriver) continue
+            vv.group.traverse((c) => {
+              if (c instanceof THREE.Mesh) {
+                vehMeshes.push(c)
+                vehMap.set(c, vv)
+              }
+            })
+          }
+          if (vehMeshes.length > 0) {
+            const vHit = raycaster.intersectObjects(vehMeshes, false)[0]
+            const blockedByWall = !!(nearestWall && vHit && nearestWall.distance < vHit.distance)
+            const blockedByEnemy = !!(enemyHits[0] && vHit && enemyHits[0].distance < vHit.distance)
+            if (vHit && !blockedByWall && !blockedByEnemy) {
+              const vv = vehMap.get(vHit.object)
+              if (vv) {
+                damageEnemyVehicle(vv, weapon.hitDamage, "bullet")
+                SOUNDS.hit()
+                spawnExplosion(vHit.point.clone(), true)
+                enemyHits = [] // consumed by the vehicle
+              }
+            }
+          }
         }
 
         // PvP hit: check remote players
@@ -5484,6 +5723,9 @@ export default function ThreeWorld({
       // 60Hz; running them every 4th frame is the cheapest perf win in
       // the loop.
       let frameCount = 0
+      // Enemy-vehicle spawn manager timers (ms). Armed lazily on first frame.
+      let aiVehicleArmAt = 0
+      let aiVehicleNextCheck = 0
 
       function animate() {
         animFrameRef.current = requestAnimationFrame(animate)
@@ -5635,6 +5877,29 @@ export default function ThreeWorld({
           }
         }
         if (drivingRef.current) updateVehicle(dt)
+
+        // ── Enemy-driven vehicles: spawn manager + per-frame AI ──────────────
+        // Only in Wave Defense / missions (FFA/TDM have no vehicles; Zombie has
+        // no driving enemies). A capped, occasional "special threat".
+        if (modeRef.current === "wave_defense") {
+          const nowAi = Date.now()
+          if (aiVehicleArmAt === 0) aiVehicleArmAt = nowAi + 18000 // arm after 18s
+          if (nowAi > aiVehicleArmAt && nowAi > aiVehicleNextCheck) {
+            aiVehicleNextCheck = nowAi + 3000
+            const activeDrivers = vehicles.filter((vv) => vv.aiDriver && !vv.dead).length
+            const cap = nowAi - aiVehicleArmAt > 60000 ? 2 : 1
+            if (activeDrivers < cap) {
+              const free = vehicles.find((vv) => !vv.dead && !vv.aiDriver && vv !== activeVehicle)
+              const hasFootEnemy = enemies.some((e) => e.hp > 0 && !e.aiDriving)
+              if (free && hasFootEnemy) {
+                commandeerVehicle(free, free.kind === "tank" ? "heavy" : "grunt")
+              }
+            }
+          }
+          for (const vv of vehicles) {
+            if (vv.aiDriver && !vv.dead) updateEnemyVehicle(vv, dt)
+          }
+        }
 
         // Input → desired movement direction. Joystick is filtered; WASD
         // contributes raw ±1 components clamped to unit length.
@@ -6063,6 +6328,10 @@ export default function ThreeWorld({
           const now = Date.now()
           const fp = refs.focalPoint
           for (const enemy of refs.enemies) {
+            // Skip enemies currently driving a vehicle — updateEnemyVehicle
+            // owns them (their mesh is hidden + parked at the vehicle). On
+            // death the vehicle clears aiDriving so the corpse anim runs here.
+            if (enemy.aiDriving) continue
             // Respawn dead enemies (with death animation)
             if (enemy.hp <= 0) {
               if (enemy.dyingTimer >= 0) {
@@ -6806,7 +7075,7 @@ export default function ThreeWorld({
           raycaster.setFromCamera(pointer, camera)
           const aimParts: THREE.Object3D[] = []
           for (const e of refs.enemies) {
-            if (e.hp <= 0) continue
+            if (e.hp <= 0 || e.aiDriving) continue
             e.mesh.traverse((child) => {
               if (child instanceof THREE.Mesh && child.userData.enemyId) aimParts.push(child)
             })
