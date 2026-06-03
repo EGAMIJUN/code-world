@@ -510,7 +510,7 @@ function findSafeSpawnNear(x: number, z: number, radius: number): { x: number; z
 }
 
 // ── Enemy type system ──────────────────────────────────────────────────────────
-type EnemyType = "grunt" | "sniper" | "heavy" | "zombie"
+type EnemyType = "grunt" | "sniper" | "heavy" | "zombie" | "terraformer"
 type EnemyState = "patrol" | "alert" | "attack" | "search"
 
 interface EnemyConfig {
@@ -610,6 +610,27 @@ const ENEMY_CONFIGS: Record<EnemyType, EnemyConfig> = {
     fovAngle: Math.PI * 2,
     score: 120,
     blockReward: 1,
+  },
+  // ── Terraformer (INVASION mode) ────────────────────────────────────────────
+  // A towering, armoured roach-humanoid. Brutal melee bruiser — no ranged, very
+  // high HP, fast, hits like a truck. Relentless (huge sight + 360° FOV).
+  terraformer: {
+    hp: 600,
+    speed: 6.0,
+    attackDamage: 34,
+    attackInterval: 950,
+    attackRange: 2.5,
+    fireRange: 0,
+    fireInterval: 999999,
+    fireDamage: 0,
+    color: 0x241f1b, // dark chitin
+    emissive: 0x140707,
+    bodyW: 0.85,
+    bodyH: 2.4,
+    sightRange: 220,
+    fovAngle: Math.PI * 2,
+    score: 700,
+    blockReward: 8,
   },
 }
 
@@ -1224,10 +1245,22 @@ const ZOMBIE_AI_TUNING: BotDifficultyTuning = {
   noiseRange: 0,
 }
 
+// Terraformers (INVASION) share the zombie's relentless melee-chaser profile
+// (bee-line + smart wall steering, no ranged/flank). Their speed/HP come from
+// the per-instance config, not the tuning.
+const TERRAFORMER_AI_TUNING: BotDifficultyTuning = ZOMBIE_AI_TUNING
+
+// Melee chasers (zombies + terraformers) share the dedicated pursuit AI:
+// wall-steering, encircle, lunge, last-seen search. Other types use the
+// flank/cover soldier AI.
+function isMeleeChaser(type: EnemyType): boolean {
+  return type === "zombie" || type === "terraformer"
+}
+
 const BOT_NAMES = ["Bot_α", "Bot_β", "Bot_γ", "Bot_δ", "Bot_ε", "Bot_ζ", "Bot_η", "Bot_θ", "Bot_ι"]
 
 export interface ThreeWorldProps {
-  mode?: "wave_defense" | "ffa" | "tdm" | "zombie"
+  mode?: "wave_defense" | "ffa" | "tdm" | "zombie" | "invasion"
   mapId?: "urban" | "desert" | "snow"
   botCount?: number
   botDifficulty?: BotDifficulty
@@ -1331,6 +1364,10 @@ export default function ThreeWorld({
   // Zombie mode wave controller state.
   const zombieWaveRef = useRef(0)
   const zombieActiveRef = useRef(false)
+  // Invasion mode controller state (rocket strike → terraformer waves).
+  const invasionWaveRef = useRef(0)
+  const invasionActiveRef = useRef(false)
+  const invasionNextStrikeRef = useRef(0) // ms timestamp for the next rocket
 
   // Phase 3: extended stat refs
   const maxKillstreakRef = useRef(0)
@@ -2757,6 +2794,177 @@ export default function ThreeWorld({
         roofProp: "vent",
       })
 
+      // ── Landmark observation tower (Tokyo-Tower-style lattice) ──────────────
+      // A tall splayed lattice tower with an observation deck you ride an
+      // elevator up to (reuses the floor + climb-zone lift). Legs are decorative
+      // (no collision) so you can walk under it to the central elevator; the
+      // deck + railings are solid up top.
+      function makeLandmarkTower(cx: number, cz: number) {
+        const deckY = 22
+        const towerTopY = deckY + 14
+        const legMat = new THREE.MeshStandardMaterial({
+          color: 0xc0392b,
+          roughness: 0.5,
+          metalness: 0.55,
+        })
+        const braceMat = new THREE.MeshStandardMaterial({
+          color: 0xe8e8e8,
+          roughness: 0.6,
+          metalness: 0.3,
+        })
+        const steelMat = new THREE.MeshStandardMaterial({
+          color: 0x9aa0a6,
+          roughness: 0.45,
+          metalness: 0.6,
+        })
+        // Strut between two world points (used for legs + braces).
+        const strut = (
+          ax: number,
+          ay: number,
+          az: number,
+          bx: number,
+          by: number,
+          bz: number,
+          r: number,
+          mat: THREE.Material,
+        ) => {
+          const a = new THREE.Vector3(ax, ay, az)
+          const b = new THREE.Vector3(bx, by, bz)
+          const len = a.distanceTo(b)
+          const m = new THREE.Mesh(new THREE.CylinderGeometry(r, r, len, 6), mat)
+          m.position.copy(a).add(b).multiplyScalar(0.5)
+          m.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), b.clone().sub(a).normalize())
+          m.castShadow = true
+          scene.add(m)
+        }
+        const baseHalf = 7
+        const waistHalf = 2.2
+        const corners: [number, number][] = [
+          [-1, -1],
+          [1, -1],
+          [1, 1],
+          [-1, 1],
+        ]
+        // Position of leg `c` at height fraction t (0=base, 1=deck).
+        const legPt = (c: [number, number], t: number): [number, number, number] => {
+          const half = baseHalf + (waistHalf - baseHalf) * t
+          return [cx + c[0] * half, t * deckY, cz + c[1] * half]
+        }
+        // Four splayed legs.
+        for (const c of corners) {
+          const [ax, ay, az] = legPt(c, 0)
+          const [bx, by, bz] = legPt(c, 1)
+          strut(ax, ay, az, bx, by, bz, 0.32, legMat)
+        }
+        // Lattice: ring + X braces at several levels.
+        for (const t of [0.22, 0.44, 0.66, 0.88]) {
+          const pts = corners.map((c) => legPt(c, t))
+          for (let i = 0; i < 4; i++) {
+            const p = pts[i]
+            const q = pts[(i + 1) % 4]
+            if (!p || !q) continue
+            strut(p[0], p[1], p[2], q[0], q[1], q[2], 0.12, braceMat) // ring
+            // diagonal up to the next corner's higher point (cheap X look)
+            const qHi = legPt(corners[(i + 1) % 4] as [number, number], t + 0.16)
+            strut(p[0], p[1], p[2], qHi[0], qHi[1], qHi[2], 0.08, braceMat)
+          }
+        }
+        // Observation deck slab.
+        const deckHalf = 4
+        const deck = new THREE.Mesh(
+          new THREE.BoxGeometry(deckHalf * 2, 0.4, deckHalf * 2),
+          steelMat,
+        )
+        deck.position.set(cx, deckY, cz)
+        deck.castShadow = true
+        deck.receiveShadow = true
+        scene.add(deck)
+        floors.push({
+          x1: cx - deckHalf,
+          z1: cz - deckHalf,
+          x2: cx + deckHalf,
+          z2: cz + deckHalf,
+          y: deckY + 0.2,
+        })
+        // Deck railings (solid up top so you don't walk off).
+        const railY = deckY + 0.2 + 0.55
+        addWallSlab(cx, railY, cz - deckHalf, deckHalf * 2, 1.1, 0.15, steelMat)
+        addWallSlab(cx, railY, cz + deckHalf, deckHalf * 2, 1.1, 0.15, steelMat)
+        addWallSlab(cx - deckHalf, railY, cz, 0.15, 1.1, deckHalf * 2, steelMat)
+        addWallSlab(cx + deckHalf, railY, cz, 0.15, 1.1, deckHalf * 2, steelMat)
+        // Upper tower above the deck + antenna spire.
+        for (const c of corners) {
+          strut(
+            cx + c[0] * waistHalf,
+            deckY,
+            cz + c[1] * waistHalf,
+            cx + c[0] * 0.6,
+            towerTopY,
+            cz + c[1] * 0.6,
+            0.16,
+            legMat,
+          )
+        }
+        const antennaLen = 11
+        const antenna = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.18, 0.32, antennaLen, 8),
+          steelMat,
+        )
+        antenna.position.set(cx, towerTopY + antennaLen / 2, cz)
+        antenna.castShadow = true
+        scene.add(antenna)
+        const beacon = new THREE.Mesh(
+          new THREE.SphereGeometry(0.4, 10, 8),
+          new THREE.MeshBasicMaterial({ color: 0xff3322 }),
+        )
+        beacon.position.set(cx, towerTopY + antennaLen, cz)
+        scene.add(beacon)
+        // Elevator shaft (4 thin posts) + a car at the base for flavour.
+        for (const c of corners) {
+          strut(
+            cx + c[0] * 0.8,
+            0,
+            cz + c[1] * 0.8,
+            cx + c[0] * 0.8,
+            deckY,
+            cz + c[1] * 0.8,
+            0.07,
+            steelMat,
+          )
+        }
+        const car = new THREE.Mesh(
+          new THREE.BoxGeometry(1.6, 2.2, 1.6),
+          new THREE.MeshStandardMaterial({
+            color: 0x2a3038,
+            roughness: 0.4,
+            metalness: 0.6,
+            transparent: true,
+            opacity: 0.85,
+          }),
+        )
+        car.position.set(cx, 1.1, cz)
+        scene.add(car)
+        // Elevator lift zone (central; ground↔deck, disambiguated by altitude).
+        climbZones.push({
+          x1: cx - 1.3,
+          x2: cx + 1.3,
+          z1: cz - 1.3,
+          z2: cz + 1.3,
+          targetY: deckY + 0.2,
+          downY: 0,
+          topX: cx,
+          topZ: cz,
+          baseX: cx,
+          baseZ: cz,
+        })
+        entryDecals.push(makeEntryDecal(cx, cz, 0x33ddff))
+        const sign = makeEntrySign("[E] ELEVATOR", "#33ddff")
+        sign.position.set(cx, 2.4, cz)
+        scene.add(sign)
+        entries.push({ x: cx, z: cz, kind: "ladder" })
+      }
+      makeLandmarkTower(84, 44)
+
       // ── Street props ───────────────────────────────────────────────────────
       // Drum barrels (cylinders) clustered at key choke points.
       const drumMat = new THREE.MeshStandardMaterial({
@@ -3931,9 +4139,15 @@ export default function ThreeWorld({
       function makeEnemy(type: EnemyType, x: number, z: number, isCommander = false): CombatEnemy {
         const cfg = ENEMY_CONFIGS[type]
         const isZombie = type === "zombie"
-        // Per-zombie size individuality (other archetypes are fixed-scale).
-        const zJit = isZombie ? 0.86 + Math.random() * 0.3 : 1
-        const scale = (type === "heavy" ? 1.25 : type === "sniper" ? 1.03 : 1.0) * zJit
+        const isTerraformer = type === "terraformer"
+        // Per-individual size jitter (zombies + terraformers vary; soldiers fixed).
+        const zJit = isZombie
+          ? 0.86 + Math.random() * 0.3
+          : isTerraformer
+            ? 0.95 + Math.random() * 0.22
+            : 1
+        const scale =
+          (type === "heavy" ? 1.25 : type === "sniper" ? 1.03 : isTerraformer ? 1.4 : 1.0) * zJit
         const bodyColor = isCommander ? 0xff6600 : cfg.color
         const eid = enemyIdCounter++
         const enemyIdStr = `enemy_${eid}`
@@ -3951,7 +4165,7 @@ export default function ThreeWorld({
         // across sickly green↔grey with varied darkness; rags/skin rot toward
         // muddy tones. Non-zombies keep their exact archetype colours.
         const bodyCol = new THREE.Color(bodyColor)
-        const skinCol = new THREE.Color(isZombie ? 0x9fae9a : 0xc8a878)
+        const skinCol = new THREE.Color(isTerraformer ? 0x2a2420 : isZombie ? 0x9fae9a : 0xc8a878)
         if (isZombie && !isCommander) {
           bodyCol.offsetHSL(
             (Math.random() - 0.4) * 0.12,
@@ -3970,18 +4184,23 @@ export default function ThreeWorld({
         // Zombies have undead, ashen flesh; everyone else is normal skin.
         const skinMat = new THREE.MeshLambertMaterial({
           color: skinCol,
-          emissive: isZombie ? 0x202a22 : 0x000000,
+          emissive: isTerraformer ? 0x120606 : isZombie ? 0x202a22 : 0x000000,
         })
-        const gloveMat = new THREE.MeshLambertMaterial({ color: 0x141414 })
+        const gloveMat = new THREE.MeshLambertMaterial({
+          color: isTerraformer ? 0x14100e : 0x141414,
+        })
         // Eye glow varies by archetype (sniper green NV, grunt blue, heavy red,
-        // zombie a hot menacing red).
-        const eyeHex = isZombie
-          ? 0xff1a1a
-          : type === "heavy"
-            ? 0xff3333
-            : type === "sniper"
-              ? 0x55ff99
-              : 0x88ddff
+        // zombie + terraformer a hot menacing red).
+        const eyeHex =
+          isZombie || isTerraformer
+            ? isTerraformer
+              ? 0xff2a14
+              : 0xff1a1a
+            : type === "heavy"
+              ? 0xff3333
+              : type === "sniper"
+                ? 0x55ff99
+                : 0x88ddff
         const eyeMat = new THREE.MeshBasicMaterial({ color: eyeHex })
 
         const lodDetails: THREE.Object3D[] = []
@@ -4079,6 +4298,27 @@ export default function ThreeWorld({
           blotch(0.1, 0.44, 0.13, 0.09)
           blotch(-0.12, 0.24, 0.09, 0.14)
         }
+        // Terraformer carapace: glossy back wing-cases + shoulder spikes.
+        if (isTerraformer) {
+          const carMat = new THREE.MeshLambertMaterial({ color: 0x1d1916, emissive: 0x0b0405 })
+          for (const s of [-1, 1]) {
+            const wing = new THREE.Mesh(box(0.26, 0.52, 0.05), carMat)
+            wing.position.set(s * 0.13 * scale, 0.4 * scale, (torsoD / 2 + 0.04) * scale)
+            wing.rotation.set(0.16, s * 0.2, s * 0.1)
+            wing.castShadow = true
+            torso.add(wing)
+          }
+          for (const s of [-1, 1]) {
+            const spike = new THREE.Mesh(
+              new THREE.ConeGeometry(0.085 * scale, 0.32 * scale, 5),
+              carMat,
+            )
+            spike.position.set(s * 0.28 * scale, 0.6 * scale, 0)
+            spike.rotation.z = s * 0.5
+            torso.add(spike)
+            lodDetails.push(spike)
+          }
+        }
 
         // ── Neck ─────────────────────────────────────────────────────────────
         const neck = new THREE.Mesh(cyl(0.06, 0.072, 0.13), skinMat)
@@ -4167,9 +4407,49 @@ export default function ThreeWorld({
           lodDetails.push(gash)
         }
 
+        // ── Terraformer roach head ───────────────────────────────────────────
+        // Flatter elongated chitin skull, jutting mandibles, swept antennae,
+        // wide compound red eyes. Reads as a humanoid roach bearing down.
+        if (isTerraformer) {
+          head.remove(mouth)
+          const tmIdx = lodDetails.indexOf(mouth)
+          if (tmIdx >= 0) lodDetails.splice(tmIdx, 1)
+          skull.scale.set(1.05, 0.82, 1.4)
+          const chitinMat = new THREE.MeshLambertMaterial({ color: 0x1d1916, emissive: 0x0b0405 })
+          jaw.visible = false
+          // Mandibles — two angled jaws jutting forward-down.
+          for (const s of [-1, 1]) {
+            const mand = new THREE.Mesh(box(0.045, 0.14, 0.18), chitinMat)
+            mand.position.set(s * 0.05 * scale, -0.11 * scale, -0.17 * scale)
+            mand.rotation.z = s * 0.32
+            mand.rotation.x = 0.34
+            head.add(mand)
+            lodDetails.push(mand)
+          }
+          // Antennae sweeping back over the carapace.
+          for (const s of [-1, 1]) {
+            const ant = new THREE.Mesh(
+              new THREE.CylinderGeometry(0.013 * scale, 0.005 * scale, 0.55 * scale, 5),
+              chitinMat,
+            )
+            ant.position.set(s * 0.06 * scale, 0.18 * scale, 0.02 * scale)
+            ant.rotation.set(1.0, 0, s * 0.28)
+            head.add(ant)
+            lodDetails.push(ant)
+          }
+          // Big wide compound eyes (hot red), set on the sides of the head.
+          const cEyeMat = new THREE.MeshBasicMaterial({ color: 0xff2a14 })
+          for (const eye of [leftEye, rightEye]) {
+            const side = Math.sign(eye.position.x) || 1
+            eye.geometry = sph(0.052, 8, 6)
+            eye.material = cEyeMat
+            eye.position.set(side * 0.09 * scale, 0.035 * scale, -0.13 * scale)
+          }
+        }
+
         // ── Helmet / Visor (per archetype) ───────────────────────────────────
-        // Zombies are bare-headed (no helmet/visor) — just the exposed skull.
-        if (!isZombie) {
+        // Zombies + terraformers are bare-headed — no helmet/visor.
+        if (!isZombie && !isTerraformer) {
           const helmetColor = type === "grunt" ? 0x3a4230 : type === "sniper" ? 0x4a5535 : 0x101010
           const helmetMat = new THREE.MeshLambertMaterial({ color: helmetColor })
           if (type === "heavy") {
@@ -4261,8 +4541,8 @@ export default function ThreeWorld({
         const rightArm = buildArm(1)
 
         // ── Rifle (parented to right elbow so it tracks aim) ─────────────────
-        // Zombies are unarmed (素手) — they get no rifle at all.
-        if (!isZombie) {
+        // Zombies + terraformers are unarmed (素手) — no rifle.
+        if (!isZombie && !isTerraformer) {
           const rifleMat = new THREE.MeshLambertMaterial({
             color: type === "sniper" ? 0x1a1812 : 0x2a2a2a,
           })
@@ -4976,6 +5256,158 @@ export default function ThreeWorld({
         SOUNDS.zombieGroan()
       }
 
+      // ── Invasion mode: rocket strikes + terraformer waves ──────────────────
+      interface RocketStrike {
+        group: THREE.Group
+        x: number
+        y: number
+        z: number
+        vx: number
+        vy: number
+        vz: number
+        tx: number
+        tz: number
+        waveNum: number
+        trailT: number
+      }
+      const rocketStrikes: RocketStrike[] = []
+
+      function makeRocket(): THREE.Group {
+        const g = new THREE.Group()
+        const bodyMat = new THREE.MeshStandardMaterial({
+          color: 0xcfd4da,
+          roughness: 0.4,
+          metalness: 0.6,
+        })
+        const noseMat = new THREE.MeshStandardMaterial({ color: 0xcc3322, roughness: 0.5 })
+        const finMat = new THREE.MeshStandardMaterial({ color: 0x99221a, roughness: 0.6 })
+        const body = new THREE.Mesh(new THREE.CylinderGeometry(0.6, 0.6, 4.5, 12), bodyMat)
+        body.castShadow = true
+        g.add(body)
+        const nose = new THREE.Mesh(new THREE.ConeGeometry(0.6, 1.6, 12), noseMat)
+        nose.position.y = 3.05
+        g.add(nose)
+        for (let i = 0; i < 4; i++) {
+          const a = (i * Math.PI) / 2
+          const fin = new THREE.Mesh(new THREE.BoxGeometry(0.12, 1.2, 0.9), finMat)
+          fin.position.set(Math.cos(a) * 0.6, -1.9, Math.sin(a) * 0.6)
+          fin.rotation.y = -a
+          g.add(fin)
+        }
+        const flame = new THREE.Mesh(
+          new THREE.ConeGeometry(0.5, 1.8, 10),
+          new THREE.MeshBasicMaterial({ color: 0xffaa33 }),
+        )
+        flame.position.y = -3.3
+        flame.rotation.x = Math.PI
+        g.add(flame)
+        return g
+      }
+
+      // Launch an incoming rocket aimed at (cx,cz); it arcs in from a high
+      // diagonal, trails fire, and on impact detonates + spawns a terraformer
+      // wave around the crater.
+      function triggerRocketStrike(cx: number, cz: number, waveNum: number) {
+        const g = makeRocket()
+        const sx = Math.max(4, Math.min(MAP_SIZE - 4, cx - 28))
+        const sz = Math.max(4, Math.min(MAP_SIZE - 4, cz - 28))
+        const sy = 130
+        const dur = 2.6
+        const vx = (cx - sx) / dur
+        const vy = (0.5 - sy) / dur
+        const vz = (cz - sz) / dur
+        g.position.set(sx, sy, sz)
+        // Point the nose (+y) along the travel vector so it dives in nose-first.
+        g.quaternion.setFromUnitVectors(
+          new THREE.Vector3(0, 1, 0),
+          new THREE.Vector3(vx, vy, vz).normalize(),
+        )
+        scene.add(g)
+        rocketStrikes.push({
+          group: g,
+          x: sx,
+          y: sy,
+          z: sz,
+          vx,
+          vy,
+          vz,
+          tx: cx,
+          tz: cz,
+          waveNum,
+          trailT: 0,
+        })
+        SOUNDS.alert()
+        showNotification("⚠ ロケット接近——!")
+      }
+
+      function spawnTerraformerWave(waveNum: number, cx: number, cz: number) {
+        const count = 3 + (waveNum - 1) * 2
+        const chaseSpeed = ENEMY_CONFIGS.terraformer.speed + (waveNum - 1) * 0.35
+        for (let i = 0; i < count; i++) {
+          const a = (i / count) * Math.PI * 2 + Math.random() * 0.5
+          const rad = 3 + Math.random() * 4
+          const sx = Math.max(3, Math.min(MAP_SIZE - 3, cx + Math.cos(a) * rad))
+          const sz = Math.max(3, Math.min(MAP_SIZE - 3, cz + Math.sin(a) * rad))
+          const safe = findSafeSpawnNear(sx, sz, ENEMY_RADIUS)
+          const tf = makeEnemy("terraformer", safe.x, safe.z, false)
+          tf.config = { ...tf.config, speed: chaseSpeed }
+          tf.aiTuning = TERRAFORMER_AI_TUNING
+          tf.state = "alert"
+          tf.lastSeenPlayer = { x: focalPoint.x, z: focalPoint.z }
+          enemies.push(tf)
+        }
+        setAliveEnemyCount(enemies.filter((e) => e.hp > 0).length)
+        setEnemyStatus(
+          enemies.map((e) => ({
+            id: e.id,
+            hp: e.hp,
+            maxHp: e.maxHp,
+            type: e.type,
+            alive: e.hp > 0,
+          })),
+        )
+      }
+
+      function updateRocketStrikes(dt: number) {
+        for (let i = rocketStrikes.length - 1; i >= 0; i--) {
+          const r = rocketStrikes[i]
+          if (!r) continue
+          r.x += r.vx * dt
+          r.y += r.vy * dt
+          r.z += r.vz * dt
+          r.group.position.set(r.x, r.y, r.z)
+          r.trailT += dt
+          if (r.trailT > 0.045) {
+            r.trailT = 0
+            spawnExplosion(new THREE.Vector3(r.x, r.y, r.z), true)
+          }
+          if (r.y <= 0.6) {
+            // Impact: blast, crater, screen-shake, and the horde erupts.
+            const c = new THREE.Vector3(r.tx, 1.0, r.tz)
+            for (let k = 0; k < 6; k++) spawnExplosion(c)
+            cameraShakeRef.current.intensity = 12
+            SOUNDS.shotgun()
+            lastNoiseRef.current = { x: r.tx, z: r.tz, expires: Date.now() + 6000 }
+            const crater = new THREE.Mesh(
+              new THREE.CircleGeometry(4.2, 22),
+              new THREE.MeshBasicMaterial({
+                color: 0x130a06,
+                transparent: true,
+                opacity: 0.85,
+                depthWrite: false,
+              }),
+            )
+            crater.rotation.x = -Math.PI / 2
+            crater.position.set(r.tx, 0.03, r.tz)
+            scene.add(crater)
+            scene.remove(r.group)
+            rocketStrikes.splice(i, 1)
+            showNotification("☄ 着弾！テラフォーマーズ襲来")
+            spawnTerraformerWave(r.waveNum, r.tx, r.tz)
+          }
+        }
+      }
+
       // Auto-spawn bots for FFA/TDM modes (wave_defense uses mission select).
       if ((modeRef.current === "ffa" || modeRef.current === "tdm") && botCount > 0) {
         spawnBots(botCount, botDifficulty, modeRef.current)
@@ -4996,6 +5428,20 @@ export default function ThreeWorld({
           zombieActiveRef.current = true
         }, 3000)
         showNotification("ZOMBIE MODE — 生き延びろ")
+      }
+
+      // Invasion mode: a calm opening, then the first rocket falls ~15s in and
+      // terraformer waves begin. Waves escalate endlessly with a lull between.
+      if (modeRef.current === "invasion") {
+        invasionWaveRef.current = 0
+        invasionActiveRef.current = false
+        invasionNextStrikeRef.current = Date.now() + 15000
+        setCurrentWave(0)
+        setWaveMessage("INVASION — 静かだ…今のうちに備えろ")
+        setTimeout(() => {
+          if (gamePhaseRef.current === "playing") setWaveMessage(null)
+        }, 3500)
+        showNotification("INVASION MODE — 空を警戒せよ")
       }
 
       const bullets: Bullet[] = []
@@ -5201,15 +5647,17 @@ export default function ThreeWorld({
         }
         const tag = hitEnemy.isBot
           ? `${usernameRef.current} ▶ ${hitEnemy.botName}`
-          : hitEnemy.type === "heavy"
-            ? "HEAVY ELIMINATED"
-            : hitEnemy.type === "sniper"
-              ? "SNIPER ELIMINATED"
-              : hitEnemy.type === "zombie"
-                ? "ZOMBIE DOWN"
-                : hitEnemy.isCommander
-                  ? "COMMANDER ELIMINATED"
-                  : "GRUNT ELIMINATED"
+          : hitEnemy.type === "terraformer"
+            ? "TERRAFORMER SLAIN"
+            : hitEnemy.type === "heavy"
+              ? "HEAVY ELIMINATED"
+              : hitEnemy.type === "sniper"
+                ? "SNIPER ELIMINATED"
+                : hitEnemy.type === "zombie"
+                  ? "ZOMBIE DOWN"
+                  : hitEnemy.isCommander
+                    ? "COMMANDER ELIMINATED"
+                    : "GRUNT ELIMINATED"
         showNotification(`${tag} +${hitEnemy.config.score}pt`)
         // Kill feed
         const feedColor = hitEnemy.isBot
@@ -5218,13 +5666,15 @@ export default function ThreeWorld({
             : hitEnemy.botTeam === "blue"
               ? "#66aaff"
               : "#ffd55a"
-          : hitEnemy.type === "heavy"
-            ? "#cc44ff"
-            : hitEnemy.type === "sniper"
-              ? "#88cc44"
-              : hitEnemy.type === "zombie"
-                ? "#88dd66"
-                : "#ff5555"
+          : hitEnemy.type === "terraformer"
+            ? "#ff7733"
+            : hitEnemy.type === "heavy"
+              ? "#cc44ff"
+              : hitEnemy.type === "sniper"
+                ? "#88cc44"
+                : hitEnemy.type === "zombie"
+                  ? "#88dd66"
+                  : "#ff5555"
         const feedEntry = { id: Date.now(), text: tag, color: feedColor }
         killFeedRef.current = [...killFeedRef.current, feedEntry].slice(-6)
         setKillFeed([...killFeedRef.current])
@@ -6542,15 +6992,15 @@ export default function ThreeWorld({
                 }
               }
             } else if (enemy.state === "alert") {
-              // Zombies manage their own last-seen tracking (LOS-gated) inside
-              // moveZombieAlert; everyone else remembers the live position.
-              if (enemy.type !== "zombie") enemy.lastSeenPlayer = { x: fp.x, z: fp.z }
+              // Melee chasers manage their own last-seen tracking (LOS-gated)
+              // inside moveZombieAlert; everyone else remembers the live position.
+              if (!isMeleeChaser(enemy.type)) enemy.lastSeenPlayer = { x: fp.x, z: fp.z }
               if (
                 distToPlayer <= enemy.config.attackRange &&
                 Math.abs(enemy.mesh.position.y - fp.y) < 2.5
               ) {
                 enemy.state = "attack"
-              } else if (enemy.type === "zombie") {
+              } else if (isMeleeChaser(enemy.type)) {
                 moveZombieAlert(enemy, ex, ez, toPx, toPz, distToPlayer, dt, now)
               } else {
                 // Flank offset: aim toward a point perpendicular to the
@@ -6769,7 +7219,7 @@ export default function ThreeWorld({
                   damage: enemy.config.fireDamage,
                 })
               }
-            } else if (enemy.state === "search" && enemy.type === "zombie") {
+            } else if (enemy.state === "search" && isMeleeChaser(enemy.type)) {
               // Zombie search: shamble around the last-known spot hunting for
               // prey. Re-locks the instant the player reappears, and never
               // truly gives up — it loops back to the hunt when the timer ends.
@@ -6936,6 +7386,20 @@ export default function ThreeWorld({
               }
             }
 
+            // Terraformer charge: hulking forward-lean, big raised claws ready
+            // to swipe, powerful arm pump synced to the stride. Reads as a
+            // bearing-down monster rather than a shambling corpse.
+            if (enemy.type === "terraformer") {
+              const sw = Math.sin(t) * 0.5
+              tgtTorsoPitchX = 0.3 + Math.sin(now * 0.007 + enemy.microIdleSeed) * 0.05
+              tgtLeftShoulder = -1.7 + sw
+              tgtRightShoulder = -1.7 - sw
+              tgtLeftElbow = -1.1 - Math.max(0, sw) * 0.4
+              tgtRightElbow = -1.1 - Math.max(0, -sw) * 0.4
+              tgtLeftHip = -sw * 0.6
+              tgtRightHip = sw * 0.6
+            }
+
             // Melee swing: when an enemy has just landed a close-range hit, whip
             // the right arm down (knife-style) over the ~300ms window. Applied
             // after the per-state pose so it reads on grunts, heavies, zombies.
@@ -6983,8 +7447,8 @@ export default function ThreeWorld({
               enemy.blinkTimer -= dt
               if (enemy.blinkTimer <= 0) enemy.blinkActive = 0.12
             }
-            // Zombies never blink — a fixed dead stare is creepier.
-            const tgtEyeOpen = enemy.type === "zombie" ? 1 : enemy.blinkActive > 0 ? 0.08 : 1
+            // Zombies + terraformers never blink — a fixed dead stare.
+            const tgtEyeOpen = isMeleeChaser(enemy.type) ? 1 : enemy.blinkActive > 0 ? 0.08 : 1
 
             // Frame-independent exp interpolation toward the target pose.
             const blend = 1 - Math.exp(-dt * 12)
@@ -7167,6 +7631,42 @@ export default function ThreeWorld({
             missionCompleteRef.current = true
             setMissionComplete(true)
             SOUNDS.clear()
+          }
+        }
+
+        // ── Invasion mode control: rocket strikes + terraformer waves ──────
+        if (modeRef.current === "invasion" && gamePhaseRef.current === "playing") {
+          updateRocketStrikes(dt)
+          const waveActive =
+            rocketStrikes.length > 0 ||
+            refs.enemies.some((e) => e.type === "terraformer" && (e.hp > 0 || e.dyingTimer >= 0))
+          if (waveActive) {
+            invasionActiveRef.current = true
+          } else {
+            if (invasionActiveRef.current) {
+              // Wave just cleared → breathe, then the next rocket comes.
+              invasionActiveRef.current = false
+              invasionNextStrikeRef.current = Date.now() + 7000
+            }
+            if (Date.now() > invasionNextStrikeRef.current) {
+              const next = invasionWaveRef.current + 1
+              invasionWaveRef.current = next
+              setCurrentWave(next)
+              setWaveMessage(`INVASION WAVE ${next}`)
+              setTimeout(() => {
+                if (gamePhaseRef.current === "playing") setWaveMessage(null)
+              }, 2500)
+              const tx = Math.max(
+                6,
+                Math.min(MAP_SIZE - 6, refs.focalPoint.x + (Math.random() - 0.5) * 24),
+              )
+              const tz = Math.max(
+                6,
+                Math.min(MAP_SIZE - 6, refs.focalPoint.z + (Math.random() - 0.5) * 24),
+              )
+              triggerRocketStrike(tx, tz, next)
+              invasionNextStrikeRef.current = Number.MAX_SAFE_INTEGER // until cleared
+            }
           }
         }
 
@@ -8957,9 +9457,11 @@ export default function ThreeWorld({
               >
                 {mode === "zombie"
                   ? "ZOMBIES"
-                  : mode === "wave_defense"
-                    ? "ENEMIES REMAINING"
-                    : "BOTS ALIVE"}
+                  : mode === "invasion"
+                    ? "TERRAFORMERS"
+                    : mode === "wave_defense"
+                      ? "ENEMIES REMAINING"
+                      : "BOTS ALIVE"}
               </div>
               <div
                 style={{ color: "#ff5555", fontSize: "1.4rem", fontWeight: "bold", lineHeight: 1 }}
@@ -9298,7 +9800,7 @@ export default function ThreeWorld({
                   letterSpacing: "0.15em",
                 }}
               >
-                {mode === "zombie"
+                {mode === "zombie" || mode === "invasion"
                   ? `WAVE ${currentWave}`
                   : `WAVE ${currentWave} / ${WAVE_DEFS.length}`}
               </div>

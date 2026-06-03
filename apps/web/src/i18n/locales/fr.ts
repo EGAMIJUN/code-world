@@ -65,6 +65,9 @@ export const fr: typeof ja = {
     ffaDesc: "Chacun pour soi. Survivez.",
     tdmDesc: "Rouge vs Bleu. Maximisez les kills d'équipe.",
     zombieDesc: "Survivez à des vagues infinies de zombies rapides et désarmés.",
+    invasion: "INVASION",
+    invasionDesc:
+      "Une fusée s'écrase du ciel et les Terraformers déferlent. Survis à la horde implacable.",
     selectMap: "CARTE",
     urban: "URBAIN",
     desert: "DÉSERT",
