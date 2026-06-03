@@ -38,6 +38,10 @@ const VEHICLE_TURN_RATE = 1.9 // rad/s steering at speed
 const VEHICLE_ENTER_RADIUS = 3.4 // how close on foot to board
 const VEHICLE_CAM_DIST = 7.5 // third-person camera trail distance
 const VEHICLE_CAM_HEIGHT = 4.0 // third-person camera height
+const VEHICLE_CAR_HP = 250 // cars are fragile (all damage counts)
+const VEHICLE_EJECT_DAMAGE = 60 // dealt to the player when their ride explodes
+// Auto-recenter the chase cam behind the hull after this idle (no aim input).
+const VEHICLE_CAM_RECENTER_MS = 600
 // ── Vertical movement ──────────────────────────────────────────────────────────
 // Real gravity in m/s². Picked to feel snappy (a 4m drop = ~0.6s in air),
 // not a perfect-physics simulation. Tuned by feel under EYE_HEIGHT.
@@ -1366,6 +1370,12 @@ export default function ThreeWorld({
   const prevNearVehicleRef = useRef(false)
   // Set by the E key / mobile board-exit button; consumed once in the loop.
   const vehicleActionRef = useRef(false)
+  // Active vehicle HP (drives the HUD bar while driving). 0 when on foot.
+  const [vehicleHp, setVehicleHp] = useState(0)
+  const [vehicleMaxHp, setVehicleMaxHp] = useState(0)
+  // Last time the player moved the aim (mouse/right-stick) while driving — the
+  // chase camera auto-recenters behind the hull after a short idle.
+  const lastDriveAimRef = useRef(0)
   // CRT scanlines: default off (was too distracting). F8 toggles, persisted
   // in localStorage so the choice survives refresh.
   const [scanlinesOn, setScanlinesOn] = useState(false)
@@ -3206,6 +3216,9 @@ export default function ThreeWorld({
         z: number
         heading: number // yaw; forward = (-sin, -cos)
         speed: number // m/s along heading (negative = reverse)
+        hp: number
+        maxHp: number
+        dead: boolean // true once destroyed (no longer boardable)
       }
       const vehicles: Vehicle[] = []
       let activeVehicle: Vehicle | null = null
@@ -3274,19 +3287,33 @@ export default function ThreeWorld({
         group.position.set(safe.x, 0, safe.z)
         group.rotation.y = heading
         scene.add(group)
-        vehicles.push({ group, x: safe.x, z: safe.z, heading, speed: 0 })
+        vehicles.push({
+          group,
+          x: safe.x,
+          z: safe.z,
+          heading,
+          speed: 0,
+          hp: VEHICLE_CAR_HP,
+          maxHp: VEHICLE_CAR_HP,
+          dead: false,
+        })
       }
 
       // Park a few intact cars along the central avenue (z ≈ 50). Heading
       // -π/2 faces +x (east) — the same direction the player spawns looking.
-      spawnVehicle(14, 50, -Math.PI / 2, 0xbb2222)
-      spawnVehicle(40, 52, -Math.PI / 2, 0x2255bb)
-      spawnVehicle(66, 49, -Math.PI / 2, 0xddaa22)
+      // Vehicles are excluded from PvP (FFA/TDM) for now — they aren't synced
+      // over the network, so a half-visible combat car would be unfair there.
+      if (modeRef.current !== "ffa" && modeRef.current !== "tdm") {
+        spawnVehicle(14, 50, -Math.PI / 2, 0xbb2222)
+        spawnVehicle(40, 52, -Math.PI / 2, 0x2255bb)
+        spawnVehicle(66, 49, -Math.PI / 2, 0xddaa22)
+      }
 
       function nearestVehicle(): Vehicle | null {
         let best: Vehicle | null = null
         let bestD = VEHICLE_ENTER_RADIUS
         for (const v of vehicles) {
+          if (v.dead) continue
           const d = Math.hypot(v.x - focalPoint.x, v.z - focalPoint.z)
           if (d < bestD) {
             bestD = d
@@ -3312,7 +3339,17 @@ export default function ThreeWorld({
         mouseDownRef.current = false
         isAimingRef.current = false
         setIsAiming(false)
+        // Keep the FP weapon hidden — driving uses a third-person view, and
+        // bullets fire from the vehicle (the gun view-model would float).
         gunGroup.visible = false
+        // Publish vehicle HP to the HUD.
+        setVehicleHp(Math.round(v.hp))
+        setVehicleMaxHp(v.maxHp)
+        // Seed the free-aim camera looking the way the hull faces, and start
+        // "recentered" so a freshly-boarded car isn't aimed off to one side.
+        camState.yaw = v.heading
+        camState.pitch = -0.12
+        lastDriveAimRef.current = 0
         // Snap the (hidden) player onto the car.
         focalPoint.x = v.x
         focalPoint.z = v.z
@@ -3352,6 +3389,44 @@ export default function ThreeWorld({
         playerVelRef.current.x = 0
         playerVelRef.current.z = 0
         playerVelYRef.current = 0
+        setVehicleHp(0)
+        setVehicleMaxHp(0)
+      }
+
+      // Route incoming damage to the vehicle the player is riding (the vehicle
+      // acts as a shield — the player inside is untouched until it blows up).
+      function damageActiveVehicle(dmg: number) {
+        const v = activeVehicle
+        if (!v || v.dead || dmg <= 0) return
+        v.hp = Math.max(0, v.hp - dmg)
+        setVehicleHp(Math.round(v.hp))
+        if (v.hp <= 0) destroyActiveVehicle()
+      }
+
+      // Vehicle destroyed: big blast, the player is thrown clear and takes a
+      // heavy (but non-lethal) hit, and the wreck is removed (no re-boarding).
+      function destroyActiveVehicle() {
+        const v = activeVehicle
+        if (!v) return
+        v.dead = true
+        const burst = new THREE.Vector3(v.x, 1.0, v.z)
+        spawnExplosion(burst)
+        spawnExplosion(burst) // doubled for a meatier vehicle blast
+        SOUNDS.damage()
+        lastNoiseRef.current = { x: v.x, z: v.z, expires: Date.now() + 4000 }
+        // Eject the player beside the wreck (resets driving state + camera).
+        exitVehicle()
+        // Heavy ejection damage, floored so it never kills outright (生存).
+        if (gamePhaseRef.current === "playing") {
+          playerHpRef.current = Math.max(1, playerHpRef.current - VEHICLE_EJECT_DAMAGE)
+          setPlayerHp(playerHpRef.current)
+          lastDamageTimeRef.current = Date.now()
+          cameraShakeRef.current.intensity = 6
+          setDamageFlash(true)
+          setTimeout(() => setDamageFlash(false), 360)
+        }
+        // Remove the wreck mesh from the scene.
+        scene.remove(v.group)
       }
 
       function updateVehicle(dt: number) {
@@ -3411,31 +3486,53 @@ export default function ThreeWorld({
         focalPoint.z = v.z
         focalPoint.y = 0
 
-        // Smoothed third-person chase camera (ぬるっと追従). March backward from
-        // the car toward the default trail position; if a (view-height) wall is
-        // in the way, pull the camera in to just in front of it so it never
-        // clips inside geometry and blacks out the view.
+        // ── Free-aim chase camera ──────────────────────────────────────────
+        // The hull steers with WASD; the mouse/right-stick independently aims
+        // (camState.yaw/pitch, fed in the mouse-drain block while driving). The
+        // camera orbits to sit behind the AIM direction and looks exactly along
+        // it, so the screen-center crosshair (and fire ray) point where aimed.
+        // When the player stops aiming for a beat, it eases back behind the hull
+        // so plain driving keeps the road in view.
+        if (Date.now() - lastDriveAimRef.current > VEHICLE_CAM_RECENTER_MS) {
+          let dy = v.heading - camState.yaw
+          while (dy > Math.PI) dy -= Math.PI * 2
+          while (dy < -Math.PI) dy += Math.PI * 2
+          const recenter = 1 - Math.exp(-dt * 3)
+          camState.yaw += dy * recenter
+          camState.pitch += (-0.12 - camState.pitch) * recenter
+        }
+        const aimHx = -Math.sin(camState.yaw)
+        const aimHz = -Math.cos(camState.yaw)
+        const cp = Math.cos(camState.pitch)
+        const aimFx = aimHx * cp
+        const aimFy = Math.sin(camState.pitch)
+        const aimFz = aimHz * cp
+        // March backward along the aim horizontal; pull the camera in if a
+        // view-height wall (or the map edge) would clip it (no black-out).
         let camDist = VEHICLE_CAM_DIST
         for (let d = 1.0; d <= VEHICLE_CAM_DIST; d += 0.5) {
-          const sx = v.x - fx * d
-          const sz = v.z - fz * d
+          const sx = v.x - aimHx * d
+          const sz = v.z - aimHz * d
           const outOfBounds = sx < 0.4 || sx > MAP_SIZE - 0.4 || sz < 0.4 || sz > MAP_SIZE - 0.4
           if (outOfBounds || pointInsideWall(sx, 2.0, sz)) {
-            camDist = Math.max(2.2, d - 0.7) // keep the camera ahead of the wall
+            camDist = Math.max(2.2, d - 0.7)
             break
           }
         }
-        const camTargetX = v.x - fx * camDist
-        const camTargetZ = v.z - fz * camDist
-        // Pull in fast (snap toward the wall-clamped target) but trail back out
-        // smoothly, so the view never lags into a wall when one appears.
+        const camTargetX = v.x - aimHx * camDist
+        const camTargetZ = v.z - aimHz * camDist
         const wantCloser =
           camDist * camDist < (camera.position.x - v.x) ** 2 + (camera.position.z - v.z) ** 2
         const camBlend = 1 - Math.exp(-dt * (wantCloser ? 18 : 6))
         camera.position.x += (camTargetX - camera.position.x) * camBlend
         camera.position.z += (camTargetZ - camera.position.z) * camBlend
         camera.position.y += (VEHICLE_CAM_HEIGHT - camera.position.y) * camBlend
-        camera.lookAt(v.x + fx * 4, 1.0, v.z + fz * 4)
+        // Look exactly along the aim vector → center-ray == crosshair == fire dir.
+        camera.lookAt(
+          camera.position.x + aimFx,
+          camera.position.y + aimFy,
+          camera.position.z + aimFz,
+        )
       }
 
       // ── Humanoid enemy factory ─────────────────────────────────────────────
@@ -4550,7 +4647,13 @@ export default function ThreeWorld({
         })
         const bulletMesh = new THREE.Mesh(bulletGeo, bulletMat)
         bulletMesh.renderOrder = 998
-        bulletMesh.position.copy(camera.position).addScaledVector(fwd, 0.55)
+        if (drivingRef.current && activeVehicle) {
+          // Third-person: spawn the tracer at the vehicle so it doesn't appear
+          // to come from the chase camera floating behind the car.
+          bulletMesh.position.set(activeVehicle.x + fwd.x * 1.6, 1.1, activeVehicle.z + fwd.z * 1.6)
+        } else {
+          bulletMesh.position.copy(camera.position).addScaledVector(fwd, 0.55)
+        }
         bulletMesh.lookAt(bulletMesh.position.clone().add(fwd))
         scene.add(bulletMesh)
         bullets.push({
@@ -4791,18 +4894,23 @@ export default function ThreeWorld({
             Date.now() > spawnInvulnUntilRef.current
           ) {
             const dmg = Math.max(15, Math.floor(60 * (1 - dpDist / radius)))
-            playerHpRef.current = Math.max(0, playerHpRef.current - dmg)
-            setPlayerHp(playerHpRef.current)
-            lastDamageTimeRef.current = Date.now()
-            cameraShakeRef.current.intensity = 3
-            setDamageFlash(true)
-            SOUNDS.damage()
-            setTimeout(() => setDamageFlash(false), 320)
-            if (playerHpRef.current <= 0) {
-              gamePhaseRef.current = "gameover"
-              setGamePhase("gameover")
-              deathsRef.current += 1
-              setDeaths(deathsRef.current)
+            if (drivingRef.current && activeVehicle) {
+              // Riding: the vehicle soaks the blast (player shielded).
+              damageActiveVehicle(dmg)
+            } else {
+              playerHpRef.current = Math.max(0, playerHpRef.current - dmg)
+              setPlayerHp(playerHpRef.current)
+              lastDamageTimeRef.current = Date.now()
+              cameraShakeRef.current.intensity = 3
+              setDamageFlash(true)
+              SOUNDS.damage()
+              setTimeout(() => setDamageFlash(false), 320)
+              if (playerHpRef.current <= 0) {
+                gamePhaseRef.current = "gameover"
+                setGamePhase("gameover")
+                deathsRef.current += 1
+                setDeaths(deathsRef.current)
+              }
             }
           }
           return
@@ -4914,12 +5022,11 @@ export default function ThreeWorld({
       // ── Fire weapon ────────────────────────────────────────────────────────
       function fire() {
         if (gamePhaseRef.current !== "playing") return
-        // Shooting is disabled while driving (運転に集中).
-        if (drivingRef.current) return
         const weapon = WEAPONS[currentWeaponIdxRef.current]
         if (!weapon) return
         // Knife: melee swing instead of a projectile. Its own cooldown gate
         // lives in meleeAttack so a held FIRE button can't chain swings.
+        // (meleeAttack stays disabled while driving — no knifing from a car.)
         if (weapon.melee) {
           meleeAttack()
           return
@@ -5081,7 +5188,8 @@ export default function ThreeWorld({
         if (e.button === 0) {
           mouseDownRef.current = true
           fire()
-        } else if (e.button === 2) {
+        } else if (e.button === 2 && !drivingRef.current) {
+          // ADS is disabled while driving (third-person free-aim, no zoom).
           isAimingRef.current = true
           setIsAiming(true)
         }
@@ -5158,16 +5266,20 @@ export default function ThreeWorld({
           const mdy = mouseDeltaRef.current.y * APPLY
           mouseDeltaRef.current.x -= mdx
           mouseDeltaRef.current.y -= mdy
-          // Mouse look is suppressed while driving (the chase camera owns the
-          // view); the buffered delta is still drained above so it doesn't
-          // snap on exit.
-          if (!drivingRef.current && (mdx !== 0 || mdy !== 0)) {
+          if (mdx !== 0 || mdy !== 0) {
             // Base sensitivity dropped 0.002 → 0.0012 (≈40% slower default).
             // Player can scale 0.5x–2.0x via the settings panel.
             const sens = 0.0012 * mouseSensRef.current
             camState.yaw -= mdx * sens
             camState.pitch = clampPitch(camState.pitch - mdy * sens)
-            updateCamera()
+            if (drivingRef.current) {
+              // Free-aim while driving: the chase camera (updateVehicle) reads
+              // camState and owns the camera. Just flag active aiming so it
+              // doesn't auto-recenter behind the hull mid-aim.
+              lastDriveAimRef.current = Date.now()
+            } else {
+              updateCamera()
+            }
           }
         }
 
@@ -5610,23 +5722,30 @@ export default function ThreeWorld({
             const dx = b.mesh.position.x - refs.focalPoint.x
             const dy = b.mesh.position.y - EYE_HEIGHT
             const dz = b.mesh.position.z - refs.focalPoint.z
-            if (Math.sqrt(dx * dx + dy * dy + dz * dz) < 0.5) {
+            // Riding presents a bigger target (the vehicle body) than a person.
+            const riding = drivingRef.current && activeVehicle !== null
+            const hitR = riding ? VEHICLE_RADIUS : 0.5
+            if (Math.sqrt(dx * dx + dy * dy + dz * dz) < hitR) {
               refs.scene.remove(b.mesh)
               b.mesh.geometry.dispose()
               refs.bullets.splice(i, 1)
               if (gamePhaseRef.current === "playing" && Date.now() > spawnInvulnUntilRef.current) {
-                playerHpRef.current = Math.max(0, playerHpRef.current - b.damage)
-                setPlayerHp(playerHpRef.current)
-                lastDamageTimeRef.current = Date.now()
-                cameraShakeRef.current.intensity = 2
-                setDamageFlash(true)
-                SOUNDS.damage()
-                setTimeout(() => setDamageFlash(false), 300)
-                if (playerHpRef.current <= 0) {
-                  gamePhaseRef.current = "gameover"
-                  setGamePhase("gameover")
-                  deathsRef.current += 1
-                  setDeaths(deathsRef.current)
+                if (riding) {
+                  damageActiveVehicle(b.damage) // vehicle soaks it (player shielded)
+                } else {
+                  playerHpRef.current = Math.max(0, playerHpRef.current - b.damage)
+                  setPlayerHp(playerHpRef.current)
+                  lastDamageTimeRef.current = Date.now()
+                  cameraShakeRef.current.intensity = 2
+                  setDamageFlash(true)
+                  SOUNDS.damage()
+                  setTimeout(() => setDamageFlash(false), 300)
+                  if (playerHpRef.current <= 0) {
+                    gamePhaseRef.current = "gameover"
+                    setGamePhase("gameover")
+                    deathsRef.current += 1
+                    setDeaths(deathsRef.current)
+                  }
                 }
               }
               continue
@@ -6072,18 +6191,23 @@ export default function ThreeWorld({
                 // Visible melee swing (right arm) — same knife-style motion
                 // for grunts/heavies/zombies whenever they land a close hit.
                 enemy.meleeAnimUntil = now + 300
-                playerHpRef.current = Math.max(0, playerHpRef.current - enemy.config.attackDamage)
-                setPlayerHp(playerHpRef.current)
-                lastDamageTimeRef.current = Date.now()
-                cameraShakeRef.current.intensity = 2
-                setDamageFlash(true)
-                SOUNDS.damage()
-                setTimeout(() => setDamageFlash(false), 300)
-                if (playerHpRef.current <= 0 && gamePhaseRef.current === "playing") {
-                  gamePhaseRef.current = "gameover"
-                  setGamePhase("gameover")
-                  deathsRef.current += 1
-                  setDeaths(deathsRef.current)
+                if (drivingRef.current && activeVehicle) {
+                  // Clawing the vehicle chips its HP, not the shielded driver.
+                  damageActiveVehicle(enemy.config.attackDamage)
+                } else {
+                  playerHpRef.current = Math.max(0, playerHpRef.current - enemy.config.attackDamage)
+                  setPlayerHp(playerHpRef.current)
+                  lastDamageTimeRef.current = Date.now()
+                  cameraShakeRef.current.intensity = 2
+                  setDamageFlash(true)
+                  SOUNDS.damage()
+                  setTimeout(() => setDamageFlash(false), 300)
+                  if (playerHpRef.current <= 0 && gamePhaseRef.current === "playing") {
+                    gamePhaseRef.current = "gameover"
+                    setGamePhase("gameover")
+                    deathsRef.current += 1
+                    setDeaths(deathsRef.current)
+                  }
                 }
               }
               // Enemy ranged fire
@@ -7669,6 +7793,59 @@ export default function ThreeWorld({
             </div>
           )}
 
+        {/* Vehicle HP bar — shown while driving (mobile + desktop). */}
+        {inVehicle && vehicleMaxHp > 0 && !isLoading && !error && gamePhase === "playing" && (
+          <div
+            style={{
+              position: "absolute",
+              bottom: isMobile ? "auto" : "6%",
+              top: isMobile ? "0.6rem" : "auto",
+              left: "50%",
+              transform: "translateX(-50%)",
+              zIndex: 25,
+              pointerEvents: "none",
+              fontFamily: "monospace",
+              textAlign: "center",
+            }}
+          >
+            <div
+              style={{
+                fontSize: "0.7rem",
+                letterSpacing: "0.2em",
+                color: "#ffcc44",
+                textShadow: "0 0 6px rgba(255,180,40,0.6)",
+                marginBottom: "0.2rem",
+              }}
+            >
+              VEHICLE {Math.max(0, Math.ceil((vehicleHp / vehicleMaxHp) * 100))}%
+            </div>
+            <div
+              style={{
+                width: "220px",
+                height: "10px",
+                background: "rgba(0,0,0,0.7)",
+                border: "1px solid rgba(255,180,40,0.7)",
+                borderRadius: "2px",
+                overflow: "hidden",
+              }}
+            >
+              <div
+                style={{
+                  width: `${Math.max(0, Math.min(100, (vehicleHp / vehicleMaxHp) * 100))}%`,
+                  height: "100%",
+                  background:
+                    vehicleHp / vehicleMaxHp > 0.5
+                      ? "#ffcc44"
+                      : vehicleHp / vehicleMaxHp > 0.25
+                        ? "#ff8800"
+                        : "#ff3333",
+                  transition: "width 0.1s linear",
+                }}
+              />
+            </div>
+          </div>
+        )}
+
         {/* Notification */}
         {notification && (
           <div
@@ -9068,49 +9245,51 @@ export default function ThreeWorld({
               RELOAD
             </button>
 
-            {/* ADS button (top-right) */}
-            <button
-              type="button"
-              onPointerDown={(e) => {
-                e.preventDefault()
-                isAimingRef.current = true
-                setIsAiming(true)
-              }}
-              onPointerUp={(e) => {
-                e.preventDefault()
-                isAimingRef.current = false
-                setIsAiming(false)
-              }}
-              onPointerCancel={() => {
-                isAimingRef.current = false
-                setIsAiming(false)
-              }}
-              style={{
-                position: "absolute",
-                // Portrait: pushed below the top-right minimap (62px) so they
-                // don't overlap. Landscape ADS sits further left (right 7.5rem)
-                // clear of the corner minimap already.
-                top: isLandscape ? "0.6rem" : "4.7rem",
-                right: isLandscape ? "7.5rem" : "1.2rem",
-                width: isLandscape ? "56px" : "64px",
-                height: isLandscape ? "56px" : "64px",
-                borderRadius: "50%",
-                background: "rgba(0,0,0,0.6)",
-                border: "2px solid rgba(0,200,255,0.6)",
-                boxShadow: "0 0 10px rgba(0,200,255,0.2)",
-                color: "#88e0ff",
-                fontFamily: "monospace",
-                fontSize: isLandscape ? "0.62rem" : "0.72rem",
-                fontWeight: "bold",
-                touchAction: "none",
-                userSelect: "none",
-                zIndex: 30,
-              }}
-            >
-              ⊙
-              <br />
-              ADS
-            </button>
+            {/* ADS button (top-right) — hidden while driving (no ADS in vehicles). */}
+            {!inVehicle && (
+              <button
+                type="button"
+                onPointerDown={(e) => {
+                  e.preventDefault()
+                  isAimingRef.current = true
+                  setIsAiming(true)
+                }}
+                onPointerUp={(e) => {
+                  e.preventDefault()
+                  isAimingRef.current = false
+                  setIsAiming(false)
+                }}
+                onPointerCancel={() => {
+                  isAimingRef.current = false
+                  setIsAiming(false)
+                }}
+                style={{
+                  position: "absolute",
+                  // Portrait: pushed below the top-right minimap (62px) so they
+                  // don't overlap. Landscape ADS sits further left (right 7.5rem)
+                  // clear of the corner minimap already.
+                  top: isLandscape ? "0.6rem" : "4.7rem",
+                  right: isLandscape ? "7.5rem" : "1.2rem",
+                  width: isLandscape ? "56px" : "64px",
+                  height: isLandscape ? "56px" : "64px",
+                  borderRadius: "50%",
+                  background: "rgba(0,0,0,0.6)",
+                  border: "2px solid rgba(0,200,255,0.6)",
+                  boxShadow: "0 0 10px rgba(0,200,255,0.2)",
+                  color: "#88e0ff",
+                  fontFamily: "monospace",
+                  fontSize: isLandscape ? "0.62rem" : "0.72rem",
+                  fontWeight: "bold",
+                  touchAction: "none",
+                  userSelect: "none",
+                  zIndex: 30,
+                }}
+              >
+                ⊙
+                <br />
+                ADS
+              </button>
+            )}
 
             {/* GRENADE button (top-right, below ADS) */}
             <button
