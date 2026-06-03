@@ -59,6 +59,8 @@ export const ko: typeof ja = {
     ffaDesc: "모두가 적. 살아남아라.",
     tdmDesc: "레드 vs 블루. 팀 킬 수로 승부.",
     zombieDesc: "끝없이 몰려오는 좀비 무리에서 살아남아라. 맨손의 민첩한 적이 무한히 등장한다.",
+    invasion: "침공",
+    invasionDesc: "갑자기 로켓이 떨어지고 테라포머가 몰려온다. 압도적인 강적에게서 살아남아라.",
     selectMap: "맵",
     urban: "도시",
     desert: "사막",

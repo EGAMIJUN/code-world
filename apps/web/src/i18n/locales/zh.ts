@@ -59,6 +59,8 @@ export const zh: typeof ja = {
     ffaDesc: "每个人都是敌人。活下去。",
     tdmDesc: "红队 vs 蓝队。比拼团队击杀数。",
     zombieDesc: "在无尽的僵尸浪潮中幸存。徒手而敏捷的敌人无限涌来。",
+    invasion: "入侵",
+    invasionDesc: "火箭突然坠落，泰拉formers倾巢而出。在压倒性的强敌中幸存下来。",
     selectMap: "地图",
     urban: "都市",
     desert: "沙漠",

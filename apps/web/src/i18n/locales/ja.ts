@@ -57,6 +57,8 @@ export const ja = {
     ffaDesc: "全員が敵。最後まで生き残れ。",
     tdmDesc: "赤チーム vs 青チーム。チームのキル数を競え。",
     zombieDesc: "押し寄せるゾンビの群れを生き延びろ。武器を持たぬ俊敏な敵が無限に湧く。",
+    invasion: "INVASION",
+    invasionDesc: "突如ロケットが飛来し、テラフォーマーズが襲来する。圧倒的な強敵から生き延びろ。",
     selectMap: "MAP",
     urban: "URBAN",
     desert: "DESERT",

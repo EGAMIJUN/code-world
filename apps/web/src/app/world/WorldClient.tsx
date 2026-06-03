@@ -25,7 +25,7 @@ const ThreeWorld = dynamic(() => import("./ThreeWorld"), {
   ),
 })
 
-export type GameMode = "wave_defense" | "ffa" | "tdm" | "zombie"
+export type GameMode = "wave_defense" | "ffa" | "tdm" | "zombie" | "invasion"
 export type GameMap = "urban" | "desert" | "snow"
 export type BotDifficulty = "easy" | "normal" | "hard"
 
@@ -48,7 +48,7 @@ export default function WorldClient() {
       const mp = localStorage.getItem(STORAGE_MAP) as GameMap | null
       const bc = localStorage.getItem(STORAGE_BOT_COUNT)
       const bd = localStorage.getItem(STORAGE_BOT_DIFF) as BotDifficulty | null
-      if (m && ["wave_defense", "ffa", "tdm", "zombie"].includes(m)) setMode(m)
+      if (m && ["wave_defense", "ffa", "tdm", "zombie", "invasion"].includes(m)) setMode(m)
       if (mp && ["urban", "desert", "snow"].includes(mp)) setMapId(mp)
       if (bc !== null) {
         const n = Number.parseInt(bc, 10)
@@ -112,6 +112,7 @@ export default function WorldClient() {
             { id: "ffa" as GameMode, label: t.mode.ffa, desc: t.mode.ffaDesc },
             { id: "tdm" as GameMode, label: t.mode.tdm, desc: t.mode.tdmDesc },
             { id: "zombie" as GameMode, label: t.mode.zombie, desc: t.mode.zombieDesc },
+            { id: "invasion" as GameMode, label: t.mode.invasion, desc: t.mode.invasionDesc },
           ].map((m) => {
             const sel = mode === m.id
             return (
