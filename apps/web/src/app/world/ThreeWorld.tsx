@@ -301,14 +301,14 @@ const MAP_OBJECTS: [number, number, number, number, number][] = [
   // (z=5–28, z=71–79) are now enterable cover beyond the main flanks.
   // Tanks & pipes. Pipe at [63, 46, 1, 10, 3] removed — it was a tall
   // 1m-wide 7m-tall slab sitting in the middle of the central avenue,
-  // blocking the spawn-to-terminus walking path.
+  // blocking the spawn-to-terminus walking path. Three more thin pipe slabs
+  // ([63,10,1,10] / [63,28,8,1] / [63,65,8,1]) removed for the same reason:
+  // each was a 1m-thin wall (one rendered 7m tall, two 8m long) that solidly
+  // blocked the x≈63 industrial crossing. The 2×2 tanks below stay as cover.
   [60, 5, 2, 2, 3],
-  [63, 10, 1, 10, 3],
   [60, 24, 2, 2, 3],
-  [63, 28, 8, 1, 3],
   [60, 42, 2, 2, 3],
   [60, 60, 2, 2, 3],
-  [63, 65, 8, 1, 3],
   // ── Outdoor zone (x: 68–92) ──────────────────────────────────────────────
   // Trenches (long and thin)
   [68, 5, 16, 1, 5],
@@ -433,6 +433,22 @@ function collidesWithWall(px: number, pz: number, radius: number, feetY = 0): bo
 function pointInsideWall(px: number, py: number, pz: number): boolean {
   for (const w of ALL_AABBS) {
     if (px > w.x1 && px < w.x2 && pz > w.z1 && pz < w.z2 && py >= 0 && py <= w.h) return true
+  }
+  return false
+}
+
+// True if a torso-height wall sits between two ground points. Sampled at
+// y=1.0 so it ignores low cover (sandbags / pipes ≤ ~0.85) but blocks on real
+// walls and buildings. Used to stop enemy melee from reaching through walls.
+function wallBetween(x1: number, z1: number, x2: number, z2: number): boolean {
+  const dx = x2 - x1
+  const dz = z2 - z1
+  const dist = Math.hypot(dx, dz)
+  if (dist < 0.001) return false
+  const steps = Math.max(2, Math.ceil(dist / 0.4))
+  for (let i = 1; i < steps; i++) {
+    const t = i / steps
+    if (pointInsideWall(x1 + dx * t, 1.0, z1 + dz * t)) return true
   }
   return false
 }
@@ -3358,9 +3374,12 @@ export default function ThreeWorld({
         v.speed = Math.max(-VEHICLE_REVERSE_SPEED, Math.min(VEHICLE_MAX_SPEED, v.speed))
 
         // Steering scales with speed and flips in reverse (like a real car).
+        // Note the leading minus: with forward = (-sin h, -cos h), a *positive*
+        // heading delta swings the nose toward -x (the driver's left). Steer is
+        // +1 for D / right-stick, so we negate it to map D → right, A → left.
         const speedFactor = Math.min(1, Math.abs(v.speed) / 3 + 0.12)
         const dir = v.speed >= 0 ? 1 : -1
-        v.heading += steer * VEHICLE_TURN_RATE * dt * speedFactor * dir
+        v.heading -= steer * VEHICLE_TURN_RATE * dt * speedFactor * dir
 
         // Integrate with per-axis wall collision (no tunnelling).
         const fx = -Math.sin(v.heading)
@@ -3385,10 +3404,27 @@ export default function ThreeWorld({
         focalPoint.z = v.z
         focalPoint.y = 0
 
-        // Smoothed third-person chase camera (ぬるっと追従).
-        const camTargetX = v.x - fx * VEHICLE_CAM_DIST
-        const camTargetZ = v.z - fz * VEHICLE_CAM_DIST
-        const camBlend = 1 - Math.exp(-dt * 6)
+        // Smoothed third-person chase camera (ぬるっと追従). March backward from
+        // the car toward the default trail position; if a (view-height) wall is
+        // in the way, pull the camera in to just in front of it so it never
+        // clips inside geometry and blacks out the view.
+        let camDist = VEHICLE_CAM_DIST
+        for (let d = 1.0; d <= VEHICLE_CAM_DIST; d += 0.5) {
+          const sx = v.x - fx * d
+          const sz = v.z - fz * d
+          const outOfBounds = sx < 0.4 || sx > MAP_SIZE - 0.4 || sz < 0.4 || sz > MAP_SIZE - 0.4
+          if (outOfBounds || pointInsideWall(sx, 2.0, sz)) {
+            camDist = Math.max(2.2, d - 0.7) // keep the camera ahead of the wall
+            break
+          }
+        }
+        const camTargetX = v.x - fx * camDist
+        const camTargetZ = v.z - fz * camDist
+        // Pull in fast (snap toward the wall-clamped target) but trail back out
+        // smoothly, so the view never lags into a wall when one appears.
+        const wantCloser =
+          camDist * camDist < (camera.position.x - v.x) ** 2 + (camera.position.z - v.z) ** 2
+        const camBlend = 1 - Math.exp(-dt * (wantCloser ? 18 : 6))
         camera.position.x += (camTargetX - camera.position.x) * camBlend
         camera.position.z += (camTargetZ - camera.position.z) * camBlend
         camera.position.y += (VEHICLE_CAM_HEIGHT - camera.position.y) * camBlend
@@ -4498,6 +4534,56 @@ export default function ThreeWorld({
         weaponKillsRef.current[weaponKey] = (weaponKillsRef.current[weaponKey] ?? 0) + 1
       }
 
+      // ── Grenade detonation (shared) ─────────────────────────────────────────
+      // AOE blast for any thrown grenade. Enemy-thrown grenades (fromEnemy)
+      // damage the player; player-thrown grenades damage enemies. Called from
+      // every isGrenade projectile's impact / fuse-expiry path so the toss →
+      // land → AOE → damage chain runs from one place.
+      function detonateGrenade(center: THREE.Vector3, radius: number, fromEnemy: boolean) {
+        center.y = Math.max(0.4, center.y)
+        spawnExplosion(center)
+        lastNoiseRef.current = { x: center.x, z: center.z, expires: Date.now() + 4000 }
+        if (fromEnemy) {
+          const dpDist = Math.hypot(focalPoint.x - center.x, focalPoint.z - center.z)
+          if (
+            dpDist < radius &&
+            gamePhaseRef.current === "playing" &&
+            Date.now() > spawnInvulnUntilRef.current
+          ) {
+            const dmg = Math.max(15, Math.floor(60 * (1 - dpDist / radius)))
+            playerHpRef.current = Math.max(0, playerHpRef.current - dmg)
+            setPlayerHp(playerHpRef.current)
+            lastDamageTimeRef.current = Date.now()
+            cameraShakeRef.current.intensity = 3
+            setDamageFlash(true)
+            SOUNDS.damage()
+            setTimeout(() => setDamageFlash(false), 320)
+            if (playerHpRef.current <= 0) {
+              gamePhaseRef.current = "gameover"
+              setGamePhase("gameover")
+              deathsRef.current += 1
+              setDeaths(deathsRef.current)
+            }
+          }
+          return
+        }
+        // Player-thrown: AOE-damage every living enemy in range.
+        for (const enemy of enemies) {
+          if (enemy.hp <= 0) continue
+          const dx = enemy.mesh.position.x - center.x
+          const dz = enemy.mesh.position.z - center.z
+          const d2 = dx * dx + dz * dz
+          if (d2 >= radius * radius) continue
+          const dist = Math.sqrt(d2)
+          const dmg = Math.max(20, Math.floor(120 * (1 - dist / radius)))
+          enemy.hp = Math.max(0, enemy.hp - dmg)
+          if (enemy.hp <= 0) {
+            spawnExplosion(enemy.mesh.position.clone())
+            applyEnemyKill(enemy, "grenade")
+          }
+        }
+      }
+
       // ── Knife melee ────────────────────────────────────────────────────────
       // Forward fan-shaped (±30°, 1.8m) sweep. Big damage; a hit on a target
       // whose head is in view (player aiming up) is a one-shot. Anti-spam
@@ -4859,7 +4945,10 @@ export default function ThreeWorld({
           camera.updateProjectionMatrix()
         }
 
-        // Grenade request: AOE explosion ahead of player (disabled while driving).
+        // Grenade request: throw an arcing grenade (disabled while driving).
+        // It travels under gravity and AOE-detonates on ground/wall impact or
+        // fuse expiry via the shared isGrenade projectile path — same physics
+        // the heavy enemies' grenades already use.
         if (requestGrenadeRef.current && drivingRef.current) {
           requestGrenadeRef.current = false
         }
@@ -4867,37 +4956,36 @@ export default function ThreeWorld({
           requestGrenadeRef.current = false
           const fwd = new THREE.Vector3()
           camera.getWorldDirection(fwd)
-          const origin = new THREE.Vector3(refs.focalPoint.x, EYE_HEIGHT, refs.focalPoint.z)
-          const explosionPos = origin.clone().add(fwd.multiplyScalar(8))
-          explosionPos.y = Math.max(0.5, explosionPos.y)
-          spawnExplosion(explosionPos)
-          // Grenade is even louder than a gunshot — bigger noise radius via
-          // the longer expiry plus the AI's own distance check.
+          const gMesh = new THREE.Mesh(
+            new THREE.SphereGeometry(0.14, 8, 6),
+            new THREE.MeshBasicMaterial({ color: 0x335a33 }),
+          )
+          // Spawn just ahead of the eye so it clears the player's own body.
+          gMesh.position.set(
+            refs.focalPoint.x + fwd.x * 0.6,
+            EYE_HEIGHT - 0.1,
+            refs.focalPoint.z + fwd.z * 0.6,
+          )
+          refs.scene.add(gMesh)
+          const THROW_SPEED = 17
+          refs.bullets.push({
+            mesh: gMesh,
+            velocity: new THREE.Vector3(
+              fwd.x * THROW_SPEED,
+              fwd.y * THROW_SPEED + 4.5, // upward arc on top of the aim vector
+              fwd.z * THROW_SPEED,
+            ),
+            life: 2.5,
+            isEnemy: false,
+            damage: 0, // damage comes from the AOE on detonation
+            isGrenade: true,
+            grenadeRadius: 5,
+          })
+          // Grenade toss is loud — flags the AI's noise sense to the throw spot.
           lastNoiseRef.current = {
-            x: explosionPos.x,
-            z: explosionPos.z,
-            expires: Date.now() + 5000,
-          }
-          for (const enemy of enemies) {
-            if (enemy.hp <= 0) continue
-            const dx = enemy.mesh.position.x - explosionPos.x
-            const dz = enemy.mesh.position.z - explosionPos.z
-            const d2 = dx * dx + dz * dz
-            const RADIUS = 5
-            if (d2 < RADIUS * RADIUS) {
-              const dist = Math.sqrt(d2)
-              const dmg = Math.max(20, Math.floor(120 * (1 - dist / RADIUS)))
-              enemy.hp = Math.max(0, enemy.hp - dmg)
-              if (enemy.hp === 0) {
-                killsRef.current += 1
-                setKills(killsRef.current)
-                scoreRef.current += enemy.config.score
-                setScore(scoreRef.current)
-                weaponKillsRef.current.grenade = (weaponKillsRef.current.grenade ?? 0) + 1
-                spawnExplosion(enemy.mesh.position.clone())
-                scene.remove(enemy.mesh)
-              }
-            }
+            x: refs.focalPoint.x,
+            z: refs.focalPoint.z,
+            expires: Date.now() + 2000,
           }
         }
         // Tick grenade cooldown display. Rounded to 100ms; also gated by
@@ -5254,34 +5342,7 @@ export default function ThreeWorld({
             const ground = b.mesh.position.y <= 0.15
             const inWall = pointInsideWall(b.mesh.position.x, b.mesh.position.y, b.mesh.position.z)
             if (ground || inWall) {
-              const center = b.mesh.position.clone()
-              center.y = Math.max(0.4, center.y)
-              spawnExplosion(center)
-              lastNoiseRef.current = { x: center.x, z: center.z, expires: Date.now() + 4000 }
-              const R = b.grenadeRadius ?? 4
-              const dxp = refs.focalPoint.x - center.x
-              const dzp = refs.focalPoint.z - center.z
-              const dpDist = Math.hypot(dxp, dzp)
-              if (
-                dpDist < R &&
-                gamePhaseRef.current === "playing" &&
-                Date.now() > spawnInvulnUntilRef.current
-              ) {
-                const dmg = Math.max(15, Math.floor(60 * (1 - dpDist / R)))
-                playerHpRef.current = Math.max(0, playerHpRef.current - dmg)
-                setPlayerHp(playerHpRef.current)
-                lastDamageTimeRef.current = Date.now()
-                cameraShakeRef.current.intensity = 3
-                setDamageFlash(true)
-                SOUNDS.damage()
-                setTimeout(() => setDamageFlash(false), 320)
-                if (playerHpRef.current <= 0) {
-                  gamePhaseRef.current = "gameover"
-                  setGamePhase("gameover")
-                  deathsRef.current += 1
-                  setDeaths(deathsRef.current)
-                }
-              }
+              detonateGrenade(b.mesh.position.clone(), b.grenadeRadius ?? 4, b.isEnemy)
               refs.scene.remove(b.mesh)
               b.mesh.geometry.dispose()
               refs.bullets.splice(i, 1)
@@ -5335,31 +5396,7 @@ export default function ThreeWorld({
             // Fuse-expired grenade air-bursts (covers the rare "stays
             // airborne the whole fuse" case — apartment-balcony-trajectory).
             if (b.isGrenade) {
-              const center = b.mesh.position.clone()
-              center.y = Math.max(0.4, center.y)
-              spawnExplosion(center)
-              const R = b.grenadeRadius ?? 4
-              const dpDist = Math.hypot(refs.focalPoint.x - center.x, refs.focalPoint.z - center.z)
-              if (
-                dpDist < R &&
-                gamePhaseRef.current === "playing" &&
-                Date.now() > spawnInvulnUntilRef.current
-              ) {
-                const dmg = Math.max(15, Math.floor(60 * (1 - dpDist / R)))
-                playerHpRef.current = Math.max(0, playerHpRef.current - dmg)
-                setPlayerHp(playerHpRef.current)
-                lastDamageTimeRef.current = Date.now()
-                cameraShakeRef.current.intensity = 3
-                setDamageFlash(true)
-                SOUNDS.damage()
-                setTimeout(() => setDamageFlash(false), 320)
-                if (playerHpRef.current <= 0) {
-                  gamePhaseRef.current = "gameover"
-                  setGamePhase("gameover")
-                  deathsRef.current += 1
-                  setDeaths(deathsRef.current)
-                }
-              }
+              detonateGrenade(b.mesh.position.clone(), b.grenadeRadius ?? 4, b.isEnemy)
             } else if (!b.isEnemy) {
               spawnExplosion(b.mesh.position.clone(), true)
             }
@@ -5776,7 +5813,10 @@ export default function ThreeWorld({
                 enemy.state = "alert"
               } else if (
                 now - enemy.lastAttackTime > enemy.config.attackInterval &&
-                Date.now() > spawnInvulnUntilRef.current
+                Date.now() > spawnInvulnUntilRef.current &&
+                // Don't let a melee swing land through a wall — require an
+                // unobstructed torso-height line from the enemy to the player.
+                !wallBetween(enemy.mesh.position.x, enemy.mesh.position.z, fp.x, fp.z)
               ) {
                 enemy.lastAttackTime = now
                 // Visible melee swing (right arm) — same knife-style motion
