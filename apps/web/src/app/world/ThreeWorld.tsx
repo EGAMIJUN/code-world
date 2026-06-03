@@ -916,6 +916,13 @@ interface CombatEnemy {
   // Torso (for breathing) and head (for look-at). Pelvis is enemy.mesh's child[0].
   torso?: THREE.Object3D | null
   head?: THREE.Object3D | null
+  // Jaw mesh — animated into a gnashing chomp for zombies.
+  jaw?: THREE.Object3D | null
+  // Cached local-steering detour heading (zombie wall avoidance) + the time
+  // it stays committed, so they don't jitter at corners. Optional / zombie-only.
+  steerX?: number
+  steerZ?: number
+  steerUntil?: number
   // Per-bot/enemy shadow plane for ground projection (set in spawnEnemiesFromDef).
   shadowMesh?: THREE.Mesh | null
   // Meshes that should hide when far (eyes / mouth / pouches / ghillie strips).
@@ -3436,7 +3443,9 @@ export default function ThreeWorld({
       function makeEnemy(type: EnemyType, x: number, z: number, isCommander = false): CombatEnemy {
         const cfg = ENEMY_CONFIGS[type]
         const isZombie = type === "zombie"
-        const scale = type === "heavy" ? 1.25 : type === "sniper" ? 1.03 : 1.0
+        // Per-zombie size individuality (other archetypes are fixed-scale).
+        const zJit = isZombie ? 0.86 + Math.random() * 0.3 : 1
+        const scale = (type === "heavy" ? 1.25 : type === "sniper" ? 1.03 : 1.0) * zJit
         const bodyColor = isCommander ? 0xff6600 : cfg.color
         const eid = enemyIdCounter++
         const enemyIdStr = `enemy_${eid}`
@@ -3450,13 +3459,30 @@ export default function ThreeWorld({
         scene.add(root)
 
         // ── Materials ────────────────────────────────────────────────────────
-        const bodyMat = new THREE.MeshLambertMaterial({ color: bodyColor, emissive: cfg.emissive })
+        // Per-zombie colour drift so a horde never looks uniform: flesh slides
+        // across sickly green↔grey with varied darkness; rags/skin rot toward
+        // muddy tones. Non-zombies keep their exact archetype colours.
+        const bodyCol = new THREE.Color(bodyColor)
+        const skinCol = new THREE.Color(isZombie ? 0x9fae9a : 0xc8a878)
+        if (isZombie && !isCommander) {
+          bodyCol.offsetHSL(
+            (Math.random() - 0.4) * 0.12,
+            -0.08 + Math.random() * 0.1,
+            -0.12 + Math.random() * 0.1,
+          )
+          skinCol.offsetHSL(
+            (Math.random() - 0.45) * 0.08,
+            (Math.random() - 0.5) * 0.18,
+            (Math.random() - 0.5) * 0.16,
+          )
+        }
+        const bodyMat = new THREE.MeshLambertMaterial({ color: bodyCol, emissive: cfg.emissive })
         const darkColor = type === "grunt" ? 0x2a3027 : type === "sniper" ? 0x18241b : 0x080808
         const darkMat = new THREE.MeshLambertMaterial({ color: darkColor })
-        // Zombies have undead, ashen-pale skin; everyone else is normal skin.
+        // Zombies have undead, ashen flesh; everyone else is normal skin.
         const skinMat = new THREE.MeshLambertMaterial({
-          color: isZombie ? 0xaeb9b0 : 0xc8a878,
-          emissive: isZombie ? 0x223027 : 0x000000,
+          color: skinCol,
+          emissive: isZombie ? 0x202a22 : 0x000000,
         })
         const gloveMat = new THREE.MeshLambertMaterial({ color: 0x141414 })
         // Eye glow varies by archetype (sniper green NV, grunt blue, heavy red,
@@ -3553,6 +3579,18 @@ export default function ThreeWorld({
           torso.add(pouch)
           lodDetails.push(pouch)
         }
+        // Zombie wounds: dark bruise / open-gash blotches mottling the torso.
+        if (isZombie) {
+          const woundMat = new THREE.MeshLambertMaterial({ color: 0x3a2630, emissive: 0x140a10 })
+          const blotch = (px: number, py: number, w: number, h: number) => {
+            const m = new THREE.Mesh(box(w, h, 0.02), woundMat)
+            m.position.set(px * scale, py * scale, -(torsoD / 2 + 0.05) * scale)
+            torso.add(m)
+            lodDetails.push(m)
+          }
+          blotch(0.1, 0.44, 0.13, 0.09)
+          blotch(-0.12, 0.24, 0.09, 0.14)
+        }
 
         // ── Neck ─────────────────────────────────────────────────────────────
         const neck = new THREE.Mesh(cyl(0.06, 0.072, 0.13), skinMat)
@@ -3588,6 +3626,58 @@ export default function ThreeWorld({
         mouth.position.set(0, -0.06 * scale, -0.165 * scale)
         head.add(mouth)
         lodDetails.push(mouth)
+
+        // ── Zombie horror head dressing ──────────────────────────────────────
+        // Sunken glowing eyes set in dark sockets, a gaping torn jaw with a
+        // black maw + broken teeth, and a skull wound. All small + LOD-culled.
+        if (isZombie) {
+          // Drop the tidy mouth slit entirely (LOD would re-show a hidden one)
+          // — it's replaced by the gaping maw below.
+          head.remove(mouth)
+          const mIdx = lodDetails.indexOf(mouth)
+          if (mIdx >= 0) lodDetails.splice(mIdx, 1)
+          const socketMat = new THREE.MeshLambertMaterial({ color: 0x101309, emissive: 0x05060a })
+          for (const sx of [-0.055, 0.055]) {
+            const socket = new THREE.Mesh(sph(0.052, 8, 6), socketMat)
+            socket.position.set(sx * scale, 0.02 * scale, -0.14 * scale)
+            socket.scale.z = 0.55
+            head.add(socket)
+            lodDetails.push(socket)
+          }
+          // Recess the eyes into the sockets and make them a hotter red so they
+          // glint from the shadow (their own material, brighter than the shared).
+          const zEyeMat = new THREE.MeshBasicMaterial({ color: 0xff2a12 })
+          for (const eye of [leftEye, rightEye]) {
+            eye.position.z = -0.128 * scale
+            eye.material = zEyeMat
+          }
+          // Gaping jaw: drop + widen it and expose a black throat cavity.
+          jaw.position.set(0, -0.21 * scale, 0.03 * scale)
+          jaw.scale.set(1.18, 2.0, 1.05)
+          const maw = new THREE.Mesh(
+            box(0.1, 0.12, 0.06),
+            new THREE.MeshBasicMaterial({ color: 0x070405 }),
+          )
+          maw.position.set(0, -0.13 * scale, -0.11 * scale)
+          head.add(maw)
+          lodDetails.push(maw)
+          const toothMat = new THREE.MeshLambertMaterial({ color: 0xcabf9f })
+          for (const tx of [-0.032, 0.005, 0.034]) {
+            const tooth = new THREE.Mesh(box(0.016, 0.035, 0.012), toothMat)
+            tooth.position.set(tx * scale, -0.082 * scale, -0.158 * scale)
+            head.add(tooth)
+            lodDetails.push(tooth)
+          }
+          // Skull wound — a dark gash across the crown.
+          const gash = new THREE.Mesh(
+            box(0.12, 0.05, 0.02),
+            new THREE.MeshLambertMaterial({ color: 0x32202a, emissive: 0x120a10 }),
+          )
+          gash.position.set(0.04 * scale, 0.12 * scale, -0.12 * scale)
+          gash.rotation.z = 0.5
+          head.add(gash)
+          lodDetails.push(gash)
+        }
 
         // ── Helmet / Visor (per archetype) ───────────────────────────────────
         // Zombies are bare-headed (no helmet/visor) — just the exposed skull.
@@ -3823,6 +3913,10 @@ export default function ThreeWorld({
           rightShin: rightLeg.knee,
           torso,
           head,
+          jaw,
+          steerX: 0,
+          steerZ: 0,
+          steerUntil: 0,
           shadowMesh: shadow,
           lodDetails,
           leftEye,
@@ -3865,6 +3959,152 @@ export default function ThreeWorld({
           markerUntil: 0,
           meleeAnimUntil: 0,
         }
+      }
+
+      // ── Zombie navigation (smarter pursuit) ────────────────────────────────
+      // Coarse line-of-sight: torso-height samples between two ground points,
+      // step ~1.5m and capped at 24 samples so long sight-lines stay cheap.
+      function zombieLosBlocked(x1: number, z1: number, x2: number, z2: number): boolean {
+        const dx = x2 - x1
+        const dz = z2 - z1
+        const d = Math.hypot(dx, dz)
+        if (d < 0.001) return false
+        const steps = Math.min(16, Math.ceil(d / 1.8))
+        for (let i = 1; i < steps; i++) {
+          const t = i / steps
+          if (pointInsideWall(x1 + dx * t, 1.2, z1 + dz * t)) return true
+        }
+        return false
+      }
+      // True if a short step in (dirX,dirZ) is wall-free (probes mid + end).
+      function zombiePathClear(
+        x: number,
+        z: number,
+        dirX: number,
+        dirZ: number,
+        reach: number,
+      ): boolean {
+        return (
+          !collidesWithWall(x + dirX * reach * 0.6, z + dirZ * reach * 0.6, ENEMY_RADIUS) &&
+          !collidesWithWall(x + dirX * reach, z + dirZ * reach, ENEMY_RADIUS)
+        )
+      }
+      // Local steering: head straight when the way is clear, else probe a fan of
+      // headings (own flank side first so a horde splits around obstacles) and
+      // commit to the clearest one briefly. Lightweight — no global pathfinding.
+      function zombieSteer(
+        enemy: CombatEnemy,
+        x: number,
+        z: number,
+        desX: number,
+        desZ: number,
+        now: number,
+      ): { x: number; z: number } {
+        const dlen = Math.hypot(desX, desZ) || 1
+        const dx = desX / dlen
+        const dz = desZ / dlen
+        const REACH = ENEMY_RADIUS * 2 + 1.0
+        if (zombiePathClear(x, z, dx, dz, REACH)) {
+          enemy.steerUntil = 0
+          return { x: dx, z: dz }
+        }
+        // Hold a committed detour so it doesn't oscillate at a corner.
+        if (enemy.steerUntil && now < enemy.steerUntil) {
+          const sx = enemy.steerX ?? dx
+          const sz = enemy.steerZ ?? dz
+          if (zombiePathClear(x, z, sx, sz, REACH * 0.8)) return { x: sx, z: sz }
+        }
+        const base = Math.atan2(dx, dz)
+        const side = enemy.flankSide
+        for (const off of [0.5, 1.0, 1.6, 2.3]) {
+          for (const s of [side, -side]) {
+            const a = base + s * off
+            const cx = Math.sin(a)
+            const cz = Math.cos(a)
+            if (zombiePathClear(x, z, cx, cz, REACH)) {
+              enemy.steerX = cx
+              enemy.steerZ = cz
+              enemy.steerUntil = now + 350
+              return { x: cx, z: cz }
+            }
+          }
+        }
+        return { x: dx, z: dz } // boxed in — push straight, per-axis slide handles it
+      }
+      // Zombie chase movement: encircle the player (pincer), funnel to ladders
+      // when the player is treed up high, lunge-feint occasionally, and steer
+      // around walls. Falls back to the last-seen position + a search when the
+      // player slips out of sight. Self-contained so other AI is untouched.
+      function moveZombieAlert(
+        enemy: CombatEnemy,
+        x: number,
+        z: number,
+        toPx: number,
+        toPz: number,
+        dist: number,
+        dt: number,
+        now: number,
+      ) {
+        const player = focalPoint
+        const dd = Math.max(0.001, dist)
+        const elevated = player.y > 2
+        // LOS is only worth the wall-trace up close; far zombies just home in.
+        const los = elevated || dist > 45 || !zombieLosBlocked(x, z, player.x, player.z)
+        let tgtX: number
+        let tgtZ: number
+        if (los) {
+          enemy.lastSeenPlayer = { x: player.x, z: player.z }
+          const perpX = -toPz / dd
+          const perpZ = toPx / dd
+          const ring = Math.min(7, dd * 0.45) * enemy.flankStrength
+          tgtX = player.x + perpX * enemy.flankSide * ring
+          tgtZ = player.z + perpZ * enemy.flankSide * ring
+        } else if (enemy.lastSeenPlayer) {
+          tgtX = enemy.lastSeenPlayer.x
+          tgtZ = enemy.lastSeenPlayer.z
+          // Reached the last-known spot still blind → break into a search.
+          if (Math.hypot(tgtX - x, tgtZ - z) < 1.5) {
+            enemy.state = "search"
+            enemy.searchTimer = 4
+            setEnemyMarker(enemy, "search", 4000)
+            return
+          }
+        } else {
+          return
+        }
+        // Player up on a roof/ledge: route to the nearest climb access (ladder)
+        // and crowd it — come up the ladder route / lie in wait at its foot.
+        if (elevated && climbZones.length) {
+          let bx = tgtX
+          let bz = tgtZ
+          let bestD = Number.POSITIVE_INFINITY
+          for (const cz of climbZones) {
+            const czx = cz.baseX ?? (cz.x1 + cz.x2) / 2
+            const czz = cz.baseZ ?? (cz.z1 + cz.z2) / 2
+            const d = Math.hypot(czx - x, czz - z)
+            if (d < bestD) {
+              bestD = d
+              bx = czx
+              bz = czz
+            }
+          }
+          tgtX = bx
+          tgtZ = bz
+        }
+        // Lunge feint — sudden bursts so the approach isn't a constant crawl.
+        if (now > enemy.nextDashCheckTime) {
+          enemy.nextDashCheckTime = now + 1200 + Math.random() * 2000
+          if (dist > 2.5 && dist < 22 && Math.random() < 0.4) enemy.dashUntil = now + 650
+        }
+        const spd = enemy.config.speed * (now < enemy.dashUntil ? 1.55 : 1) * dt
+        const dir = zombieSteer(enemy, x, z, tgtX - x, tgtZ - z, now)
+        const nx = x + dir.x * spd
+        const nz = z + dir.z * spd
+        if (!collidesWithWall(nx, z, ENEMY_RADIUS)) enemy.mesh.position.x = nx
+        if (!collidesWithWall(x, nz, ENEMY_RADIUS)) enemy.mesh.position.z = nz
+        // Face the player when sensed (menace), else face travel direction.
+        if (los) enemy.facing.set(toPx / dd, 0, toPz / dd)
+        else enemy.facing.set(dir.x, 0, dir.z)
       }
 
       // ── Wave / mission spawner ─────────────────────────────────────────────
@@ -5657,9 +5897,16 @@ export default function ThreeWorld({
                 }
               }
             } else if (enemy.state === "alert") {
-              enemy.lastSeenPlayer = { x: fp.x, z: fp.z }
-              if (distToPlayer <= enemy.config.attackRange) {
+              // Zombies manage their own last-seen tracking (LOS-gated) inside
+              // moveZombieAlert; everyone else remembers the live position.
+              if (enemy.type !== "zombie") enemy.lastSeenPlayer = { x: fp.x, z: fp.z }
+              if (
+                distToPlayer <= enemy.config.attackRange &&
+                Math.abs(enemy.mesh.position.y - fp.y) < 2.5
+              ) {
                 enemy.state = "attack"
+              } else if (enemy.type === "zombie") {
+                moveZombieAlert(enemy, ex, ez, toPx, toPz, distToPlayer, dt, now)
               } else {
                 // Flank offset: aim toward a point perpendicular to the
                 // bee-line so different enemies arc around the player from
@@ -5816,7 +6063,10 @@ export default function ThreeWorld({
                 Date.now() > spawnInvulnUntilRef.current &&
                 // Don't let a melee swing land through a wall — require an
                 // unobstructed torso-height line from the enemy to the player.
-                !wallBetween(enemy.mesh.position.x, enemy.mesh.position.z, fp.x, fp.z)
+                !wallBetween(enemy.mesh.position.x, enemy.mesh.position.z, fp.x, fp.z) &&
+                // …nor through a floor: the attacker must be on the player's
+                // level (stops zombies hitting a player up on a roof/ledge).
+                Math.abs(enemy.mesh.position.y - fp.y) < 2.5
               ) {
                 enemy.lastAttackTime = now
                 // Visible melee swing (right arm) — same knife-style motion
@@ -5868,6 +6118,32 @@ export default function ThreeWorld({
                   isEnemy: true,
                   damage: enemy.config.fireDamage,
                 })
+              }
+            } else if (enemy.state === "search" && enemy.type === "zombie") {
+              // Zombie search: shamble around the last-known spot hunting for
+              // prey. Re-locks the instant the player reappears, and never
+              // truly gives up — it loops back to the hunt when the timer ends.
+              enemy.searchTimer -= dt
+              const reSee =
+                distToPlayer < enemy.config.sightRange && !zombieLosBlocked(ex, ez, fp.x, fp.z)
+              if (reSee) {
+                enemy.state = "alert"
+                enemy.lastSeenPlayer = { x: fp.x, z: fp.z }
+                setEnemyMarker(enemy, "alert", 800)
+              } else if (enemy.searchTimer <= 0) {
+                enemy.state = "alert" // resume relentless pursuit toward last-seen
+              } else {
+                const cx = enemy.lastSeenPlayer?.x ?? ex
+                const cz = enemy.lastSeenPlayer?.z ?? ez
+                const wanderX = cx + Math.sin(now * 0.001 + enemy.microIdleSeed) * 4
+                const wanderZ = cz + Math.cos(now * 0.0013 + enemy.microIdleSeed) * 4
+                const dir = zombieSteer(enemy, ex, ez, wanderX - ex, wanderZ - ez, now)
+                const spd = enemy.config.speed * 0.5 * dt
+                const nx = ex + dir.x * spd
+                const nz = ez + dir.z * spd
+                if (!collidesWithWall(nx, ez, ENEMY_RADIUS)) enemy.mesh.position.x = nx
+                if (!collidesWithWall(ex, nz, ENEMY_RADIUS)) enemy.mesh.position.z = nz
+                enemy.facing.set(dir.x, 0, dir.z)
               }
             } else if (enemy.state === "search") {
               enemy.searchTimer -= dt
@@ -5935,7 +6211,16 @@ export default function ThreeWorld({
               const cadenceMult =
                 enemy.state === "alert" ? 1.7 : enemy.state === "search" ? 1.15 : 1
               const speedRatio = Math.min(1.6, speed / Math.max(0.4, enemy.config.speed * 0.45))
-              enemy.animTime += dt * 5 * cadenceMult * speedRatio
+              // Zombies lurch unevenly — a slow swell plus a fast jitter on the
+              // stride cadence so the shamble speeds up and stutters, never the
+              // metronome march the soldiers walk.
+              const zLurch =
+                enemy.type === "zombie"
+                  ? 0.55 +
+                    0.7 * (0.5 + 0.5 * Math.sin(now * 0.004 + enemy.microIdleSeed)) +
+                    0.3 * Math.sin(now * 0.028 + enemy.microIdleSeed * 2.3)
+                  : 1
+              enemy.animTime += dt * 5 * cadenceMult * speedRatio * zLurch
             }
 
             // ── Build target pose for this state ─────────────────────────────
@@ -5979,15 +6264,26 @@ export default function ThreeWorld({
               tgtRightHip = -w * 0.04
             }
 
-            // Zombie shamble: hunched forward, both arms reaching out for the
-            // player. Overrides the rifle-aim pose since zombies are unarmed.
+            // Zombie shamble: hunched hard forward, twitching. Overrides the
+            // rifle-aim pose (zombies are unarmed). Per-zombie carriage — about
+            // half claw both arms forward for prey, half let them dangle and
+            // swing limp — plus a fast spasm twitch layered on the slow sway.
             if (enemy.type === "zombie") {
-              const zsw = Math.sin(t) * 0.22
-              tgtTorsoPitchX = 0.42
-              tgtLeftShoulder = -1.45 + zsw
-              tgtRightShoulder = -1.45 - zsw
-              tgtLeftElbow = -0.3
-              tgtRightElbow = -0.3
+              const seed = enemy.microIdleSeed
+              const twitch = Math.sin(now * 0.033 + seed * 3.1) * 0.06
+              const zsw = Math.sin(t) * 0.22 + twitch
+              tgtTorsoPitchX = 0.42 + Math.sin(now * 0.006 + seed) * 0.06 // heaving hunch
+              if ((seed | 0) % 2 === 0) {
+                tgtLeftShoulder = -1.45 + zsw
+                tgtRightShoulder = -1.45 - zsw
+                tgtLeftElbow = -0.3 + twitch
+                tgtRightElbow = -0.3 - twitch
+              } else {
+                tgtLeftShoulder = -0.12 + zsw * 1.5
+                tgtRightShoulder = -0.12 - zsw * 1.5
+                tgtLeftElbow = -0.55
+                tgtRightElbow = -0.55
+              }
             }
 
             // Melee swing: when an enemy has just landed a close-range hit, whip
@@ -6037,7 +6333,8 @@ export default function ThreeWorld({
               enemy.blinkTimer -= dt
               if (enemy.blinkTimer <= 0) enemy.blinkActive = 0.12
             }
-            const tgtEyeOpen = enemy.blinkActive > 0 ? 0.08 : 1
+            // Zombies never blink — a fixed dead stare is creepier.
+            const tgtEyeOpen = enemy.type === "zombie" ? 1 : enemy.blinkActive > 0 ? 0.08 : 1
 
             // Frame-independent exp interpolation toward the target pose.
             const blend = 1 - Math.exp(-dt * 12)
@@ -6078,6 +6375,20 @@ export default function ThreeWorld({
             if (enemy.head) {
               enemy.head.rotation.y = p.headYaw
               enemy.head.rotation.x = p.headPitch
+              // Zombies cock their head at an unsettling angle — a slow roll
+              // plus an occasional sharper crick. Non-zombies keep it level.
+              if (enemy.type === "zombie") {
+                const s = enemy.microIdleSeed
+                const crick = Math.sin(now * 0.0007 + s * 1.7) > 0.86 ? 0.5 : 0
+                enemy.head.rotation.z = Math.sin(now * 0.0011 + s) * 0.16 + crick
+              }
+            }
+            // Jaw chomp: zombies gnash continuously, snapping wider mid-lunge.
+            if (enemy.jaw && enemy.type === "zombie") {
+              const chomping = now < enemy.meleeAnimUntil || distToPlayer < 3.5
+              const chomp =
+                (Math.sin(now * (chomping ? 0.02 : 0.008) + enemy.microIdleSeed) + 1) * 0.5
+              enemy.jaw.rotation.x = (chomping ? 0.55 : 0.2) * chomp
             }
             if (enemy.leftEye) enemy.leftEye.scale.y = p.eyeOpenness
             if (enemy.rightEye) enemy.rightEye.scale.y = p.eyeOpenness
