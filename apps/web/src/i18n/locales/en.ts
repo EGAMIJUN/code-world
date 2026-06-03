@@ -59,6 +59,9 @@ export const en: typeof ja = {
     ffaDesc: "Every player for themselves. Survive.",
     tdmDesc: "Red vs Blue. Rack up team kills.",
     zombieDesc: "Survive endless waves of fast, unarmed zombies.",
+    invasion: "INVASION",
+    invasionDesc:
+      "A rocket crashes from the sky and Terraformers swarm out. Survive the overwhelming horde.",
     selectMap: "MAP",
     urban: "URBAN",
     desert: "DESERT",

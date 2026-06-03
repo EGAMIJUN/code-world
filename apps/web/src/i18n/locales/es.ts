@@ -59,6 +59,9 @@ export const es: typeof ja = {
     ffaDesc: "Cada jugador por sí mismo. Sobrevive.",
     tdmDesc: "Rojo vs Azul. Acumula bajas para tu equipo.",
     zombieDesc: "Sobrevive a oleadas interminables de zombis rápidos y desarmados.",
+    invasion: "INVASIÓN",
+    invasionDesc:
+      "Un cohete cae del cielo y los Terraformers salen en masa. Sobrevive a la horda implacable.",
     selectMap: "MAPA",
     urban: "URBANO",
     desert: "DESIERTO",
