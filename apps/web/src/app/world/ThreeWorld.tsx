@@ -57,6 +57,12 @@ const CANNON_RADIUS = 6 // AOE blast radius
 const CANNON_SHELL_SPEED = 36 // fast enough to read fairly flat
 const CANNON_BARREL_MIN_PITCH = -0.25
 const CANNON_BARREL_MAX_PITCH = 0.6
+// Run-over: driving into enemies above a speed threshold hurts them. Tanks
+// crush almost anything; cars need real speed and scale damage with it.
+const RUNOVER_MIN_SPEED_CAR = 4 // m/s before a car does any damage
+const RUNOVER_MIN_SPEED_TANK = 1.5 // tanks crush even at a crawl
+const RUNOVER_CAR_DMG_PER_SPEED = 16 // car contact damage = speed × this
+const RUNOVER_TANK_DAMAGE = 9999 // tanks instakill on contact
 // ── Vertical movement ──────────────────────────────────────────────────────────
 // Real gravity in m/s². Picked to feel snappy (a 4m drop = ~0.6s in air),
 // not a perfect-physics simulation. Tuned by feel under EYE_HEIGHT.
@@ -3646,6 +3652,42 @@ export default function ThreeWorld({
             Math.min(CANNON_BARREL_MAX_PITCH, camState.pitch),
           )
           v.barrelPivot.rotation.x += (tp - v.barrelPivot.rotation.x) * tb
+        }
+
+        // ── Run-over ────────────────────────────────────────────────────────
+        // Driving through enemies mows them down (the vehicle still passes
+        // through — no stopping dead on a body). Tanks crush on contact; cars
+        // need speed and scale damage with it. Lethal hits route through the
+        // normal kill path (death anim / killfeed / score), bodies flung ahead.
+        {
+          const sp = Math.abs(v.speed)
+          const minSp = isTank ? RUNOVER_MIN_SPEED_TANK : RUNOVER_MIN_SPEED_CAR
+          if (sp > minSp) {
+            const reach = (isTank ? VEHICLE_TANK_RADIUS : VEHICLE_RADIUS) + ENEMY_RADIUS + 0.25
+            const reach2 = reach * reach
+            const dmg = isTank ? RUNOVER_TANK_DAMAGE : Math.floor(sp * RUNOVER_CAR_DMG_PER_SPEED)
+            for (const enemy of enemies) {
+              if (enemy.hp <= 0 || enemy.dyingTimer >= 0) continue
+              const ex = enemy.mesh.position.x - v.x
+              const ez = enemy.mesh.position.z - v.z
+              if (ex * ex + ez * ez > reach2) continue
+              if (Math.abs(enemy.mesh.position.y) > 2) continue // not our level
+              enemy.hp = Math.max(0, enemy.hp - dmg)
+              spawnBlood(new THREE.Vector3(enemy.mesh.position.x, 0.9, enemy.mesh.position.z))
+              if (enemy.hp <= 0) {
+                // Fling the body ahead in the travel direction before the anim.
+                enemy.mesh.position.x += fx * 0.6
+                enemy.mesh.position.z += fz * 0.6
+                applyEnemyKill(enemy, "vehicle")
+              } else {
+                // Survived: shove them aside so they don't grind under the hull.
+                enemy.mesh.position.x += (ex === 0 ? 0 : Math.sign(ex)) * 0.3 + fx * 0.2
+                enemy.mesh.position.z += (ez === 0 ? 0 : Math.sign(ez)) * 0.3 + fz * 0.2
+              }
+              // Cars bleed a little momentum per body; tanks barely notice.
+              if (!isTank) v.speed *= 0.94
+            }
+          }
         }
 
         // ── Free-aim chase camera ──────────────────────────────────────────
