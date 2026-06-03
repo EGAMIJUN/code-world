@@ -1627,11 +1627,14 @@ export default function ThreeWorld({
       // ── Scene ──────────────────────────────────────────────────────────────
       const scene = new THREE.Scene()
       const theme =
-        mapId === "desert"
-          ? { sky: 0xf0c887, fog: 0xe6c89a, ambient: 0xffe9c0, sun: 0xffd58a }
-          : mapId === "snow"
-            ? { sky: 0xdce8f0, fog: 0xeaf2f8, ambient: 0xeef5ff, sun: 0xffffff }
-            : { sky: 0x87ceeb, fog: 0xc0d8f0, ambient: 0xd4e8ff, sun: 0xfff4cc }
+        modeRef.current === "invasion"
+          ? // Invasion: an ominous blood-red sky regardless of map.
+            { sky: 0x3a1812, fog: 0x33140e, ambient: 0xffcaa8, sun: 0xff7a4a }
+          : mapId === "desert"
+            ? { sky: 0xf0c887, fog: 0xe6c89a, ambient: 0xffe9c0, sun: 0xffd58a }
+            : mapId === "snow"
+              ? { sky: 0xdce8f0, fog: 0xeaf2f8, ambient: 0xeef5ff, sun: 0xffffff }
+              : { sky: 0x87ceeb, fog: 0xc0d8f0, ambient: 0xd4e8ff, sun: 0xfff4cc }
       scene.background = new THREE.Color(theme.sky)
       // Snow gets a tighter fog band ("軽いフォグ" — slightly hazy whiteout
       // without crushing visibility); desert/urban keep the long open draw.
@@ -2799,11 +2802,10 @@ export default function ThreeWorld({
       // elevator up to (reuses the floor + climb-zone lift). Legs are decorative
       // (no collision) so you can walk under it to the central elevator; the
       // deck + railings are solid up top.
-      function makeLandmarkTower(cx: number, cz: number) {
-        const deckY = 22
+      function makeLandmarkTower(cx: number, cz: number, deckY = 22, legColor = 0xc0392b) {
         const towerTopY = deckY + 14
         const legMat = new THREE.MeshStandardMaterial({
-          color: 0xc0392b,
+          color: legColor,
           roughness: 0.5,
           metalness: 0.55,
         })
@@ -2963,7 +2965,13 @@ export default function ThreeWorld({
         scene.add(sign)
         entries.push({ x: cx, z: cz, kind: "ladder" })
       }
-      makeLandmarkTower(84, 44)
+      // Skyline of climbable observation towers, each with its own elevator.
+      // Legs carry no collision, so they never block traversal — only the decks
+      // up top are solid. Placed in open corners at varied heights.
+      makeLandmarkTower(84, 44, 22, 0xc0392b)
+      makeLandmarkTower(14, 14, 18, 0x3a6ea5)
+      makeLandmarkTower(14, 84, 27, 0xc0392b)
+      makeLandmarkTower(86, 86, 24, 0x6a6f78)
 
       // ── Street props ───────────────────────────────────────────────────────
       // Drum barrels (cylinders) clustered at key choke points.
@@ -4136,7 +4144,13 @@ export default function ThreeWorld({
 
       // ── Humanoid enemy factory ─────────────────────────────────────────────
       let enemyIdCounter = 0
-      function makeEnemy(type: EnemyType, x: number, z: number, isCommander = false): CombatEnemy {
+      function makeEnemy(
+        type: EnemyType,
+        x: number,
+        z: number,
+        isCommander = false,
+        scaleMul = 1,
+      ): CombatEnemy {
         const cfg = ENEMY_CONFIGS[type]
         const isZombie = type === "zombie"
         const isTerraformer = type === "terraformer"
@@ -4147,7 +4161,9 @@ export default function ThreeWorld({
             ? 0.95 + Math.random() * 0.22
             : 1
         const scale =
-          (type === "heavy" ? 1.25 : type === "sniper" ? 1.03 : isTerraformer ? 1.4 : 1.0) * zJit
+          (type === "heavy" ? 1.25 : type === "sniper" ? 1.03 : isTerraformer ? 1.4 : 1.0) *
+          zJit *
+          scaleMul
         const bodyColor = isCommander ? 0xff6600 : cfg.color
         const eid = enemyIdCounter++
         const enemyIdStr = `enemy_${eid}`
@@ -5355,6 +5371,25 @@ export default function ThreeWorld({
           tf.state = "alert"
           tf.lastSeenPlayer = { x: focalPoint.x, z: focalPoint.z }
           enemies.push(tf)
+        }
+        // Every 3rd wave: a towering BOSS terraformer — much bigger, tankier,
+        // and hits harder. Spawned at the crater so it leads the charge.
+        if (waveNum % 3 === 0) {
+          const safe = findSafeSpawnNear(cx, cz, ENEMY_RADIUS)
+          const boss = makeEnemy("terraformer", safe.x, safe.z, false, 1.9)
+          boss.hp = 2600
+          boss.maxHp = 2600
+          boss.config = {
+            ...boss.config,
+            speed: chaseSpeed * 0.82,
+            attackDamage: 60,
+            attackRange: 3.2,
+          }
+          boss.aiTuning = TERRAFORMER_AI_TUNING
+          boss.state = "alert"
+          boss.lastSeenPlayer = { x: focalPoint.x, z: focalPoint.z }
+          enemies.push(boss)
+          showNotification("☠ 巨大テラフォーマー出現！")
         }
         setAliveEnemyCount(enemies.filter((e) => e.hp > 0).length)
         setEnemyStatus(
