@@ -704,6 +704,19 @@ const SPAWN_POINTS = [
   { x: 80, z: 51 }, // Avenue terminus interior
   { x: 38, z: 9 }, // Industrial north-row interior
   { x: 38, z: 75 }, // Industrial south-row interior
+  // ── Open-world district spawns (PR-B) ──────────────────────────────────
+  // HARBOR (south): in the open apron between the container yards and
+  // warehouses (on land, north of the waterline at z≈265). Kept clear of
+  // building footprints so a spawn never lands sealed inside a shed.
+  { x: 30, z: 178 }, // HARBOR container yard (west)
+  { x: 66, z: 180 }, // HARBOR container yard (east)
+  { x: 50, z: 212 }, // HARBOR central apron
+  { x: 60, z: 248 }, // HARBOR warehouse row
+  // INDUSTRIAL (north): in the yards beside the factory halls / tank farm.
+  { x: 26, z: -136 }, // INDUSTRIAL west hall (south face)
+  { x: 76, z: -142 }, // INDUSTRIAL east hall (south face)
+  { x: 50, z: -185 }, // INDUSTRIAL central yard
+  { x: 18, z: -202 }, // INDUSTRIAL south yard
 ]
 
 // ── Battle-city building layout ────────────────────────────────────────────────
@@ -3551,6 +3564,325 @@ export default function ThreeWorld({
         }
       }
 
+      // ════════════════════════════════════════════════════════════════════
+      // PR-B — District terrain: HARBOR (south) + INDUSTRIAL (north) + CITY park
+      // Every collidable solid reuses a small set of shared geometries (a unit
+      // box scaled per instance, one container box, one chimney/tank/post/lamp
+      // geo) and registers its collision AABB by hand — so we never allocate a
+      // fresh BoxGeometry per object. No PointLights are added; emissive heads
+      // carry the "lit" look under the ACESFilmic tone map. The central N–S
+      // road runs at x=50 (±6 corridor) and the E–W avenue at z=50, so district
+      // props are kept clear of those lanes.
+      // ════════════════════════════════════════════════════════════════════
+      const smokePuffs: {
+        mesh: THREE.Mesh
+        baseX: number
+        baseZ: number
+        baseY: number
+        t: number
+        rise: number
+      }[] = []
+      {
+        // ── Shared geometries (reused across all instances) ─────────────────
+        const unitBox = new THREE.BoxGeometry(1, 1, 1)
+        const containerGeo = new THREE.BoxGeometry(6, 2.6, 2.5) // long axis = X
+        const chimneyGeo = new THREE.CylinderGeometry(0.9, 1.25, 16, 12)
+        const tankSphereGeo = new THREE.SphereGeometry(3.2, 16, 12)
+        const tankCylGeo = new THREE.CylinderGeometry(2.4, 2.4, 6, 16)
+        const fencePostGeo = new THREE.BoxGeometry(0.12, 1.7, 0.12)
+        const fenceRailGeo = new THREE.BoxGeometry(1, 0.1, 0.1)
+        const lampPostGeo = new THREE.CylinderGeometry(0.1, 0.14, 5, 6)
+        const lampHeadGeo = new THREE.SphereGeometry(0.26, 8, 6)
+        const craneBeamGeo = new THREE.BoxGeometry(0.6, 0.6, 9)
+        const craneBoomGeo = new THREE.BoxGeometry(0.55, 0.55, 15)
+        const pierPlankGeo = new THREE.BoxGeometry(3.4, 0.2, 22)
+
+        // ── Shared materials ────────────────────────────────────────────────
+        const steelMat = new THREE.MeshStandardMaterial({
+          color: zoneTint(0x9aa0a6),
+          roughness: 0.5,
+          metalness: 0.6,
+        })
+        const rustMat = new THREE.MeshStandardMaterial({
+          color: zoneTint(0x7a5238),
+          roughness: 0.85,
+          metalness: 0.3,
+        })
+        const factoryMat = new THREE.MeshStandardMaterial({
+          color: zoneTint(0x6c7178),
+          roughness: 0.8,
+          metalness: 0.25,
+        })
+        const warehouseMat = new THREE.MeshStandardMaterial({
+          color: zoneTint(0x80766a),
+          roughness: 0.9,
+          metalness: 0.1,
+        })
+        const tankMat = new THREE.MeshStandardMaterial({
+          color: zoneTint(0xb6bbc0),
+          roughness: 0.45,
+          metalness: 0.55,
+        })
+        const containerMats = [0xb23b3b, 0x3b6bb2, 0x3b9e54, 0x8a5238].map(
+          (c) =>
+            new THREE.MeshStandardMaterial({
+              color: zoneTint(c),
+              roughness: 0.72,
+              metalness: 0.4,
+            }),
+        )
+        const lampHeadMat = new THREE.MeshStandardMaterial({
+          color: 0xffe9aa,
+          emissive: 0xffd060,
+          emissiveIntensity: 1.7,
+          roughness: 0.4,
+          metalness: 0,
+        })
+
+        // ── Helpers ─────────────────────────────────────────────────────────
+        // Register a mesh for collision (AABB) + bullet raycast (wallMeshes).
+        const registerSolid = (m: THREE.Mesh, halfX: number, halfZ: number, topY: number) => {
+          m.castShadow = true
+          m.receiveShadow = true
+          scene.add(m)
+          wallMeshes.push(m)
+          ALL_AABBS.push({
+            x1: m.position.x - halfX,
+            x2: m.position.x + halfX,
+            z1: m.position.z - halfZ,
+            z2: m.position.z + halfZ,
+            h: topY,
+          })
+          return m
+        }
+        // Axis-aligned scaled box (reuses unitBox). ry must be 0 or ±π/2 so the
+        // footprint stays axis-aligned for the AABB (swaps extents at ±90°).
+        const addBox = (
+          mat: THREE.Material,
+          x: number,
+          z: number,
+          sx: number,
+          sy: number,
+          sz: number,
+          ry = 0,
+        ) => {
+          const m = new THREE.Mesh(unitBox, mat)
+          m.scale.set(sx, sy, sz)
+          m.position.set(x, sy / 2, z)
+          m.rotation.y = ry
+          const swap = Math.abs(ry) > 0.1
+          return registerSolid(m, (swap ? sz : sx) / 2, (swap ? sx : sz) / 2, sy)
+        }
+
+        // ── HARBOR (south, z ≈ 150–260; open water beyond) ──────────────────
+        // Stacked shipping containers. Each entry: [x, z, levels, rot90].
+        const containerStacks: [number, number, number, boolean][] = [
+          [28, 162, 3, false],
+          [33, 162, 2, false],
+          [28, 167, 2, true],
+          [70, 170, 3, false],
+          [65, 170, 2, false],
+          [70, 175, 2, true],
+          [18, 205, 2, false],
+          [80, 210, 3, false],
+          [76, 210, 2, false],
+          [40, 225, 2, true],
+        ]
+        for (const [bx, bz, levels, rot90] of containerStacks) {
+          for (let l = 0; l < levels; l++) {
+            const mat = containerMats[(l + Math.round(bx) + Math.round(bz)) % 4]
+            if (!mat) continue
+            const m = new THREE.Mesh(containerGeo, mat)
+            const y = 1.3 + l * 2.6
+            m.position.set(bx, y, bz)
+            if (rot90) m.rotation.y = Math.PI / 2
+            registerSolid(m, rot90 ? 1.25 : 3, rot90 ? 3 : 1.25, y + 1.3)
+          }
+        }
+        // Warehouses (low, long sheds) — kept off the x=50 road corridor.
+        addBox(warehouseMat, 26, 235, 22, 6, 13)
+        addBox(warehouseMat, 74, 236, 20, 6, 12)
+        addBox(warehouseMat, 80, 185, 16, 5.5, 11)
+        // Gantry cranes near the quay edge (z ≈ 252). Two tall legs + a top
+        // beam + a boom cantilevered out over the water (toward +z).
+        const makeCrane = (cx: number, cz: number) => {
+          for (const dz of [-4, 4]) {
+            // legs (scaled unit box, collidable)
+            addBox(steelMat, cx, cz + dz, 0.5, 14, 0.5)
+          }
+          const beam = new THREE.Mesh(craneBeamGeo, steelMat)
+          beam.position.set(cx, 14, cz)
+          beam.castShadow = true
+          scene.add(beam)
+          const boom = new THREE.Mesh(craneBoomGeo, steelMat)
+          boom.position.set(cx, 14.4, cz + 9)
+          boom.castShadow = true
+          scene.add(boom)
+          const cab = new THREE.Mesh(unitBox, rustMat)
+          cab.scale.set(1.6, 1.4, 1.6)
+          cab.position.set(cx, 13, cz - 1.5)
+          scene.add(cab)
+        }
+        makeCrane(24, 252)
+        makeCrane(58, 256)
+        makeCrane(86, 252)
+        // Piers / jetties — planks reaching south off the quay into the water.
+        // Low (y≈0.15) and walkable, so no collision AABB.
+        for (const px of [30, 70]) {
+          const plank = new THREE.Mesh(pierPlankGeo, warehouseMat)
+          plank.position.set(px, 0.15, 274)
+          plank.receiveShadow = true
+          scene.add(plank)
+        }
+        // Open water — a single large plane at the far south, just below grade.
+        const waterMat = new THREE.MeshStandardMaterial({
+          color: zoneTint(0x245f80),
+          roughness: 0.25,
+          metalness: 0.6,
+          transparent: true,
+          opacity: 0.92,
+        })
+        const water = new THREE.Mesh(new THREE.PlaneGeometry(WORLD_SIZE, 90), waterMat)
+        water.rotation.x = -Math.PI / 2
+        water.position.set(WORLD_CENTER, -0.05, 305)
+        scene.add(water)
+
+        // ── INDUSTRIAL (north, z ≈ -120 to -240) ────────────────────────────
+        // Factory halls (big, low boxes) — off the x=50 corridor.
+        addBox(factoryMat, 26, -150, 24, 8, 17)
+        addBox(factoryMat, 76, -156, 20, 8, 15)
+        addBox(factoryMat, 34, -202, 19, 7, 14)
+        // Saw-tooth roof accents (rust) on the big halls, purely decorative.
+        for (const [rx, rz] of [
+          [26, -150],
+          [76, -156],
+        ] as [number, number][]) {
+          const cap = new THREE.Mesh(unitBox, rustMat)
+          cap.scale.set(22, 0.6, 15)
+          cap.position.set(rx, 8.3, rz)
+          cap.castShadow = true
+          scene.add(cap)
+        }
+        // Chimneys (thin tall cylinders) with rising smoke. Collect tops so the
+        // smoke pool below can emit from each.
+        const chimneySpots: [number, number][] = [
+          [16, -146],
+          [30, -146],
+          [70, -152],
+          [82, -152],
+        ]
+        const CHIMNEY_TOP_Y = 16
+        for (const [cx, cz] of chimneySpots) {
+          const stack = new THREE.Mesh(chimneyGeo, rustMat)
+          stack.position.set(cx, CHIMNEY_TOP_Y / 2, cz)
+          registerSolid(stack, 1.25, 1.25, CHIMNEY_TOP_Y)
+        }
+        // Gas tanks — a sphere on a short skirt + a squat cylinder beside it.
+        {
+          const sphere = new THREE.Mesh(tankSphereGeo, tankMat)
+          sphere.position.set(58, 3.4, -192)
+          registerSolid(sphere, 3.2, 3.2, 6.6)
+          const cyl = new THREE.Mesh(tankCylGeo, tankMat)
+          cyl.position.set(67, 3, -196)
+          registerSolid(cyl, 2.4, 2.4, 6)
+        }
+        // Perimeter fence along the far-north boundary (z ≈ -236): a row of
+        // posts with two rails. Posts are thin — no collision (decorative line).
+        {
+          const fenceZ = -236
+          for (let fx = -40; fx <= 140; fx += 3) {
+            const post = new THREE.Mesh(fencePostGeo, steelMat)
+            post.position.set(fx, 0.85, fenceZ)
+            scene.add(post)
+          }
+          for (const ry of [0.6, 1.3]) {
+            const rail = new THREE.Mesh(fenceRailGeo, steelMat)
+            rail.scale.x = 180
+            rail.position.set(50, ry, fenceZ)
+            scene.add(rail)
+          }
+        }
+
+        // ── Chimney smoke pool ──────────────────────────────────────────────
+        // A fixed pool of puffs per chimney (no per-frame allocation). Each
+        // rises, expands and fades, then loops. Updated in the animate loop.
+        const smokeGeo = new THREE.SphereGeometry(0.85, 8, 6)
+        for (const [cx, cz] of chimneySpots) {
+          for (let k = 0; k < 4; k++) {
+            const mat = new THREE.MeshLambertMaterial({
+              color: 0xdadada,
+              transparent: true,
+              opacity: 0.45,
+              depthWrite: false,
+            })
+            const puff = new THREE.Mesh(smokeGeo, mat)
+            puff.position.set(cx, CHIMNEY_TOP_Y, cz)
+            scene.add(puff)
+            smokePuffs.push({
+              mesh: puff,
+              baseX: cx,
+              baseZ: cz,
+              baseY: CHIMNEY_TOP_Y,
+              t: k / 4,
+              rise: 9 + (k % 2),
+            })
+          }
+        }
+
+        // ── CITY reinforcement ──────────────────────────────────────────────
+        // A small park in an open south-central lot (clear of the flanks /
+        // towers): a green ground patch + a handful of trees + a couple of
+        // benches. Reuses the shared tree materials.
+        const parkMat = new THREE.MeshStandardMaterial({
+          color: zoneTint(0x3c6e32),
+          roughness: 0.95,
+          metalness: 0,
+        })
+        const park = new THREE.Mesh(new THREE.PlaneGeometry(18, 14), parkMat)
+        park.rotation.x = -Math.PI / 2
+        park.position.set(52, 0.015, 89)
+        park.receiveShadow = true
+        scene.add(park)
+        const parkTreeGeo = new THREE.CylinderGeometry(0.16, 0.24, 2.2, 6)
+        const parkLeafGeo = new THREE.SphereGeometry(1.2, 8, 6)
+        const treeSpots: [number, number][] = [
+          [46, 84],
+          [58, 85],
+          [50, 90],
+          [44, 93],
+          [60, 93],
+        ]
+        for (const [tx, tz] of treeSpots) {
+          const trunk = new THREE.Mesh(parkTreeGeo, trunkMat)
+          trunk.position.set(tx, 1.1, tz)
+          trunk.castShadow = true
+          scene.add(trunk)
+          const leaf = new THREE.Mesh(parkLeafGeo, leavesMat)
+          leaf.position.set(tx, 3.0, tz)
+          leaf.castShadow = true
+          scene.add(leaf)
+        }
+
+        // Street lamps along the central N–S road (x=50). Posts alternate sides
+        // (x=43 / 57) and a few continue into the districts so the arterial
+        // reads as lit at night. Emissive heads only — no PointLights.
+        const lampZs: number[] = []
+        for (let lz = 8; lz <= 96; lz += 16) lampZs.push(lz)
+        for (const lz of [-40, -80, -120, 130, 170, 210]) lampZs.push(lz)
+        let lampFlip = false
+        for (const lz of lampZs) {
+          const lx = lampFlip ? 57 : 43
+          lampFlip = !lampFlip
+          const post = new THREE.Mesh(lampPostGeo, steelMat)
+          post.position.set(lx, 2.5, lz)
+          post.castShadow = true
+          scene.add(post)
+          const head = new THREE.Mesh(lampHeadGeo, lampHeadMat)
+          head.position.set(lx + (lx < 50 ? 0.6 : -0.6), 4.8, lz)
+          scene.add(head)
+        }
+      }
+
       // ── FPS camera state ───────────────────────────────────────────────────
       // West end of the central avenue, with the avenue terminus building
       // visible dead-ahead. Buildings flanking at z=32–44 (north) and
@@ -5129,8 +5461,14 @@ export default function ThreeWorld({
           const sp = shuffled[i % shuffled.length] ?? shuffled[0]
           if (!sp) continue
           const type = types[i] ?? "grunt"
-          const rx = Math.max(2, Math.min(MAP_SIZE - 2, sp.x + (Math.random() - 0.5) * 3))
-          const rz = Math.max(2, Math.min(MAP_SIZE - 2, sp.z + (Math.random() - 0.5) * 3))
+          const rx = Math.max(
+            WORLD_MIN + 2,
+            Math.min(WORLD_MAX - 2, sp.x + (Math.random() - 0.5) * 3),
+          )
+          const rz = Math.max(
+            WORLD_MIN + 2,
+            Math.min(WORLD_MAX - 2, sp.z + (Math.random() - 0.5) * 3),
+          )
           const safe = findSafeSpawnNear(rx, rz, ENEMY_RADIUS)
           const isCmd = commandersSpawned < commanderCount && type === "sniper"
           if (isCmd) commandersSpawned++
@@ -5249,8 +5587,14 @@ export default function ThreeWorld({
           // 70% grunt, 20% sniper, 10% heavy
           const r = Math.random()
           const type: EnemyType = r < 0.7 ? "grunt" : r < 0.9 ? "sniper" : "heavy"
-          const rx = Math.max(3, Math.min(MAP_SIZE - 3, sp.x + (Math.random() - 0.5) * 4))
-          const rz = Math.max(3, Math.min(MAP_SIZE - 3, sp.z + (Math.random() - 0.5) * 4))
+          const rx = Math.max(
+            WORLD_MIN + 3,
+            Math.min(WORLD_MAX - 3, sp.x + (Math.random() - 0.5) * 4),
+          )
+          const rz = Math.max(
+            WORLD_MIN + 3,
+            Math.min(WORLD_MAX - 3, sp.z + (Math.random() - 0.5) * 4),
+          )
           const safe = findSafeSpawnNear(rx, rz, ENEMY_RADIUS)
           const bot = makeEnemy(type, safe.x, safe.z, false)
 
@@ -6976,6 +7320,21 @@ export default function ThreeWorld({
           }
         }
 
+        // ── Chimney smoke (industrial district) ────────────────────────────
+        // Fixed pool: each puff rises from its chimney, expands + fades, loops.
+        for (const puff of smokePuffs) {
+          puff.t += dt * 0.16
+          if (puff.t > 1) puff.t -= 1
+          const tt = puff.t
+          puff.mesh.position.set(
+            puff.baseX + Math.sin(tt * 3.1) * 0.7,
+            puff.baseY + tt * puff.rise,
+            puff.baseZ + Math.cos(tt * 2.3) * 0.5,
+          )
+          puff.mesh.scale.setScalar(0.5 + tt * 1.9)
+          ;(puff.mesh.material as THREE.MeshLambertMaterial).opacity = 0.45 * (1 - tt)
+        }
+
         // ── Explosion particles ────────────────────────────────────────────
         for (let i = refs.explosionParticles.length - 1; i >= 0; i--) {
           const p = refs.explosionParticles[i]
@@ -7114,8 +7473,14 @@ export default function ThreeWorld({
                     x: enemy.spawnX,
                     z: enemy.spawnZ,
                   }
-                  const rx = Math.max(3, Math.min(MAP_SIZE - 3, sp.x + (Math.random() - 0.5) * 4))
-                  const rz = Math.max(3, Math.min(MAP_SIZE - 3, sp.z + (Math.random() - 0.5) * 4))
+                  const rx = Math.max(
+                    WORLD_MIN + 3,
+                    Math.min(WORLD_MAX - 3, sp.x + (Math.random() - 0.5) * 4),
+                  )
+                  const rz = Math.max(
+                    WORLD_MIN + 3,
+                    Math.min(WORLD_MAX - 3, sp.z + (Math.random() - 0.5) * 4),
+                  )
                   const safe = findSafeSpawnNear(rx, rz, ENEMY_RADIUS)
                   enemy.mesh.position.set(safe.x, 0, safe.z)
                   enemy.mesh.rotation.x = 0
