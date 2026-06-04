@@ -3127,11 +3127,18 @@ export default function ThreeWorld({
         car.position.set(cx, 1.1, cz)
         scene.add(car)
         // Elevator lift zone (central; ground↔deck, disambiguated by altitude).
+        // The trigger box is widened to ±2.2 (was ±1.3): the elevator car
+        // (1.6×1.6) sits dead-center, so a player walking up to the tower
+        // naturally stops *outside* the car — at the old ±1.3 edge the
+        // "[E]/↑ ELEVATOR" prompt frequently never fired. ±2.2 still sits well
+        // inside the splayed legs (base half-span 7), so it can't trigger from
+        // open ground, but the hint now appears as soon as you reach the car.
+        const ELEVATOR_ZONE_HALF = 2.2
         climbZones.push({
-          x1: cx - 1.3,
-          x2: cx + 1.3,
-          z1: cz - 1.3,
-          z2: cz + 1.3,
+          x1: cx - ELEVATOR_ZONE_HALF,
+          x2: cx + ELEVATOR_ZONE_HALF,
+          z1: cz - ELEVATOR_ZONE_HALF,
+          z2: cz + ELEVATOR_ZONE_HALF,
           targetY: deckY + 0.2,
           downY: 0,
           topX: cx,
@@ -8058,12 +8065,19 @@ export default function ThreeWorld({
               ctx.arc(cx, cz, 4, 0, Math.PI * 2)
               ctx.fill()
             }
-            // Doors (green ▲) and ladders (yellow square) — navigational aids.
+            // Doors (green ▲) and ladders/elevators (yellow square). Doors are
+            // drawn only when in view (there are many). Ladders/elevators are
+            // the key navigational landmarks, so an off-screen one is *clamped*
+            // to the minimap's circular edge (GTA-style) — the player can always
+            // see which way to head for the nearest elevator. Before PR-A the
+            // whole-map minimap showed every elevator at once; the local window
+            // hid distant ones, which is what made the elevators feel "gone".
+            const EDGE_R = W / 2 - 5
             for (const ent of refs.entries) {
               const ex = mx(ent.x)
               const ez = mz(ent.z)
-              if (!inView(ex, ez)) continue
               if (ent.kind === "door") {
+                if (!inView(ex, ez)) continue
                 ctx.fillStyle = "#44ff88"
                 ctx.strokeStyle = "rgba(0,0,0,0.85)"
                 ctx.lineWidth = 1
@@ -8075,14 +8089,24 @@ export default function ThreeWorld({
                 ctx.fill()
                 ctx.stroke()
               } else {
+                // Ladder / elevator. Clamp to the circular edge when off-screen.
+                const dx = ex - W / 2
+                const dz = ez - W / 2
+                const dist = Math.hypot(dx, dz)
+                const clamped = dist > EDGE_R
+                const lx = clamped ? W / 2 + (dx / dist) * EDGE_R : ex
+                const lz = clamped ? W / 2 + (dz / dist) * EDGE_R : ez
                 ctx.fillStyle = "#ffcc22"
                 ctx.strokeStyle = "rgba(0,0,0,0.85)"
                 ctx.lineWidth = 1
-                ctx.fillRect(ex - 3, ez - 3, 6, 6)
-                ctx.strokeRect(ex - 3, ez - 3, 6, 6)
-                ctx.fillStyle = "rgba(0,0,0,0.6)"
-                ctx.fillRect(ex - 2, ez - 1, 4, 1)
-                ctx.fillRect(ex - 2, ez + 1, 4, 1)
+                const s = clamped ? 2 : 3 // edge pips are a touch smaller
+                ctx.fillRect(lx - s, lz - s, s * 2, s * 2)
+                ctx.strokeRect(lx - s, lz - s, s * 2, s * 2)
+                if (!clamped) {
+                  ctx.fillStyle = "rgba(0,0,0,0.6)"
+                  ctx.fillRect(lx - 2, lz - 1, 4, 1)
+                  ctx.fillRect(lx - 2, lz + 1, 4, 1)
+                }
               }
             }
             // Vehicles — cyan squares (occupied/enemy ones go orange-red).
