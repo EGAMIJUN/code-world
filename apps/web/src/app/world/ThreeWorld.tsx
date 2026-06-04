@@ -524,18 +524,18 @@ function findSafeSpawnNear(x: number, z: number, radius: number): { x: number; z
       const nx = x + Math.cos(a) * r
       const nz = z + Math.sin(a) * r
       if (
-        nx > radius &&
-        nx < MAP_SIZE - radius &&
-        nz > radius &&
-        nz < MAP_SIZE - radius &&
+        nx > WORLD_MIN + radius &&
+        nx < WORLD_MAX - radius &&
+        nz > WORLD_MIN + radius &&
+        nz < WORLD_MAX - radius &&
         !collidesWithWall(nx, nz, radius)
       ) {
         return { x: nx, z: nz }
       }
     }
   }
-  // Fallback: map center (always clear in our layouts).
-  return { x: MAP_SIZE / 2, z: MAP_SIZE / 2 }
+  // Fallback: world center (= city center, always clear in our layouts).
+  return { x: WORLD_CENTER, z: WORLD_CENTER }
 }
 
 // ── Enemy type system ──────────────────────────────────────────────────────────
@@ -1744,11 +1744,17 @@ export default function ThreeWorld({
       // ── Camera (FPS) ───────────────────────────────────────────────────────
       // FOV 80 (was 75): wider field reduces peripheral motion-shear when
       // the player whips around, a common motion-sickness trigger.
+      // Far clip must exceed the fog's max distance for the open world or
+      // distant geometry pops out before the fog hides it. Snow uses a tighter
+      // fog band (max 420) so a 500 far is enough; other maps fog out at 680,
+      // needing 800. Mirrors the per-map fog set below; read from mapId at
+      // scene creation so a map switch (which remounts ThreeWorld) picks up the
+      // matching clip.
       const camera = new THREE.PerspectiveCamera(
         80,
         container.clientWidth / container.clientHeight,
         0.1,
-        320,
+        mapId === "snow" ? 500 : 800,
       )
       camera.rotation.order = "YXZ"
 
@@ -4307,7 +4313,11 @@ export default function ThreeWorld({
         for (let d = 1.0; d <= VEHICLE_CAM_DIST; d += 0.5) {
           const sx = v.x - aimHx * d
           const sz = v.z - aimHz * d
-          const outOfBounds = sx < 0.4 || sx > MAP_SIZE - 0.4 || sz < 0.4 || sz > MAP_SIZE - 0.4
+          const outOfBounds =
+            sx < WORLD_MIN + 0.4 ||
+            sx > WORLD_MAX - 0.4 ||
+            sz < WORLD_MIN + 0.4 ||
+            sz > WORLD_MAX - 0.4
           if (outOfBounds || pointInsideWall(sx, 2.0, sz)) {
             camDist = Math.max(2.2, d - 0.7)
             break
