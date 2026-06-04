@@ -3830,9 +3830,10 @@ export default function ThreeWorld({
         }
 
         // ── CITY reinforcement ──────────────────────────────────────────────
-        // A small park in an open south-central lot (clear of the flanks /
-        // towers): a green ground patch + a handful of trees + a couple of
-        // benches. Reuses the shared tree materials.
+        // A small park in the open lot on the city's west side (the avenue
+        // mouth by spawn) — clear of the office-building footprints that the
+        // earlier south-central spot clipped. A green ground patch + trees;
+        // the trees carry no collision so they don't wall off the spawn.
         const parkMat = new THREE.MeshStandardMaterial({
           color: zoneTint(0x3c6e32),
           roughness: 0.95,
@@ -3840,17 +3841,17 @@ export default function ThreeWorld({
         })
         const park = new THREE.Mesh(new THREE.PlaneGeometry(18, 14), parkMat)
         park.rotation.x = -Math.PI / 2
-        park.position.set(52, 0.015, 89)
+        park.position.set(8, 0.015, 50)
         park.receiveShadow = true
         scene.add(park)
         const parkTreeGeo = new THREE.CylinderGeometry(0.16, 0.24, 2.2, 6)
         const parkLeafGeo = new THREE.SphereGeometry(1.2, 8, 6)
         const treeSpots: [number, number][] = [
-          [46, 84],
-          [58, 85],
-          [50, 90],
-          [44, 93],
-          [60, 93],
+          [3, 45],
+          [12, 46],
+          [8, 52],
+          [2, 55],
+          [14, 54],
         ]
         for (const [tx, tz] of treeSpots) {
           const trunk = new THREE.Mesh(parkTreeGeo, trunkMat)
@@ -5187,20 +5188,21 @@ export default function ThreeWorld({
         shadow.position.y = 0.02
         root.add(shadow)
 
+        // Patrol loop around the spawn. Waypoints range up to ±40 around the
+        // spawn and clamp to the *world* bounds (not MAP_SIZE) so HARBOR /
+        // INDUSTRIAL enemies patrol their own district instead of being yanked
+        // back into the 0–100 city the moment they pick a waypoint.
+        const PATROL_R = 40
+        const wp = (dx: number, dz: number) => ({
+          x: Math.max(WORLD_MIN + 2, Math.min(WORLD_MAX - 2, x + dx)),
+          z: Math.max(WORLD_MIN + 2, Math.min(WORLD_MAX - 2, z + dz)),
+        })
         const patrol = [
           { x, z },
-          {
-            x: Math.max(2, Math.min(MAP_SIZE - 2, x + 8)),
-            z: Math.max(2, Math.min(MAP_SIZE - 2, z + 8)),
-          },
-          {
-            x: Math.max(2, Math.min(MAP_SIZE - 2, x - 8)),
-            z: Math.max(2, Math.min(MAP_SIZE - 2, z + 8)),
-          },
-          {
-            x: Math.max(2, Math.min(MAP_SIZE - 2, x - 8)),
-            z: Math.max(2, Math.min(MAP_SIZE - 2, z - 8)),
-          },
+          wp(PATROL_R * 0.7, PATROL_R * 0.5),
+          wp(-PATROL_R * 0.6, PATROL_R * 0.7),
+          wp(-PATROL_R * 0.5, -PATROL_R * 0.6),
+          wp(PATROL_R * 0.6, -PATROL_R * 0.4),
         ]
         return {
           id: enemyIdStr,
