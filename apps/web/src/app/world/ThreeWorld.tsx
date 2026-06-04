@@ -4,8 +4,32 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import * as THREE from "three"
 
 // ── Constants ──────────────────────────────────────────────────────────────────
+// MAP_SIZE stays at 100: it is the original *city* grid (0–100) that every
+// building / spawn / AABB is authored against. The GTA-style open world is
+// built *around* that city by extending the walkable bounds outward — see
+// WORLD_* below. Keeping MAP_SIZE intact means none of the thousands of
+// city-relative coordinates have to move.
 const MAP_SIZE = 100
 const TILE_UNIT = 1
+// ── Open-world bounds ──────────────────────────────────────────────────────
+// The city (0–100) sits in the *center* of a 600×600 world. WORLD_HALF is the
+// reach from the city center (50,50) to each edge, so the world spans
+// WORLD_MIN..WORLD_MAX on both axes, 6× the old playable size.
+const WORLD_HALF = 300
+const WORLD_CENTER = 50 // = MAP_SIZE / 2 (city center)
+const WORLD_MIN = WORLD_CENTER - WORLD_HALF // -250
+const WORLD_MAX = WORLD_CENTER + WORLD_HALF // 350
+const WORLD_SIZE = WORLD_HALF * 2 // 600
+// Area bands (north = -z INDUSTRIAL, center = CITY, south = +z HARBOR). The
+// city occupies z 0–100; the band thresholds sit just outside it.
+type AreaId = "INDUSTRIAL" | "CITY" | "HARBOR"
+const AREA_NORTH_EDGE = -10 // z below this → INDUSTRIAL
+const AREA_SOUTH_EDGE = 110 // z above this → HARBOR
+function areaForPos(z: number): AreaId {
+  if (z < AREA_NORTH_EDGE) return "INDUSTRIAL"
+  if (z > AREA_SOUTH_EDGE) return "HARBOR"
+  return "CITY"
+}
 const EYE_HEIGHT = 1.6
 const MOVE_SPEED = 6
 // biome-ignore lint/complexity/useLiteralKeys: bracket notation required per CLAUDE.md
@@ -442,7 +466,12 @@ const ALL_AABBS: WallAABB[] = WALL_AABBS
 // movers (enemies, spawn search) pass feetY=0 and, since every wall here is
 // ≥0.6m tall (> STEP_UP_MAX), behave exactly as the old 2D check did.
 function collidesWithWall(px: number, pz: number, radius: number, feetY = 0): boolean {
-  if (px - radius < 0 || px + radius > MAP_SIZE || pz - radius < 0 || pz + radius > MAP_SIZE)
+  if (
+    px - radius < WORLD_MIN ||
+    px + radius > WORLD_MAX ||
+    pz - radius < WORLD_MIN ||
+    pz + radius > WORLD_MAX
+  )
     return true
   for (const w of ALL_AABBS) {
     if (
@@ -495,18 +524,18 @@ function findSafeSpawnNear(x: number, z: number, radius: number): { x: number; z
       const nx = x + Math.cos(a) * r
       const nz = z + Math.sin(a) * r
       if (
-        nx > radius &&
-        nx < MAP_SIZE - radius &&
-        nz > radius &&
-        nz < MAP_SIZE - radius &&
+        nx > WORLD_MIN + radius &&
+        nx < WORLD_MAX - radius &&
+        nz > WORLD_MIN + radius &&
+        nz < WORLD_MAX - radius &&
         !collidesWithWall(nx, nz, radius)
       ) {
         return { x: nx, z: nz }
       }
     }
   }
-  // Fallback: map center (always clear in our layouts).
-  return { x: MAP_SIZE / 2, z: MAP_SIZE / 2 }
+  // Fallback: world center (= city center, always clear in our layouts).
+  return { x: WORLD_CENTER, z: WORLD_CENTER }
 }
 
 // ── Enemy type system ──────────────────────────────────────────────────────────
@@ -1319,6 +1348,11 @@ export default function ThreeWorld({
   const remotePosRef = useRef<Record<string, RemotePlayer>>({})
   const msgIdRef = useRef(0)
   const minimapRef = useRef<HTMLCanvasElement>(null)
+  // GTA-style district banner — tracks the player's current area so the
+  // animate loop only fires the on-screen name when they cross a boundary.
+  const areaRef = useRef<AreaId | null>(null)
+  const areaKeyRef = useRef(0)
+  const areaHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const tagGameRef = useRef<TagGameInfo | null>(null)
   const rendererDomRef = useRef<HTMLCanvasElement | null>(null)
   const lastAlertTimeRef = useRef(0)
@@ -1489,6 +1523,10 @@ export default function ThreeWorld({
   const [damageFlash, setDamageFlash] = useState(false)
   const [killStreakMsg, setKillStreakMsg] = useState<string | null>(null)
   const [headshotMsg, setHeadshotMsg] = useState(false)
+  // GTA-style district name banner. `key` re-triggers the fade animation each
+  // time the player crosses into a new area; `visible` drives the fade out.
+  const [areaBanner, setAreaBanner] = useState<{ id: AreaId; key: number } | null>(null)
+  const [areaBannerVisible, setAreaBannerVisible] = useState(false)
   // Mission / wave state
   const [showMissionSelect, setShowMissionSelect] = useState(mode === "wave_defense")
   const [selectedMission, setSelectedMission] = useState<MissionId | null>(null)
@@ -1638,8 +1676,11 @@ export default function ThreeWorld({
       scene.background = new THREE.Color(theme.sky)
       // Snow gets a tighter fog band ("軽いフォグ" — slightly hazy whiteout
       // without crushing visibility); desert/urban keep the long open draw.
+      // Fog distances stretched for the 6× larger open world so distant
+      // areas (HARBOR / INDUSTRIAL) still fade out gracefully instead of
+      // popping into view, while keeping the near band hazy on snow.
       scene.fog =
-        mapId === "snow" ? new THREE.Fog(theme.fog, 45, 175) : new THREE.Fog(theme.fog, 80, 280)
+        mapId === "snow" ? new THREE.Fog(theme.fog, 80, 420) : new THREE.Fog(theme.fog, 140, 680)
 
       // ── Per-map material palette ───────────────────────────────────────────
       // The collision footprints (ALL_AABBS / floors / climb zones) are shared
@@ -1703,11 +1744,17 @@ export default function ThreeWorld({
       // ── Camera (FPS) ───────────────────────────────────────────────────────
       // FOV 80 (was 75): wider field reduces peripheral motion-shear when
       // the player whips around, a common motion-sickness trigger.
+      // Far clip must exceed the fog's max distance for the open world or
+      // distant geometry pops out before the fog hides it. Snow uses a tighter
+      // fog band (max 420) so a 500 far is enough; other maps fog out at 680,
+      // needing 800. Mirrors the per-map fog set below; read from mapId at
+      // scene creation so a map switch (which remounts ThreeWorld) picks up the
+      // matching clip.
       const camera = new THREE.PerspectiveCamera(
         80,
         container.clientWidth / container.clientHeight,
         0.1,
-        320,
+        mapId === "snow" ? 500 : 800,
       )
       camera.rotation.order = "YXZ"
 
@@ -1854,11 +1901,144 @@ export default function ThreeWorld({
         scene.add(mesh)
       }
 
-      const groundGeo = new THREE.PlaneGeometry(MAP_SIZE * TILE_UNIT, MAP_SIZE * TILE_UNIT)
+      // ── Open-world base ground + area bands ────────────────────────────────
+      // The city zone strips above only cover x/z 0–100. The rest of the 600×600
+      // world is floored here: a single base plane, then two tinted bands for
+      // the INDUSTRIAL (north) and HARBOR (south) districts so the player can
+      // read which area they're in even before PR-B fills them with geometry.
+      // Sits 2cm below the city zones to avoid z-fighting at the seams.
+      const baseGroundColor = zoneTint(
+        mapId === "snow" ? 0x9aa6ae : mapId === "desert" ? 0x8a7550 : 0x5a5e52,
+      )
+      const baseGround = new THREE.Mesh(
+        new THREE.PlaneGeometry(WORLD_SIZE, WORLD_SIZE),
+        new THREE.MeshStandardMaterial({
+          color: baseGroundColor,
+          map: groundNoise,
+          roughness: 0.96,
+          metalness: 0,
+        }),
+      )
+      baseGround.rotation.x = -Math.PI / 2
+      baseGround.position.set(WORLD_CENTER, -0.02, WORLD_CENTER)
+      baseGround.receiveShadow = true
+      scene.add(baseGround)
+
+      // District bands — north (INDUSTRIAL, gritty concrete) and south
+      // (HARBOR, cool dock grey with a hint of seawater). Each spans the full
+      // world width and the band's depth, lifted a hair above the base plane.
+      const districtBands: { z1: number; z2: number; color: number }[] = [
+        { z1: WORLD_MIN, z2: AREA_NORTH_EDGE, color: zoneTint(0x4a4d54) }, // industrial
+        { z1: AREA_SOUTH_EDGE, z2: WORLD_MAX, color: zoneTint(0x44525e) }, // harbor
+      ]
+      for (const band of districtBands) {
+        const depth = band.z2 - band.z1
+        const bandMesh = new THREE.Mesh(
+          new THREE.PlaneGeometry(WORLD_SIZE, depth),
+          new THREE.MeshStandardMaterial({
+            color: band.color,
+            map: groundNoise,
+            roughness: 0.95,
+            metalness: 0.05,
+          }),
+        )
+        bandMesh.rotation.x = -Math.PI / 2
+        bandMesh.position.set(WORLD_CENTER, -0.012, (band.z1 + band.z2) / 2)
+        bandMesh.receiveShadow = true
+        scene.add(bandMesh)
+      }
+
+      // ── Road network (GTA-style arterials + sidewalks) ─────────────────────
+      // Cosmetic only (no collision). Wide 4-lane asphalt strips run N–S and
+      // E–W across the whole world, crossing at intersections; light-grey
+      // sidewalks flank each road and dashed lane lines run down the middle.
+      // The central E–W road at z=50 lines up with the existing city avenue;
+      // the central N–S road at x=50 threads the city and links the districts.
+      const ROAD_W = 12 // asphalt width (≈4 lanes)
+      const SIDEWALK_W = 3
+      const ROAD_Y = 0.004
+      const SIDEWALK_Y = 0.006
+      const LANE_Y = 0.01
+      const V_ROADS = [WORLD_CENTER, -110, 210] // N–S road center X
+      const H_ROADS = [WORLD_CENTER, -120, 200] // E–W road center Z
+      const asphaltMat = new THREE.MeshStandardMaterial({
+        color: 0x282b31,
+        roughness: 0.95,
+        metalness: 0,
+      })
+      const sidewalkMat = new THREE.MeshStandardMaterial({
+        color: zoneTint(0x8c9095),
+        roughness: 0.9,
+        metalness: 0,
+      })
+      const laneMat = new THREE.MeshStandardMaterial({
+        color: 0xd8cf52,
+        emissive: 0x2a2600,
+        roughness: 0.7,
+        metalness: 0,
+      })
+      // Build one road strip (asphalt + two sidewalks + dashed centerline).
+      // `axis` "v" = runs along Z at fixed X `c`; "h" = runs along X at fixed Z.
+      const addRoadStrip = (axis: "v" | "h", c: number) => {
+        const len = WORLD_SIZE
+        const asphalt = new THREE.Mesh(
+          axis === "v"
+            ? new THREE.PlaneGeometry(ROAD_W, len)
+            : new THREE.PlaneGeometry(len, ROAD_W),
+          asphaltMat,
+        )
+        asphalt.rotation.x = -Math.PI / 2
+        asphalt.position.set(
+          axis === "v" ? c : WORLD_CENTER,
+          ROAD_Y,
+          axis === "v" ? WORLD_CENTER : c,
+        )
+        asphalt.receiveShadow = true
+        scene.add(asphalt)
+        // Sidewalks: a thin slab on each side of the asphalt.
+        for (const side of [-1, 1]) {
+          const off = side * (ROAD_W / 2 + SIDEWALK_W / 2)
+          const sw = new THREE.Mesh(
+            axis === "v"
+              ? new THREE.PlaneGeometry(SIDEWALK_W, len)
+              : new THREE.PlaneGeometry(len, SIDEWALK_W),
+            sidewalkMat,
+          )
+          sw.rotation.x = -Math.PI / 2
+          sw.position.set(
+            axis === "v" ? c + off : WORLD_CENTER,
+            SIDEWALK_Y,
+            axis === "v" ? WORLD_CENTER : c + off,
+          )
+          sw.receiveShadow = true
+          scene.add(sw)
+        }
+        // Dashed yellow centerline.
+        const dash = 2.4
+        const gap = 3.2
+        for (let p = WORLD_MIN + 4; p < WORLD_MAX - 4; p += dash + gap) {
+          const mark = new THREE.Mesh(
+            axis === "v"
+              ? new THREE.PlaneGeometry(0.32, dash)
+              : new THREE.PlaneGeometry(dash, 0.32),
+            laneMat,
+          )
+          mark.rotation.x = -Math.PI / 2
+          mark.position.set(axis === "v" ? c : p, LANE_Y, axis === "v" ? p : c)
+          scene.add(mark)
+        }
+      }
+      for (const c of V_ROADS) addRoadStrip("v", c)
+      for (const c of H_ROADS) addRoadStrip("h", c)
+
+      // Invisible raycast floor spanning the whole world (was city-only). Floor
+      // sampling for gravity uses the `floors` heightmap, so this stays purely
+      // a safety net for any plane raycast in the open area.
+      const groundGeo = new THREE.PlaneGeometry(WORLD_SIZE, WORLD_SIZE)
       const groundMat = new THREE.MeshBasicMaterial({ visible: false })
       const groundPlane = new THREE.Mesh(groundGeo, groundMat)
       groundPlane.rotation.x = -Math.PI / 2
-      groundPlane.position.set((MAP_SIZE / 2) * TILE_UNIT, 0, (MAP_SIZE / 2) * TILE_UNIT)
+      groundPlane.position.set(WORLD_CENTER, 0, WORLD_CENTER)
       scene.add(groundPlane)
 
       // ── War-zone buildings / obstacles ─────────────────────────────────────
@@ -3203,8 +3383,8 @@ export default function ThreeWorld({
       }
       // Use a single InstancedMesh per orientation strip to keep draw calls low.
       const skylineRows: { z: number; baseX: number; n: number }[] = [
-        { z: -25, baseX: -15, n: 18 }, // far north
-        { z: MAP_SIZE + 25, baseX: -15, n: 18 }, // far south
+        { z: WORLD_MIN - 25, baseX: WORLD_MIN - 10, n: 88 }, // far north
+        { z: WORLD_MAX + 25, baseX: WORLD_MIN - 10, n: 88 }, // far south
       ]
       for (const row of skylineRows) {
         const inst = new THREE.InstancedMesh(skylineGeo, skylineMat, row.n)
@@ -3225,12 +3405,12 @@ export default function ThreeWorld({
         scene.add(inst)
       }
       // Sky lanes (east-west far ends) — give depth along the avenue too.
-      for (const xFar of [-22, MAP_SIZE + 22]) {
-        const inst = new THREE.InstancedMesh(skylineGeo, skylineMat, 12)
+      for (const xFar of [WORLD_MIN - 22, WORLD_MAX + 22]) {
+        const inst = new THREE.InstancedMesh(skylineGeo, skylineMat, 84)
         const dummy = new THREE.Object3D()
-        for (let i = 0; i < 12; i++) {
+        for (let i = 0; i < 84; i++) {
           const [w, h, depth] = silhouetteScale(i + 3)
-          const z = -10 + i * 10 + ((i * 3) % 4)
+          const z = WORLD_MIN - 10 + i * 7.5 + ((i * 3) % 4)
           const yPos = skylineStyle === "dunes" ? h * 0.1 : h / 2
           dummy.position.set(xFar, yPos, z)
           dummy.scale.set(w, h, depth)
@@ -3658,13 +3838,26 @@ export default function ThreeWorld({
       // -π/2 faces +x (east) — the same direction the player spawns looking.
       // Vehicles are excluded from PvP (FFA/TDM) for now — they aren't synced
       // over the network, so a half-visible combat car would be unfair there.
+      // Now the world is 6× larger, vehicles are scattered along the road
+      // network instead of bunched on the central avenue: a couple in the city,
+      // the rest staged in the HARBOR (south) and INDUSTRIAL (north) districts
+      // and on the cross streets, so there's always a ride within reach. They
+      // sit on the V_ROADS (x=50/-110/210) and H_ROADS (z=50/-120/200) lanes.
       if (modeRef.current !== "ffa" && modeRef.current !== "tdm") {
+        // City avenue (z≈50)
         spawnVehicle(14, 50, -Math.PI / 2, 0xbb2222)
-        spawnVehicle(40, 52, -Math.PI / 2, 0x2255bb)
         spawnVehicle(66, 49, -Math.PI / 2, 0xddaa22)
-        // Drivable tanks (armored, main cannon). A couple along the avenue.
+        // North–south arterial through the city / districts (x≈50)
+        spawnVehicle(50, -70, Math.PI, 0x2255bb) // toward INDUSTRIAL
+        spawnVehicle(50, 175, 0, 0x22aa88) // toward HARBOR
+        // East / west cross streets
+        spawnVehicle(-95, 50, -Math.PI / 2, 0xcc7722)
+        spawnVehicle(205, 50, Math.PI / 2, 0x8844cc)
+        // Drivable tanks (armored, main cannon): one in the city, one staged
+        // in each outlying district.
         spawnVehicle(28, 47, -Math.PI / 2, 0x4a5a3a, "tank")
-        spawnVehicle(78, 53, -Math.PI / 2, 0x5a5048, "tank")
+        spawnVehicle(50, -150, Math.PI, 0x5a5048, "tank") // INDUSTRIAL
+        spawnVehicle(50, 250, 0, 0x4a4a52, "tank") // HARBOR
       }
 
       function nearestVehicle(): Vehicle | null {
@@ -4120,7 +4313,11 @@ export default function ThreeWorld({
         for (let d = 1.0; d <= VEHICLE_CAM_DIST; d += 0.5) {
           const sx = v.x - aimHx * d
           const sz = v.z - aimHz * d
-          const outOfBounds = sx < 0.4 || sx > MAP_SIZE - 0.4 || sz < 0.4 || sz > MAP_SIZE - 0.4
+          const outOfBounds =
+            sx < WORLD_MIN + 0.4 ||
+            sx > WORLD_MAX - 0.4 ||
+            sz < WORLD_MIN + 0.4 ||
+            sz > WORLD_MAX - 0.4
           if (outOfBounds || pointInsideWall(sx, 2.0, sz)) {
             camDist = Math.max(2.2, d - 0.7)
             break
@@ -7774,58 +7971,98 @@ export default function ThreeWorld({
         // Minimap — redraw every 4 frames (~15Hz). Player movement is
         // smooth in 3D; the corner minimap doesn't need 60Hz canvas
         // repaints, and the wall/enemy/player draws cost real time.
+        // ── District banner ────────────────────────────────────────────────
+        // Fire the GTA-style area name whenever the player crosses into a new
+        // district (and once on spawn, since areaRef starts null). It fades in
+        // via the key change, then auto-hides after a few seconds.
+        {
+          const area = areaForPos(refs.focalPoint.z)
+          if (area !== areaRef.current) {
+            areaRef.current = area
+            areaKeyRef.current += 1
+            setAreaBanner({ id: area, key: areaKeyRef.current })
+            setAreaBannerVisible(true)
+            if (areaHideTimerRef.current) clearTimeout(areaHideTimerRef.current)
+            areaHideTimerRef.current = setTimeout(() => setAreaBannerVisible(false), 3200)
+          }
+        }
+
         const mcanvas = minimapRef.current
         if (mcanvas && frameCount % 4 === 0) {
           const ctx = mcanvas.getContext("2d")
           if (ctx) {
+            // ── Local (player-centered) minimap ───────────────────────────
+            // The world is now 600×600 — far too large to show whole. Instead
+            // the minimap is a moving window centered on the player: VIEW world
+            // units span the canvas, player fixed at the center, north = up.
             const W = mcanvas.width
-            const SCALE = W / (MAP_SIZE * TILE_UNIT)
-            ctx.fillStyle = "rgba(0,0,0,0.85)"
+            const VIEW = 96 // world units shown across the minimap
+            const SCALE = W / VIEW
+            const px = refs.focalPoint.x
+            const pz = refs.focalPoint.z
+            // World → canvas (player at center). Returns pixel coords.
+            const mx = (wx: number) => (wx - px) * SCALE + W / 2
+            const mz = (wz: number) => (wz - pz) * SCALE + W / 2
+            const inView = (cx: number, cz: number, pad = 6) =>
+              cx >= -pad && cx <= W + pad && cz >= -pad && cz <= W + pad
+
+            // Base + district tint. Fill the three z-bands (INDUSTRIAL north /
+            // CITY center / HARBOR south) so the player can read which area
+            // surrounds them as they move.
+            ctx.fillStyle = "#15171a"
             ctx.fillRect(0, 0, W, W)
-            // Draw walls on minimap
-            // Zone colors on minimap
-            ctx.fillStyle = "#3a4a2a"
-            ctx.fillRect(0, 0, 33 * SCALE, W)
-            ctx.fillStyle = "#3a3a2a"
-            ctx.fillRect(33 * SCALE, 0, 33 * SCALE, W)
-            ctx.fillStyle = "#4a3a1a"
-            ctx.fillRect(66 * SCALE, 0, 34 * SCALE, W)
-            // Buildings — draw all wall AABBs (dynamic ones too, like the
-            // hollow buildings + roof towers that didn't come from
-            // MAP_OBJECTS). Big AABBs get a darker building fill so the
-            // city's silhouette reads at a glance; small ones (props /
-            // wall slabs) get a thin lighter tone.
+            const nEdge = mz(AREA_NORTH_EDGE)
+            const sEdge = mz(AREA_SOUTH_EDGE)
+            ctx.fillStyle = "#24262c" // INDUSTRIAL band (north / top)
+            ctx.fillRect(0, 0, W, Math.max(0, Math.min(W, nEdge)))
+            ctx.fillStyle = "#2c3a2a" // CITY band (center)
+            ctx.fillRect(0, Math.max(0, nEdge), W, Math.max(0, sEdge - nEdge))
+            ctx.fillStyle = "#1f2a30" // HARBOR band (south / bottom)
+            ctx.fillRect(0, Math.max(0, Math.min(W, sEdge)), W, W)
+
+            // Roads — grey strips for the N–S / E–W arterials in view.
+            ctx.fillStyle = "#3a3d42"
+            const roadPx = ROAD_W * SCALE
+            for (const c of V_ROADS) {
+              const x = mx(c)
+              if (x > -roadPx && x < W + roadPx) ctx.fillRect(x - roadPx / 2, 0, roadPx, W)
+            }
+            for (const c of H_ROADS) {
+              const z = mz(c)
+              if (z > -roadPx && z < W + roadPx) ctx.fillRect(0, z - roadPx / 2, W, roadPx)
+            }
+
+            // Buildings — only AABBs within the view window. Big footprints get
+            // a brighter building fill so the city silhouette reads; small
+            // props are skipped to keep the local map legible.
             for (const wAabb of ALL_AABBS) {
-              const ww = wAabb.x2 - wAabb.x1
-              const wd = wAabb.z2 - wAabb.z1
-              const area = ww * wd
-              if (area > 8) {
-                ctx.fillStyle = "#6a6a55"
-              } else if (area > 1.5) {
-                ctx.fillStyle = "#55534a"
-              } else {
-                continue // skip tiny lamp posts etc — keeps the map clean
-              }
-              ctx.fillRect(
-                wAabb.x1 * SCALE,
-                wAabb.z1 * SCALE,
-                Math.max(1, ww * SCALE),
-                Math.max(1, wd * SCALE),
-              )
+              const cx1 = mx(wAabb.x1)
+              const cz1 = mz(wAabb.z1)
+              const ww = (wAabb.x2 - wAabb.x1) * SCALE
+              const wd = (wAabb.z2 - wAabb.z1) * SCALE
+              if (!inView(cx1 + ww / 2, cz1 + wd / 2, Math.max(ww, wd))) continue
+              const area = (wAabb.x2 - wAabb.x1) * (wAabb.z2 - wAabb.z1)
+              if (area > 8) ctx.fillStyle = "#6a6a55"
+              else if (area > 1.5) ctx.fillStyle = "#55534a"
+              else continue
+              ctx.fillRect(cx1, cz1, Math.max(1, ww), Math.max(1, wd))
             }
             // Goal markers
             for (const marker of refs.goalMarkers) {
               if (marker.collected) continue
+              const cx = mx(marker.x)
+              const cz = mz(marker.z)
+              if (!inView(cx, cz)) continue
               ctx.fillStyle = "#00ff88"
               ctx.beginPath()
-              ctx.arc(marker.x * SCALE, marker.z * SCALE, 4, 0, Math.PI * 2)
+              ctx.arc(cx, cz, 4, 0, Math.PI * 2)
               ctx.fill()
             }
-            // Doors (green ▲) and ladders (yellow square) — navigational
-            // aids so the player can spot interactive entries on the map.
+            // Doors (green ▲) and ladders (yellow square) — navigational aids.
             for (const ent of refs.entries) {
-              const ex = ent.x * SCALE
-              const ez = ent.z * SCALE
+              const ex = mx(ent.x)
+              const ez = mz(ent.z)
+              if (!inView(ex, ez)) continue
               if (ent.kind === "door") {
                 ctx.fillStyle = "#44ff88"
                 ctx.strokeStyle = "rgba(0,0,0,0.85)"
@@ -7843,15 +8080,26 @@ export default function ThreeWorld({
                 ctx.lineWidth = 1
                 ctx.fillRect(ex - 3, ez - 3, 6, 6)
                 ctx.strokeRect(ex - 3, ez - 3, 6, 6)
-                // Tiny rung mark inside (visual hint at "ladder").
                 ctx.fillStyle = "rgba(0,0,0,0.6)"
                 ctx.fillRect(ex - 2, ez - 1, 4, 1)
                 ctx.fillRect(ex - 2, ez + 1, 4, 1)
               }
             }
+            // Vehicles — cyan squares (occupied/enemy ones go orange-red).
+            for (const v of vehicles) {
+              if (v.dead) continue
+              const cx = mx(v.x)
+              const cz = mz(v.z)
+              if (!inView(cx, cz)) continue
+              ctx.fillStyle = v.aiDriver ? "#ff7733" : "#33d6ff"
+              ctx.fillRect(cx - 2, cz - 2, 4, 4)
+            }
             // Draw enemies on minimap (color by type/state)
             for (const enemy of refs.enemies) {
               if (enemy.hp <= 0) continue
+              const cx = mx(enemy.mesh.position.x)
+              const cz = mz(enemy.mesh.position.z)
+              if (!inView(cx, cz)) continue
               ctx.fillStyle =
                 enemy.type === "heavy"
                   ? "#cc44ff"
@@ -7861,52 +8109,33 @@ export default function ThreeWorld({
                       ? "#ff2222"
                       : "#ff6666"
               ctx.beginPath()
-              ctx.arc(
-                enemy.mesh.position.x * SCALE,
-                enemy.mesh.position.z * SCALE,
-                3,
-                0,
-                Math.PI * 2,
-              )
+              ctx.arc(cx, cz, 3, 0, Math.PI * 2)
               ctx.fill()
             }
             for (const rp of Object.values(snapshot)) {
               const { tx: rtx, ty: rty } = canvasToTile(rp.x, rp.y)
+              const cx = mx(rtx * TILE_UNIT + TILE_UNIT / 2)
+              const cz = mz(rty * TILE_UNIT + TILE_UNIT / 2)
+              if (!inView(cx, cz)) continue
               ctx.fillStyle = "#ffcc00"
               ctx.beginPath()
-              ctx.arc(
-                (rtx * TILE_UNIT + TILE_UNIT / 2) * SCALE,
-                (rty * TILE_UNIT + TILE_UNIT / 2) * SCALE,
-                2.5,
-                0,
-                Math.PI * 2,
-              )
+              ctx.arc(cx, cz, 2.5, 0, Math.PI * 2)
               ctx.fill()
             }
-            // Player marker — green triangle pointing in the camera's yaw
-            // direction. Canvas rotate is clockwise from up; world forward
-            // for yaw is (-sin(yaw), -cos(yaw)). Solving: the canvas angle
-            // that maps forward to the up-pointing triangle is -yaw.
-            // (Previously +π/2 was applied which made the arrow point 90°
-            // off — north when facing east, etc.)
-            {
-              const px = refs.focalPoint.x * SCALE
-              const pz = refs.focalPoint.z * SCALE
-              ctx.save()
-              ctx.translate(px, pz)
-              ctx.rotate(-camState.yaw)
-              ctx.fillStyle = "#00ff41"
-              ctx.strokeStyle = "rgba(0,0,0,0.85)"
-              ctx.lineWidth = 1
-              ctx.beginPath()
-              ctx.moveTo(0, -5)
-              ctx.lineTo(3.5, 3)
-              ctx.lineTo(-3.5, 3)
-              ctx.closePath()
-              ctx.fill()
-              ctx.stroke()
-              ctx.restore()
-            }
+            ctx.save()
+            ctx.translate(W / 2, W / 2)
+            ctx.rotate(-camState.yaw)
+            ctx.fillStyle = "#00ff41"
+            ctx.strokeStyle = "rgba(0,0,0,0.85)"
+            ctx.lineWidth = 1
+            ctx.beginPath()
+            ctx.moveTo(0, -5)
+            ctx.lineTo(3.5, 3)
+            ctx.lineTo(-3.5, 3)
+            ctx.closePath()
+            ctx.fill()
+            ctx.stroke()
+            ctx.restore()
           }
         }
 
@@ -7924,6 +8153,7 @@ export default function ThreeWorld({
         renderer.domElement.removeEventListener("touchstart", noopTouch)
         renderer.domElement.removeEventListener("touchmove", noopTouch)
         window.removeEventListener("resize", onResize)
+        if (areaHideTimerRef.current) clearTimeout(areaHideTimerRef.current)
       }
     }
 
@@ -9841,6 +10071,54 @@ export default function ThreeWorld({
               </div>
             </button>
           )}
+
+        {/* District name banner (GTA-style) — fades in on area entry, then
+            auto-hides. `key` restarts the fade each time the player crosses
+            into a new district. */}
+        {!isLoading && !error && areaBanner && (
+          <div
+            key={areaBanner.key}
+            style={{
+              position: "absolute",
+              top: "12%",
+              left: "50%",
+              transform: "translateX(-50%)",
+              zIndex: 44,
+              pointerEvents: "none",
+              textAlign: "center",
+              fontFamily: "monospace",
+              opacity: areaBannerVisible ? 1 : 0,
+              transition: areaBannerVisible ? "opacity 0.5s ease-out" : "opacity 1.2s ease-in",
+            }}
+          >
+            <div
+              style={{
+                fontSize: "2.2rem",
+                fontWeight: "bold",
+                color: "#ffffff",
+                letterSpacing: "0.32em",
+                textShadow: "0 2px 12px rgba(0,0,0,0.95), 0 0 24px rgba(0,0,0,0.6)",
+              }}
+            >
+              {areaBanner.id}
+            </div>
+            <div
+              style={{
+                marginTop: "0.15rem",
+                fontSize: "0.7rem",
+                letterSpacing: "0.4em",
+                color: "rgba(255,255,255,0.65)",
+                textShadow: "0 1px 6px rgba(0,0,0,0.9)",
+              }}
+            >
+              {areaBanner.id === "CITY"
+                ? "DOWNTOWN"
+                : areaBanner.id === "HARBOR"
+                  ? "SOUTH DOCKS"
+                  : "NORTH WORKS"}
+            </div>
+          </div>
+        )}
 
         {/* Wave message */}
         {waveMessage && (
