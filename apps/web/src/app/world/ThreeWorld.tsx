@@ -460,7 +460,11 @@ function wallHeightFor(type: number, w: number, d: number): number {
   if (type === 5) return 0.85 // trench/sandbag
   return 0.6 // tree (rough trunk hitbox; lets shots pass over)
 }
-type WallAABB = { x1: number; z1: number; x2: number; z2: number; h: number }
+// `h` is the top of the box; `y0` (default 0) is its bottom. Most walls sit on
+// the ground (y0=0), but railings/parapets float up on a deck — giving them a
+// real bottom lets a ground-level mover walk *underneath* them (e.g. into a
+// tower's central elevator pad) while they still block anyone up on the deck.
+type WallAABB = { x1: number; z1: number; x2: number; z2: number; h: number; y0?: number }
 const WALL_AABBS: WallAABB[] = MAP_OBJECTS.map(([x, z, w, d, type]) => ({
   x1: x,
   z1: z,
@@ -490,7 +494,8 @@ function collidesWithWall(px: number, pz: number, radius: number, feetY = 0): bo
       px - radius < w.x2 &&
       pz + radius > w.z1 &&
       pz - radius < w.z2 &&
-      w.h > feetY + STEP_UP_MAX
+      w.h > feetY + STEP_UP_MAX &&
+      (w.y0 ?? 0) <= feetY + STEP_UP_MAX
     )
       return true
   }
@@ -501,7 +506,8 @@ function collidesWithWall(px: number, pz: number, radius: number, feetY = 0): bo
 // y is checked so a barricade doesn't stop a shot flying over it at eye height.
 function pointInsideWall(px: number, py: number, pz: number): boolean {
   for (const w of ALL_AABBS) {
-    if (px > w.x1 && px < w.x2 && pz > w.z1 && pz < w.z2 && py >= 0 && py <= w.h) return true
+    if (px > w.x1 && px < w.x2 && pz > w.z1 && pz < w.z2 && py >= (w.y0 ?? 0) && py <= w.h)
+      return true
   }
   return false
 }
@@ -2557,6 +2563,7 @@ export default function ThreeWorld({
           z1: czw - sz / 2,
           z2: czw + sz / 2,
           h: cy + sy / 2, // top of slab
+          y0: cy - sy / 2, // bottom of slab — lets movers pass under elevated rails
         })
         return m
       }
@@ -3701,8 +3708,9 @@ export default function ThreeWorld({
         // ── Helpers ─────────────────────────────────────────────────────────
         // Register a mesh for collision (AABB) + bullet raycast (wallMeshes).
         const registerSolid = (m: THREE.Mesh, halfX: number, halfZ: number, topY: number) => {
-          m.castShadow = true
-          m.receiveShadow = true
+          // District (HARBOR/INDUSTRIAL) solids skip shadow casting/receiving —
+          // these districts add a lot of geometry and shadow maps are the main
+          // GPU cost on mobile. The CITY core keeps its shadows.
           scene.add(m)
           wallMeshes.push(m)
           ALL_AABBS.push({
@@ -3771,11 +3779,9 @@ export default function ThreeWorld({
           }
           const beam = new THREE.Mesh(craneBeamGeo, steelMat)
           beam.position.set(cx, 14, cz)
-          beam.castShadow = true
           scene.add(beam)
           const boom = new THREE.Mesh(craneBoomGeo, steelMat)
           boom.position.set(cx, 14.4, cz + 9)
-          boom.castShadow = true
           scene.add(boom)
           const cab = new THREE.Mesh(unitBox, rustMat)
           cab.scale.set(1.6, 1.4, 1.6)
@@ -3790,7 +3796,6 @@ export default function ThreeWorld({
         for (const px of [30, 70]) {
           const plank = new THREE.Mesh(pierPlankGeo, warehouseMat)
           plank.position.set(px, 0.15, 274)
-          plank.receiveShadow = true
           scene.add(plank)
         }
         // Open water — a single large plane at the far south, just below grade.
@@ -3819,7 +3824,6 @@ export default function ThreeWorld({
           const cap = new THREE.Mesh(unitBox, rustMat)
           cap.scale.set(22, 0.6, 15)
           cap.position.set(rx, 8.3, rz)
-          cap.castShadow = true
           scene.add(cap)
         }
         // Chimneys (thin tall cylinders) with rising smoke. Collect tops so the
@@ -3866,8 +3870,10 @@ export default function ThreeWorld({
         // A fixed pool of puffs per chimney (no per-frame allocation). Each
         // rises, expands and fades, then loops. Updated in the animate loop.
         const smokeGeo = new THREE.SphereGeometry(0.85, 8, 6)
+        // Halve the puff pool on touch devices (mobile GPU budget).
+        const puffsPerChimney = isTouch ? 2 : 4
         for (const [cx, cz] of chimneySpots) {
-          for (let k = 0; k < 4; k++) {
+          for (let k = 0; k < puffsPerChimney; k++) {
             const mat = new THREE.MeshLambertMaterial({
               color: 0xdadada,
               transparent: true,
@@ -3882,7 +3888,7 @@ export default function ThreeWorld({
               baseX: cx,
               baseZ: cz,
               baseY: CHIMNEY_TOP_Y,
-              t: k / 4,
+              t: k / puffsPerChimney,
               rise: 9 + (k % 2),
             })
           }
@@ -6178,7 +6184,9 @@ export default function ThreeWorld({
 
       // ── Spawn blood particles ──────────────────────────────────────────────
       function spawnBlood(pos: THREE.Vector3) {
-        for (let i = 0; i < PARTICLE_COUNT; i++) {
+        // Halve particle counts on touch devices to lighten the mobile GPU load.
+        const bloodCount = isTouch ? Math.ceil(PARTICLE_COUNT / 2) : PARTICLE_COUNT
+        for (let i = 0; i < bloodCount; i++) {
           const geo = new THREE.SphereGeometry(0.04 + Math.random() * 0.04, 4, 4)
           const mat = new THREE.MeshBasicMaterial({ color: 0xcc0000 })
           const mesh = new THREE.Mesh(geo, mat)
@@ -6202,7 +6210,9 @@ export default function ThreeWorld({
       function spawnExplosion(pos: THREE.Vector3, isSpark = false) {
         const refs = sceneRef.current
         if (!refs) return
-        const count = isSpark ? 6 : 18
+        const baseCount = isSpark ? 6 : 18
+        // Halve particle counts on touch devices to lighten the mobile GPU load.
+        const count = isTouch ? Math.ceil(baseCount / 2) : baseCount
         const lifetime = isSpark ? 0.28 : 0.75
         const speed = isSpark ? 5 : 3.5
         for (let i = 0; i < count; i++) {
@@ -6889,6 +6899,11 @@ export default function ThreeWorld({
       // 60Hz; running them every 4th frame is the cheapest perf win in
       // the loop.
       let frameCount = 0
+      // Smoke is updated every 3rd frame; this banks the dt of the skipped
+      // frames so the puffs still rise at the right rate when we do update.
+      let smokeAccumDt = 0
+      // Wall-clock throttle (ms) for the minimap redraw — see the draw block.
+      let lastMinimapAt = 0
       // Enemy-vehicle spawn manager timers (ms). Armed lazily on first frame.
       let aiVehicleArmAt = 0
       let aiVehicleNextCheck = 0
@@ -7472,17 +7487,24 @@ export default function ThreeWorld({
 
         // ── Chimney smoke (industrial district) ────────────────────────────
         // Fixed pool: each puff rises from its chimney, expands + fades, loops.
-        for (const puff of smokePuffs) {
-          puff.t += dt * 0.16
-          if (puff.t > 1) puff.t -= 1
-          const tt = puff.t
-          puff.mesh.position.set(
-            puff.baseX + Math.sin(tt * 3.1) * 0.7,
-            puff.baseY + tt * puff.rise,
-            puff.baseZ + Math.cos(tt * 2.3) * 0.5,
-          )
-          puff.mesh.scale.setScalar(0.5 + tt * 1.9)
-          ;(puff.mesh.material as THREE.MeshLambertMaterial).opacity = 0.45 * (1 - tt)
+        // Updated only every 3rd frame to save CPU; the banked dt keeps the
+        // rise rate constant regardless of how many frames we skipped.
+        smokeAccumDt += dt
+        if (frameCount % 3 === 0) {
+          const sdt = smokeAccumDt
+          smokeAccumDt = 0
+          for (const puff of smokePuffs) {
+            puff.t += sdt * 0.16
+            if (puff.t > 1) puff.t -= 1
+            const tt = puff.t
+            puff.mesh.position.set(
+              puff.baseX + Math.sin(tt * 3.1) * 0.7,
+              puff.baseY + tt * puff.rise,
+              puff.baseZ + Math.cos(tt * 2.3) * 0.5,
+            )
+            puff.mesh.scale.setScalar(0.5 + tt * 1.9)
+            ;(puff.mesh.material as THREE.MeshLambertMaterial).opacity = 0.45 * (1 - tt)
+          }
         }
 
         // ── Explosion particles ────────────────────────────────────────────
@@ -8593,7 +8615,11 @@ export default function ThreeWorld({
         }
 
         const mcanvas = minimapRef.current
-        if (mcanvas && frameCount % 4 === 0) {
+        // Redraw the minimap at most every 100ms (frame-rate independent) — the
+        // canvas 2D work is wasted at full frame rate and costly on mobile.
+        const nowMs = Date.now()
+        if (mcanvas && nowMs - lastMinimapAt >= 100) {
+          lastMinimapAt = nowMs
           const ctx = mcanvas.getContext("2d")
           if (ctx) {
             // ── Local (player-centered) minimap ───────────────────────────
