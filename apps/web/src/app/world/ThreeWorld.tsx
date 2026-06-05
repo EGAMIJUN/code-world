@@ -99,11 +99,22 @@ const GRAVITY = 22
 // metres higher than the current foot position, we silently snap up (small
 // curbs, low stairs). Larger climbs require an E-key climb zone.
 const STEP_UP_MAX = 0.4
-// Vertical speeds (m/s) for fall-damage interpolation. Below SAFE: no
-// damage. Above LETHAL: full damage. Linear ramp in between.
-const FALL_SAFE_SPEED = 7
-const FALL_LETHAL_SPEED = 18
-const FALL_MAX_DAMAGE = 75
+// Fall damage is keyed off the *drop height* (start-Y minus landing-Y), not
+// impact speed — a single cheap Y comparison per landing, no raycasts. Below
+// MIN_DROP: harmless. From MIN_DROP up to LETHAL_DROP: damage ramps linearly
+// from DMG_AT_MIN to DMG_MAX. At/above LETHAL_DROP: instant death.
+const FALL_MIN_DROP = 8 // metres before any damage
+const FALL_LETHAL_DROP = 20 // metres = guaranteed death
+const FALL_DMG_AT_MIN = 30 // damage at exactly MIN_DROP
+const FALL_DMG_MAX = 90 // damage approaching LETHAL_DROP
+// ── Enemy elevator-chase AI (PR-C) ──────────────────────────────────────────
+// When the player is up on a tower deck, nearby grounded enemies ride the
+// elevator up to engage. Caps keep the lift from jamming.
+const PLAYER_ROOF_MIN_Y = 5 // player Y above this = "on a rooftop"
+const ELEVATOR_CHASE_RANGE = 60 // enemies within this of the base will commit
+const MAX_ELEVATOR_RIDERS = 2 // concurrent enemies riding the lift
+const MAX_ELEVATOR_COMMIT = 3 // total committed (riders + queued at the base)
+const ENEMY_RIDE_TIME = 2.2 // seconds for an enemy to ride up / down
 // How close the player has to be to a climb zone for E to lift them up.
 // Radius around the zone's center.
 const CLIMB_INTERACT_PAD = 0.2 // extra slack on the climb-zone AABB
@@ -1079,6 +1090,20 @@ interface CombatEnemy {
   // difficulty in spawnBots. Mission enemies: left undefined (state machine
   // falls back to MISSION_AI_TUNING — currently the "normal" profile).
   aiTuning?: BotDifficultyTuning
+  // ── Elevator-riding AI (PR-C) ───────────────────────────────────────────
+  // Set when this enemy is using a tower elevator to chase the player onto a
+  // rooftop. `mode` walks: approach (head to the base) → riding (lift up) →
+  // roof (normal AI, pinned at deck altitude) → descending (lift back down).
+  // `t` is the 0–1 lift progress; `zone` is the target ClimbZone.
+  climb?: {
+    mode: "approach" | "riding" | "roof" | "descending"
+    zone: ClimbZone
+    t: number
+  } | null
+  // Altitude (deck Y) this enemy fell from when shot off a rooftop, so the
+  // death animation can drop the corpse to the ground. 0 = died at grade,
+  // undefined = not yet captured for the current death.
+  fallFromY?: number | undefined
 }
 
 interface Bullet {
@@ -1341,6 +1366,11 @@ export default function ThreeWorld({
   // rising (currently only via E-key climb), negative = falling. Sampled
   // each frame against the floor heightmap.
   const playerVelYRef = useRef(0)
+  // Fall-damage tracking: the Y the player left the ground at when they became
+  // airborne, and whether they were airborne last frame. Drop = startY −
+  // landingY. Reset on elevator teleports so riding down deals no damage.
+  const fallStartYRef = useRef(0)
+  const wasAirborneRef = useRef(false)
   // ── Sensitivity / motion-sickness refs ───────────────────────────────
   // Multiplier applied to mouse / touch-drag look deltas inside the animate
   // loop. Mirrored from React state via a dedicated useEffect so the loop
@@ -1534,6 +1564,10 @@ export default function ThreeWorld({
   const [aimedEnemyId, setAimedEnemyId] = useState<string | null>(null)
   const [isReloading, setIsReloading] = useState(false)
   const [damageFlash, setDamageFlash] = useState(false)
+  // Fall-damage popup: the number shown center-screen on a hard landing
+  // (null = hidden). `key` restarts the fade each landing.
+  const [fallDmgPopup, setFallDmgPopup] = useState<{ dmg: number; key: number } | null>(null)
+  const fallDmgKeyRef = useRef(0)
   const [killStreakMsg, setKillStreakMsg] = useState<string | null>(null)
   const [headshotMsg, setHeadshotMsg] = useState(false)
   // GTA-style district name banner. `key` re-triggers the fade animation each
@@ -2415,6 +2449,31 @@ export default function ThreeWorld({
       const floors: FloorAABB[] = []
       const ceilings: CeilingAABB[] = []
       const climbZones: ClimbZone[] = []
+      // Return the climb zone (with interaction pad) whose center is nearest to
+      // (px, pz) among those the point is inside, or null. Used by both the [E]
+      // prompt and the climb action so overlapping zones resolve consistently
+      // to the closest one — and reused by the enemy elevator AI.
+      const climbZoneAt = (px: number, pz: number): ClimbZone | null => {
+        let best: ClimbZone | null = null
+        let bestD = Number.POSITIVE_INFINITY
+        for (const zone of climbZones) {
+          if (
+            px > zone.x1 - CLIMB_INTERACT_PAD &&
+            px < zone.x2 + CLIMB_INTERACT_PAD &&
+            pz > zone.z1 - CLIMB_INTERACT_PAD &&
+            pz < zone.z2 + CLIMB_INTERACT_PAD
+          ) {
+            const cx = (zone.x1 + zone.x2) / 2
+            const cz = (zone.z1 + zone.z2) / 2
+            const d = (px - cx) ** 2 + (pz - cz) ** 2
+            if (d < bestD) {
+              bestD = d
+              best = zone
+            }
+          }
+        }
+        return best
+      }
       const entries: { x: number; z: number; kind: "door" | "ladder" }[] = []
 
       // Reusable "ENTER" sign sprite — drawn above hollow-building doors
@@ -6748,6 +6807,78 @@ export default function ThreeWorld({
       }
       window.addEventListener("resize", onResize)
 
+      // ── Enemy elevator-chase FSM (PR-C) ──────────────────────────────────
+      // Advances an enemy that is using a tower elevator to reach a rooftop
+      // player. Returns true when the FSM fully owns the enemy this frame (skip
+      // the normal AI) — that's approach / riding / descending. Returns false
+      // only for the "roof" phase, where the normal combat AI runs but the
+      // enemy stays pinned at the deck altitude (its mesh.y is never otherwise
+      // touched while alive). Movement is plain Y-lerp + 2D steering — no
+      // raycasts.
+      function updateEnemyClimb(enemy: CombatEnemy, dt: number): boolean {
+        const c = enemy.climb
+        if (!c) return false
+        const zone = c.zone
+        const baseX = zone.baseX ?? (zone.x1 + zone.x2) / 2
+        const baseZ = zone.baseZ ?? (zone.z1 + zone.z2) / 2
+        const topX = zone.topX ?? baseX
+        const topZ = zone.topZ ?? baseZ
+        const targetY = zone.targetY
+        if (c.mode === "approach") {
+          const dx = baseX - enemy.mesh.position.x
+          const dz = baseZ - enemy.mesh.position.z
+          const d = Math.hypot(dx, dz)
+          if (d < 1.4) {
+            // At the base — board only if a rider slot is free (else queue).
+            let riders = 0
+            for (const e of enemies) if (e !== enemy && e.climb?.mode === "riding") riders++
+            if (riders < MAX_ELEVATOR_RIDERS) {
+              c.mode = "riding"
+              c.t = 0
+              enemy.mesh.position.x = baseX
+              enemy.mesh.position.z = baseZ
+            }
+          } else {
+            const spd = enemy.config.speed * 0.95 * dt
+            const nx = enemy.mesh.position.x + (dx / d) * spd
+            const nz = enemy.mesh.position.z + (dz / d) * spd
+            if (!collidesWithWall(nx, enemy.mesh.position.z, ENEMY_RADIUS))
+              enemy.mesh.position.x = nx
+            if (!collidesWithWall(enemy.mesh.position.x, nz, ENEMY_RADIUS))
+              enemy.mesh.position.z = nz
+            enemy.facing.set(dx / d, 0, dz / d)
+          }
+          return true
+        }
+        if (c.mode === "riding") {
+          c.t = Math.min(1, c.t + dt / ENEMY_RIDE_TIME)
+          enemy.mesh.position.x = baseX + (topX - baseX) * c.t
+          enemy.mesh.position.z = baseZ + (topZ - baseZ) * c.t
+          enemy.mesh.position.y = targetY * c.t
+          if (c.t >= 1) {
+            c.mode = "roof"
+            enemy.mesh.position.y = targetY
+            // Engage immediately on arrival.
+            enemy.state = "alert"
+            enemy.lastSeenPlayer = { x: enemy.mesh.position.x, z: enemy.mesh.position.z }
+          }
+          return true
+        }
+        if (c.mode === "descending") {
+          c.t = Math.min(1, c.t + dt / ENEMY_RIDE_TIME)
+          enemy.mesh.position.x = topX + (baseX - topX) * c.t
+          enemy.mesh.position.z = topZ + (baseZ - topZ) * c.t
+          enemy.mesh.position.y = targetY * (1 - c.t)
+          if (c.t >= 1) {
+            enemy.mesh.position.y = 0
+            enemy.climb = null
+            enemy.state = "patrol"
+          }
+          return true
+        }
+        return false // "roof" — normal AI runs at altitude
+      }
+
       // ── Animation loop ─────────────────────────────────────────────────────
       const clock = new THREE.Clock()
       const fwd3 = new THREE.Vector3()
@@ -7012,20 +7143,20 @@ export default function ThreeWorld({
           // the bottom-of-screen "[E] 登る" prompt. We push to React state
           // only on boundary changes (entering / leaving the zone) so the
           // HUD doesn't re-render every frame while the player loiters.
+          // Pick the *closest* zone the player is inside (by center distance)
+          // rather than the first in array order. When two zones overlap (an
+          // elevator pad near a building ladder), first-match could latch onto
+          // the wrong one and the elevator would feel unresponsive — choosing
+          // the nearest center makes every tower's elevator reliably engage.
           let nearClimbNow = false
           let atTopNow = false
-          for (const zone of refs.climbZones) {
-            if (
-              refs.focalPoint.x > zone.x1 - CLIMB_INTERACT_PAD &&
-              refs.focalPoint.x < zone.x2 + CLIMB_INTERACT_PAD &&
-              refs.focalPoint.z > zone.z1 - CLIMB_INTERACT_PAD &&
-              refs.focalPoint.z < zone.z2 + CLIMB_INTERACT_PAD
-            ) {
+          {
+            const zone = climbZoneAt(refs.focalPoint.x, refs.focalPoint.z)
+            if (zone) {
               nearClimbNow = true
               // Same "already on top" test the climb action uses, so the label
               // matches what pressing the button will actually do.
               atTopNow = Math.abs(refs.focalPoint.y - zone.targetY) < 0.6
-              break
             }
           }
           if (nearClimbNow !== prevNearClimbRef.current) {
@@ -7041,70 +7172,86 @@ export default function ThreeWorld({
           if (climbRequestRef.current) {
             climbRequestRef.current = false
             if (Date.now() > climbCooldownUntilRef.current) {
-              for (const zone of refs.climbZones) {
-                if (
-                  refs.focalPoint.x > zone.x1 - CLIMB_INTERACT_PAD &&
-                  refs.focalPoint.x < zone.x2 + CLIMB_INTERACT_PAD &&
-                  refs.focalPoint.z > zone.z1 - CLIMB_INTERACT_PAD &&
-                  refs.focalPoint.z < zone.z2 + CLIMB_INTERACT_PAD
-                ) {
-                  // If already roughly at the top, descend back down; else
-                  // climb up. Avoids "press E and bounce back instantly"
-                  // when the player keeps the key tapped at the top.
-                  const atTop = Math.abs(refs.focalPoint.y - zone.targetY) < 0.6
-                  if (atTop && zone.downY !== undefined) {
-                    // Descend: drop onto clear ground beside the tower so we
-                    // don't land embedded in the solid tower footprint.
-                    refs.focalPoint.y = zone.downY
-                    if (zone.baseX !== undefined) refs.focalPoint.x = zone.baseX
-                    if (zone.baseZ !== undefined) refs.focalPoint.z = zone.baseZ
-                    playerVelYRef.current = 0
-                    groundY = zone.downY
-                    climbCooldownUntilRef.current = Date.now() + 600
-                  } else if (!atTop) {
-                    // Ascend: step onto the roof itself (inside the floor
-                    // bounds) — landing beside the tower would leave no floor
-                    // underfoot and the player would just fall back down.
-                    refs.focalPoint.y = zone.targetY
-                    if (zone.topX !== undefined) refs.focalPoint.x = zone.topX
-                    if (zone.topZ !== undefined) refs.focalPoint.z = zone.topZ
-                    playerVelYRef.current = 0
-                    groundY = zone.targetY
-                    climbCooldownUntilRef.current = Date.now() + 600
-                  }
-                  break
+              const zone = climbZoneAt(refs.focalPoint.x, refs.focalPoint.z)
+              if (zone) {
+                // If already roughly at the top, descend back down; else
+                // climb up. Avoids "press E and bounce back instantly"
+                // when the player keeps the key tapped at the top.
+                const atTop = Math.abs(refs.focalPoint.y - zone.targetY) < 0.6
+                if (atTop && zone.downY !== undefined) {
+                  // Descend: drop onto clear ground beside the tower so we
+                  // don't land embedded in the solid tower footprint.
+                  refs.focalPoint.y = zone.downY
+                  if (zone.baseX !== undefined) refs.focalPoint.x = zone.baseX
+                  if (zone.baseZ !== undefined) refs.focalPoint.z = zone.baseZ
+                  playerVelYRef.current = 0
+                  groundY = zone.downY
+                  climbCooldownUntilRef.current = Date.now() + 600
+                  // Elevator descent is not a fall — clear the airborne tracker
+                  // so the landing block deals no fall damage.
+                  wasAirborneRef.current = false
+                  fallStartYRef.current = zone.downY
+                } else if (!atTop) {
+                  // Ascend: step onto the roof itself (inside the floor
+                  // bounds) — landing beside the tower would leave no floor
+                  // underfoot and the player would just fall back down.
+                  refs.focalPoint.y = zone.targetY
+                  if (zone.topX !== undefined) refs.focalPoint.x = zone.topX
+                  if (zone.topZ !== undefined) refs.focalPoint.z = zone.topZ
+                  playerVelYRef.current = 0
+                  groundY = zone.targetY
+                  climbCooldownUntilRef.current = Date.now() + 600
+                  wasAirborneRef.current = false
+                  fallStartYRef.current = zone.targetY
                 }
               }
             }
           }
 
-          // Apply gravity / floor snap.
+          // Apply gravity / floor snap. Fall damage is computed from the drop
+          // height (the Y the player became airborne at, minus the landing Y) —
+          // a single cheap comparison, no raycasts.
           if (refs.focalPoint.y > groundY + 0.01) {
+            // Mark the start of a fall the frame the player leaves the ground.
+            if (!wasAirborneRef.current) {
+              wasAirborneRef.current = true
+              fallStartYRef.current = refs.focalPoint.y
+            }
             playerVelYRef.current -= GRAVITY * dt
             refs.focalPoint.y += playerVelYRef.current * dt
             if (refs.focalPoint.y <= groundY) {
-              // Landed. Fall damage based on impact vertical speed.
-              const vy = -playerVelYRef.current
+              // Landed. Damage scales with the drop; ≥ LETHAL_DROP is fatal.
+              const drop = fallStartYRef.current - groundY
+              wasAirborneRef.current = false
               if (
-                vy > FALL_SAFE_SPEED &&
+                drop >= FALL_MIN_DROP &&
                 gamePhaseRef.current === "playing" &&
                 Date.now() > spawnInvulnUntilRef.current
               ) {
-                const t = Math.min(
-                  1,
-                  (vy - FALL_SAFE_SPEED) / (FALL_LETHAL_SPEED - FALL_SAFE_SPEED),
-                )
-                const dmg = Math.round(FALL_MAX_DAMAGE * t)
+                let dmg: number
+                if (drop >= FALL_LETHAL_DROP) {
+                  dmg = playerHpRef.current // guaranteed kill
+                } else {
+                  const t = (drop - FALL_MIN_DROP) / (FALL_LETHAL_DROP - FALL_MIN_DROP)
+                  dmg = Math.round(FALL_DMG_AT_MIN + (FALL_DMG_MAX - FALL_DMG_AT_MIN) * t)
+                }
                 if (dmg > 0) {
                   playerHpRef.current = Math.max(0, playerHpRef.current - dmg)
                   setPlayerHp(playerHpRef.current)
                   lastDamageTimeRef.current = Date.now()
-                  // Reduced shake (was 5 + t*8). Tones down the motion-
-                  // sickness spike on fall-damage landings.
-                  cameraShakeRef.current.intensity = 2.5 + t * 4
+                  cameraShakeRef.current.intensity = 3 + Math.min(6, drop * 0.3)
                   setDamageFlash(true)
                   SOUNDS.damage()
                   setTimeout(() => setDamageFlash(false), 320)
+                  // Center-screen damage number; auto-clears after ~1.1s
+                  // (guarded by key so a fresher popup isn't wiped early).
+                  fallDmgKeyRef.current += 1
+                  const popupKey = fallDmgKeyRef.current
+                  setFallDmgPopup({ dmg, key: popupKey })
+                  setTimeout(
+                    () => setFallDmgPopup((p) => (p && p.key === popupKey ? null : p)),
+                    1100,
+                  )
                   if (playerHpRef.current <= 0) {
                     gamePhaseRef.current = "gameover"
                     setGamePhase("gameover")
@@ -7121,6 +7268,7 @@ export default function ThreeWorld({
             // and the small auto step-up of low geometry).
             refs.focalPoint.y = groundY
             playerVelYRef.current = 0
+            wasAirborneRef.current = false
           }
           updateCamera()
         }
@@ -7377,6 +7525,27 @@ export default function ThreeWorld({
         if (gamePhaseRef.current === "playing") {
           const now = Date.now()
           const fp = refs.focalPoint
+          // ── Elevator-chase setup (PR-C) ──────────────────────────────────
+          // Find the tower deck the player is currently standing on (matching
+          // a climb zone by altitude + horizontal proximity to its top), and
+          // count how many enemies are already committed to a lift, so we can
+          // send a couple more up after them without jamming the elevator.
+          let playerRoofZone: ClimbZone | null = null
+          if (fp.y > PLAYER_ROOF_MIN_Y) {
+            let bestD = 81 // (9m)² — within deck radius + margin
+            for (const zone of refs.climbZones) {
+              if (Math.abs(fp.y - zone.targetY) > 1.5) continue
+              const tx = zone.topX ?? (zone.x1 + zone.x2) / 2
+              const tz = zone.topZ ?? (zone.z1 + zone.z2) / 2
+              const d = (tx - fp.x) ** 2 + (tz - fp.z) ** 2
+              if (d < bestD) {
+                bestD = d
+                playerRoofZone = zone
+              }
+            }
+          }
+          let elevatorCommits = 0
+          for (const e of refs.enemies) if (e.climb) elevatorCommits++
           for (const enemy of refs.enemies) {
             // Skip enemies currently driving a vehicle — updateEnemyVehicle
             // owns them (their mesh is hidden + parked at the vehicle). On
@@ -7390,6 +7559,13 @@ export default function ThreeWorld({
                 //   t∈[FALL, FALL+LIE]: corpse lies still on the ground.
                 //   final FADE seconds: opacity fades to 0, then mesh hides.
                 enemy.dyingTimer -= dt
+                // First dying frame: record any rooftop altitude so the corpse
+                // tumbles off the deck to the ground (rooftop "shot off" kill).
+                // Also release any in-progress elevator state.
+                if (enemy.fallFromY === undefined) {
+                  enemy.fallFromY = enemy.mesh.position.y > 3 ? enemy.mesh.position.y : 0
+                  enemy.climb = null
+                }
                 const tElapsed = DEATH_ANIM_TOTAL - Math.max(0, enemy.dyingTimer)
                 const fallRaw = Math.min(1, tElapsed / DEATH_ANIM_FALL)
                 // Ease-out (1 - (1-x)^2): fast collapse, gentle settle.
@@ -7409,10 +7585,19 @@ export default function ThreeWorld({
                 }
                 // YXZ rotation order means rotation.x tips the body around its
                 // own lateral axis *after* yaw — clean forward/back fall.
-                enemy.mesh.rotation.x = enemy.deathFallDir * tilt
-                // Lift the root slightly as it lies flat so the prone torso
-                // rests *on* the ground rather than half-buried in it.
-                enemy.mesh.position.y = Math.sin(tilt) * 0.18
+                if (enemy.fallFromY && enemy.fallFromY > 0.5) {
+                  // Rooftop kill: tumble off the deck, accelerating downward to
+                  // the ground (gravity-like ease-in) with an extra somersault.
+                  const fallP = Math.min(1, tElapsed / (DEATH_ANIM_FALL * 1.4))
+                  enemy.mesh.position.y = Math.max(0, enemy.fallFromY * (1 - fallP * fallP))
+                  enemy.mesh.rotation.x = enemy.deathFallDir * tilt + fallP * Math.PI * 1.2
+                  if (enemy.mesh.position.y <= 0.0001) enemy.fallFromY = 0
+                } else {
+                  enemy.mesh.rotation.x = enemy.deathFallDir * tilt
+                  // Lift the root slightly as it lies flat so the prone torso
+                  // rests *on* the ground rather than half-buried in it.
+                  enemy.mesh.position.y = Math.sin(tilt) * 0.18
+                }
                 // Fade only during the final FADE seconds.
                 const fadeT = Math.max(0, tElapsed - (DEATH_ANIM_TOTAL - DEATH_ANIM_FADE))
                 const opacity = fadeT > 0 ? Math.max(0, 1 - fadeT / DEATH_ANIM_FADE) : 1
@@ -7497,6 +7682,9 @@ export default function ThreeWorld({
                   enemy.lastSeenPlayer = null
                   enemy.searchTimer = 0
                   enemy.dyingTimer = -1
+                  // Clear rooftop fall / elevator state for the fresh life.
+                  enemy.fallFromY = undefined
+                  enemy.climb = null
                   enemy.respawnTimer = ENEMY_NO_RESPAWN
                   setAliveEnemyCount(enemies.filter((e2) => e2.hp > 0).length)
                 }
@@ -7510,6 +7698,39 @@ export default function ThreeWorld({
             const toPx = fp.x - ex
             const toPz = fp.z - ez
             const distToPlayer = Math.sqrt(toPx * toPx + toPz * toPz)
+
+            // ── Elevator chase (PR-C) ────────────────────────────────────────
+            // Already committed to a lift? The FSM owns approach/riding/descend
+            // (skip the normal AI). The "roof" phase returns false and falls
+            // through so the standard combat AI fights at deck altitude. If the
+            // player has left this rooftop, ride back down.
+            if (enemy.climb) {
+              const playerGone = !playerRoofZone || playerRoofZone !== enemy.climb.zone
+              if (playerGone && enemy.climb.mode === "approach") {
+                // Player left before we boarded — abort and resume normal AI.
+                enemy.climb = null
+              } else {
+                if (playerGone && enemy.climb.mode === "roof") {
+                  enemy.climb.mode = "descending"
+                  enemy.climb.t = 0
+                }
+                if (updateEnemyClimb(enemy, dt)) continue
+                // else: roof phase — fall through to the normal AI below.
+              }
+            } else if (
+              playerRoofZone &&
+              !isMeleeChaser(enemy.type) &&
+              elevatorCommits < MAX_ELEVATOR_COMMIT
+            ) {
+              // Commit nearby grounded enemies to chase up the elevator.
+              const bx = playerRoofZone.baseX ?? (playerRoofZone.x1 + playerRoofZone.x2) / 2
+              const bz = playerRoofZone.baseZ ?? (playerRoofZone.z1 + playerRoofZone.z2) / 2
+              if (Math.hypot(bx - ex, bz - ez) < ELEVATOR_CHASE_RANGE) {
+                enemy.climb = { mode: "approach", zone: playerRoofZone, t: 0 }
+                elevatorCommits++
+                continue
+              }
+            }
 
             // ── Pre-state-machine: read difficulty tuning + sensory input ─
             // Mission enemies have no botDifficulty selector → fall back to
@@ -7555,8 +7776,11 @@ export default function ThreeWorld({
                   const spd = enemy.config.speed * 0.45 * dt
                   const nx = ex + (wpDx / wpDist) * spd
                   const nz = ez + (wpDz / wpDist) * spd
-                  if (!collidesWithWall(nx, ez, ENEMY_RADIUS)) enemy.mesh.position.x = nx
-                  if (!collidesWithWall(ex, nz, ENEMY_RADIUS)) enemy.mesh.position.z = nz
+                  const enemyFeetY = enemy.climb?.mode === "roof" ? enemy.mesh.position.y : 0
+                  if (!collidesWithWall(nx, ez, ENEMY_RADIUS, enemyFeetY))
+                    enemy.mesh.position.x = nx
+                  if (!collidesWithWall(ex, nz, ENEMY_RADIUS, enemyFeetY))
+                    enemy.mesh.position.z = nz
                   enemy.facing.set(wpDx / wpDist, 0, wpDz / wpDist)
                 }
               }
@@ -7660,8 +7884,11 @@ export default function ThreeWorld({
                   const spd = enemy.config.speed * tuning.speedMult * dashMult * dt
                   const nx = ex + (tx / tDist) * spd
                   const nz = ez + (tz / tDist) * spd
-                  if (!collidesWithWall(nx, ez, ENEMY_RADIUS)) enemy.mesh.position.x = nx
-                  if (!collidesWithWall(ex, nz, ENEMY_RADIUS)) enemy.mesh.position.z = nz
+                  const enemyFeetY = enemy.climb?.mode === "roof" ? enemy.mesh.position.y : 0
+                  if (!collidesWithWall(nx, ez, ENEMY_RADIUS, enemyFeetY))
+                    enemy.mesh.position.x = nx
+                  if (!collidesWithWall(ex, nz, ENEMY_RADIUS, enemyFeetY))
+                    enemy.mesh.position.z = nz
                 }
                 enemy.facing.set(toPx / distToPlayer, 0, toPz / distToPlayer)
                 if (
@@ -7847,8 +8074,9 @@ export default function ThreeWorld({
                 const spd = enemy.config.speed * 0.5 * dt
                 const nx = ex + dir.x * spd
                 const nz = ez + dir.z * spd
-                if (!collidesWithWall(nx, ez, ENEMY_RADIUS)) enemy.mesh.position.x = nx
-                if (!collidesWithWall(ex, nz, ENEMY_RADIUS)) enemy.mesh.position.z = nz
+                const enemyFeetY = enemy.climb?.mode === "roof" ? enemy.mesh.position.y : 0
+                if (!collidesWithWall(nx, ez, ENEMY_RADIUS, enemyFeetY)) enemy.mesh.position.x = nx
+                if (!collidesWithWall(ex, nz, ENEMY_RADIUS, enemyFeetY)) enemy.mesh.position.z = nz
                 enemy.facing.set(dir.x, 0, dir.z)
               }
             } else if (enemy.state === "search") {
@@ -7864,8 +8092,11 @@ export default function ThreeWorld({
                   const spd = enemy.config.speed * 0.7 * dt
                   const nx = ex + (lx / ld) * spd
                   const nz = ez + (lz / ld) * spd
-                  if (!collidesWithWall(nx, ez, ENEMY_RADIUS)) enemy.mesh.position.x = nx
-                  if (!collidesWithWall(ex, nz, ENEMY_RADIUS)) enemy.mesh.position.z = nz
+                  const enemyFeetY = enemy.climb?.mode === "roof" ? enemy.mesh.position.y : 0
+                  if (!collidesWithWall(nx, ez, ENEMY_RADIUS, enemyFeetY))
+                    enemy.mesh.position.x = nx
+                  if (!collidesWithWall(ex, nz, ENEMY_RADIUS, enemyFeetY))
+                    enemy.mesh.position.z = nz
                   enemy.facing.set(lx / ld, 0, lz / ld)
                 } else {
                   enemy.lastSeenPlayer = null
@@ -9333,6 +9564,34 @@ export default function ThreeWorld({
               zIndex: 6,
             }}
           />
+        )}
+
+        {/* Fall-damage number — rises + fades on a hard landing. */}
+        {fallDmgPopup && (
+          <div
+            key={fallDmgPopup.key}
+            style={{
+              position: "absolute",
+              top: "44%",
+              left: "50%",
+              transform: "translateX(-50%)",
+              zIndex: 46,
+              pointerEvents: "none",
+              fontFamily: "monospace",
+              fontSize: "2.6rem",
+              fontWeight: "bold",
+              color: "#ff5252",
+              textShadow: "0 0 16px rgba(255,0,0,0.9), 0 2px 6px rgba(0,0,0,0.9)",
+              animation: "fallDmgRise 1.1s ease-out forwards",
+            }}
+          >
+            -{fallDmgPopup.dmg}
+            <style>{`@keyframes fallDmgRise {
+              0% { opacity: 0; transform: translate(-50%, 12px) scale(0.7); }
+              20% { opacity: 1; transform: translate(-50%, 0) scale(1.1); }
+              100% { opacity: 0; transform: translate(-50%, -28px) scale(1); }
+            }`}</style>
+          </div>
         )}
 
         {/* ── Top-center: Score / Kills (desktop only — mobile shows these in
