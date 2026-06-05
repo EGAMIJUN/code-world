@@ -7776,8 +7776,11 @@ export default function ThreeWorld({
                   const spd = enemy.config.speed * 0.45 * dt
                   const nx = ex + (wpDx / wpDist) * spd
                   const nz = ez + (wpDz / wpDist) * spd
-                  if (!collidesWithWall(nx, ez, ENEMY_RADIUS)) enemy.mesh.position.x = nx
-                  if (!collidesWithWall(ex, nz, ENEMY_RADIUS)) enemy.mesh.position.z = nz
+                  const enemyFeetY = enemy.climb?.mode === "roof" ? enemy.mesh.position.y : 0
+                  if (!collidesWithWall(nx, ez, ENEMY_RADIUS, enemyFeetY))
+                    enemy.mesh.position.x = nx
+                  if (!collidesWithWall(ex, nz, ENEMY_RADIUS, enemyFeetY))
+                    enemy.mesh.position.z = nz
                   enemy.facing.set(wpDx / wpDist, 0, wpDz / wpDist)
                 }
               }
@@ -7881,8 +7884,11 @@ export default function ThreeWorld({
                   const spd = enemy.config.speed * tuning.speedMult * dashMult * dt
                   const nx = ex + (tx / tDist) * spd
                   const nz = ez + (tz / tDist) * spd
-                  if (!collidesWithWall(nx, ez, ENEMY_RADIUS)) enemy.mesh.position.x = nx
-                  if (!collidesWithWall(ex, nz, ENEMY_RADIUS)) enemy.mesh.position.z = nz
+                  const enemyFeetY = enemy.climb?.mode === "roof" ? enemy.mesh.position.y : 0
+                  if (!collidesWithWall(nx, ez, ENEMY_RADIUS, enemyFeetY))
+                    enemy.mesh.position.x = nx
+                  if (!collidesWithWall(ex, nz, ENEMY_RADIUS, enemyFeetY))
+                    enemy.mesh.position.z = nz
                 }
                 enemy.facing.set(toPx / distToPlayer, 0, toPz / distToPlayer)
                 if (
@@ -8068,8 +8074,9 @@ export default function ThreeWorld({
                 const spd = enemy.config.speed * 0.5 * dt
                 const nx = ex + dir.x * spd
                 const nz = ez + dir.z * spd
-                if (!collidesWithWall(nx, ez, ENEMY_RADIUS)) enemy.mesh.position.x = nx
-                if (!collidesWithWall(ex, nz, ENEMY_RADIUS)) enemy.mesh.position.z = nz
+                const enemyFeetY = enemy.climb?.mode === "roof" ? enemy.mesh.position.y : 0
+                if (!collidesWithWall(nx, ez, ENEMY_RADIUS, enemyFeetY)) enemy.mesh.position.x = nx
+                if (!collidesWithWall(ex, nz, ENEMY_RADIUS, enemyFeetY)) enemy.mesh.position.z = nz
                 enemy.facing.set(dir.x, 0, dir.z)
               }
             } else if (enemy.state === "search") {
@@ -8085,8 +8092,11 @@ export default function ThreeWorld({
                   const spd = enemy.config.speed * 0.7 * dt
                   const nx = ex + (lx / ld) * spd
                   const nz = ez + (lz / ld) * spd
-                  if (!collidesWithWall(nx, ez, ENEMY_RADIUS)) enemy.mesh.position.x = nx
-                  if (!collidesWithWall(ex, nz, ENEMY_RADIUS)) enemy.mesh.position.z = nz
+                  const enemyFeetY = enemy.climb?.mode === "roof" ? enemy.mesh.position.y : 0
+                  if (!collidesWithWall(nx, ez, ENEMY_RADIUS, enemyFeetY))
+                    enemy.mesh.position.x = nx
+                  if (!collidesWithWall(ex, nz, ENEMY_RADIUS, enemyFeetY))
+                    enemy.mesh.position.z = nz
                   enemy.facing.set(lx / ld, 0, lz / ld)
                 } else {
                   enemy.lastSeenPlayer = null
