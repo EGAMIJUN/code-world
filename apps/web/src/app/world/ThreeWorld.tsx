@@ -1190,6 +1190,9 @@ interface ClimbZone {
   topZ?: number
   baseX?: number
   baseZ?: number
+  // Optional elevator car mesh — when present it rides up/down with the player
+  // during a smooth (eased) lift instead of an instant teleport.
+  car?: THREE.Mesh
 }
 
 // ── Three.js scene refs ────────────────────────────────────────────────────────
@@ -1392,6 +1395,18 @@ export default function ThreeWorld({
   // Cooldown timestamp after a climb fires; blocks chaining a second climb
   // for half a second so you can't jitter up and down a ladder.
   const climbCooldownUntilRef = useRef(0)
+  // Active smooth elevator ride. While set, the animate loop eases the player
+  // (and the glass car) between fromY/toY instead of teleporting, and gravity
+  // is suspended so the lift can't be fought by the fall code.
+  const elevatorRideRef = useRef<{
+    fromY: number
+    toY: number
+    x: number
+    z: number
+    startMs: number
+    durMs: number
+    car: THREE.Mesh | null
+  } | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
   const usernameRef = useRef("Player")
   const remotePosRef = useRef<Record<string, RemotePlayer>>({})
@@ -3061,7 +3076,16 @@ export default function ThreeWorld({
       // elevator up to (reuses the floor + climb-zone lift). Legs are decorative
       // (no collision) so you can walk under it to the central elevator; the
       // deck + railings are solid up top.
-      function makeLandmarkTower(cx: number, cz: number, deckY = 22, legColor = 0xc0392b) {
+      // Emissive materials of the rooftop warning lights, pulsed in the animate
+      // loop so the towers appear to blink.
+      const towerBeacons: THREE.MeshStandardMaterial[] = []
+      function makeLandmarkTower(
+        cx: number,
+        cz: number,
+        deckY = 22,
+        legColor = 0xc0392b,
+        neonColor = 0x33ddff,
+      ) {
         const towerTopY = deckY + 14
         const legMat = new THREE.MeshStandardMaterial({
           color: legColor,
@@ -3130,6 +3154,31 @@ export default function ThreeWorld({
             strut(p[0], p[1], p[2], qHi[0], qHi[1], qHi[2], 0.08, braceMat)
           }
         }
+        // Dark-glass window strips on each face at every lattice level, so the
+        // tower reads as a glazed high-rise with "floors" rather than bare steel.
+        const glassMat = new THREE.MeshStandardMaterial({
+          color: 0x0c2230,
+          emissive: 0x12384e,
+          emissiveIntensity: 0.45,
+          roughness: 0.2,
+          metalness: 0.7,
+          transparent: true,
+          opacity: 0.72,
+        })
+        for (const t of [0.18, 0.4, 0.62, 0.84]) {
+          const half = baseHalf + (waistHalf - baseHalf) * t
+          const wy = t * deckY
+          const ww = half * 1.2 // strip spans ~60% of each face
+          const wh = 1.4
+          for (const s of [-1, 1]) {
+            const winZ = new THREE.Mesh(new THREE.BoxGeometry(ww, wh, 0.12), glassMat)
+            winZ.position.set(cx, wy, cz + s * half)
+            scene.add(winZ)
+            const winX = new THREE.Mesh(new THREE.BoxGeometry(0.12, wh, ww), glassMat)
+            winX.position.set(cx + s * half, wy, cz)
+            scene.add(winX)
+          }
+        }
         // Observation deck slab.
         const deckHalf = 4
         const deck = new THREE.Mesh(
@@ -3140,6 +3189,40 @@ export default function ThreeWorld({
         deck.castShadow = true
         deck.receiveShadow = true
         scene.add(deck)
+        // Neon accent lines along the deck rim (emissive — glow at night).
+        const neonMat = new THREE.MeshStandardMaterial({
+          color: neonColor,
+          emissive: neonColor,
+          emissiveIntensity: 2.2,
+          roughness: 0.3,
+          metalness: 0,
+        })
+        const neonY = deckY + 0.45
+        for (const s of [-1, 1]) {
+          const nz = new THREE.Mesh(new THREE.BoxGeometry(deckHalf * 2 + 0.25, 0.12, 0.12), neonMat)
+          nz.position.set(cx, neonY, cz + s * deckHalf)
+          scene.add(nz)
+          const nx = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.12, deckHalf * 2 + 0.25), neonMat)
+          nx.position.set(cx + s * deckHalf, neonY, cz)
+          scene.add(nx)
+        }
+        // Rooftop warning lights at the deck corners — collected so the animate
+        // loop can pulse them (aircraft-warning blink).
+        for (const c of corners) {
+          const beaconMat = new THREE.MeshStandardMaterial({
+            color: 0xff2a2a,
+            emissive: 0xff1111,
+            emissiveIntensity: 1.5,
+          })
+          const light = new THREE.Mesh(new THREE.SphereGeometry(0.16, 8, 6), beaconMat)
+          light.position.set(
+            cx + c[0] * (deckHalf - 0.3),
+            deckY + 0.5,
+            cz + c[1] * (deckHalf - 0.3),
+          )
+          scene.add(light)
+          towerBeacons.push(beaconMat)
+        }
         floors.push({
           x1: cx - deckHalf,
           z1: cz - deckHalf,
@@ -3180,6 +3263,11 @@ export default function ThreeWorld({
         )
         beacon.position.set(cx, towerTopY + antennaLen, cz)
         scene.add(beacon)
+        // Slim antenna mast standing on the observation deck (rooftop antenna).
+        const deckAntenna = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.06, 4.5, 6), steelMat)
+        deckAntenna.position.set(cx - (deckHalf - 0.6), deckY + 0.2 + 2.25, cz - (deckHalf - 0.6))
+        deckAntenna.castShadow = true
+        scene.add(deckAntenna)
         // Elevator shaft (4 thin posts) + a car at the base for flavour.
         for (const c of corners) {
           strut(
@@ -3193,14 +3281,17 @@ export default function ThreeWorld({
             steelMat,
           )
         }
+        // Glass-walled elevator car (translucent blue) — rides with the player.
         const car = new THREE.Mesh(
           new THREE.BoxGeometry(1.6, 2.2, 1.6),
           new THREE.MeshStandardMaterial({
-            color: 0x2a3038,
-            roughness: 0.4,
-            metalness: 0.6,
+            color: 0x3a8fd0,
+            emissive: 0x123a5a,
+            emissiveIntensity: 0.5,
+            roughness: 0.15,
+            metalness: 0.4,
             transparent: true,
-            opacity: 0.85,
+            opacity: 0.42,
           }),
         )
         car.position.set(cx, 1.1, cz)
@@ -3224,6 +3315,7 @@ export default function ThreeWorld({
           topZ: cz,
           baseX: cx,
           baseZ: cz,
+          car,
         })
         entryDecals.push(makeEntryDecal(cx, cz, 0x33ddff))
         const sign = makeEntrySign("[E] ELEVATOR", "#33ddff")
@@ -3234,10 +3326,10 @@ export default function ThreeWorld({
       // Skyline of climbable observation towers, each with its own elevator.
       // Legs carry no collision, so they never block traversal — only the decks
       // up top are solid. Placed in open corners at varied heights.
-      makeLandmarkTower(84, 44, 22, 0xc0392b)
-      makeLandmarkTower(14, 14, 18, 0x3a6ea5)
-      makeLandmarkTower(14, 84, 27, 0xc0392b)
-      makeLandmarkTower(86, 86, 24, 0x6a6f78)
+      makeLandmarkTower(84, 44, 22, 0xc0392b, 0xff3366) // red neon
+      makeLandmarkTower(14, 14, 18, 0x3a6ea5, 0x33ddff) // blue-white neon
+      makeLandmarkTower(14, 84, 27, 0xc0392b, 0xff3366) // red neon
+      makeLandmarkTower(86, 86, 24, 0x6a6f78, 0x33ddff) // blue-white neon
 
       // ── Street props ───────────────────────────────────────────────────────
       // Drum barrels (cylinders) clustered at key choke points.
@@ -4153,17 +4245,52 @@ export default function ThreeWorld({
           roughness: 0.85,
           metalness: 0.3,
         })
+        // Lighter shade of the hull colour for the nose, so the front reads
+        // distinctly from the rest of the body at a glance.
+        const frontMat = new THREE.MeshStandardMaterial({
+          color: new THREE.Color(color).lerp(new THREE.Color(0xffffff), 0.3),
+          roughness: 0.6,
+          metalness: 0.45,
+        })
+        // Glowing headlight / taillight materials (emissive so they read even in
+        // shadow). Forward is -z, so headlights face -z and taillights +z.
+        const headlightMat = new THREE.MeshStandardMaterial({
+          color: 0xfff2a8,
+          emissive: 0xffdd44,
+          emissiveIntensity: 1.6,
+          roughness: 0.4,
+          metalness: 0,
+        })
+        const taillightMat = new THREE.MeshStandardMaterial({
+          color: 0xff5555,
+          emissive: 0xff1111,
+          emissiveIntensity: 1.4,
+          roughness: 0.4,
+          metalness: 0,
+        })
         // Hull (wide, low, long).
         const hull = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.7, 3.4), hullMat)
         hull.position.y = 0.7
         hull.castShadow = true
         hull.receiveShadow = true
         g.add(hull)
-        // Sloped glacis at the nose for a tanky read.
-        const glacis = new THREE.Mesh(new THREE.BoxGeometry(2.1, 0.5, 0.7), hullMat)
+        // Sloped glacis at the nose for a tanky read (lighter front colour).
+        const glacis = new THREE.Mesh(new THREE.BoxGeometry(2.1, 0.5, 0.7), frontMat)
         glacis.position.set(0, 0.55, -1.5)
         glacis.rotation.x = -0.5
         g.add(glacis)
+        // Front headlights (two glowing yellow squares on the nose, facing -z).
+        for (const lx of [-0.6, 0.6]) {
+          const light = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.24, 0.08), headlightMat)
+          light.position.set(lx, 0.7, -1.72)
+          g.add(light)
+        }
+        // Rear taillights (two glowing red squares on the tail, facing +z).
+        for (const lx of [-0.6, 0.6]) {
+          const light = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.2, 0.08), taillightMat)
+          light.position.set(lx, 0.7, 1.72)
+          g.add(light)
+        }
         // Two tracks (long dark boxes along the sides).
         for (const tx of [-1.0, 1.0]) {
           const track = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.55, 3.5), darkMat)
@@ -4181,18 +4308,25 @@ export default function ThreeWorld({
         const cupola = new THREE.Mesh(new THREE.CylinderGeometry(0.28, 0.32, 0.26, 10), hullMat)
         cupola.position.set(0.35, 0.36, 0.3)
         turret.add(cupola)
+        // Thin antenna rod off the turret's rear corner (sways visually with the
+        // turret since it's parented to it).
+        const antenna = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, 1.3, 5), darkMat)
+        antenna.position.set(-0.55, 0.9, 0.65)
+        turret.add(antenna)
         // Barrel pivot at the turret front — pitches the gun up/down.
         const barrelPivot = new THREE.Group()
         barrelPivot.position.set(0, 0.05, -0.7)
         turret.add(barrelPivot)
-        const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.15, 2.2, 10), darkMat)
+        // Barrel lengthened to 1.5× (2.2 → 3.3) so the front reads clearly. The
+        // rear end stays just behind the pivot; the muzzle follows the new tip.
+        const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.15, 3.3, 10), darkMat)
         barrel.rotation.x = Math.PI / 2 // lie along z
-        barrel.position.z = -1.0 // extend forward (-z) from the pivot
+        barrel.position.z = -1.55 // extend forward (-z) from the pivot
         barrel.castShadow = true
         barrelPivot.add(barrel)
         const muzzle = new THREE.Mesh(new THREE.CylinderGeometry(0.17, 0.17, 0.3, 10), darkMat)
         muzzle.rotation.x = Math.PI / 2
-        muzzle.position.z = -2.05
+        muzzle.position.z = -3.2
         barrelPivot.add(muzzle)
         return { group: g, turret, barrelPivot }
       }
@@ -7193,40 +7327,72 @@ export default function ThreeWorld({
                 // climb up. Avoids "press E and bounce back instantly"
                 // when the player keeps the key tapped at the top.
                 const atTop = Math.abs(refs.focalPoint.y - zone.targetY) < 0.6
+                // Start a smooth (eased) lift rather than teleporting. The ride
+                // snaps the player to the shaft centre, then the animate loop
+                // interpolates Y (and the glass car) over RIDE_MS.
+                const RIDE_MS = 750
+                const startRide = (toY: number, ex: number, ez: number) => {
+                  refs.focalPoint.x = ex
+                  refs.focalPoint.z = ez
+                  elevatorRideRef.current = {
+                    fromY: refs.focalPoint.y,
+                    toY,
+                    x: ex,
+                    z: ez,
+                    startMs: Date.now(),
+                    durMs: RIDE_MS,
+                    car: zone.car ?? null,
+                  }
+                  // Bring the car to the boarding height so it carries the player.
+                  if (zone.car) zone.car.position.set(ex, refs.focalPoint.y + 1.1, ez)
+                  playerVelYRef.current = 0
+                  // Block re-trigger until the ride (plus a little slack) ends.
+                  climbCooldownUntilRef.current = Date.now() + RIDE_MS + 150
+                  // A lift is not a fall — keep the fall tracker quiet.
+                  wasAirborneRef.current = false
+                  fallStartYRef.current = refs.focalPoint.y
+                }
                 if (atTop && zone.downY !== undefined) {
-                  // Descend: drop onto clear ground beside the tower so we
-                  // don't land embedded in the solid tower footprint.
-                  refs.focalPoint.y = zone.downY
-                  if (zone.baseX !== undefined) refs.focalPoint.x = zone.baseX
-                  if (zone.baseZ !== undefined) refs.focalPoint.z = zone.baseZ
-                  playerVelYRef.current = 0
-                  groundY = zone.downY
-                  climbCooldownUntilRef.current = Date.now() + 600
-                  // Elevator descent is not a fall — clear the airborne tracker
-                  // so the landing block deals no fall damage.
-                  wasAirborneRef.current = false
-                  fallStartYRef.current = zone.downY
+                  // Descend onto clear ground at the shaft centre.
+                  startRide(
+                    zone.downY,
+                    zone.baseX ?? refs.focalPoint.x,
+                    zone.baseZ ?? refs.focalPoint.z,
+                  )
                 } else if (!atTop) {
-                  // Ascend: step onto the roof itself (inside the floor
-                  // bounds) — landing beside the tower would leave no floor
-                  // underfoot and the player would just fall back down.
-                  refs.focalPoint.y = zone.targetY
-                  if (zone.topX !== undefined) refs.focalPoint.x = zone.topX
-                  if (zone.topZ !== undefined) refs.focalPoint.z = zone.topZ
-                  playerVelYRef.current = 0
-                  groundY = zone.targetY
-                  climbCooldownUntilRef.current = Date.now() + 600
-                  wasAirborneRef.current = false
-                  fallStartYRef.current = zone.targetY
+                  // Ascend onto the deck (inside its floor bounds).
+                  startRide(
+                    zone.targetY,
+                    zone.topX ?? refs.focalPoint.x,
+                    zone.topZ ?? refs.focalPoint.z,
+                  )
                 }
               }
             }
           }
 
+          // Smooth elevator ride takes precedence over gravity: ease the player
+          // (and the glass car) between fromY/toY, suspending the fall code.
+          if (elevatorRideRef.current) {
+            const e = elevatorRideRef.current
+            const tt = Math.min(1, (Date.now() - e.startMs) / e.durMs)
+            const k = tt * tt * (3 - 2 * tt) // smoothstep ease-in-out
+            refs.focalPoint.x = e.x
+            refs.focalPoint.z = e.z
+            refs.focalPoint.y = e.fromY + (e.toY - e.fromY) * k
+            if (e.car) e.car.position.set(e.x, refs.focalPoint.y + 1.1, e.z)
+            playerVelYRef.current = 0
+            wasAirborneRef.current = false
+            fallStartYRef.current = refs.focalPoint.y
+            if (tt >= 1) {
+              refs.focalPoint.y = e.toY
+              elevatorRideRef.current = null
+            }
+          }
           // Apply gravity / floor snap. Fall damage is computed from the drop
           // height (the Y the player became airborne at, minus the landing Y) —
           // a single cheap comparison, no raycasts.
-          if (refs.focalPoint.y > groundY + 0.01) {
+          else if (refs.focalPoint.y > groundY + 0.01) {
             // Mark the start of a fall the frame the player leaves the ground.
             if (!wasAirborneRef.current) {
               wasAirborneRef.current = true
@@ -7298,6 +7464,14 @@ export default function ThreeWorld({
             const mm = d.material as THREE.MeshStandardMaterial
             mm.emissiveIntensity = pulse
           }
+        }
+
+        // Blink the rooftop warning lights on the landmark towers (sharp on/off
+        // pulse, like aircraft-warning beacons).
+        if (towerBeacons.length) {
+          const on = Math.sin(Date.now() * 0.006) > 0
+          const intensity = on ? 2.6 : 0.25
+          for (const m of towerBeacons) m.emissiveIntensity = intensity
         }
 
         // Walk-bob: subtle vertical head sway when actually moving. Phase
