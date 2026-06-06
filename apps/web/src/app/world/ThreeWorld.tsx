@@ -100,7 +100,7 @@ const ENEMY_VEH_CAR_HP = 200
 const ENEMY_VEH_TANK_HP = 600
 // ── Fighter jet (drivable; taxis, takes off, flies, lands) ──────────────────
 const VEHICLE_JET_RADIUS = 1.5 // fuselage collision circle
-const VEHICLE_JET_HP = 500
+const VEHICLE_JET_HP = 700 // player jet — tankier than enemy jets (150)
 const JET_ACCEL = 16 // throttle response (m/s²)
 const JET_MAX_SPEED = 48 // top speed (fastest vehicle by far)
 const JET_DRAG = 2.2 // passive decel when off-throttle
@@ -136,8 +136,8 @@ const ENEMY_JET_ATTACK_RANGE = 100
 const ENEMY_JET_GUN_COOLDOWN_MS = 150
 const ENEMY_JET_GUN_DAMAGE = 6
 const ENEMY_JET_TURN = 0.7 // rad/s steering toward the target
-const PARACHUTE_GRAVITY = 3.6 // gentle descent (≈ GRAVITY/6)
-const PARACHUTE_MAX_SINK = 4 // terminal descent speed under canopy
+const PARACHUTE_GRAVITY = 11 // descent ≈ GRAVITY/2 (was /6 — too floaty)
+const PARACHUTE_MAX_SINK = 12 // terminal descent speed under canopy (3× faster)
 const PARACHUTE_OPEN_DELAY_MS = 1000 // free-fall before the canopy deploys
 const EJECT_UP_SPEED = 9 // upward pop when ejecting
 // ── Vertical movement ──────────────────────────────────────────────────────────
@@ -1848,7 +1848,9 @@ export default function ThreeWorld({
       // areas (HARBOR / INDUSTRIAL) still fade out gracefully instead of
       // popping into view, while keeping the near band hazy on snow.
       scene.fog = isSky
-        ? new THREE.Fog(theme.fog, 400, 1800) // open, hazy horizon for the sky arena
+        ? // Push the haze far out so looking down from altitude doesn't wash the
+          // ground into white — the terrain should stay legible from up high.
+          new THREE.Fog(theme.fog, 900, 3000)
         : mapId === "snow"
           ? new THREE.Fog(theme.fog, 80, 420)
           : new THREE.Fog(theme.fog, 140, 680)
@@ -1933,6 +1935,12 @@ export default function ThreeWorld({
       const renderer = new THREE.WebGLRenderer({
         antialias: true,
         powerPreference: "high-performance",
+        // SKY views the ground from hundreds of metres up with a far clip of
+        // 2400 vs near 0.1 — that ratio crushes depth precision and makes
+        // coplanar ground decals / building faces z-fight, which reads as a
+        // rippling "wave" over the whole scene. A logarithmic depth buffer
+        // restores precision across the huge range and removes the shimmer.
+        logarithmicDepthBuffer: isSky,
       })
       renderer.setSize(container.clientWidth, container.clientHeight)
       // Cap at 1.75 instead of 2 — on retina the extra 14% pixels rarely
