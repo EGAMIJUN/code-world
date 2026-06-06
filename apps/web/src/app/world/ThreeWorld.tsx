@@ -385,9 +385,8 @@ const MAP_OBJECTS: [number, number, number, number, number][] = [
   [68, 68, 1, 14, 5],
   [83, 62, 1, 14, 5],
   [68, 85, 16, 1, 5],
-  // Trees
-  [70, 7, 1, 1, 4],
-  [76, 9, 1, 1, 4],
+  // Trees ([70,7] and [76,9] removed — they fell inside the relocated
+  // outdoor-NE mansion footprint at x70–82, z7–19).
   [82, 6, 1, 1, 4],
   [88, 9, 1, 1, 4],
   [72, 20, 1, 1, 4],
@@ -721,6 +720,15 @@ const SPAWN_POINTS = [
   { x: 80, z: 51 }, // Avenue terminus interior
   { x: 38, z: 9 }, // Industrial north-row interior
   { x: 38, z: 75 }, // Industrial south-row interior
+  // Mansion interiors (ground floor) — 2 each so bots "occupy" the buildings
+  // and the player clears rooms before heading upstairs. Match makeMansion
+  // footprints: A (70,7) / B (0.5,59) / C (0.5,31).
+  { x: 74, z: 11 }, // Mansion A
+  { x: 76, z: 15 }, // Mansion A
+  { x: 3, z: 64 }, // Mansion B
+  { x: 5, z: 68 }, // Mansion B
+  { x: 3, z: 35 }, // Mansion C
+  { x: 5, z: 40 }, // Mansion C
   // ── Open-world district spawns (PR-B) ──────────────────────────────────
   // HARBOR (south): in the open apron between the container yards and
   // warehouses (on land, north of the waterline at z≈265). Kept clear of
@@ -2710,6 +2718,144 @@ export default function ThreeWorld({
         })
       }
 
+      // ── Shared building-enrichment + mansion materials / geometry ──────────
+      // Created once and reused across every existing building AND the new
+      // mansions so the GPU sees a handful of materials, not hundreds. No
+      // point lights are added anywhere below — all "glow" is emissive only.
+      // Dark glass with a faint warm internal glow: reads as an occupied,
+      // lit apartment window (pops on the dark/snow skies, subtle in daylight).
+      const litWindowMat = new THREE.MeshStandardMaterial({
+        color: 0x6a5a2a,
+        emissive: 0xffcc55,
+        emissiveIntensity: mapId === "snow" ? 1.1 : 0.8,
+        roughness: 0.25,
+        metalness: 0.3,
+      })
+      // AC / rooftop-unit grey metal, and a darker concrete for interior floors.
+      const acUnitMat = new THREE.MeshStandardMaterial({
+        color: 0x6a6a6a,
+        roughness: 0.45,
+        metalness: 0.5,
+      })
+      const mansionFloorMat = new THREE.MeshStandardMaterial({
+        color: 0x4a4438,
+        roughness: 0.95,
+        metalness: 0,
+      })
+      const stairMat = new THREE.MeshStandardMaterial({
+        color: 0x6a6258,
+        roughness: 0.9,
+        metalness: 0,
+      })
+      const furnMatA = new THREE.MeshStandardMaterial({
+        color: 0x6a4a26,
+        roughness: 0.85,
+        metalness: 0.05,
+      })
+      const furnMatB = new THREE.MeshStandardMaterial({
+        color: 0x40444a,
+        roughness: 0.7,
+        metalness: 0.2,
+      })
+      const railMatM = new THREE.MeshStandardMaterial({
+        color: 0x3a3a3e,
+        roughness: 0.5,
+        metalness: 0.7,
+      })
+      // Small palette of emissive shop-sign colours, shared across all signs.
+      const signMats = [0xff4488, 0x44ffcc, 0xffcc44, 0x8844ff].map(
+        (c) =>
+          new THREE.MeshStandardMaterial({
+            color: c,
+            emissive: c,
+            emissiveIntensity: 1.4,
+            roughness: 0.4,
+            metalness: 0.2,
+          }),
+      )
+      // Shared window-pane geometries (same size for every pane → one buffer).
+      const winGeoH = new THREE.BoxGeometry(1.0, 1.0, 0.08) // north / south faces
+      const winGeoV = new THREE.BoxGeometry(0.08, 1.0, 1.0) // east / west faces
+
+      // Lay a grid of windows over the requested faces of a footprint between
+      // yStart and yTop. Visual only (no collision, no shadows). A deterministic
+      // 1-in-litEvery panes use the warm emissive material so some "rooms" read
+      // as lit at night without adding any lights.
+      function addBuildingWindows(o: {
+        x: number
+        z: number
+        w: number
+        d: number
+        yStart: number
+        yTop: number
+        faces: ("north" | "south" | "east" | "west")[]
+        litEvery?: number
+        litOffset?: number
+      }) {
+        const litEvery = o.litEvery ?? 3
+        const paneH = 1.0
+        const rows: number[] = []
+        for (let yy = o.yStart; yy <= o.yTop - 0.6; yy += 1.8) rows.push(yy)
+        let idx = o.litOffset ?? 0
+        for (const face of o.faces) {
+          const horizontal = face === "north" || face === "south"
+          const len = horizontal ? o.w : o.d
+          const cols = Math.max(1, Math.floor(len / 2.5))
+          for (let c = 0; c < cols; c++) {
+            const t = (c + 0.5) / cols
+            for (const ry of rows) {
+              const lit = idx++ % litEvery === 0
+              const mat = lit ? litWindowMat : windowMat
+              const mesh = new THREE.Mesh(horizontal ? winGeoH : winGeoV, mat)
+              if (horizontal) {
+                const pz = face === "north" ? o.z - 0.05 : o.z + o.d + 0.05
+                mesh.position.set(o.x + t * o.w, ry + paneH / 2, pz)
+              } else {
+                const px = face === "west" ? o.x - 0.05 : o.x + o.w + 0.05
+                mesh.position.set(px, ry + paneH / 2, o.z + t * o.d)
+              }
+              mesh.castShadow = false
+              scene.add(mesh)
+            }
+          }
+        }
+      }
+
+      // A rooftop water tank (cylinder) or AC vent (box), placed at the given
+      // roof-top Y. Kept simple — these read fine from the street and add
+      // city silhouette without any extra lights.
+      function addRoofUnit(cx: number, topY: number, cz: number, kind: "tank" | "vent") {
+        if (kind === "tank") {
+          const tank = new THREE.Mesh(new THREE.CylinderGeometry(0.7, 0.8, 1.4, 12), tankMat)
+          tank.position.set(cx, topY + 0.7, cz)
+          tank.castShadow = true
+          scene.add(tank)
+          // Four stubby legs so it reads as a raised water tank.
+          for (const sx of [-1, 1]) {
+            for (const sz of [-1, 1]) {
+              const leg = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.5, 0.12), railMatM)
+              leg.position.set(cx + sx * 0.5, topY + 0.25, cz + sz * 0.5)
+              scene.add(leg)
+            }
+          }
+        } else {
+          const vent = new THREE.Mesh(new THREE.BoxGeometry(1.3, 0.8, 1.0), acUnitMat)
+          vent.position.set(cx, topY + 0.4, cz)
+          vent.castShadow = true
+          scene.add(vent)
+        }
+      }
+
+      // An emissive shop-sign board mounted on a building face (urban only).
+      function addShopSign(cx: number, y: number, cz: number, rotY: number, colorIdx: number) {
+        const mat = signMats[colorIdx % signMats.length] ?? signMats[0]
+        if (!mat) return
+        const sign = new THREE.Mesh(new THREE.BoxGeometry(3.0, 0.7, 0.14), mat)
+        sign.position.set(cx, y, cz)
+        sign.rotation.y = rotY
+        scene.add(sign)
+      }
+
       // ── Battle city: hollow buildings flanking the central avenue ─────
       // Generated from the BATTLE_CITY_BUILDINGS module-level spec so the
       // layout is editable in one place. Each gets 2–3 interior cover
@@ -2764,6 +2910,30 @@ export default function ThreeWorld({
             d: 0.4,
             color: 0x333333,
           })
+        }
+        // ── Enrichment: windows (lit subset), a rooftop unit, and an urban
+        // shop sign so the avenue reads as a living city block. Windows skip
+        // the door face so panes don't float in the doorway gap.
+        const allFaces: ("north" | "south" | "east" | "west")[] = ["north", "south", "east", "west"]
+        addBuildingWindows({
+          x: b.x,
+          z: b.z,
+          w: b.w,
+          d: b.d,
+          yStart: 1.2,
+          yTop: h,
+          faces: allFaces.filter((f) => f !== b.doorSide),
+          litOffset: seed & 3,
+        })
+        addRoofUnit(b.x + b.w * 0.3, h + 0.24, b.z + b.d * 0.3, (seed & 1) === 0 ? "tank" : "vent")
+        if (mapId === "urban") {
+          // Mount the sign just above the door, facing the avenue.
+          const sx = b.x + b.w / 2
+          const sz = b.z + b.d / 2
+          if (b.doorSide === "south") addShopSign(sx, 3.0, b.z + b.d + 0.2, 0, seed & 3)
+          else if (b.doorSide === "north") addShopSign(sx, 3.0, b.z - 0.2, 0, seed & 3)
+          else if (b.doorSide === "west") addShopSign(b.x - 0.2, 3.0, sz, Math.PI / 2, seed & 3)
+          else addShopSign(b.x + b.w + 0.2, 3.0, sz, Math.PI / 2, seed & 3)
         }
       }
 
@@ -3069,6 +3239,265 @@ export default function ThreeWorld({
         bldMat: industrialMat,
         roofMat: industrialRoofMat,
         roofProp: "vent",
+      })
+
+      // ── Multi-floor mansions (enterable, walkable switchback stairs) ────────
+      // Unlike the roof towers (E-key elevator lifts) these have real walkable
+      // stairs: each tread is a FloorAABB rising < STEP_UP_MAX, so the existing
+      // floor-snap auto-steps the player up/down. A switchback per storey climbs
+      // all the way from the ground to a rooftop penthouse. Interiors are split
+      // into rooms with cover; windows + a roof tank dress the exterior. No
+      // point lights — emissive windows only. Interior props skip castShadow.
+      function makeMansion(opts: {
+        x: number
+        z: number
+        w: number
+        d: number
+        levels: number // storeys including ground; the roof sits above the top
+        bldMat: THREE.Material
+        roofMat: THREE.Material
+      }) {
+        const { x, z, w, d, levels, bldMat, roofMat } = opts
+        const floorH = 3.0
+        const roofY = levels * floorH
+        const WT = WALL_T
+        const ix1 = x + WT
+        const ix2 = x + w - WT
+        const iz1 = z + WT
+        const iz2 = z + d - WT
+        // Stairwell shaft: flush to the north (iz1) + east (ix2) interior walls,
+        // open toward the south (interior). Two 1.4-wide flights + 0.2 gap = 3.0
+        // wide, 3.0 deep. Per storey: flight A climbs north, a landing, flight B
+        // climbs back south and emerges on the floor above at the open edge.
+        const swW = 3.0
+        const swDepth = 3.0
+        const swx = ix2 - swW // west edge of the shaft
+        const nearZ = iz1 + swDepth // open (south) edge of the shaft
+        const laneW = 1.4
+        const tread = 0.42
+        const rise = 0.3 // < STEP_UP_MAX (0.4): floor-snap auto-steps each tread
+        const stepsPerFlight = 5 // 5 * 0.3 = 1.5 = half a storey
+        const landingD = swDepth - stepsPerFlight * tread // 3.0 - 2.1 = 0.9
+
+        // ── Perimeter shell: full-height walls (windows overlaid separately).
+        //    The south wall carries two ground-floor doors via lintels.
+        addWallSlab(x + w / 2, roofY / 2, z, w, roofY, WT, bldMat) // north
+        addWallSlab(x, roofY / 2, z + d / 2, WT, roofY, d, bldMat) // west
+        addWallSlab(x + w, roofY / 2, z + d / 2, WT, roofY, d, bldMat) // east
+        const doorTop = 2.4
+        const g1 = x + w * 0.3
+        const g2 = x + w * 0.7
+        const half = 1.0 // half door width (2.0 wide)
+        const southSeg = (xa: number, xb: number) => {
+          if (xb - xa > 0.05) {
+            addWallSlab((xa + xb) / 2, roofY / 2, z + d, xb - xa, roofY, WT, bldMat)
+          }
+        }
+        southSeg(x, g1 - half)
+        southSeg(g1 + half, g2 - half)
+        southSeg(g2 + half, x + w)
+        for (const gc of [g1, g2]) {
+          // Lintel above each door (doorTop → roof).
+          addWallSlab(gc, (doorTop + roofY) / 2, z + d, 2 * half, roofY - doorTop, WT, bldMat)
+          const dz = z + d + 0.6
+          entryDecals.push(makeEntryDecal(gc, dz, 0x44ff88))
+          entries.push({ x: gc, z: dz, kind: "door" })
+        }
+
+        // ── Local builders ──
+        // A floor rectangle: walkable AABB + a thin visual slab (top at y).
+        const addFloorRect = (fx1: number, fz1: number, fx2: number, fz2: number, y: number) => {
+          if (fx2 - fx1 <= 0.05 || fz2 - fz1 <= 0.05) return
+          floors.push({ x1: fx1, z1: fz1, x2: fx2, z2: fz2, y })
+          const slab = new THREE.Mesh(
+            new THREE.BoxGeometry(fx2 - fx1, 0.12, fz2 - fz1),
+            mansionFloorMat,
+          )
+          slab.position.set((fx1 + fx2) / 2, y - 0.06, (fz1 + fz2) / 2)
+          slab.receiveShadow = true
+          slab.castShadow = false
+          scene.add(slab)
+        }
+        // One stair tread: walkable AABB + a visual step block (no wall AABB).
+        const stepGeo = new THREE.BoxGeometry(laneW, rise, tread + 0.04)
+        const addTread = (lx1: number, lz1: number, lz2: number, topY: number) => {
+          floors.push({ x1: lx1, z1: lz1, x2: lx1 + laneW, z2: lz2, y: topY })
+          const step = new THREE.Mesh(stepGeo, stairMat)
+          step.position.set(lx1 + laneW / 2, topY - rise / 2, (lz1 + lz2) / 2)
+          step.castShadow = false
+          step.receiveShadow = true
+          scene.add(step)
+        }
+        // Interior partition with a centred door gap, standing on floor baseY.
+        const addPartition = (
+          pa: number,
+          pb: number,
+          fixed: number,
+          baseY: number,
+          axis: "x" | "z",
+        ) => {
+          const ph = floorH - 0.1
+          const cy = baseY + ph / 2
+          const gc = (pa + pb) / 2
+          const seg = (a: number, b: number) => {
+            if (b - a <= 0.05) return
+            if (axis === "x") addWallSlab((a + b) / 2, cy, fixed, b - a, ph, WT, bldMat)
+            else addWallSlab(fixed, cy, (a + b) / 2, WT, ph, b - a, bldMat)
+          }
+          seg(pa, gc - 0.9)
+          seg(gc + 0.9, pb)
+        }
+        // A furniture box (cover) resting on floor baseY; no shadow (interior).
+        const addFurniture = (
+          cx: number,
+          baseY: number,
+          cz: number,
+          sw: number,
+          sh: number,
+          sd: number,
+          mat: THREE.Material,
+        ) => {
+          const m = addWallSlab(cx, baseY + sh / 2, cz, sw, sh, sd, mat)
+          m.castShadow = false
+        }
+
+        // ── Per-storey floor slabs: a frame around the shaft hole. Levels
+        //    1..levels-1 are interior floors; `levels` is the roof deck.
+        for (let L = 1; L <= levels; L++) {
+          const y = L * floorH
+          addFloorRect(ix1, iz1, swx, iz2, y) // west of the shaft, full depth
+          addFloorRect(swx, nearZ, ix2, iz2, y) // east of west part, south of shaft
+        }
+
+        // ── Switchback stairs through every storey (ground → … → roof).
+        for (let k = 0; k < levels; k++) {
+          const baseY = k * floorH
+          for (let i = 1; i <= stepsPerFlight; i++) {
+            // Flight A — climbs north (−z) in the west lane.
+            addTread(swx, nearZ - i * tread, nearZ - (i - 1) * tread, baseY + i * rise)
+          }
+          addFloorRect(swx, iz1, ix2, iz1 + landingD, baseY + stepsPerFlight * rise)
+          for (let j = 1; j <= stepsPerFlight; j++) {
+            // Flight B — climbs south (+z) in the east lane, back to the open edge.
+            addTread(
+              ix2 - laneW,
+              iz1 + landingD + (j - 1) * tread,
+              iz1 + landingD + j * tread,
+              baseY + (stepsPerFlight + j) * rise,
+            )
+          }
+        }
+
+        // ── Rooms + furniture on each habitable storey (incl. ground).
+        for (let L = 0; L < levels; L++) {
+          const baseY = L * floorH
+          // East-west corridor wall (front rooms vs back rooms), west of shaft.
+          addPartition(ix1, swx - 0.3, z + d * 0.55, baseY, "x")
+          // North-south cross wall making two south-side rooms.
+          addPartition(nearZ + 0.3, iz2, x + w * 0.4, baseY, "z")
+          addFurniture(ix1 + 1.4, baseY, iz1 + 1.2, 1.3, 0.9, 1.3, furnMatA)
+          addFurniture(x + w * 0.25, baseY, iz2 - 1.4, 1.8, 0.8, 1.0, furnMatB)
+          if (L > 0) addFurniture(ix1 + 1.2, baseY, iz2 - 1.6, 1.1, 1.6, 0.4, furnMatB)
+        }
+
+        // ── Windows (skip the ground-floor south = door face).
+        addBuildingWindows({
+          x,
+          z,
+          w,
+          d,
+          yStart: 1.2,
+          yTop: roofY,
+          faces: ["north", "east", "west"],
+          litOffset: (x * 3 + z) & 3,
+        })
+        addBuildingWindows({
+          x,
+          z,
+          w,
+          d,
+          yStart: floorH + 1.0,
+          yTop: roofY,
+          faces: ["south"],
+        })
+
+        // ── Roof: parapet handrail, a stair penthouse over the shaft, a tank.
+        const para = 0.9
+        const paraT = 0.18
+        const paraY = roofY + para / 2
+        addWallSlab(x + w / 2, paraY, z, w, para, paraT, bldMat) // north
+        addWallSlab(x + w / 2, paraY, z + d, w, para, paraT, bldMat) // south
+        addWallSlab(x, paraY, z + d / 2, paraT, para, d, bldMat) // west
+        addWallSlab(x + w, paraY, z + d / 2, paraT, para, d, bldMat) // east
+        const phH = 2.4
+        const phY = roofY + phH / 2
+        const phMid = (swx + ix2) / 2
+        addWallSlab(phMid, phY, iz1, swW, phH, paraT, bldMat) // north (against wall)
+        addWallSlab(ix2, phY, (iz1 + nearZ) / 2, paraT, phH, swDepth, bldMat) // east
+        addWallSlab(swx, phY, (iz1 + nearZ) / 2, paraT, phH, swDepth, bldMat) // west
+        // South penthouse face with a door gap (exit onto the roof).
+        const phGap = 1.2
+        addWallSlab(
+          (swx + (phMid - phGap)) / 2,
+          phY,
+          nearZ,
+          phMid - phGap - swx,
+          phH,
+          paraT,
+          bldMat,
+        )
+        addWallSlab(
+          (phMid + phGap + ix2) / 2,
+          phY,
+          nearZ,
+          ix2 - (phMid + phGap),
+          phH,
+          paraT,
+          bldMat,
+        )
+        const cap = new THREE.Mesh(new THREE.BoxGeometry(swW + 0.2, 0.2, swDepth + 0.2), roofMat)
+        cap.position.set(phMid, roofY + phH + 0.1, (iz1 + nearZ) / 2)
+        cap.castShadow = true
+        scene.add(cap)
+        addRoofUnit(x + w * 0.28, roofY, z + d * 0.78, "tank")
+
+        // ── Minimap: phantom footprint AABB. h < 0 → never collides (and
+        //    bullets pass), but the minimap draws it as a filled building.
+        ALL_AABBS.push({ x1: x, z1: z, x2: x + w, z2: z + d, h: -1 })
+      }
+
+      // Three mansions in empty lots, surveyed clear of the observation towers
+      // (centres 14,14 / 14,84 / 84,44 / 86,86 — legs splay ±7, kept ≥13 m
+      // away), the avenue (z 44–58), and every existing building / prop.
+      //  A: outdoor NE cell, north of the z≈28 trench (two trees removed below)
+      //  B: west strip, south of the avenue (clear of the S-flank at x≥10)
+      //  C: west strip, north of the avenue (clear of the N-flank at x≥10)
+      makeMansion({
+        x: 70,
+        z: 7,
+        w: 12,
+        d: 12,
+        levels: 4,
+        bldMat: concreteMat,
+        roofMat: concreteRoofMat,
+      })
+      makeMansion({
+        x: 0.5,
+        z: 59,
+        w: 9,
+        d: 12,
+        levels: 5,
+        bldMat: concreteMat,
+        roofMat: concreteRoofMat,
+      })
+      makeMansion({
+        x: 0.5,
+        z: 31,
+        w: 9,
+        d: 12,
+        levels: 6,
+        bldMat: concreteMat,
+        roofMat: concreteRoofMat,
       })
 
       // ── Landmark observation tower (Tokyo-Tower-style lattice) ──────────────
