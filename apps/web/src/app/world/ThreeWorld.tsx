@@ -8710,7 +8710,14 @@ export default function ThreeWorld({
             // camera and remote player blocks the shot.
             const wallBlocks =
               nearestWall && pvpHits[0] && nearestWall.distance < pvpHits[0].distance
-            if (!wallBlocks && pvpHits.length > 0 && pvpHits[0]) {
+            // A nearer infantry (AI enemy) in front of the remote player blocks
+            // the shot: don't consume it on PvP, let the infantry hit run below.
+            const blockedByInfantry = !!(
+              enemyHits[0] &&
+              pvpHits[0] &&
+              enemyHits[0].distance < pvpHits[0].distance
+            )
+            if (!wallBlocks && !blockedByInfantry && pvpHits.length > 0 && pvpHits[0]) {
               const targetId = remoteIdMap.get(pvpHits[0].object)
               if (targetId) {
                 const wpId = weapon.id
