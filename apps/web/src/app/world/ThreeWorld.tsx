@@ -8635,7 +8635,10 @@ export default function ThreeWorld({
             const vHit = raycaster.intersectObjects(vehMeshes, false)[0]
             const blockedByWall = !!(nearestWall && vHit && nearestWall.distance < vHit.distance)
             const blockedByEnemy = !!(enemyHits[0] && vHit && enemyHits[0].distance < vHit.distance)
-            if (!shotConsumed && vHit && !blockedByWall && !blockedByEnemy) {
+            // No !shotConsumed guard here: the vehicle is the first target pass,
+            // so shotConsumed is always false at this point (CodeQL flagged the
+            // redundant check). It SETS the flag so later passes skip.
+            if (vHit && !blockedByWall && !blockedByEnemy) {
               const vv = vehMap.get(vHit.object)
               if (vv) {
                 damageEnemyVehicle(vv, weapon.hitDamage, "bullet")
