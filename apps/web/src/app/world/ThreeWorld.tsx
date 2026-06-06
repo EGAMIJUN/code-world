@@ -8611,6 +8611,11 @@ export default function ThreeWorld({
           spawnExplosion(nearestWall.point.clone(), true)
         }
 
+        // A single shot can only damage one thing. Once any target (AI vehicle,
+        // enemy jet, remote player or infantry) takes the hit, later passes are
+        // skipped — otherwise one bullet would pass through and multi-hit.
+        let shotConsumed = false
+
         // Enemy-driven vehicles are shootable. If one is the closest thing in
         // the crosshair (nearer than any wall / enemy), the shot chips it
         // (tank armor reduces bullets) and is consumed.
@@ -8630,6 +8635,9 @@ export default function ThreeWorld({
             const vHit = raycaster.intersectObjects(vehMeshes, false)[0]
             const blockedByWall = !!(nearestWall && vHit && nearestWall.distance < vHit.distance)
             const blockedByEnemy = !!(enemyHits[0] && vHit && enemyHits[0].distance < vHit.distance)
+            // No !shotConsumed guard here: the vehicle is the first target pass,
+            // so shotConsumed is always false at this point (CodeQL flagged the
+            // redundant check). It SETS the flag so later passes skip.
             if (vHit && !blockedByWall && !blockedByEnemy) {
               const vv = vehMap.get(vHit.object)
               if (vv) {
@@ -8637,6 +8645,7 @@ export default function ThreeWorld({
                 SOUNDS.hit()
                 spawnExplosion(vHit.point.clone(), true)
                 enemyHits = [] // consumed by the vehicle
+                shotConsumed = true
               }
             }
           }
@@ -8660,7 +8669,7 @@ export default function ThreeWorld({
             const jHit = raycaster.intersectObjects(ejMeshes, false)[0]
             const blockedByWall = !!(nearestWall && jHit && nearestWall.distance < jHit.distance)
             const blockedByEnemy = !!(enemyHits[0] && jHit && enemyHits[0].distance < jHit.distance)
-            if (jHit && !blockedByWall && !blockedByEnemy) {
+            if (!shotConsumed && jHit && !blockedByWall && !blockedByEnemy) {
               const ej = ejMap.get(jHit.object)
               if (ej && !ej.dead) {
                 ej.hp -= weapon.hitDamage
@@ -8676,6 +8685,7 @@ export default function ThreeWorld({
                   killEnemyJet(ej)
                 }
                 enemyHits = [] // consumed by the jet
+                shotConsumed = true
               }
             }
           }
@@ -8683,7 +8693,11 @@ export default function ThreeWorld({
 
         // PvP hit: check remote players
         const sceneRefsLocal = sceneRef.current
-        if (sceneRefsLocal && (myTeamRef.current !== "ffa" || modeRef.current === "ffa")) {
+        if (
+          !shotConsumed &&
+          sceneRefsLocal &&
+          (myTeamRef.current !== "ffa" || modeRef.current === "ffa")
+        ) {
           const remoteMeshList: THREE.Object3D[] = []
           const remoteIdMap = new Map<THREE.Object3D, string>()
           for (const [rid, rmesh] of sceneRefsLocal.remoteMeshes) {
@@ -8713,12 +8727,13 @@ export default function ThreeWorld({
                 )
                 SOUNDS.hit()
                 spawnBlood(pvpHits[0].point)
+                shotConsumed = true
               }
             }
           }
         }
 
-        if (enemyHits.length > 0) {
+        if (!shotConsumed && enemyHits.length > 0) {
           const hitEnemyId = enemyHits[0]?.object.userData.enemyId as string | undefined
           const hitEnemy = aliveEnemies.find((e) => e.id === hitEnemyId)
           if (hitEnemy && enemyHits[0]) {
