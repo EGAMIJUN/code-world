@@ -5226,8 +5226,10 @@ export default function ThreeWorld({
         }
         // Seed the free-aim camera looking the way the hull faces, and start
         // "recentered" so a freshly-boarded car isn't aimed off to one side.
+        // Jets start level (pitch 0) so a small pull-up reaches the takeoff
+        // rotate angle — a nose-down start made liftoff feel impossible.
         camState.yaw = v.heading
-        camState.pitch = -0.12
+        camState.pitch = isJet ? 0 : -0.12
         lastDriveAimRef.current = 0
         // Snap the (hidden) player onto the car.
         focalPoint.x = v.x
@@ -6314,12 +6316,20 @@ export default function ThreeWorld({
         let pitch = camState.pitch
         const y = v.y ?? 0
         if (!v.airborne) {
-          // On the runway: nose stays level. Rotate + lift once fast enough and
-          // the player pulls back on the stick/mouse.
+          // On the runway the nose stays level. Rotate + lift off once fast
+          // enough AND the player pulls up — or, as a safety net, once well
+          // past takeoff speed so you can never get stuck rolling forever.
           pitch = 0
-          if (v.speed >= JET_TAKEOFF_SPEED && camState.pitch > 0.06) {
+          const fastEnough = v.speed >= JET_TAKEOFF_SPEED
+          const pullingUp = camState.pitch > 0.03
+          const autoRotate = v.speed >= JET_MAX_SPEED * 0.7
+          if (fastEnough && (pullingUp || autoRotate)) {
             v.airborne = true
             v.y = 0.05
+            // Guarantee a positive climb angle at the moment of rotation so the
+            // jet actually leaves the ground (a near-zero nose just skimmed it).
+            camState.pitch = Math.max(camState.pitch, 0.12)
+            pitch = camState.pitch
           }
         }
         const stall = !!v.airborne && v.speed < JET_MIN_FLY_SPEED
@@ -8627,6 +8637,45 @@ export default function ThreeWorld({
                 SOUNDS.hit()
                 spawnExplosion(vHit.point.clone(), true)
                 enemyHits = [] // consumed by the vehicle
+              }
+            }
+          }
+        }
+
+        // Enemy jets are shootable from the ground too (pistol / shotgun /
+        // sniper). Same occlusion rules: a nearer wall or enemy blocks the shot.
+        {
+          const ejMeshes: THREE.Object3D[] = []
+          const ejMap = new Map<THREE.Object3D, EnemyJet>()
+          for (const ej of enemyJets) {
+            if (ej.dead) continue
+            ej.group.traverse((c) => {
+              if (c instanceof THREE.Mesh) {
+                ejMeshes.push(c)
+                ejMap.set(c, ej)
+              }
+            })
+          }
+          if (ejMeshes.length > 0) {
+            const jHit = raycaster.intersectObjects(ejMeshes, false)[0]
+            const blockedByWall = !!(nearestWall && jHit && nearestWall.distance < jHit.distance)
+            const blockedByEnemy = !!(enemyHits[0] && jHit && enemyHits[0].distance < jHit.distance)
+            if (jHit && !blockedByWall && !blockedByEnemy) {
+              const ej = ejMap.get(jHit.object)
+              if (ej && !ej.dead) {
+                ej.hp -= weapon.hitDamage
+                SOUNDS.hit()
+                spawnExplosion(jHit.point.clone(), true)
+                if (ej.hp <= 0) {
+                  scoreRef.current += 1200
+                  setScore(scoreRef.current)
+                  if (isSky) {
+                    killsRef.current += 1
+                    setKills(killsRef.current)
+                  }
+                  killEnemyJet(ej)
+                }
+                enemyHits = [] // consumed by the jet
               }
             }
           }
