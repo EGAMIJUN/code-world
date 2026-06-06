@@ -118,6 +118,28 @@ const JET_MISSILE_COOLDOWN_MS = 3000
 const JET_MISSILE_RADIUS = 9 // AOE blast radius
 const JET_MISSILE_SPEED = 60
 const JET_CRASH_DAMAGE = 80 // dealt to the player when the jet smashes in
+// ── PR-F2: anti-air guns, enemy jets, parachute ────────────────────────────
+const AA_GUN_HP = 80
+const AA_RANGE = 150 // engages the player jet within this 3D distance
+const AA_MIN_ALT = 5 // only fires at a jet this far off the ground
+const AA_FIRE_INTERVAL_MIN = 2000
+const AA_FIRE_INTERVAL_VAR = 1000
+const AA_SHELL_SPEED = 70
+const AA_SHELL_DIRECT = 30 // direct-hit damage to the jet
+const AA_SHELL_SPLASH = 10 // near-miss splash damage
+const AA_DIRECT_RADIUS = 4
+const AA_SPLASH_RADIUS = 10
+const ENEMY_JET_HP = 150
+const ENEMY_JET_SPEED = 30
+const ENEMY_JET_CHASE_RANGE = 200
+const ENEMY_JET_ATTACK_RANGE = 100
+const ENEMY_JET_GUN_COOLDOWN_MS = 150
+const ENEMY_JET_GUN_DAMAGE = 6
+const ENEMY_JET_TURN = 0.7 // rad/s steering toward the target
+const PARACHUTE_GRAVITY = 3.6 // gentle descent (≈ GRAVITY/6)
+const PARACHUTE_MAX_SINK = 4 // terminal descent speed under canopy
+const PARACHUTE_OPEN_DELAY_MS = 1000 // free-fall before the canopy deploys
+const EJECT_UP_SPEED = 9 // upward pop when ejecting
 // ── Vertical movement ──────────────────────────────────────────────────────────
 // Real gravity in m/s². Picked to feel snappy (a 4m drop = ~0.6s in air),
 // not a perfect-physics simulation. Tuned by feel under EYE_HEIGHT.
@@ -1613,6 +1635,12 @@ export default function ThreeWorld({
   const prevMissileCdRef = useRef(0)
   const prevJetSpeedRef = useRef(0)
   const prevJetAltRef = useRef(0)
+  // Parachute ejection: phase machine + canopy mesh + eject request (Alt / btn).
+  const parachutePhaseRef = useRef<"none" | "falling" | "chute">("none")
+  const chuteOpenAtRef = useRef(0)
+  const parachuteMeshRef = useRef<THREE.Group | null>(null)
+  const ejectReqRef = useRef(false)
+  const [parachuting, setParachuting] = useState(false)
   // Last time the player moved the aim (mouse/right-stick) while driving — the
   // chase camera auto-recenters behind the hull after a short idle.
   const lastDriveAimRef = useRef(0)
@@ -5217,7 +5245,14 @@ export default function ThreeWorld({
         const applied = v.kind === "tank" && type !== "explosive" ? dmg * TANK_ARMOR_BULLET : dmg
         v.hp = Math.max(0, v.hp - applied)
         setVehicleHp(Math.round(v.hp))
-        if (v.hp <= 0) destroyActiveVehicle()
+        if (v.hp <= 0) {
+          // A downed jet auto-ejects the pilot under a parachute. If it was
+          // airborne, the empty jet keeps flying on its last heading and blows
+          // up when it finally hits the ground / a building (continueCrash);
+          // if it was already low / taxiing, it just detonates in place.
+          if (v.kind === "jet") ejectFromJet((v.y ?? 0) > 3)
+          else destroyActiveVehicle()
+        }
       }
 
       // Vehicle destroyed: big blast, the player is thrown clear and takes a
@@ -5427,6 +5462,482 @@ export default function ThreeWorld({
         emissiveIntensity: 0.6,
       })
 
+      // ── PR-F2 systems: anti-air guns, enemy jets, crashing jets, parachute ──
+      // Shared materials / geometry (created once; reused per instance).
+      const AA_FWD = new THREE.Vector3(0, 0, -1)
+      const aaBaseMat = new THREE.MeshStandardMaterial({
+        color: 0x4a4e44,
+        roughness: 0.7,
+        metalness: 0.45,
+      })
+      const aaBarrelMat = new THREE.MeshStandardMaterial({
+        color: 0x26291f,
+        roughness: 0.5,
+        metalness: 0.6,
+      })
+      const aaShellMat = new THREE.MeshBasicMaterial({ color: 0xffdd66 })
+      const aaShellGeo = new THREE.SphereGeometry(0.26, 6, 5)
+      // Canopy materials are created per-deploy (in openChute) so closeChute can
+      // dispose them along with the geometry without affecting a later chute.
+
+      interface AAGun {
+        group: THREE.Group
+        turret: THREE.Group
+        x: number
+        z: number
+        baseY: number
+        hp: number
+        dead: boolean
+        nextFire: number
+        meshes: THREE.Mesh[]
+      }
+      const aaGuns: AAGun[] = []
+      interface AAShell {
+        mesh: THREE.Mesh
+        pos: THREE.Vector3
+        vel: THREE.Vector3
+        life: number
+      }
+      const aaShells: AAShell[] = []
+      interface EnemyJet {
+        group: THREE.Group
+        x: number
+        y: number
+        z: number
+        heading: number
+        pitch: number
+        speed: number
+        hp: number
+        dead: boolean
+        state: "patrol" | "chase" | "attack" | "evade"
+        stateUntil: number
+        nextFire: number
+        evadeYaw: number
+        wpIndex: number
+        noCrashUntil: number
+      }
+      const enemyJets: EnemyJet[] = []
+      interface CrashJet {
+        group: THREE.Group
+        x: number
+        y: number
+        z: number
+        heading: number
+        pitch: number
+        speed: number
+      }
+      const crashJets: CrashJet[] = []
+      // Patrol circuit over the airfield + harbor (x, y=altitude, z).
+      const ENEMY_JET_WAYPOINTS: [number, number, number][] = [
+        [35, 38, 100],
+        [85, 45, 175],
+        [40, 42, 235],
+        [-10, 40, 175],
+      ]
+
+      // Build a fixed AA gun: pedestal + a turret (barrels point -z) that aims
+      // via quaternion slerp. Returns nothing; pushes into aaGuns.
+      function makeAAGun(x: number, z: number, baseY: number) {
+        const g = new THREE.Group()
+        g.position.set(x, baseY, z)
+        const base = new THREE.Mesh(new THREE.CylinderGeometry(1.0, 1.3, 0.8, 10), aaBaseMat)
+        base.position.y = 0.4
+        base.castShadow = true
+        g.add(base)
+        const turret = new THREE.Group()
+        turret.position.y = 1.1
+        g.add(turret)
+        const housing = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.5, 0.9), aaBaseMat)
+        turret.add(housing)
+        for (const bx of [-0.18, 0.18]) {
+          const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 2.4, 8), aaBarrelMat)
+          barrel.rotation.x = Math.PI / 2
+          barrel.position.set(bx, 0, -1.0)
+          barrel.castShadow = true
+          turret.add(barrel)
+        }
+        scene.add(g)
+        const meshes: THREE.Mesh[] = []
+        g.traverse((c) => {
+          if (c instanceof THREE.Mesh) {
+            c.userData.aaGunIndex = aaGuns.length
+            meshes.push(c)
+          }
+        })
+        aaGuns.push({
+          group: g,
+          turret,
+          x,
+          z,
+          baseY,
+          hp: AA_GUN_HP,
+          dead: false,
+          nextFire: 0,
+          meshes,
+        })
+      }
+
+      function destroyAAGun(gun: AAGun) {
+        if (gun.dead) return
+        gun.dead = true
+        spawnExplosion(new THREE.Vector3(gun.x, gun.baseY + 1.0, gun.z))
+        scene.remove(gun.group)
+      }
+
+      function fireAAShell(gun: AAGun, gunY: number, tx: number, ty: number, tz: number) {
+        const dir = new THREE.Vector3(tx - gun.x, ty - gunY, tz - gun.z).normalize()
+        const mesh = new THREE.Mesh(aaShellGeo, aaShellMat)
+        const pos = new THREE.Vector3(gun.x, gunY, gun.z)
+        mesh.position.copy(pos)
+        scene.add(mesh)
+        aaShells.push({ mesh, pos, vel: dir.multiplyScalar(AA_SHELL_SPEED), life: 4 })
+        SOUNDS.pistol()
+      }
+
+      // AA guns aim + fire only while the player is flying a jet (asleep
+      // otherwise — no barrel updates, no shells).
+      function updateAAGuns(dt: number) {
+        const jet = drivingRef.current && activeVehicle?.kind === "jet" ? activeVehicle : null
+        if (!jet) return
+        const now = Date.now()
+        const jy = jet.y ?? 0
+        for (const gun of aaGuns) {
+          if (gun.dead) continue
+          const gunY = gun.baseY + 1.1
+          const dx = jet.x - gun.x
+          const dy = jy - gunY
+          const dz = jet.z - gun.z
+          const d = Math.hypot(dx, dy, dz)
+          if (d > AA_RANGE || jy < AA_MIN_ALT) continue
+          const dir = new THREE.Vector3(dx / d, dy / d, dz / d)
+          const tq = new THREE.Quaternion().setFromUnitVectors(AA_FWD, dir)
+          gun.turret.quaternion.slerp(tq, 1 - Math.exp(-dt * 5))
+          if (now > gun.nextFire) {
+            gun.nextFire = now + AA_FIRE_INTERVAL_MIN + Math.random() * AA_FIRE_INTERVAL_VAR
+            fireAAShell(gun, gunY, jet.x, jy, jet.z)
+          }
+        }
+      }
+
+      function updateAAShells(dt: number) {
+        const jet = drivingRef.current && activeVehicle?.kind === "jet" ? activeVehicle : null
+        for (let i = aaShells.length - 1; i >= 0; i--) {
+          const s = aaShells[i]
+          if (!s) continue
+          s.pos.addScaledVector(s.vel, dt)
+          s.mesh.position.copy(s.pos)
+          s.life -= dt
+          let detonate = false
+          let direct = false
+          if (jet) {
+            const d = Math.hypot(s.pos.x - jet.x, s.pos.y - (jet.y ?? 0), s.pos.z - jet.z)
+            if (d < AA_DIRECT_RADIUS) {
+              detonate = true
+              direct = true
+            } else if ((s.life <= 0 || s.pos.y <= 0) && d < AA_SPLASH_RADIUS) {
+              detonate = true
+            }
+          }
+          if (!detonate && (s.life <= 0 || s.pos.y <= 0)) detonate = true
+          if (detonate) {
+            spawnExplosion(s.pos.clone())
+            if (
+              jet &&
+              (direct ||
+                Math.hypot(s.pos.x - jet.x, s.pos.y - (jet.y ?? 0), s.pos.z - jet.z) <
+                  AA_SPLASH_RADIUS)
+            ) {
+              damageActiveVehicle(direct ? AA_SHELL_DIRECT : AA_SHELL_SPLASH, "explosive")
+            }
+            scene.remove(s.mesh)
+            aaShells.splice(i, 1)
+          }
+        }
+      }
+
+      // Spawn an enemy jet at the runway's west end with a short climb-out grace.
+      function spawnEnemyJet(x: number, z: number, heading: number) {
+        const group = makeJet(0x992222)
+        group.position.set(x, 0, z)
+        group.rotation.y = heading
+        scene.add(group)
+        enemyJets.push({
+          group,
+          x,
+          y: 0,
+          z,
+          heading,
+          pitch: 0.32,
+          speed: ENEMY_JET_SPEED,
+          hp: ENEMY_JET_HP,
+          dead: false,
+          state: "patrol",
+          stateUntil: 0,
+          nextFire: 0,
+          evadeYaw: 0,
+          wpIndex: 0,
+          noCrashUntil: Date.now() + 4500,
+        })
+      }
+
+      function killEnemyJet(ej: EnemyJet) {
+        if (ej.dead) return
+        ej.dead = true
+        const b = new THREE.Vector3(ej.x, ej.y + 0.5, ej.z)
+        spawnExplosion(b)
+        spawnExplosion(b)
+        SOUNDS.damage()
+        scene.remove(ej.group)
+      }
+
+      function updateEnemyJets(dt: number) {
+        if (enemyJets.length === 0) return
+        const now = Date.now()
+        const jet = drivingRef.current && activeVehicle?.kind === "jet" ? activeVehicle : null
+        for (const ej of enemyJets) {
+          if (ej.dead) continue
+          // Target selection / state machine.
+          let tx: number
+          let ty: number
+          let tz: number
+          const pdx = jet ? jet.x - ej.x : 0
+          const pdy = jet ? (jet.y ?? 0) - ej.y : 0
+          const pdz = jet ? jet.z - ej.z : 0
+          const pdist = jet ? Math.hypot(pdx, pdy, pdz) : Number.POSITIVE_INFINITY
+          if (ej.state === "evade" && now > ej.stateUntil) ej.state = "patrol"
+          if (!jet) {
+            if (ej.state !== "evade") ej.state = "patrol"
+          } else if (ej.state !== "evade") {
+            // Facing test for ATTACK.
+            const fwd = new THREE.Vector3(
+              -Math.sin(ej.heading) * Math.cos(ej.pitch),
+              Math.sin(ej.pitch),
+              -Math.cos(ej.heading) * Math.cos(ej.pitch),
+            )
+            const toP = new THREE.Vector3(pdx, pdy, pdz).normalize()
+            const facing = fwd.dot(toP)
+            if (pdist < ENEMY_JET_ATTACK_RANGE && facing > 0.93) ej.state = "attack"
+            else if (pdist < ENEMY_JET_CHASE_RANGE) ej.state = "chase"
+            else ej.state = "patrol"
+          }
+          if (ej.state === "evade") {
+            tx = ej.x + -Math.sin(ej.evadeYaw) * 100
+            ty = ej.y + 6
+            tz = ej.z + -Math.cos(ej.evadeYaw) * 100
+          } else if (ej.state === "patrol" || !jet) {
+            const wp = ENEMY_JET_WAYPOINTS[ej.wpIndex % ENEMY_JET_WAYPOINTS.length] ?? [0, 40, 150]
+            tx = wp[0]
+            ty = wp[1]
+            tz = wp[2]
+            if (Math.hypot(tx - ej.x, tz - ej.z) < 14) ej.wpIndex++
+          } else {
+            tx = jet?.x ?? ej.x
+            ty = (jet?.y ?? 0) + 2
+            tz = jet?.z ?? ej.z
+          }
+          // Climb-out: hold a nose-up attitude until clear of the ground.
+          if (now < ej.noCrashUntil) ty = Math.max(ty, 35)
+          // Steer heading + pitch toward the target.
+          const dx = tx - ej.x
+          const dy = ty - ej.y
+          const dz = tz - ej.z
+          const horiz = Math.max(0.001, Math.hypot(dx, dz))
+          const desiredYaw = Math.atan2(-dx, -dz)
+          const desiredPitch = Math.max(-0.6, Math.min(0.6, Math.atan2(dy, horiz)))
+          let dyaw = desiredYaw - ej.heading
+          while (dyaw > Math.PI) dyaw -= Math.PI * 2
+          while (dyaw < -Math.PI) dyaw += Math.PI * 2
+          const turn = Math.max(-ENEMY_JET_TURN * dt, Math.min(ENEMY_JET_TURN * dt, dyaw))
+          ej.heading += turn
+          ej.pitch += (desiredPitch - ej.pitch) * (1 - Math.exp(-dt * 2))
+          // Integrate.
+          const cp = Math.cos(ej.pitch)
+          const fx = -Math.sin(ej.heading) * cp
+          const fy = Math.sin(ej.pitch)
+          const fz = -Math.cos(ej.heading) * cp
+          ej.x += fx * ej.speed * dt
+          ej.y += fy * ej.speed * dt
+          ej.z += fz * ej.speed * dt
+          if (ej.y <= 0) {
+            if (now > ej.noCrashUntil) {
+              killEnemyJet(ej)
+              continue
+            }
+            ej.y = 0.05
+          }
+          if (now > ej.noCrashUntil && collidesWithWall(ej.x, ej.z, VEHICLE_JET_RADIUS, ej.y)) {
+            killEnemyJet(ej)
+            continue
+          }
+          const bank = Math.max(-0.7, Math.min(0.7, -dyaw * 1.5))
+          ej.group.position.set(ej.x, ej.y, ej.z)
+          ej.group.rotation.set(ej.pitch, ej.heading, bank)
+          // ATTACK fire: narrow forward cone + range, 150ms cadence, hitscan.
+          if (ej.state === "attack" && jet && now > ej.nextFire) {
+            ej.nextFire = now + ENEMY_JET_GUN_COOLDOWN_MS
+            const muzzle = new THREE.Vector3(ej.x + fx * 3, ej.y + fy * 3, ej.z + fz * 3)
+            const dir = new THREE.Vector3(
+              jet.x - ej.x,
+              (jet.y ?? 0) - ej.y,
+              jet.z - ej.z,
+            ).normalize()
+            const tracer = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.06, 2.0), jetTracerMat)
+            tracer.position.copy(muzzle)
+            tracer.lookAt(muzzle.clone().add(dir))
+            scene.add(tracer)
+            bullets.push({
+              mesh: tracer,
+              velocity: dir.clone().multiplyScalar(180),
+              life: 0.4,
+              isEnemy: false,
+              damage: 0,
+            })
+            if (Math.random() < 0.6) damageActiveVehicle(ENEMY_JET_GUN_DAMAGE, "bullet")
+          }
+        }
+      }
+
+      function updateCrashJets(dt: number) {
+        for (let i = crashJets.length - 1; i >= 0; i--) {
+          const c = crashJets[i]
+          if (!c) continue
+          const cp = Math.cos(c.pitch)
+          c.x += -Math.sin(c.heading) * cp * c.speed * dt
+          c.y += Math.sin(c.pitch) * c.speed * dt
+          c.z += -Math.cos(c.heading) * cp * c.speed * dt
+          if (c.y <= 0 || collidesWithWall(c.x, c.z, VEHICLE_JET_RADIUS, c.y)) {
+            const b = new THREE.Vector3(c.x, Math.max(0.5, c.y), c.z)
+            spawnExplosion(b)
+            spawnExplosion(b)
+            SOUNDS.damage()
+            scene.remove(c.group)
+            crashJets.splice(i, 1)
+            continue
+          }
+          c.group.position.set(c.x, c.y, c.z)
+          c.group.rotation.set(c.pitch, c.heading, 0)
+        }
+      }
+
+      // ── Parachute ──
+      function openChute() {
+        const g = new THREE.Group()
+        const canopyMat = new THREE.MeshStandardMaterial({
+          color: 0xe8e8ee,
+          roughness: 0.85,
+          metalness: 0,
+          side: THREE.DoubleSide,
+          emissive: 0x222230,
+          emissiveIntensity: 0.2,
+        })
+        const cordMat = new THREE.MeshBasicMaterial({ color: 0x888888 })
+        const canopy = new THREE.Mesh(
+          new THREE.SphereGeometry(1.6, 14, 8, 0, Math.PI * 2, 0, Math.PI / 2),
+          canopyMat,
+        )
+        canopy.position.y = 2.6
+        g.add(canopy)
+        for (const a of [0, Math.PI / 2, Math.PI, (3 * Math.PI) / 2]) {
+          const cord = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, 2.4, 4), cordMat)
+          cord.position.set(Math.cos(a) * 1.2, 1.4, Math.sin(a) * 1.2)
+          cord.rotation.x = Math.cos(a) * 0.25
+          cord.rotation.z = Math.sin(a) * 0.25
+          g.add(cord)
+        }
+        scene.add(g)
+        parachuteMeshRef.current = g
+        parachutePhaseRef.current = "chute"
+        setParachuting(true)
+      }
+      function closeChute() {
+        const g = parachuteMeshRef.current
+        if (g) {
+          // Free the per-deploy geometry + materials before dropping the group.
+          g.traverse((c) => {
+            if (c instanceof THREE.Mesh) {
+              c.geometry.dispose()
+              if (Array.isArray(c.material)) for (const m of c.material) m.dispose()
+              else c.material.dispose()
+            }
+          })
+          scene.remove(g)
+          parachuteMeshRef.current = null
+        }
+        parachutePhaseRef.current = "none"
+        setParachuting(false)
+      }
+
+      // Eject from the jet. makeCrashing=true (manual) lets the empty jet fly on
+      // and crash; false (auto-eject on HP 0) detonates it immediately.
+      function ejectFromJet(makeCrashing: boolean) {
+        const v = activeVehicle
+        if (!v || v.kind !== "jet") return
+        const jx = v.x
+        const jy = v.y ?? 0
+        const jz = v.z
+        if (makeCrashing) {
+          crashJets.push({
+            group: v.group,
+            x: jx,
+            y: jy,
+            z: jz,
+            heading: v.heading,
+            pitch: camState.pitch,
+            speed: Math.max(v.speed, 14),
+          })
+        } else {
+          const b = new THREE.Vector3(jx, jy + 0.5, jz)
+          spawnExplosion(b)
+          spawnExplosion(b)
+          scene.remove(v.group)
+        }
+        v.dead = true
+        SOUNDS.damage()
+        // Tear down driving (no side-step — we keep the player at altitude).
+        drivingRef.current = false
+        setInVehicle(false)
+        gunGroup.visible = true
+        activeVehicle = null
+        setVehicleHp(0)
+        setVehicleMaxHp(0)
+        cannonModeRef.current = false
+        setCannonActive(false)
+        setCannonCooldownMs(0)
+        setInTank(false)
+        setInJet(false)
+        jetThrottleRef.current = 0
+        jetGunHeldRef.current = false
+        jetMissileReqRef.current = false
+        setMissileCdMs(0)
+        drivingKindRef.current = null
+        // Pop the player up out of the cockpit; free-fall until the canopy opens.
+        focalPoint.x = jx
+        focalPoint.z = jz
+        focalPoint.y = jy + 1
+        playerVelRef.current.x = 0
+        playerVelRef.current.z = 0
+        playerVelYRef.current = EJECT_UP_SPEED
+        wasAirborneRef.current = true
+        fallStartYRef.current = focalPoint.y
+        camState.pitch = -0.08
+        parachutePhaseRef.current = "falling"
+        chuteOpenAtRef.current = Date.now() + PARACHUTE_OPEN_DELAY_MS
+        cameraShakeRef.current.intensity = 5
+      }
+
+      // Place the air-defence network + enemy jets (single-player modes only —
+      // PvP doesn't sync vehicles/jets). AA guns: 2 on warehouse roofs, 1 by the
+      // control tower, 1 at the container-yard edge. Enemy jets scramble from
+      // the runway's west end.
+      if (modeRef.current !== "ffa" && modeRef.current !== "tdm") {
+        makeAAGun(26, 235, 6.0) // west warehouse roof
+        makeAAGun(74, 236, 6.0) // central warehouse roof
+        makeAAGun(16, 122, 0) // beside the control tower
+        makeAAGun(88, 205, 0) // east container-yard edge
+        spawnEnemyJet(-12, 134, -Math.PI / 2)
+        spawnEnemyJet(-12, 139, -Math.PI / 2)
+      }
+
       // Nose machine gun: cooldown-gated hitscan from the jet's nose along the
       // aim, with a bright tracer. Direct damage on the first enemy hit.
       function fireJetGun() {
@@ -5455,24 +5966,101 @@ export default function ThreeWorld({
             })
           }
         }
-        const hits = raycaster.intersectObjects(parts, false)
+        const enemyHit = raycaster.intersectObjects(parts, false)[0]
         const wallHit = raycaster.intersectObjects(wallMeshes, false)[0]
-        let impact: THREE.Vector3 | null = null
-        if (hits[0] && (!wallHit || wallHit.distance > hits[0].distance)) {
-          const id = hits[0].object.userData.enemyId as string | undefined
+        // AA guns + enemy jets are shootable too (HP 80 / 150).
+        const aaMeshes: THREE.Object3D[] = []
+        const aaMap = new Map<THREE.Object3D, AAGun>()
+        for (const gun of aaGuns) {
+          if (gun.dead) continue
+          for (const m of gun.meshes) {
+            aaMeshes.push(m)
+            aaMap.set(m, gun)
+          }
+        }
+        const ejMeshes: THREE.Object3D[] = []
+        const ejMap = new Map<THREE.Object3D, EnemyJet>()
+        for (const ej of enemyJets) {
+          if (ej.dead) continue
+          ej.group.traverse((c) => {
+            if (c instanceof THREE.Mesh) {
+              ejMeshes.push(c)
+              ejMap.set(c, ej)
+            }
+          })
+        }
+        const aaHit = aaMeshes.length ? raycaster.intersectObjects(aaMeshes, false)[0] : undefined
+        const ejHit = ejMeshes.length ? raycaster.intersectObjects(ejMeshes, false)[0] : undefined
+        raycaster.far = prevFar
+        // Resolve the nearest hittable target, respecting wall occlusion.
+        const cands: { dist: number; point: THREE.Vector3; apply: () => void }[] = []
+        if (enemyHit) {
+          const id = enemyHit.object.userData.enemyId as string | undefined
           const en = enemies.find((e) => e.id === id)
           if (en) {
-            en.hp -= JET_GUN_DAMAGE
-            spawnBlood(hits[0].point)
-            scoreRef.current += JET_GUN_DAMAGE * 8
-            setScore(scoreRef.current)
-            if (en.hp <= 0) applyEnemyKill(en, "jet")
-            impact = hits[0].point.clone()
+            cands.push({
+              dist: enemyHit.distance,
+              point: enemyHit.point,
+              apply: () => {
+                en.hp -= JET_GUN_DAMAGE
+                spawnBlood(enemyHit.point)
+                scoreRef.current += JET_GUN_DAMAGE * 8
+                setScore(scoreRef.current)
+                if (en.hp <= 0) applyEnemyKill(en, "jet")
+              },
+            })
           }
+        }
+        if (aaHit) {
+          const gun = aaMap.get(aaHit.object)
+          if (gun) {
+            cands.push({
+              dist: aaHit.distance,
+              point: aaHit.point,
+              apply: () => {
+                gun.hp -= JET_GUN_DAMAGE
+                if (gun.hp <= 0) {
+                  scoreRef.current += 600
+                  setScore(scoreRef.current)
+                  destroyAAGun(gun)
+                }
+              },
+            })
+          }
+        }
+        if (ejHit) {
+          const ej = ejMap.get(ejHit.object)
+          if (ej) {
+            cands.push({
+              dist: ejHit.distance,
+              point: ejHit.point,
+              apply: () => {
+                ej.hp -= JET_GUN_DAMAGE
+                if (ej.hp <= 0) {
+                  scoreRef.current += 1200
+                  setScore(scoreRef.current)
+                  killEnemyJet(ej)
+                } else {
+                  // Took a hit → break off and evade for a beat.
+                  ej.state = "evade"
+                  ej.stateUntil = Date.now() + 1500
+                  ej.evadeYaw =
+                    ej.heading + (Math.random() < 0.5 ? -1 : 1) * (0.8 + Math.random() * 0.8)
+                }
+              },
+            })
+          }
+        }
+        cands.sort((a, b) => a.dist - b.dist)
+        const best = cands[0]
+        const wallDist = wallHit ? wallHit.distance : Number.POSITIVE_INFINITY
+        let impact: THREE.Vector3 | null = null
+        if (best && best.dist < wallDist) {
+          best.apply()
+          impact = best.point.clone()
         } else if (wallHit) {
           impact = wallHit.point.clone()
         }
-        raycaster.far = prevFar
         // Bright tracer streaking from the nose.
         const tracer = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.07, 2.4), jetTracerMat)
         tracer.position.copy(nose)
@@ -5544,6 +6132,13 @@ export default function ThreeWorld({
       // ground-vehicle update entirely while the active vehicle is a jet.
       function updateJet(v: Vehicle, dt: number) {
         const now = Date.now()
+        // Manual ejection ([Alt] / mobile EJECT) — bail out under a parachute,
+        // the empty jet flies on and crashes.
+        if (ejectReqRef.current) {
+          ejectReqRef.current = false
+          ejectFromJet(true)
+          return
+        }
         // Nose control: PC drives camState via the mouse already; the mobile
         // LEFT stick (joySmoothRef) pitches/rolls the nose here.
         const sj = joySmoothRef.current
@@ -8254,6 +8849,12 @@ export default function ThreeWorld({
           }
         }
         if (drivingRef.current) updateVehicle(dt)
+        // PR-F2 air war: AA guns (sleep unless the player is flying), their
+        // shells, enemy jets, and any ownerless crashing jet.
+        updateAAGuns(dt)
+        updateAAShells(dt)
+        updateEnemyJets(dt)
+        updateCrashJets(dt)
 
         // ── Enemy-driven vehicles: spawn manager + per-frame AI ──────────────
         // Only in Wave Defense / missions (FFA/TDM have no vehicles; Zombie has
@@ -8433,6 +9034,12 @@ export default function ThreeWorld({
             }
           }
 
+          // Parachute: 1s after ejecting the canopy auto-deploys.
+          if (parachutePhaseRef.current === "falling" && Date.now() >= chuteOpenAtRef.current) {
+            openChute()
+            playerVelYRef.current = Math.min(playerVelYRef.current, -1.5)
+          }
+
           // Smooth elevator ride takes precedence over gravity: ease the player
           // (and the glass car) between fromY/toY, suspending the fall code.
           if (elevatorRideRef.current) {
@@ -8449,6 +9056,28 @@ export default function ThreeWorld({
             if (tt >= 1) {
               refs.focalPoint.y = e.toY
               elevatorRideRef.current = null
+            }
+          }
+          // Under canopy: gentle descent (no fall damage), horizontal steering
+          // already handled by the normal on-foot movement above.
+          else if (parachutePhaseRef.current === "chute") {
+            playerVelYRef.current -= PARACHUTE_GRAVITY * dt
+            if (playerVelYRef.current < -PARACHUTE_MAX_SINK) {
+              playerVelYRef.current = -PARACHUTE_MAX_SINK
+            }
+            refs.focalPoint.y += playerVelYRef.current * dt
+            if (refs.focalPoint.y <= groundY) {
+              refs.focalPoint.y = groundY
+              playerVelYRef.current = 0
+              wasAirborneRef.current = false
+              closeChute()
+            }
+            if (parachuteMeshRef.current) {
+              parachuteMeshRef.current.position.set(
+                refs.focalPoint.x,
+                refs.focalPoint.y,
+                refs.focalPoint.z,
+              )
             }
           }
           // Apply gravity / floor snap. Fall damage is computed from the drop
@@ -8468,6 +9097,7 @@ export default function ThreeWorld({
               wasAirborneRef.current = false
               if (
                 drop >= FALL_MIN_DROP &&
+                parachutePhaseRef.current === "none" &&
                 gamePhaseRef.current === "playing" &&
                 Date.now() > spawnInvulnUntilRef.current
               ) {
@@ -10047,6 +10677,29 @@ export default function ThreeWorld({
               ctx.arc(cx, cz, 3, 0, Math.PI * 2)
               ctx.fill()
             }
+            // AA guns (orange squares) + enemy jets (red diamonds).
+            for (const gun of aaGuns) {
+              if (gun.dead) continue
+              const cx = mx(gun.x)
+              const cz = mz(gun.z)
+              if (!inView(cx, cz)) continue
+              ctx.fillStyle = "#ff9933"
+              ctx.fillRect(cx - 2.5, cz - 2.5, 5, 5)
+            }
+            for (const ej of enemyJets) {
+              if (ej.dead) continue
+              const cx = mx(ej.x)
+              const cz = mz(ej.z)
+              if (!inView(cx, cz)) continue
+              ctx.fillStyle = "#ff3366"
+              ctx.beginPath()
+              ctx.moveTo(cx, cz - 3.5)
+              ctx.lineTo(cx + 3, cz)
+              ctx.lineTo(cx, cz + 3.5)
+              ctx.lineTo(cx - 3, cz)
+              ctx.closePath()
+              ctx.fill()
+            }
             for (const rp of Object.values(snapshot)) {
               const { tx: rtx, ty: rty } = canvasToTile(rp.x, rp.y)
               const cx = mx(rtx * TILE_UNIT + TILE_UNIT / 2)
@@ -10195,6 +10848,11 @@ export default function ThreeWorld({
         // Climb interaction — animate loop consumes the request and only
         // fires if the player is currently inside a climb zone.
         climbRequestRef.current = true
+      }
+      if (e.key === "Alt" && drivingKindRef.current === "jet") {
+        // Eject from the jet (consumed in updateJet).
+        e.preventDefault()
+        ejectReqRef.current = true
       }
       if (e.key === "F8") {
         e.preventDefault()
@@ -11156,6 +11814,29 @@ export default function ThreeWorld({
                 </span>
               </div>
             )}
+          </div>
+        )}
+
+        {/* Parachute indicator */}
+        {parachuting && !isLoading && !error && gamePhase === "playing" && (
+          <div
+            style={{
+              position: "absolute",
+              top: isMobile ? "0.6rem" : "auto",
+              bottom: isMobile ? "auto" : "8%",
+              left: "50%",
+              transform: "translateX(-50%)",
+              zIndex: 26,
+              pointerEvents: "none",
+              fontFamily: "monospace",
+              fontSize: "0.9rem",
+              letterSpacing: "0.2em",
+              fontWeight: "bold",
+              color: "#bfefff",
+              textShadow: "0 0 8px rgba(120,200,255,0.8)",
+            }}
+          >
+            ⬇ CHUTE
           </div>
         )}
 
@@ -12912,6 +13593,32 @@ export default function ThreeWorld({
                   }}
                 >
                   MSL
+                </button>
+                <button
+                  type="button"
+                  onPointerDown={(e) => {
+                    e.preventDefault()
+                    ejectReqRef.current = true
+                  }}
+                  style={{
+                    position: "absolute",
+                    bottom: "14rem",
+                    right: "1.5rem",
+                    width: "62px",
+                    height: "62px",
+                    borderRadius: "50%",
+                    background: "rgba(255,230,60,0.2)",
+                    border: "3px solid #ffe23a",
+                    color: "#fff4b0",
+                    fontFamily: "monospace",
+                    fontSize: "0.6rem",
+                    fontWeight: "bold",
+                    touchAction: "none",
+                    userSelect: "none",
+                    zIndex: 32,
+                  }}
+                >
+                  EJECT
                 </button>
                 <button
                   type="button"
