@@ -67,16 +67,23 @@ const VEHICLE_EJECT_DAMAGE = 60 // dealt to the player when their ride explodes
 // Auto-recenter the chase cam behind the hull after this idle (no aim input).
 const VEHICLE_CAM_RECENTER_MS = 600
 // ── Tank (drivable, armored, main cannon) ──────────────────────────────────
-const VEHICLE_TANK_HP = 2000 // heavy armor; far tougher than a car
+const VEHICLE_TANK_HP = 1200 // heavy armor, but nerfed from 2000 (was too cheaty)
 const VEHICLE_TANK_RADIUS = 1.7 // bigger collision body than a car
-const VEHICLE_TANK_MAX_SPEED = 9 // slow & heavy (car is 16)
-const VEHICLE_TANK_REVERSE = 4
+const VEHICLE_TANK_MAX_SPEED = 8.1 // slow & heavy; nerfed 10% from 9
+const VEHICLE_TANK_REVERSE = 3.6 // nerfed 10% from 4
 const VEHICLE_TANK_ACCEL = 8 // sluggish throttle response
 const VEHICLE_TANK_TURN = 1.05 // ponderous hull steering (car is 1.9)
 // Small-arms (bullets / claws) only chip the tank; explosives hit full.
-const TANK_ARMOR_BULLET = 0.12
+// Bumped from 0.12 → 0.25 so sustained enemy fire actually wears it down.
+const TANK_ARMOR_BULLET = 0.25
 // Main cannon: slow AOE shell on a cooldown, unlimited ammo.
-const CANNON_COOLDOWN_MS = 2500
+const CANNON_COOLDOWN_MS = 3750 // nerfed 1.5x from 2500
+// Enemy heavy grenades hit a tank for 3x (anti-tank rounds) so dismounting
+// under grenade pressure is a real decision, not a free win.
+const TANK_GRENADE_MULT = 3
+// After dismounting, the player can't fire for this long (mount/dismount
+// vulnerability window — you're exposed the instant you hop out).
+const VEHICLE_EXIT_FIRE_LOCK_MS = 500
 const CANNON_RADIUS = 6 // AOE blast radius
 const CANNON_SHELL_SPEED = 36 // fast enough to read fairly flat
 const CANNON_BARREL_MIN_PITCH = -0.25
@@ -1047,6 +1054,14 @@ interface CombatEnemy {
   // Eye meshes for blink scaling (subset of lodDetails). Optional.
   leftEye?: THREE.Mesh
   rightEye?: THREE.Mesh
+  // ── Terraformer gross-out animation state (set only for terraformers) ──
+  // Throbbing pustule meshes (parented to torso/head/arms) + a per-instance
+  // phase so a crowd writhes out of sync. eyeGlowMat is the shared-per-enemy
+  // eye material whose emissiveIntensity is pulsed for that dead-glow stare.
+  pustules?: THREE.Mesh[]
+  pulsePhase?: number
+  twitchPhase?: number
+  eyeGlowMat?: THREE.MeshStandardMaterial | undefined
   // Smoothed walk velocity (world space). Lerps toward desired velocity each
   // frame so enemies accelerate and decelerate instead of teleporting around.
   velocity: { x: number; z: number }
@@ -1507,6 +1522,9 @@ export default function ThreeWorld({
   const lastCannonRef = useRef(0)
   const [cannonCooldownMs, setCannonCooldownMs] = useState(0)
   const prevCannonCdRef = useRef(0)
+  // Timestamp until which the player's handheld fire is locked (set right
+  // after dismounting a vehicle — see VEHICLE_EXIT_FIRE_LOCK_MS).
+  const fireLockUntilRef = useRef(0)
   // Mirror of `playerHp` (the rendered React state). Animate loop uses this
   // to bail out of setPlayerHp calls while regen is ticking sub-integer.
   const prevDisplayHpRef = useRef(PLAYER_MAX_HP)
@@ -4924,6 +4942,9 @@ export default function ThreeWorld({
         setCannonCooldownMs(0)
         setInTank(false)
         drivingKindRef.current = null
+        // Mount/dismount opening: handheld fire is locked briefly so hopping
+        // out of a tank mid-fight leaves the player momentarily exposed.
+        fireLockUntilRef.current = Date.now() + VEHICLE_EXIT_FIRE_LOCK_MS
       }
 
       // Route incoming damage to the vehicle the player is riding (the vehicle
@@ -5309,6 +5330,17 @@ export default function ThreeWorld({
 
       // ── Humanoid enemy factory ─────────────────────────────────────────────
       let enemyIdCounter = 0
+      // Shared terraformer gross-out assets — one sphere geometry + one glossy
+      // pustule material reused across every terraformer (pustules are scaled
+      // per-mesh). Dark wet red-purple with a faint glow.
+      const TERRA_PUSTULE_GEO = new THREE.SphereGeometry(1, 6, 5)
+      const terraPustuleMat = new THREE.MeshStandardMaterial({
+        color: 0x3a0a1e,
+        emissive: 0x2a0512,
+        emissiveIntensity: 0.5,
+        roughness: 0.18,
+        metalness: 0.1,
+      })
       function makeEnemy(
         type: EnemyType,
         x: number,
@@ -5358,6 +5390,20 @@ export default function ThreeWorld({
             (Math.random() - 0.5) * 0.18,
             (Math.random() - 0.5) * 0.16,
           )
+        } else if (isTerraformer && !isCommander) {
+          // Per-terraformer drift: chitin slides red↔purple↔brown and skin
+          // darkness varies, so a swarm reads as a writhing mass of mismatched
+          // horrors rather than clones.
+          bodyCol.offsetHSL(
+            (Math.random() - 0.5) * 0.09,
+            (Math.random() - 0.5) * 0.2,
+            (Math.random() - 0.5) * 0.12,
+          )
+          skinCol.offsetHSL(
+            (Math.random() - 0.5) * 0.1,
+            (Math.random() - 0.5) * 0.2,
+            (Math.random() - 0.5) * 0.12,
+          )
         }
         const bodyMat = new THREE.MeshLambertMaterial({ color: bodyCol, emissive: cfg.emissive })
         const darkColor = type === "grunt" ? 0x2a3027 : type === "sniper" ? 0x18241b : 0x080808
@@ -5385,6 +5431,29 @@ export default function ThreeWorld({
         const eyeMat = new THREE.MeshBasicMaterial({ color: eyeHex })
 
         const lodDetails: THREE.Object3D[] = []
+        // Terraformer-only: throbbing pustules + the glowing eye material, both
+        // captured here so the return can wire them for the per-frame writhe.
+        const terraPustules: THREE.Mesh[] = []
+        let terraEyeMat: THREE.MeshStandardMaterial | undefined
+        // Attach one pustule to a body node. Shared geometry, scaled per-mesh;
+        // userData.pustuleBase stores its rest scale so the animate loop throbs
+        // it without re-reading geometry. LOD-culled like the other small bits.
+        const addPustule = (
+          parent: THREE.Object3D,
+          px: number,
+          py: number,
+          pz: number,
+          r: number,
+        ) => {
+          const m = new THREE.Mesh(TERRA_PUSTULE_GEO, terraPustuleMat)
+          m.position.set(px * scale, py * scale, pz * scale)
+          const rr = r * scale
+          m.scale.set(rr, rr, rr)
+          m.userData.pustuleBase = rr
+          parent.add(m)
+          terraPustules.push(m)
+          lodDetails.push(m)
+        }
         // Mark a mesh as hit-target (raycast uses userData.enemyId).
         function hit<T extends THREE.Object3D>(o: T): T {
           o.userData.enemyId = enemyIdStr
@@ -5499,6 +5568,14 @@ export default function ThreeWorld({
             torso.add(spike)
             lodDetails.push(spike)
           }
+          // Pustules erupting across the back, flanks and chest — these throb
+          // out of phase in the animate loop for a "writhing flesh" read.
+          addPustule(torso, 0.1, 0.5, 0.16, 0.06)
+          addPustule(torso, -0.14, 0.34, 0.17, 0.05)
+          addPustule(torso, 0.19, 0.22, -0.04, 0.055)
+          addPustule(torso, -0.16, 0.16, -0.02, 0.045)
+          addPustule(torso, 0.06, 0.12, 0.18, 0.05)
+          addPustule(torso, -0.05, 0.42, -0.14, 0.04)
         }
 
         // ── Neck ─────────────────────────────────────────────────────────────
@@ -5618,14 +5695,28 @@ export default function ThreeWorld({
             head.add(ant)
             lodDetails.push(ant)
           }
-          // Big wide compound eyes (hot red), set on the sides of the head.
-          const cEyeMat = new THREE.MeshBasicMaterial({ color: 0xff2a14 })
+          // Big wide compound eyes — emissive so they burn through the dark.
+          // emissiveIntensity is pulsed per-frame for an unsettling flicker.
+          const cEyeMat = new THREE.MeshStandardMaterial({
+            color: 0x3a0606,
+            emissive: 0xff2a14,
+            emissiveIntensity: 2.4,
+            roughness: 0.3,
+            metalness: 0,
+          })
+          terraEyeMat = cEyeMat
           for (const eye of [leftEye, rightEye]) {
             const side = Math.sign(eye.position.x) || 1
-            eye.geometry = sph(0.052, 8, 6)
-            eye.material = cEyeMat
+            eye.geometry = sph(0.058, 8, 6)
+            // eye.material is inferred as MeshBasicMaterial from creation; widen
+            // through the base Mesh type to swap in the emissive standard mat.
+            const eyeMesh: THREE.Mesh = eye
+            eyeMesh.material = cEyeMat
             eye.position.set(side * 0.09 * scale, 0.035 * scale, -0.13 * scale)
           }
+          // A couple of weeping pustules on the skull/brow.
+          addPustule(head, 0.075, 0.12, -0.04, 0.034)
+          addPustule(head, -0.06, 0.05, 0.07, 0.03)
         }
 
         // ── Helmet / Visor (per archetype) ───────────────────────────────────
@@ -5871,6 +5962,10 @@ export default function ThreeWorld({
           lodDetails,
           leftEye,
           rightEye,
+          pustules: terraPustules,
+          pulsePhase: Math.random() * Math.PI * 2,
+          twitchPhase: Math.random() * Math.PI * 2,
+          eyeGlowMat: terraEyeMat,
           velocity: { x: 0, z: 0 },
           smoothedYaw: 0,
           pose: {
@@ -6963,8 +7058,10 @@ export default function ThreeWorld({
             const dmg = Math.max(15, Math.floor(60 * (1 - dpDist / radius)))
             if (drivingRef.current && activeVehicle) {
               // Riding: the vehicle soaks the blast (player shielded). Explosive
-              // → bypasses tank armor.
-              damageActiveVehicle(dmg, "explosive")
+              // → bypasses tank armor, and anti-tank grenades hit for 3x so a
+              // heavy lobbing a nade is a genuine threat to a tank.
+              const vDmg = activeVehicle.kind === "tank" ? dmg * TANK_GRENADE_MULT : dmg
+              damageActiveVehicle(vDmg, "explosive")
             } else {
               playerHpRef.current = Math.max(0, playerHpRef.current - dmg)
               setPlayerHp(playerHpRef.current)
@@ -7144,6 +7241,8 @@ export default function ThreeWorld({
           fireCannon()
           return
         }
+        // Brief lock right after dismounting a vehicle (exposure window).
+        if (Date.now() < fireLockUntilRef.current) return
         const weapon = WEAPONS[currentWeaponIdxRef.current]
         if (!weapon) return
         // Knife: melee swing instead of a projectile. Its own cooldown gate
@@ -8535,12 +8634,16 @@ export default function ThreeWorld({
               // *will be* in ~1s. Only fires when LOS is clear and the
               // player is at mid-range (too close = friendly-fire risk; too
               // far = arc gets weird).
+              // Anti-tank behaviour: against a player riding a vehicle the
+              // heavy prioritises grenades — wider engagement range and a much
+              // shorter cooldown so the tank takes real anti-armor pressure.
+              const vsVehicle = drivingRef.current && activeVehicle !== null
               if (
                 tuning.grenadeEnabled &&
                 enemy.type === "heavy" &&
                 now > enemy.nextGrenadeTime &&
                 distToPlayer > 5 &&
-                distToPlayer < 22 &&
+                distToPlayer < (vsVehicle ? 32 : 22) &&
                 enemyCanSee(
                   toPx / distToPlayer,
                   toPz / distToPlayer,
@@ -8550,7 +8653,9 @@ export default function ThreeWorld({
                   enemy.config,
                 )
               ) {
-                enemy.nextGrenadeTime = now + 6000 + Math.random() * 3000
+                enemy.nextGrenadeTime = vsVehicle
+                  ? now + 2500 + Math.random() * 1500
+                  : now + 6000 + Math.random() * 3000
                 // Lead the player by their current velocity (approx via the
                 // smoothed player velocity ref).
                 const leadT = 1.0
@@ -8853,13 +8958,16 @@ export default function ThreeWorld({
             // bearing-down monster rather than a shambling corpse.
             if (enemy.type === "terraformer") {
               const sw = Math.sin(t) * 0.5
-              tgtTorsoPitchX = 0.3 + Math.sin(now * 0.007 + enemy.microIdleSeed) * 0.05
+              // Heavier forward hunch — it drags itself toward you.
+              tgtTorsoPitchX = 0.52 + Math.sin(now * 0.007 + enemy.microIdleSeed) * 0.06
               tgtLeftShoulder = -1.7 + sw
               tgtRightShoulder = -1.7 - sw
               tgtLeftElbow = -1.1 - Math.max(0, sw) * 0.4
               tgtRightElbow = -1.1 - Math.max(0, -sw) * 0.4
+              // Asymmetric stride: the trailing leg drags (lower amplitude,
+              // bent knee) so the gait looks lopsided and wrong.
               tgtLeftHip = -sw * 0.6
-              tgtRightHip = sw * 0.6
+              tgtRightHip = sw * 0.35 - 0.18
             }
 
             // Melee swing: when an enemy has just landed a close-range hit, whip
@@ -8968,6 +9076,37 @@ export default function ThreeWorld({
             }
             if (enemy.leftEye) enemy.leftEye.scale.y = p.eyeOpenness
             if (enemy.rightEye) enemy.rightEye.scale.y = p.eyeOpenness
+
+            // ── Terraformer writhe ─────────────────────────────────────────
+            // Out-of-phase body swell, individually throbbing pustules, jerky
+            // head twitches/tilts, and a flickering eye glow. All driven off
+            // `now` + per-enemy phases so a swarm never moves in lockstep.
+            if (enemy.type === "terraformer") {
+              const ph = enemy.pulsePhase ?? 0
+              const pulse = Math.sin(now * 0.004 + ph) * 0.05
+              if (enemy.torso) {
+                enemy.torso.scale.x = 1 + pulse
+                enemy.torso.scale.z = 1 + pulse
+                enemy.torso.scale.y = (1 + p.torsoBreath) * (1 + pulse * 0.6)
+              }
+              if (enemy.pustules) {
+                for (let pi = 0; pi < enemy.pustules.length; pi++) {
+                  const pm = enemy.pustules[pi]
+                  if (!pm) continue
+                  const base = pm.userData.pustuleBase as number
+                  pm.scale.setScalar(base * (1 + Math.sin(now * 0.006 + ph + pi * 1.3) * 0.22))
+                }
+              }
+              if (enemy.head) {
+                const tw = enemy.twitchPhase ?? 0
+                const jerk = Math.sin(now * 0.0009 + tw) > 0.9 ? 0.32 : 0
+                enemy.head.rotation.y += Math.sin(now * 0.05 + tw) * 0.04 + jerk
+                enemy.head.rotation.z = Math.sin(now * 0.0017 + tw) * 0.2 + jerk * 0.5
+              }
+              if (enemy.eyeGlowMat) {
+                enemy.eyeGlowMat.emissiveIntensity = 2.0 + Math.sin(now * 0.008 + ph) * 1.1
+              }
+            }
           }
         }
 
