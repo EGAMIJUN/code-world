@@ -98,6 +98,26 @@ const RUNOVER_TANK_DAMAGE = 9999 // tanks instakill on contact
 // player's own ride): explosives are the intended counter, bullets chip.
 const ENEMY_VEH_CAR_HP = 200
 const ENEMY_VEH_TANK_HP = 600
+// ── Fighter jet (drivable; taxis, takes off, flies, lands) ──────────────────
+const VEHICLE_JET_RADIUS = 1.5 // fuselage collision circle
+const VEHICLE_JET_HP = 500
+const JET_ACCEL = 16 // throttle response (m/s²)
+const JET_MAX_SPEED = 48 // top speed (fastest vehicle by far)
+const JET_DRAG = 2.2 // passive decel when off-throttle
+const JET_TAKEOFF_SPEED = 22 // ground speed needed to rotate + lift off
+const JET_MIN_FLY_SPEED = 16 // below this in the air → stall + sink
+const JET_STALL_SINK = 11 // m/s downward pull while stalled
+const JET_PITCH_RATE = 1.1 // rad/s nose pitch from the stick (mobile)
+const JET_TURN_RATE = 1.5 // rad/s yaw/roll from the stick (mobile)
+const JET_CAM_DIST = 12 // chase-cam trail distance (further than ground rides)
+const JET_CAM_HEIGHT = 4.5
+const JET_GUN_COOLDOWN_MS = 90 // nose machine-gun cadence
+const JET_GUN_DAMAGE = 22
+const JET_GUN_RANGE = 220
+const JET_MISSILE_COOLDOWN_MS = 3000
+const JET_MISSILE_RADIUS = 9 // AOE blast radius
+const JET_MISSILE_SPEED = 60
+const JET_CRASH_DAMAGE = 80 // dealt to the player when the jet smashes in
 // ── Vertical movement ──────────────────────────────────────────────────────────
 // Real gravity in m/s². Picked to feel snappy (a 4m drop = ~0.6s in air),
 // not a perfect-physics simulation. Tuned by feel under EYE_HEIGHT.
@@ -1566,7 +1586,7 @@ export default function ThreeWorld({
   const drivingRef = useRef(false)
   // Kind of the vehicle currently driven (for input handlers in other effects
   // that can't see the scene-effect-local `activeVehicle`). null when on foot.
-  const drivingKindRef = useRef<"car" | "tank" | null>(null)
+  const drivingKindRef = useRef<"car" | "tank" | "jet" | null>(null)
   const [inVehicle, setInVehicle] = useState(false)
   // True while on foot next to a boardable car (shows the "乗る" prompt).
   const [nearVehicle, setNearVehicle] = useState(false)
@@ -1579,6 +1599,20 @@ export default function ThreeWorld({
   // True while the active vehicle is a tank (drives the cannon HUD + the
   // mobile weapon button's cannon⇄handheld toggle).
   const [inTank, setInTank] = useState(false)
+  // True while the active vehicle is the fighter jet (drives the flight HUD).
+  const [inJet, setInJet] = useState(false)
+  const [jetSpeed, setJetSpeed] = useState(0) // km/h-ish readout
+  const [jetAlt, setJetAlt] = useState(0) // altitude (m)
+  const [missileCdMs, setMissileCdMs] = useState(0)
+  // Jet input refs (mobile throttle buttons + missile request + held MG fire).
+  const jetThrottleRef = useRef(0) // -1 / 0 / +1 from the mobile accel/decel pads
+  const jetGunHeldRef = useRef(false) // mobile FIRE button held
+  const jetMissileReqRef = useRef(false) // one-shot missile request (RMB / button)
+  const lastJetGunRef = useRef(0)
+  const lastMissileRef = useRef(0)
+  const prevMissileCdRef = useRef(0)
+  const prevJetSpeedRef = useRef(0)
+  const prevJetAltRef = useRef(0)
   // Last time the player moved the aim (mouse/right-stick) while driving — the
   // chase camera auto-recenters behind the hull after a short idle.
   const lastDriveAimRef = useRef(0)
@@ -4354,6 +4388,114 @@ export default function ThreeWorld({
         water.position.set(WORLD_CENTER, -0.05, 305)
         scene.add(water)
 
+        // ── HARBOR airfield — runway + enterable hangar + control tower ─────
+        // Sits in the open northern apron (z ≈ 130–142), clear of every
+        // container yard / warehouse / crane (all at z ≥ 160) and the harbor
+        // enemy spawns (z ≥ 178). The runway is a flat decal (no collision);
+        // the jet taxis off its west end toward +x.
+        {
+          const RW_CX = 35
+          const RW_CZ = 136
+          const RW_LEN = 100 // along x (x: -15 … 85)
+          const RW_WID = 12 // along z (z: 130 … 142)
+          const runwayMat = new THREE.MeshStandardMaterial({
+            color: 0x1b1d22,
+            roughness: 0.95,
+            metalness: 0,
+          })
+          const slab = new THREE.Mesh(new THREE.PlaneGeometry(RW_LEN, RW_WID), runwayMat)
+          slab.rotation.x = -Math.PI / 2
+          slab.position.set(RW_CX, 0.03, RW_CZ)
+          slab.receiveShadow = true
+          scene.add(slab)
+          // Shared marking materials (emissive, no point lights).
+          const centerMat = new THREE.MeshStandardMaterial({
+            color: 0xe8e8e8,
+            emissive: 0xb0b0b0,
+            emissiveIntensity: 0.5,
+            roughness: 0.7,
+          })
+          const edgeLightMat = new THREE.MeshStandardMaterial({
+            color: 0xffcc55,
+            emissive: 0xffaa22,
+            emissiveIntensity: 1.8,
+            roughness: 0.5,
+          })
+          const dashGeo = new THREE.PlaneGeometry(3.2, 0.4)
+          const lightGeo = new THREE.PlaneGeometry(0.6, 0.6)
+          // Centreline dashes down the middle.
+          for (let x = RW_CX - RW_LEN / 2 + 4; x < RW_CX + RW_LEN / 2 - 2; x += 6) {
+            const dash = new THREE.Mesh(dashGeo, centerMat)
+            dash.rotation.x = -Math.PI / 2
+            dash.position.set(x, 0.05, RW_CZ)
+            scene.add(dash)
+          }
+          // Edge lights along both long sides.
+          for (let x = RW_CX - RW_LEN / 2 + 2; x <= RW_CX + RW_LEN / 2 - 2; x += 8) {
+            for (const ez of [RW_CZ - RW_WID / 2, RW_CZ + RW_WID / 2]) {
+              const lt = new THREE.Mesh(lightGeo, edgeLightMat)
+              lt.rotation.x = -Math.PI / 2
+              lt.position.set(x, 0.05, ez)
+              scene.add(lt)
+            }
+          }
+          // Phantom footprint so the airfield reads as a structure on the
+          // minimap (h < 0 → never collides, bullets pass).
+          ALL_AABBS.push({
+            x1: RW_CX - RW_LEN / 2,
+            x2: RW_CX + RW_LEN / 2,
+            z1: RW_CZ - RW_WID / 2,
+            z2: RW_CZ + RW_WID / 2,
+            h: -1,
+          })
+          // Enterable hangar just north-west of the runway (door faces the
+          // strip). Reuses the hollow-building generator (walls + door + roof).
+          const hangarMat = new THREE.MeshStandardMaterial({
+            color: 0x6a6e72,
+            roughness: 0.8,
+            metalness: 0.2,
+          })
+          const hangarRoofMat = new THREE.MeshStandardMaterial({
+            color: 0x4a4e52,
+            roughness: 0.85,
+            metalness: 0.2,
+          })
+          makeHollowBuilding({
+            x: -14,
+            z: 116,
+            w: 14,
+            d: 12,
+            h: 7,
+            doorSide: "south",
+            doorWidth: 5,
+            bldMat: hangarMat,
+            roofMat: hangarRoofMat,
+          })
+          // Control tower (visual only) — a slim shaft + a glass cab on top.
+          const towerMat = new THREE.MeshStandardMaterial({
+            color: 0x8a8e92,
+            roughness: 0.7,
+            metalness: 0.35,
+          })
+          addBox(towerMat, 10, 120, 4, 13, 4)
+          const cab = new THREE.Mesh(new THREE.BoxGeometry(5.2, 2.2, 5.2), towerMat)
+          cab.position.set(10, 14.2, 120)
+          cab.castShadow = true
+          scene.add(cab)
+          const cabGlass = new THREE.Mesh(
+            new THREE.BoxGeometry(5.0, 1.4, 5.0),
+            new THREE.MeshStandardMaterial({
+              color: 0x0c2230,
+              emissive: 0x16384a,
+              emissiveIntensity: 0.5,
+              roughness: 0.1,
+              metalness: 0.8,
+            }),
+          )
+          cabGlass.position.set(10, 14.4, 120)
+          scene.add(cabGlass)
+        }
+
         // ── INDUSTRIAL (north, z ≈ -120 to -240) ────────────────────────────
         // Factory halls (big, low boxes) — off the x=50 corridor.
         addBox(factoryMat, 26, -150, 24, 8, 17)
@@ -4604,7 +4746,7 @@ export default function ThreeWorld({
         hp: number
         maxHp: number
         dead: boolean // true once destroyed (no longer boardable)
-        kind: "car" | "tank"
+        kind: "car" | "tank" | "jet"
         // Tank only: turret yaws to the aim, barrelPivot pitches the gun.
         // (undefined for cars — required-but-nullable to satisfy exactOptional.)
         turret: THREE.Object3D | undefined
@@ -4615,6 +4757,9 @@ export default function ThreeWorld({
         // Tank AI cannon cadence + ram-damage cooldown timestamps (ms).
         aiNextCannon: number
         aiNextRam: number
+        // ── Jet flight state (jet only) ──
+        y?: number // altitude (m); cars/tanks stay at 0
+        airborne?: boolean // true once the jet has rotated off the runway
       }
       const vehicles: Vehicle[] = []
       let activeVehicle: Vehicle | null = null
@@ -4782,14 +4927,98 @@ export default function ThreeWorld({
         return { group: g, turret, barrelPivot }
       }
 
+      // Build a fighter jet from primitives: fuselage + nose cone + swept main
+      // wings + tail fin + horizontal stabilisers + a glass canopy + twin
+      // exhausts. Forward is -z (same convention as the car/tank), so the nose
+      // points -z at rest. Shared materials keep it cheap.
+      function makeJet(color: number): THREE.Group {
+        const g = new THREE.Group()
+        // YXZ so flight orientation reads as yaw → pitch → roll (bank).
+        g.rotation.order = "YXZ"
+        const bodyMat = new THREE.MeshStandardMaterial({
+          color,
+          roughness: 0.4,
+          metalness: 0.6,
+        })
+        const darkMat = new THREE.MeshStandardMaterial({
+          color: 0x20242a,
+          roughness: 0.6,
+          metalness: 0.5,
+        })
+        const glassMat = new THREE.MeshStandardMaterial({
+          color: 0x0c2230,
+          emissive: 0x10303f,
+          emissiveIntensity: 0.4,
+          roughness: 0.1,
+          metalness: 0.8,
+        })
+        const exhaustMat = new THREE.MeshStandardMaterial({
+          color: 0xffaa44,
+          emissive: 0xff7722,
+          emissiveIntensity: 1.6,
+          roughness: 0.5,
+        })
+        // Fuselage — a long capsule (cylinder lying along z).
+        const fuse = new THREE.Mesh(new THREE.CylinderGeometry(0.42, 0.34, 5.2, 12), bodyMat)
+        fuse.rotation.x = Math.PI / 2
+        fuse.position.y = 1.0
+        fuse.castShadow = true
+        g.add(fuse)
+        // Nose cone (toward -z).
+        const nose = new THREE.Mesh(new THREE.ConeGeometry(0.42, 1.3, 12), bodyMat)
+        nose.rotation.x = -Math.PI / 2
+        nose.position.set(0, 1.0, -3.0)
+        nose.castShadow = true
+        g.add(nose)
+        // Canopy (glass bubble, set forward of centre).
+        const canopy = new THREE.Mesh(new THREE.SphereGeometry(0.42, 12, 10), glassMat)
+        canopy.scale.set(0.85, 0.7, 1.5)
+        canopy.position.set(0, 1.4, -1.1)
+        g.add(canopy)
+        // Main wings — a single swept-back thin slab spanning both sides.
+        const wing = new THREE.Mesh(new THREE.BoxGeometry(6.4, 0.12, 1.6), bodyMat)
+        wing.position.set(0, 0.95, 0.4)
+        wing.castShadow = true
+        g.add(wing)
+        // Wingtip rake (thin angled tips) for a sharper read.
+        for (const s of [-1, 1]) {
+          const tip = new THREE.Mesh(new THREE.BoxGeometry(1.4, 0.1, 1.0), darkMat)
+          tip.position.set(s * 3.4, 0.95, 0.7)
+          tip.rotation.y = s * 0.5
+          g.add(tip)
+        }
+        // Horizontal tail stabilisers.
+        const htail = new THREE.Mesh(new THREE.BoxGeometry(2.6, 0.1, 0.9), bodyMat)
+        htail.position.set(0, 1.0, 2.3)
+        g.add(htail)
+        // Vertical tail fin.
+        const vtail = new THREE.Mesh(new THREE.BoxGeometry(0.12, 1.3, 1.2), bodyMat)
+        vtail.position.set(0, 1.7, 2.3)
+        vtail.castShadow = true
+        g.add(vtail)
+        // Twin exhaust glow at the tail (+z).
+        for (const ex of [-0.22, 0.22]) {
+          const exhaust = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.24, 0.4, 10), exhaustMat)
+          exhaust.rotation.x = Math.PI / 2
+          exhaust.position.set(ex, 1.0, 2.65)
+          g.add(exhaust)
+        }
+        return g
+      }
+
       function spawnVehicle(
         x: number,
         z: number,
         heading: number,
         color: number,
-        kind: "car" | "tank" = "car",
+        kind: "car" | "tank" | "jet" = "car",
       ) {
-        const radius = kind === "tank" ? VEHICLE_TANK_RADIUS : VEHICLE_RADIUS
+        const radius =
+          kind === "tank"
+            ? VEHICLE_TANK_RADIUS
+            : kind === "jet"
+              ? VEHICLE_JET_RADIUS
+              : VEHICLE_RADIUS
         const safe = findSafeSpawnNear(x, z, radius)
         let group: THREE.Group
         let turret: THREE.Object3D | undefined
@@ -4799,13 +5028,16 @@ export default function ThreeWorld({
           group = t.group
           turret = t.turret
           barrelPivot = t.barrelPivot
+        } else if (kind === "jet") {
+          group = makeJet(color)
         } else {
           group = makeVehicle(color)
         }
         group.position.set(safe.x, 0, safe.z)
         group.rotation.y = heading
         scene.add(group)
-        const maxHp = kind === "tank" ? VEHICLE_TANK_HP : VEHICLE_CAR_HP
+        const maxHp =
+          kind === "tank" ? VEHICLE_TANK_HP : kind === "jet" ? VEHICLE_JET_HP : VEHICLE_CAR_HP
         vehicles.push({
           group,
           x: safe.x,
@@ -4821,6 +5053,8 @@ export default function ThreeWorld({
           aiDriver: null,
           aiNextCannon: 0,
           aiNextRam: 0,
+          y: 0,
+          airborne: false,
         })
       }
 
@@ -4848,6 +5082,9 @@ export default function ThreeWorld({
         spawnVehicle(28, 47, -Math.PI / 2, 0x4a5a3a, "tank")
         spawnVehicle(50, -150, Math.PI, 0x5a5048, "tank") // INDUSTRIAL
         spawnVehicle(50, 250, 0, 0x4a4a52, "tank") // HARBOR
+        // Fighter jet parked at the west end of the HARBOR airfield runway,
+        // nose pointing +x (east) down the strip for a clean takeoff run.
+        spawnVehicle(-10, 136, -Math.PI / 2, 0x33557a, "jet")
       }
 
       function nearestVehicle(): Vehicle | null {
@@ -4895,6 +5132,21 @@ export default function ThreeWorld({
         lastCannonRef.current = 0
         setCannonCooldownMs(0)
         prevCannonCdRef.current = 0
+        // Jet flight HUD + weapon timers.
+        const isJet = v.kind === "jet"
+        setInJet(isJet)
+        if (isJet) {
+          v.y = 0
+          v.airborne = false
+          lastJetGunRef.current = 0
+          lastMissileRef.current = 0
+          jetThrottleRef.current = 0
+          jetGunHeldRef.current = false
+          jetMissileReqRef.current = false
+          setMissileCdMs(0)
+          prevMissileCdRef.current = 0
+          camState.pitch = 0 // level nose for the takeoff roll
+        }
         // Seed the free-aim camera looking the way the hull faces, and start
         // "recentered" so a freshly-boarded car isn't aimed off to one side.
         camState.yaw = v.heading
@@ -4945,6 +5197,11 @@ export default function ThreeWorld({
         setCannonActive(false)
         setCannonCooldownMs(0)
         setInTank(false)
+        setInJet(false)
+        jetThrottleRef.current = 0
+        jetGunHeldRef.current = false
+        jetMissileReqRef.current = false
+        setMissileCdMs(0)
         drivingKindRef.current = null
         // Mount/dismount opening: handheld fire is locked briefly so hopping
         // out of a tank mid-fight leaves the player momentarily exposed.
@@ -5160,9 +5417,271 @@ export default function ThreeWorld({
         }
       }
 
+      // Shared jet weapon visuals (one material each, reused per shot).
+      const jetTracerMat = new THREE.MeshBasicMaterial({ color: 0xffee66, depthTest: false })
+      const jetMissileMat = new THREE.MeshStandardMaterial({
+        color: 0x9aa0a6,
+        roughness: 0.4,
+        metalness: 0.6,
+        emissive: 0x331100,
+        emissiveIntensity: 0.6,
+      })
+
+      // Nose machine gun: cooldown-gated hitscan from the jet's nose along the
+      // aim, with a bright tracer. Direct damage on the first enemy hit.
+      function fireJetGun() {
+        const v = activeVehicle
+        if (!v || v.kind !== "jet" || v.dead) return
+        const now = Date.now()
+        if (now - lastJetGunRef.current < JET_GUN_COOLDOWN_MS) return
+        lastJetGunRef.current = now
+        const yaw = camState.yaw
+        const pitch = camState.pitch
+        const ch = Math.cos(pitch)
+        const fwd = new THREE.Vector3(-Math.sin(yaw) * ch, Math.sin(pitch), -Math.cos(yaw) * ch)
+        const nose = new THREE.Vector3(
+          v.x + fwd.x * 3.2,
+          (v.y ?? 0) + 1.0 + fwd.y * 3.2,
+          v.z + fwd.z * 3.2,
+        )
+        raycaster.set(nose, fwd)
+        const prevFar = raycaster.far
+        raycaster.far = JET_GUN_RANGE
+        const parts: THREE.Object3D[] = []
+        for (const e of enemies) {
+          if (e.hp > 0 && !e.aiDriving) {
+            e.mesh.traverse((c) => {
+              if (c instanceof THREE.Mesh && c.userData.enemyId) parts.push(c)
+            })
+          }
+        }
+        const hits = raycaster.intersectObjects(parts, false)
+        const wallHit = raycaster.intersectObjects(wallMeshes, false)[0]
+        let impact: THREE.Vector3 | null = null
+        if (hits[0] && (!wallHit || wallHit.distance > hits[0].distance)) {
+          const id = hits[0].object.userData.enemyId as string | undefined
+          const en = enemies.find((e) => e.id === id)
+          if (en) {
+            en.hp -= JET_GUN_DAMAGE
+            spawnBlood(hits[0].point)
+            scoreRef.current += JET_GUN_DAMAGE * 8
+            setScore(scoreRef.current)
+            if (en.hp <= 0) applyEnemyKill(en, "jet")
+            impact = hits[0].point.clone()
+          }
+        } else if (wallHit) {
+          impact = wallHit.point.clone()
+        }
+        raycaster.far = prevFar
+        // Bright tracer streaking from the nose.
+        const tracer = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.07, 2.4), jetTracerMat)
+        tracer.position.copy(nose)
+        tracer.lookAt(nose.clone().add(fwd))
+        tracer.renderOrder = 998
+        scene.add(tracer)
+        bullets.push({
+          mesh: tracer,
+          velocity: fwd.clone().multiplyScalar(200),
+          life: 0.4,
+          isEnemy: false,
+          damage: 0,
+        })
+        if (impact) spawnExplosion(impact, true)
+        SOUNDS.pistol()
+      }
+
+      // Missile: 3s-cooldown explosive that flies forward and AOE-detonates on
+      // impact (reuses the grenade detonation → damages enemies in range).
+      function fireJetMissile() {
+        const v = activeVehicle
+        if (!v || v.kind !== "jet" || v.dead) return
+        const now = Date.now()
+        if (now - lastMissileRef.current < JET_MISSILE_COOLDOWN_MS) return
+        lastMissileRef.current = now
+        setMissileCdMs(JET_MISSILE_COOLDOWN_MS)
+        prevMissileCdRef.current = JET_MISSILE_COOLDOWN_MS
+        const yaw = camState.yaw
+        const pitch = camState.pitch
+        const ch = Math.cos(pitch)
+        const fwd = new THREE.Vector3(-Math.sin(yaw) * ch, Math.sin(pitch), -Math.cos(yaw) * ch)
+        const m = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.2, 1.1), jetMissileMat)
+        const start = new THREE.Vector3(
+          v.x + fwd.x * 3.6,
+          (v.y ?? 0) + 0.9 + fwd.y * 3.6,
+          v.z + fwd.z * 3.6,
+        )
+        m.position.copy(start)
+        m.lookAt(start.clone().add(fwd))
+        scene.add(m)
+        bullets.push({
+          mesh: m,
+          velocity: fwd.clone().multiplyScalar(JET_MISSILE_SPEED),
+          life: 3.0,
+          isEnemy: false,
+          damage: 0,
+          isGrenade: true,
+          grenadeRadius: JET_MISSILE_RADIUS,
+        })
+        SOUNDS.shotgun()
+        cameraShakeRef.current.intensity = 3
+      }
+
+      // A jet smashing into the ground or a building: big blast, ejects the
+      // player (via destroyActiveVehicle) and deals heavy crash damage on top.
+      function jetCrash(v: Vehicle) {
+        v.hp = 0
+        destroyActiveVehicle() // blast + eject + clears driving state
+        if (gamePhaseRef.current === "playing") {
+          playerHpRef.current = Math.max(1, playerHpRef.current - JET_CRASH_DAMAGE)
+          setPlayerHp(playerHpRef.current)
+          lastDamageTimeRef.current = Date.now()
+          setDamageFlash(true)
+          setTimeout(() => setDamageFlash(false), 320)
+        }
+      }
+
+      // Fighter-jet flight model: taxi → rotate → fly → stall/land. Replaces the
+      // ground-vehicle update entirely while the active vehicle is a jet.
+      function updateJet(v: Vehicle, dt: number) {
+        const now = Date.now()
+        // Nose control: PC drives camState via the mouse already; the mobile
+        // LEFT stick (joySmoothRef) pitches/rolls the nose here.
+        const sj = joySmoothRef.current
+        if (sj.vx !== 0 || sj.vy !== 0) {
+          camState.yaw -= sj.vx * JET_TURN_RATE * dt
+          camState.pitch = clampPitch(camState.pitch + -sj.vy * JET_PITCH_RATE * dt)
+          lastDriveAimRef.current = now
+        }
+        // Throttle: W/S (or arrows) + mobile accel/decel pads.
+        let throttle = 0
+        if (keysRef.current.has("w") || keysRef.current.has("ArrowUp")) throttle += 1
+        if (keysRef.current.has("s") || keysRef.current.has("ArrowDown")) throttle -= 1
+        throttle += jetThrottleRef.current
+        throttle = Math.max(-1, Math.min(1, throttle))
+        if (Math.abs(throttle) > 0.01) v.speed += JET_ACCEL * throttle * dt
+        else v.speed -= JET_DRAG * dt
+        v.speed = Math.max(0, Math.min(JET_MAX_SPEED, v.speed))
+
+        const yaw = camState.yaw
+        let pitch = camState.pitch
+        const y = v.y ?? 0
+        if (!v.airborne) {
+          // On the runway: nose stays level. Rotate + lift once fast enough and
+          // the player pulls back on the stick/mouse.
+          pitch = 0
+          if (v.speed >= JET_TAKEOFF_SPEED && camState.pitch > 0.06) {
+            v.airborne = true
+            v.y = 0.05
+          }
+        }
+        const stall = !!v.airborne && v.speed < JET_MIN_FLY_SPEED
+        const ch = Math.cos(pitch)
+        const fx = -Math.sin(yaw) * ch
+        const fz = -Math.cos(yaw) * ch
+        const fy = Math.sin(pitch)
+        const nx = v.x + fx * v.speed * dt
+        const nz = v.z + fz * v.speed * dt
+
+        if (v.airborne) {
+          let ny = y + fy * v.speed * dt
+          if (stall) ny -= JET_STALL_SINK * dt
+          if (collidesWithWall(nx, nz, VEHICLE_JET_RADIUS, ny)) {
+            jetCrash(v)
+            return
+          }
+          if (ny <= 0) {
+            // Touchdown attempt. Gentle = shallow nose, not too fast, soft sink.
+            const vertVel = fy * v.speed - (stall ? JET_STALL_SINK : 0)
+            const gentle =
+              camState.pitch < 0.28 &&
+              camState.pitch > -0.28 &&
+              v.speed < JET_TAKEOFF_SPEED * 1.35 &&
+              vertVel > -13 &&
+              !collidesWithWall(nx, nz, VEHICLE_JET_RADIUS, 0)
+            if (gentle) {
+              v.airborne = false
+              v.x = nx
+              v.z = nz
+              v.y = 0
+            } else {
+              jetCrash(v)
+              return
+            }
+          } else {
+            v.x = nx
+            v.z = nz
+            v.y = ny
+          }
+        } else {
+          // Taxiing: per-axis wall stop (no crash at runway speeds).
+          if (!collidesWithWall(nx, v.z, VEHICLE_JET_RADIUS, 0)) v.x = nx
+          if (!collidesWithWall(v.x, nz, VEHICLE_JET_RADIUS, 0)) v.z = nz
+          v.y = 0
+        }
+        focalPoint.x = v.x
+        focalPoint.z = v.z
+        focalPoint.y = 0
+        v.heading = yaw
+
+        // Orient the airframe: yaw + pitch + a visual bank from the turn input.
+        const targetBank = Math.max(-0.7, Math.min(0.7, -sj.vx * 0.7))
+        const curBank = v.group.rotation.z
+        const bank = curBank + (targetBank - curBank) * (1 - Math.exp(-dt * 6))
+        v.group.position.set(v.x, v.y ?? 0, v.z)
+        v.group.rotation.set(pitch, yaw, bank)
+
+        // Weapons: held MG fire + one-shot missile request.
+        if (mouseDownRef.current || jetGunHeldRef.current) fireJetGun()
+        if (jetMissileReqRef.current) {
+          jetMissileReqRef.current = false
+          fireJetMissile()
+        }
+
+        // ── Chase camera: trail behind the nose in full 3D (incl. altitude) ──
+        const aimHx = -Math.sin(yaw)
+        const aimHz = -Math.cos(yaw)
+        const cp = Math.cos(pitch)
+        const aimFx = aimHx * cp
+        const aimFy = Math.sin(pitch)
+        const aimFz = aimHz * cp
+        const camY = (v.y ?? 0) + JET_CAM_HEIGHT
+        const tx = v.x - aimFx * JET_CAM_DIST
+        const ty = camY - aimFy * JET_CAM_DIST
+        const tz = v.z - aimFz * JET_CAM_DIST
+        const blend = 1 - Math.exp(-dt * 8)
+        camera.position.x += (tx - camera.position.x) * blend
+        camera.position.y += (ty - camera.position.y) * blend
+        camera.position.z += (tz - camera.position.z) * blend
+        camera.position.y = Math.max(camera.position.y, 0.7)
+        camera.lookAt(v.x + aimFx, (v.y ?? 0) + 1 + aimFy, v.z + aimFz)
+
+        // HUD (throttled to value changes to avoid per-frame re-renders).
+        const spK = Math.round((v.speed * 3.6) / 5) * 5
+        if (spK !== prevJetSpeedRef.current) {
+          prevJetSpeedRef.current = spK
+          setJetSpeed(spK)
+        }
+        const altR = Math.round(v.y ?? 0)
+        if (altR !== prevJetAltRef.current) {
+          prevJetAltRef.current = altR
+          setJetAlt(altR)
+        }
+        const mcd =
+          Math.round(Math.max(0, JET_MISSILE_COOLDOWN_MS - (now - lastMissileRef.current)) / 100) *
+          100
+        if (mcd !== prevMissileCdRef.current) {
+          prevMissileCdRef.current = mcd
+          setMissileCdMs(mcd)
+        }
+      }
+
       function updateVehicle(dt: number) {
         const v = activeVehicle
         if (!v) return
+        if (v.kind === "jet") {
+          updateJet(v, dt)
+          return
+        }
         // Inputs: WASD / arrows + left stick (vy = throttle, vx = steer).
         const sjoy = joySmoothRef.current
         let throttle = 0
@@ -7250,6 +7769,9 @@ export default function ThreeWorld({
           fireCannon()
           return
         }
+        // In the jet, the nose MG is fired continuously from updateJet while
+        // the button is held (mouseDownRef) — nothing to do here.
+        if (drivingRef.current && activeVehicle?.kind === "jet") return
         // Brief lock right after dismounting a vehicle (exposure window).
         if (Date.now() < fireLockUntilRef.current) return
         const weapon = WEAPONS[currentWeaponIdxRef.current]
@@ -7450,6 +7972,9 @@ export default function ThreeWorld({
         if (e.button === 0) {
           mouseDownRef.current = true
           fire()
+        } else if (e.button === 2 && drivingRef.current && activeVehicle?.kind === "jet") {
+          // Right-click fires a jet missile (consumed in updateJet).
+          jetMissileReqRef.current = true
         } else if (e.button === 2 && !drivingRef.current) {
           // ADS is disabled while driving (third-person free-aim, no zoom).
           isAimingRef.current = true
@@ -10610,6 +11135,27 @@ export default function ThreeWorld({
                 </span>
               </div>
             )}
+            {/* Jet flight readout: speed, altitude, missile readiness. */}
+            {inJet && (
+              <div
+                style={{
+                  marginTop: "0.3rem",
+                  fontSize: "0.72rem",
+                  letterSpacing: "0.12em",
+                  color: "#9fd8ff",
+                  textShadow: "0 0 6px rgba(0,0,0,0.8)",
+                }}
+              >
+                <span style={{ marginRight: "0.7rem" }}>SPD {jetSpeed}</span>
+                <span style={{ marginRight: "0.7rem" }}>ALT {jetAlt}m</span>
+                <span style={{ color: missileCdMs > 0 ? "#ff8866" : "#ffdd55" }}>
+                  {missileCdMs > 0 ? `◇ MSL ${(missileCdMs / 1000).toFixed(1)}s` : "◆ MSL READY"}
+                </span>
+                <span style={{ opacity: 0.6, marginLeft: "0.6rem" }}>
+                  {isMobile ? "" : "[W/S]加減速 [マウス]機首 [RMB]ミサイル"}
+                </span>
+              </div>
+            )}
           </div>
         )}
 
@@ -12300,6 +12846,135 @@ export default function ThreeWorld({
               >
                 {inVehicle ? "降りる" : "乗る"}
               </button>
+            )}
+
+            {/* Jet flight controls (mobile): nose is the LEFT stick; these add
+                throttle, machine gun and missile. */}
+            {inJet && (
+              <>
+                <button
+                  type="button"
+                  onPointerDown={(e) => {
+                    e.preventDefault()
+                    jetGunHeldRef.current = true
+                  }}
+                  onPointerUp={() => {
+                    jetGunHeldRef.current = false
+                  }}
+                  onPointerLeave={() => {
+                    jetGunHeldRef.current = false
+                  }}
+                  style={{
+                    position: "absolute",
+                    bottom: "6rem",
+                    right: "1.5rem",
+                    width: "72px",
+                    height: "72px",
+                    borderRadius: "50%",
+                    background: "rgba(255,60,60,0.22)",
+                    border: "3px solid #ff5555",
+                    color: "#ffd0d0",
+                    fontFamily: "monospace",
+                    fontSize: "0.78rem",
+                    fontWeight: "bold",
+                    touchAction: "none",
+                    userSelect: "none",
+                    zIndex: 32,
+                  }}
+                >
+                  FIRE
+                </button>
+                <button
+                  type="button"
+                  onPointerDown={(e) => {
+                    e.preventDefault()
+                    jetMissileReqRef.current = true
+                  }}
+                  style={{
+                    position: "absolute",
+                    bottom: "10rem",
+                    right: "1.5rem",
+                    width: "68px",
+                    height: "68px",
+                    borderRadius: "50%",
+                    background: "rgba(255,160,40,0.22)",
+                    border: "3px solid #ffaa33",
+                    color: "#ffe2b0",
+                    fontFamily: "monospace",
+                    fontSize: "0.66rem",
+                    fontWeight: "bold",
+                    touchAction: "none",
+                    userSelect: "none",
+                    zIndex: 32,
+                  }}
+                >
+                  MSL
+                </button>
+                <button
+                  type="button"
+                  onPointerDown={(e) => {
+                    e.preventDefault()
+                    jetThrottleRef.current = 1
+                  }}
+                  onPointerUp={() => {
+                    jetThrottleRef.current = 0
+                  }}
+                  onPointerLeave={() => {
+                    jetThrottleRef.current = 0
+                  }}
+                  style={{
+                    position: "absolute",
+                    bottom: "10rem",
+                    right: "7rem",
+                    width: "66px",
+                    height: "66px",
+                    borderRadius: "50%",
+                    background: "rgba(60,220,120,0.2)",
+                    border: "3px solid #33dd77",
+                    color: "#bfffd6",
+                    fontFamily: "monospace",
+                    fontSize: "0.66rem",
+                    fontWeight: "bold",
+                    touchAction: "none",
+                    userSelect: "none",
+                    zIndex: 32,
+                  }}
+                >
+                  加速
+                </button>
+                <button
+                  type="button"
+                  onPointerDown={(e) => {
+                    e.preventDefault()
+                    jetThrottleRef.current = -1
+                  }}
+                  onPointerUp={() => {
+                    jetThrottleRef.current = 0
+                  }}
+                  onPointerLeave={() => {
+                    jetThrottleRef.current = 0
+                  }}
+                  style={{
+                    position: "absolute",
+                    bottom: "6rem",
+                    right: "7rem",
+                    width: "66px",
+                    height: "66px",
+                    borderRadius: "50%",
+                    background: "rgba(160,170,180,0.18)",
+                    border: "3px solid #9aa4ae",
+                    color: "#dfe6ee",
+                    fontFamily: "monospace",
+                    fontSize: "0.66rem",
+                    fontWeight: "bold",
+                    touchAction: "none",
+                    userSelect: "none",
+                    zIndex: 32,
+                  }}
+                >
+                  減速
+                </button>
+              </>
             )}
           </>
         )}
