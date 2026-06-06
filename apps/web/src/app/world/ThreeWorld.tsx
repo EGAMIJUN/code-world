@@ -1145,6 +1145,10 @@ interface Bullet {
   // expiry. Plain bullets ignore this field.
   isGrenade?: boolean
   grenadeRadius?: number
+  // True only for a heavy's hand-thrown anti-tank grenade. Gates the 3x
+  // tank-damage multiplier so enemy *tank shells* (also explosive grenades)
+  // don't inherit it.
+  isAntiTankGrenade?: boolean
 }
 
 interface GoalMarker {
@@ -7044,7 +7048,12 @@ export default function ThreeWorld({
       // damage the player; player-thrown grenades damage enemies. Called from
       // every isGrenade projectile's impact / fuse-expiry path so the toss →
       // land → AOE → damage chain runs from one place.
-      function detonateGrenade(center: THREE.Vector3, radius: number, fromEnemy: boolean) {
+      function detonateGrenade(
+        center: THREE.Vector3,
+        radius: number,
+        fromEnemy: boolean,
+        antiTank = false,
+      ) {
         center.y = Math.max(0.4, center.y)
         spawnExplosion(center)
         lastNoiseRef.current = { x: center.x, z: center.z, expires: Date.now() + 4000 }
@@ -7058,9 +7067,9 @@ export default function ThreeWorld({
             const dmg = Math.max(15, Math.floor(60 * (1 - dpDist / radius)))
             if (drivingRef.current && activeVehicle) {
               // Riding: the vehicle soaks the blast (player shielded). Explosive
-              // → bypasses tank armor, and anti-tank grenades hit for 3x so a
-              // heavy lobbing a nade is a genuine threat to a tank.
-              const vDmg = activeVehicle.kind === "tank" ? dmg * TANK_GRENADE_MULT : dmg
+              // → bypasses tank armor. Only a heavy's anti-tank grenade gets the
+              // 3x multiplier — enemy tank shells (also explosive) stay 1x.
+              const vDmg = activeVehicle.kind === "tank" && antiTank ? dmg * TANK_GRENADE_MULT : dmg
               damageActiveVehicle(vDmg, "explosive")
             } else {
               playerHpRef.current = Math.max(0, playerHpRef.current - dmg)
@@ -8116,7 +8125,12 @@ export default function ThreeWorld({
             const ground = b.mesh.position.y <= 0.15
             const inWall = pointInsideWall(b.mesh.position.x, b.mesh.position.y, b.mesh.position.z)
             if (ground || inWall) {
-              detonateGrenade(b.mesh.position.clone(), b.grenadeRadius ?? 4, b.isEnemy)
+              detonateGrenade(
+                b.mesh.position.clone(),
+                b.grenadeRadius ?? 4,
+                b.isEnemy,
+                b.isAntiTankGrenade ?? false,
+              )
               refs.scene.remove(b.mesh)
               b.mesh.geometry.dispose()
               refs.bullets.splice(i, 1)
@@ -8177,7 +8191,12 @@ export default function ThreeWorld({
             // Fuse-expired grenade air-bursts (covers the rare "stays
             // airborne the whole fuse" case — apartment-balcony-trajectory).
             if (b.isGrenade) {
-              detonateGrenade(b.mesh.position.clone(), b.grenadeRadius ?? 4, b.isEnemy)
+              detonateGrenade(
+                b.mesh.position.clone(),
+                b.grenadeRadius ?? 4,
+                b.isEnemy,
+                b.isAntiTankGrenade ?? false,
+              )
             } else if (!b.isEnemy) {
               spawnExplosion(b.mesh.position.clone(), true)
             }
@@ -8683,6 +8702,7 @@ export default function ThreeWorld({
                   damage: 0, // damage comes from the AOE on detonation
                   isGrenade: true,
                   grenadeRadius: 4.5,
+                  isAntiTankGrenade: true, // heavy anti-tank nade → 3x vs tank
                 })
               }
               // Shoot while chasing (alert range fire)
