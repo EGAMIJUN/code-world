@@ -5726,7 +5726,9 @@ export default function ThreeWorld({
           nextFire: 0,
           evadeYaw: 0,
           wpIndex: 0,
-          noCrashUntil: Date.now() + (y > 5 ? 0 : 4500),
+          // Altitude spawns get a short grace so the bounds / collision check
+          // can't kill them on the very first frame; ground launches get longer.
+          noCrashUntil: Date.now() + (y > 5 ? 3000 : 4500),
         })
       }
 
@@ -5994,11 +5996,15 @@ export default function ThreeWorld({
       let skyPlayerJetRespawnAt = 0
       // Spawn `count` red jets at altitude (150–300m), scattered over the arena.
       function skySpawnSquadron(count: number) {
+        // Keep spawns inside the playable box (with margin) — a jet generated
+        // outside WORLD_MIN…WORLD_MAX is killed instantly by the bounds check.
+        const lo = WORLD_MIN + 50
+        const hi = WORLD_MAX - 50
         for (let i = 0; i < count; i++) {
           const ang = Math.random() * Math.PI * 2
           const rad = 130 + Math.random() * 220
-          const x = 35 + Math.cos(ang) * rad
-          const z = 150 + Math.sin(ang) * rad
+          const x = Math.max(lo, Math.min(hi, 35 + Math.cos(ang) * rad))
+          const z = Math.max(lo, Math.min(hi, 150 + Math.sin(ang) * rad))
           const y = 150 + Math.random() * 150
           spawnEnemyJet(x, z, ang + Math.PI, y)
         }
@@ -6051,7 +6057,11 @@ export default function ThreeWorld({
         if (parked < 2) {
           if (skyPlayerJetRespawnAt === 0) skyPlayerJetRespawnAt = now + 60000
           else if (now > skyPlayerJetRespawnAt) {
-            spawnVehicle(-10 + parked * 12, 133 + parked * 4, -Math.PI / 2, 0x33557a, "jet")
+            // Refill the full deficit in one cycle so "≥2 parked" is restored
+            // immediately rather than one jet per 60s.
+            for (let s = parked; s < 2; s++) {
+              spawnVehicle(-10 + s * 12, 133 + s * 4, -Math.PI / 2, 0x33557a, "jet")
+            }
             skyPlayerJetRespawnAt = 0
           }
         } else {

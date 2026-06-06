@@ -179,7 +179,7 @@ export default function WorldClient() {
             { id: "urban" as GameMap, label: t.mode.urban, color: "#7a8aa0" },
             { id: "desert" as GameMap, label: t.mode.desert, color: "#c9a064" },
             { id: "snow" as GameMap, label: t.mode.snow, color: "#cce8ff" },
-            { id: "sky" as GameMap, label: "SKY ✈", color: "#7ec8ff" },
+            { id: "sky" as GameMap, label: t.mode.sky, color: "#7ec8ff" },
           ].map((m) => {
             const sel = mapId === m.id
             return (

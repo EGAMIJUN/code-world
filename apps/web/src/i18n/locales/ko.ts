@@ -65,6 +65,7 @@ export const ko: typeof ja = {
     urban: "도시",
     desert: "사막",
     snow: "설산",
+    sky: "공역 ✈",
     start: "▶ 출격",
     vote: "투표",
   },
