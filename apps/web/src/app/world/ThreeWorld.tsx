@@ -385,9 +385,8 @@ const MAP_OBJECTS: [number, number, number, number, number][] = [
   [68, 68, 1, 14, 5],
   [83, 62, 1, 14, 5],
   [68, 85, 16, 1, 5],
-  // Trees
-  [70, 7, 1, 1, 4],
-  [76, 9, 1, 1, 4],
+  // Trees ([70,7] and [76,9] removed — they fell inside the relocated
+  // outdoor-NE mansion footprint at x70–82, z7–19).
   [82, 6, 1, 1, 4],
   [88, 9, 1, 1, 4],
   [72, 20, 1, 1, 4],
@@ -723,13 +722,13 @@ const SPAWN_POINTS = [
   { x: 38, z: 75 }, // Industrial south-row interior
   // Mansion interiors (ground floor) — 2 each so bots "occupy" the buildings
   // and the player clears rooms before heading upstairs. Match makeMansion
-  // footprints: A (14,2) / B (1,17) / C (1,71).
-  { x: 18, z: 6 }, // Mansion A
-  { x: 23, z: 12 }, // Mansion A
-  { x: 5, z: 21 }, // Mansion B
-  { x: 10, z: 27 }, // Mansion B
-  { x: 5, z: 75 }, // Mansion C
-  { x: 10, z: 81 }, // Mansion C
+  // footprints: A (70,7) / B (0.5,59) / C (0.5,31).
+  { x: 74, z: 11 }, // Mansion A
+  { x: 76, z: 15 }, // Mansion A
+  { x: 3, z: 64 }, // Mansion B
+  { x: 5, z: 68 }, // Mansion B
+  { x: 3, z: 35 }, // Mansion C
+  { x: 5, z: 40 }, // Mansion C
   // ── Open-world district spawns (PR-B) ──────────────────────────────────
   // HARBOR (south): in the open apron between the container yards and
   // warehouses (on land, north of the waterline at z≈265). Kept clear of
@@ -3467,30 +3466,35 @@ export default function ThreeWorld({
         ALL_AABBS.push({ x1: x, z1: z, x2: x + w, z2: z + d, h: -1 })
       }
 
-      // Three mansions in empty city lots (surveyed clear of roads / props):
+      // Three mansions in empty lots, surveyed clear of the observation towers
+      // (centres 14,14 / 14,84 / 84,44 / 86,86 — legs splay ±7, kept ≥13 m
+      // away), the avenue (z 44–58), and every existing building / prop.
+      //  A: outdoor NE cell, north of the z≈28 trench (two trees removed below)
+      //  B: west strip, south of the avenue (clear of the S-flank at x≥10)
+      //  C: west strip, north of the avenue (clear of the N-flank at x≥10)
       makeMansion({
-        x: 14,
-        z: 2,
+        x: 70,
+        z: 7,
         w: 12,
-        d: 13,
+        d: 12,
         levels: 4,
         bldMat: concreteMat,
         roofMat: concreteRoofMat,
       })
       makeMansion({
-        x: 1,
-        z: 17,
-        w: 12,
-        d: 13,
+        x: 0.5,
+        z: 59,
+        w: 9,
+        d: 12,
         levels: 5,
         bldMat: concreteMat,
         roofMat: concreteRoofMat,
       })
       makeMansion({
-        x: 1,
-        z: 71,
-        w: 12,
-        d: 13,
+        x: 0.5,
+        z: 31,
+        w: 9,
+        d: 12,
         levels: 6,
         bldMat: concreteMat,
         roofMat: concreteRoofMat,
