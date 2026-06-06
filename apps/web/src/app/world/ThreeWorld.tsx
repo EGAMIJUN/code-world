@@ -12864,6 +12864,9 @@ export default function ThreeWorld({
                   onPointerLeave={() => {
                     jetGunHeldRef.current = false
                   }}
+                  onPointerCancel={() => {
+                    jetGunHeldRef.current = false
+                  }}
                   style={{
                     position: "absolute",
                     bottom: "6rem",
@@ -12922,6 +12925,9 @@ export default function ThreeWorld({
                   onPointerLeave={() => {
                     jetThrottleRef.current = 0
                   }}
+                  onPointerCancel={() => {
+                    jetThrottleRef.current = 0
+                  }}
                   style={{
                     position: "absolute",
                     bottom: "10rem",
@@ -12952,6 +12958,9 @@ export default function ThreeWorld({
                     jetThrottleRef.current = 0
                   }}
                   onPointerLeave={() => {
+                    jetThrottleRef.current = 0
+                  }}
+                  onPointerCancel={() => {
                     jetThrottleRef.current = 0
                   }}
                   style={{
