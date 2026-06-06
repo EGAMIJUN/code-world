@@ -5246,9 +5246,11 @@ export default function ThreeWorld({
         v.hp = Math.max(0, v.hp - applied)
         setVehicleHp(Math.round(v.hp))
         if (v.hp <= 0) {
-          // A downed jet auto-ejects the pilot under a parachute; ground rides
-          // just blow up and dump the player beside the wreck.
-          if (v.kind === "jet") ejectFromJet(false)
+          // A downed jet auto-ejects the pilot under a parachute. If it was
+          // airborne, the empty jet keeps flying on its last heading and blows
+          // up when it finally hits the ground / a building (continueCrash);
+          // if it was already low / taxiing, it just detonates in place.
+          if (v.kind === "jet") ejectFromJet((v.y ?? 0) > 3)
           else destroyActiveVehicle()
         }
       }
@@ -5475,15 +5477,8 @@ export default function ThreeWorld({
       })
       const aaShellMat = new THREE.MeshBasicMaterial({ color: 0xffdd66 })
       const aaShellGeo = new THREE.SphereGeometry(0.26, 6, 5)
-      const chuteMat = new THREE.MeshStandardMaterial({
-        color: 0xe8e8ee,
-        roughness: 0.85,
-        metalness: 0,
-        side: THREE.DoubleSide,
-        emissive: 0x222230,
-        emissiveIntensity: 0.2,
-      })
-      const chuteCordMat = new THREE.MeshBasicMaterial({ color: 0x888888 })
+      // Canopy materials are created per-deploy (in openChute) so closeChute can
+      // dispose them along with the geometry without affecting a later chute.
 
       interface AAGun {
         group: THREE.Group
@@ -5827,14 +5822,23 @@ export default function ThreeWorld({
       // ── Parachute ──
       function openChute() {
         const g = new THREE.Group()
+        const canopyMat = new THREE.MeshStandardMaterial({
+          color: 0xe8e8ee,
+          roughness: 0.85,
+          metalness: 0,
+          side: THREE.DoubleSide,
+          emissive: 0x222230,
+          emissiveIntensity: 0.2,
+        })
+        const cordMat = new THREE.MeshBasicMaterial({ color: 0x888888 })
         const canopy = new THREE.Mesh(
           new THREE.SphereGeometry(1.6, 14, 8, 0, Math.PI * 2, 0, Math.PI / 2),
-          chuteMat,
+          canopyMat,
         )
         canopy.position.y = 2.6
         g.add(canopy)
         for (const a of [0, Math.PI / 2, Math.PI, (3 * Math.PI) / 2]) {
-          const cord = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, 2.4, 4), chuteCordMat)
+          const cord = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, 2.4, 4), cordMat)
           cord.position.set(Math.cos(a) * 1.2, 1.4, Math.sin(a) * 1.2)
           cord.rotation.x = Math.cos(a) * 0.25
           cord.rotation.z = Math.sin(a) * 0.25
@@ -5846,8 +5850,17 @@ export default function ThreeWorld({
         setParachuting(true)
       }
       function closeChute() {
-        if (parachuteMeshRef.current) {
-          scene.remove(parachuteMeshRef.current)
+        const g = parachuteMeshRef.current
+        if (g) {
+          // Free the per-deploy geometry + materials before dropping the group.
+          g.traverse((c) => {
+            if (c instanceof THREE.Mesh) {
+              c.geometry.dispose()
+              if (Array.isArray(c.material)) for (const m of c.material) m.dispose()
+              else c.material.dispose()
+            }
+          })
+          scene.remove(g)
           parachuteMeshRef.current = null
         }
         parachutePhaseRef.current = "none"
