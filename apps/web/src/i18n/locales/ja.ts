@@ -63,6 +63,7 @@ export const ja = {
     urban: "URBAN",
     desert: "DESERT",
     snow: "SNOW",
+    sky: "空域 ✈",
     start: "▶ DEPLOY",
     vote: "投票",
   },

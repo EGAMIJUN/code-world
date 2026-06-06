@@ -1406,7 +1406,7 @@ const BOT_NAMES = ["Bot_α", "Bot_β", "Bot_γ", "Bot_δ", "Bot_ε", "Bot_ζ", "
 
 export interface ThreeWorldProps {
   mode?: "wave_defense" | "ffa" | "tdm" | "zombie" | "invasion"
-  mapId?: "urban" | "desert" | "snow"
+  mapId?: "urban" | "desert" | "snow" | "sky"
   botCount?: number
   botDifficulty?: BotDifficulty
   onExit?: () => void
@@ -1688,7 +1688,10 @@ export default function ThreeWorld({
   const [areaBanner, setAreaBanner] = useState<{ id: AreaId; key: number } | null>(null)
   const [areaBannerVisible, setAreaBannerVisible] = useState(false)
   // Mission / wave state
-  const [showMissionSelect, setShowMissionSelect] = useState(mode === "wave_defense")
+  // SKY has no ground missions — skip the mission picker and drop straight in.
+  const [showMissionSelect, setShowMissionSelect] = useState(
+    mode === "wave_defense" && mapId !== "sky",
+  )
   const [selectedMission, setSelectedMission] = useState<MissionId | null>(null)
   const [currentWave, setCurrentWave] = useState(0)
   const [waveMessage, setWaveMessage] = useState<string | null>(null)
@@ -1824,23 +1827,31 @@ export default function ThreeWorld({
 
       // ── Scene ──────────────────────────────────────────────────────────────
       const scene = new THREE.Scene()
+      // SKY: a dedicated aerial-combat arena — you fight enemy jets in a high,
+      // bright sky over the existing world (which reads as the distant terrain).
+      const isSky = mapId === "sky"
       const theme =
         modeRef.current === "invasion"
           ? // Invasion: an ominous blood-red sky regardless of map.
             { sky: 0x3a1812, fog: 0x33140e, ambient: 0xffcaa8, sun: 0xff7a4a }
-          : mapId === "desert"
-            ? { sky: 0xf0c887, fog: 0xe6c89a, ambient: 0xffe9c0, sun: 0xffd58a }
-            : mapId === "snow"
-              ? { sky: 0xdce8f0, fog: 0xeaf2f8, ambient: 0xeef5ff, sun: 0xffffff }
-              : { sky: 0x87ceeb, fog: 0xc0d8f0, ambient: 0xd4e8ff, sun: 0xfff4cc }
+          : isSky
+            ? { sky: 0x4a9fe0, fog: 0xbfe0f5, ambient: 0xdfeeff, sun: 0xffffe8 }
+            : mapId === "desert"
+              ? { sky: 0xf0c887, fog: 0xe6c89a, ambient: 0xffe9c0, sun: 0xffd58a }
+              : mapId === "snow"
+                ? { sky: 0xdce8f0, fog: 0xeaf2f8, ambient: 0xeef5ff, sun: 0xffffff }
+                : { sky: 0x87ceeb, fog: 0xc0d8f0, ambient: 0xd4e8ff, sun: 0xfff4cc }
       scene.background = new THREE.Color(theme.sky)
       // Snow gets a tighter fog band ("軽いフォグ" — slightly hazy whiteout
       // without crushing visibility); desert/urban keep the long open draw.
       // Fog distances stretched for the 6× larger open world so distant
       // areas (HARBOR / INDUSTRIAL) still fade out gracefully instead of
       // popping into view, while keeping the near band hazy on snow.
-      scene.fog =
-        mapId === "snow" ? new THREE.Fog(theme.fog, 80, 420) : new THREE.Fog(theme.fog, 140, 680)
+      scene.fog = isSky
+        ? new THREE.Fog(theme.fog, 400, 1800) // open, hazy horizon for the sky arena
+        : mapId === "snow"
+          ? new THREE.Fog(theme.fog, 80, 420)
+          : new THREE.Fog(theme.fog, 140, 680)
 
       // ── Per-map material palette ───────────────────────────────────────────
       // The collision footprints (ALL_AABBS / floors / climb zones) are shared
@@ -1914,7 +1925,7 @@ export default function ThreeWorld({
         80,
         container.clientWidth / container.clientHeight,
         0.1,
-        mapId === "snow" ? 500 : 800,
+        isSky ? 2400 : mapId === "snow" ? 500 : 800,
       )
       camera.rotation.order = "YXZ"
 
@@ -1974,6 +1985,35 @@ export default function ThreeWorld({
       const fillLight = new THREE.DirectionalLight(0xb0c8ff, 0.45)
       fillLight.position.set(-40, 30, -20)
       scene.add(fillLight)
+
+      // SKY arena: a layer of flat cloud quads at altitude for depth cues. One
+      // shared geometry + material (low draw cost, no lights). Deterministic
+      // scatter so the layer reads the same every match.
+      if (isSky) {
+        const cloudMat = new THREE.MeshBasicMaterial({
+          color: 0xffffff,
+          transparent: true,
+          opacity: 0.55,
+          depthWrite: false,
+          fog: true,
+        })
+        const cloudGeo = new THREE.PlaneGeometry(1, 1)
+        for (let i = 0; i < 18; i++) {
+          const cloud = new THREE.Mesh(cloudGeo, cloudMat)
+          const ang = (i / 18) * Math.PI * 2
+          const rad = 200 + ((i * 137) % 600)
+          const s = 120 + ((i * 53) % 160)
+          cloud.scale.set(s, s * 0.6, 1)
+          cloud.rotation.x = -Math.PI / 2
+          cloud.position.set(
+            Math.cos(ang) * rad + 50,
+            180 + ((i * 71) % 260),
+            Math.sin(ang) * rad + 90,
+          )
+          cloud.renderOrder = -1
+          scene.add(cloud)
+        }
+      }
 
       // ── Procedural noise textures ──────────────────────────────────────────
       // Pure flat-colored boxes shimmer at distance (moire from mipmap aliasing
@@ -4667,7 +4707,8 @@ export default function ThreeWorld({
       // visible dead-ahead. Buildings flanking at z=32–44 (north) and
       // z=57–70 (south) sit tight against the avenue (z≈44–57) so they
       // read as "the city's street walls" — no more "off in the distance".
-      const focalPoint = new THREE.Vector3(4, 0, 50)
+      // SKY arena spawns the player on the airbase apron beside the runway.
+      const focalPoint = isSky ? new THREE.Vector3(20, 0, 126) : new THREE.Vector3(4, 0, 50)
       const camState = { yaw: -Math.PI / 2, pitch: 0 } // facing +X (east)
 
       function clampPitch(p: number) {
@@ -5095,7 +5136,15 @@ export default function ThreeWorld({
       // the rest staged in the HARBOR (south) and INDUSTRIAL (north) districts
       // and on the cross streets, so there's always a ride within reach. They
       // sit on the V_ROADS (x=50/-110/210) and H_ROADS (z=50/-120/200) lanes.
-      if (modeRef.current !== "ffa" && modeRef.current !== "tdm") {
+      if (isSky) {
+        // SKY: only jets. Four boardable fighters staged along the runway, in
+        // every mode (you always need a ride). The sky-arena manager respawns
+        // them so the apron is never empty.
+        spawnVehicle(-10, 133, -Math.PI / 2, 0x33557a, "jet")
+        spawnVehicle(-10, 139, -Math.PI / 2, 0x3a6a8a, "jet")
+        spawnVehicle(2, 132, -Math.PI / 2, 0x335a7a, "jet")
+        spawnVehicle(2, 140, -Math.PI / 2, 0x2f6f8f, "jet")
+      } else if (modeRef.current !== "ffa" && modeRef.current !== "tdm") {
         // City avenue (z≈50)
         spawnVehicle(14, 50, -Math.PI / 2, 0xbb2222)
         spawnVehicle(66, 49, -Math.PI / 2, 0xddaa22)
@@ -5655,19 +5704,20 @@ export default function ThreeWorld({
         }
       }
 
-      // Spawn an enemy jet at the runway's west end with a short climb-out grace.
-      function spawnEnemyJet(x: number, z: number, heading: number) {
+      // Spawn an enemy jet. y=0 launches off the runway (climb-out grace); a
+      // positive y drops it straight into the fight at altitude (SKY arena).
+      function spawnEnemyJet(x: number, z: number, heading: number, y = 0) {
         const group = makeJet(0x992222)
-        group.position.set(x, 0, z)
+        group.position.set(x, y, z)
         group.rotation.y = heading
         scene.add(group)
         enemyJets.push({
           group,
           x,
-          y: 0,
+          y,
           z,
           heading,
-          pitch: 0.32,
+          pitch: y > 5 ? 0 : 0.32,
           speed: ENEMY_JET_SPEED,
           hp: ENEMY_JET_HP,
           dead: false,
@@ -5676,7 +5726,9 @@ export default function ThreeWorld({
           nextFire: 0,
           evadeYaw: 0,
           wpIndex: 0,
-          noCrashUntil: Date.now() + 4500,
+          // Altitude spawns get a short grace so the bounds / collision check
+          // can't kill them on the very first frame; ground launches get longer.
+          noCrashUntil: Date.now() + (y > 5 ? 3000 : 4500),
         })
       }
 
@@ -5727,7 +5779,9 @@ export default function ThreeWorld({
           } else if (ej.state === "patrol" || !jet) {
             const wp = ENEMY_JET_WAYPOINTS[ej.wpIndex % ENEMY_JET_WAYPOINTS.length] ?? [0, 40, 150]
             tx = wp[0]
-            ty = wp[1]
+            // SKY: patrol the high arena (180–260m) instead of the low harbor
+            // circuit so bandits don't dive into the ground between waypoints.
+            ty = isSky ? 180 + (ej.wpIndex % 3) * 40 : wp[1]
             tz = wp[2]
             if (Math.hypot(tx - ej.x, tz - ej.z) < 14) ej.wpIndex++
           } else {
@@ -5865,6 +5919,14 @@ export default function ThreeWorld({
         }
         parachutePhaseRef.current = "none"
         setParachuting(false)
+        // SKY: a downed pilot returns to the airbase apron to grab a fresh jet.
+        if (isSky) {
+          focalPoint.x = 20
+          focalPoint.z = 126
+          focalPoint.y = 0
+          camState.pitch = 0
+          updateCamera()
+        }
       }
 
       // Eject from the jet. makeCrashing=true (manual) lets the empty jet fly on
@@ -5925,11 +5987,97 @@ export default function ThreeWorld({
         cameraShakeRef.current.intensity = 5
       }
 
+      // ── SKY arena manager: enemy-jet waves / endless respawns + keeping the
+      //    apron stocked with boardable player jets. Runs only on the SKY map.
+      let skyWaveNum = 0
+      let skyWaveActive = false
+      let skyWaveInterUntil = 0
+      let skyEnemyRespawnAt = 0
+      let skyPlayerJetRespawnAt = 0
+      // Spawn `count` red jets at altitude (150–300m), scattered over the arena.
+      function skySpawnSquadron(count: number) {
+        // Keep spawns inside the playable box (with margin) — a jet generated
+        // outside WORLD_MIN…WORLD_MAX is killed instantly by the bounds check.
+        const lo = WORLD_MIN + 50
+        const hi = WORLD_MAX - 50
+        for (let i = 0; i < count; i++) {
+          const ang = Math.random() * Math.PI * 2
+          const rad = 130 + Math.random() * 220
+          const x = Math.max(lo, Math.min(hi, 35 + Math.cos(ang) * rad))
+          const z = Math.max(lo, Math.min(hi, 150 + Math.sin(ang) * rad))
+          const y = 150 + Math.random() * 150
+          spawnEnemyJet(x, z, ang + Math.PI, y)
+        }
+      }
+      function updateSkyArena() {
+        const now = Date.now()
+        let aliveJets = 0
+        for (const e of enemyJets) if (!e.dead) aliveJets++
+        if (modeRef.current === "wave_defense") {
+          if (skyWaveActive) {
+            if (aliveJets === 0) {
+              skyWaveActive = false
+              skyWaveInterUntil = now + 15000 // 15s repair interval
+              setWaveMessage(`WAVE ${skyWaveNum} CLEAR — 次の編隊まで15秒`)
+            }
+          } else if (now > skyWaveInterUntil) {
+            skyWaveNum++
+            const count = 2 + skyWaveNum // wave1:3, wave2:4, wave3:5, …
+            skySpawnSquadron(count)
+            skyWaveActive = true
+            setCurrentWave(skyWaveNum)
+            setWaveMessage(`WAVE ${skyWaveNum} — 敵編隊 ${count} 機`)
+            setTimeout(() => setWaveMessage(null), 3000)
+          }
+        } else {
+          // Endless (ffa / tdm / others): keep a flight of 4 up, 30s respawn.
+          const TARGET = 4
+          if (aliveJets < TARGET) {
+            if (skyEnemyRespawnAt === 0) skyEnemyRespawnAt = now + 30000
+            else if (now > skyEnemyRespawnAt) {
+              skySpawnSquadron(TARGET - aliveJets)
+              skyEnemyRespawnAt = 0
+            }
+          } else {
+            skyEnemyRespawnAt = 0
+          }
+        }
+        // Keep ≥2 boardable jets parked at the apron; refill 60s after running low.
+        let parked = 0
+        for (const v of vehicles) {
+          if (
+            v.kind === "jet" &&
+            !v.dead &&
+            (v.y ?? 0) < 2 &&
+            Math.abs(v.speed) < 2 &&
+            Math.hypot(v.x - 20, v.z - 136) < 70
+          )
+            parked++
+        }
+        if (parked < 2) {
+          if (skyPlayerJetRespawnAt === 0) skyPlayerJetRespawnAt = now + 60000
+          else if (now > skyPlayerJetRespawnAt) {
+            // Refill the full deficit in one cycle so "≥2 parked" is restored
+            // immediately rather than one jet per 60s.
+            for (let s = parked; s < 2; s++) {
+              spawnVehicle(-10 + s * 12, 133 + s * 4, -Math.PI / 2, 0x33557a, "jet")
+            }
+            skyPlayerJetRespawnAt = 0
+          }
+        } else {
+          skyPlayerJetRespawnAt = 0
+        }
+      }
+
       // Place the air-defence network + enemy jets (single-player modes only —
       // PvP doesn't sync vehicles/jets). AA guns: 2 on warehouse roofs, 1 by the
       // control tower, 1 at the container-yard edge. Enemy jets scramble from
-      // the runway's west end.
-      if (modeRef.current !== "ffa" && modeRef.current !== "tdm") {
+      // the runway's west end. On SKY, the arena manager owns enemy spawns.
+      if (isSky) {
+        // Initial bandit flight at altitude; waves / respawns continue from here.
+        skySpawnSquadron(modeRef.current === "wave_defense" ? 0 : 4)
+        if (modeRef.current === "wave_defense") skyWaveInterUntil = Date.now() + 4000
+      } else if (modeRef.current !== "ffa" && modeRef.current !== "tdm") {
         makeAAGun(26, 235, 6.0) // west warehouse roof
         makeAAGun(74, 236, 6.0) // central warehouse roof
         makeAAGun(16, 122, 0) // beside the control tower
@@ -6039,6 +6187,11 @@ export default function ThreeWorld({
                 if (ej.hp <= 0) {
                   scoreRef.current += 1200
                   setScore(scoreRef.current)
+                  // On SKY, a downed bandit counts as a kill (FFA/TDM scoring).
+                  if (isSky) {
+                    killsRef.current += 1
+                    setKills(killsRef.current)
+                  }
                   killEnemyJet(ej)
                 } else {
                   // Took a hit → break off and evade for a beat.
@@ -7542,6 +7695,9 @@ export default function ThreeWorld({
       }
 
       function spawnMission(missionId: MissionId) {
+        // SKY has no ground infantry / missions — the sky-arena manager owns
+        // all enemy (jet) spawning, so skip the whole infantry mission setup.
+        if (isSky) return
         clearEnemies()
         clearGoalMarkers()
         selectedMissionRef.current = missionId
@@ -7835,7 +7991,7 @@ export default function ThreeWorld({
       }
 
       // Auto-spawn bots for FFA/TDM modes (wave_defense uses mission select).
-      if ((modeRef.current === "ffa" || modeRef.current === "tdm") && botCount > 0) {
+      if (!isSky && (modeRef.current === "ffa" || modeRef.current === "tdm") && botCount > 0) {
         spawnBots(botCount, botDifficulty, modeRef.current)
         showNotification(
           `${botCount} BOT${botCount === 1 ? "" : "S"} ENGAGED · ${botDifficulty.toUpperCase()}`,
@@ -7843,7 +7999,7 @@ export default function ThreeWorld({
       }
 
       // Zombie mode: kick off wave 1 immediately, flag active after the intro.
-      if (modeRef.current === "zombie") {
+      if (!isSky && modeRef.current === "zombie") {
         zombieWaveRef.current = 1
         zombieActiveRef.current = false
         setCurrentWave(1)
@@ -7858,7 +8014,7 @@ export default function ThreeWorld({
 
       // Invasion mode: a calm opening, then the first rocket falls ~15s in and
       // terraformer waves begin. Waves escalate endlessly with a lull between.
-      if (modeRef.current === "invasion") {
+      if (!isSky && modeRef.current === "invasion") {
         invasionWaveRef.current = 0
         invasionActiveRef.current = false
         invasionNextStrikeRef.current = Date.now() + 15000
@@ -8855,6 +9011,7 @@ export default function ThreeWorld({
         updateAAShells(dt)
         updateEnemyJets(dt)
         updateCrashJets(dt)
+        if (isSky && gamePhaseRef.current === "playing") updateSkyArena()
 
         // ── Enemy-driven vehicles: spawn manager + per-frame AI ──────────────
         // Only in Wave Defense / missions (FFA/TDM have no vehicles; Zombie has
@@ -10544,7 +10701,9 @@ export default function ThreeWorld({
             // the minimap is a moving window centered on the player: VIEW world
             // units span the canvas, player fixed at the center, north = up.
             const W = mcanvas.width
-            const VIEW = 96 // world units shown across the minimap
+            // SKY zooms the minimap out to an aviation-radar scale so the whole
+            // dogfight (jets spread over hundreds of metres) fits the dial.
+            const VIEW = isSky ? 520 : 96 // world units shown across the minimap
             const SCALE = W / VIEW
             const px = refs.focalPoint.x
             const pz = refs.focalPoint.z
@@ -10686,12 +10845,25 @@ export default function ThreeWorld({
               ctx.fillStyle = "#ff9933"
               ctx.fillRect(cx - 2.5, cz - 2.5, 5, 5)
             }
+            // Enemy jets: red triangle. On SKY, tint by altitude relative to the
+            // player's jet — brighter = above you, darker = below you.
+            const playerJetY =
+              isSky && drivingRef.current && activeVehicle?.kind === "jet"
+                ? (activeVehicle.y ?? 0)
+                : null
             for (const ej of enemyJets) {
               if (ej.dead) continue
               const cx = mx(ej.x)
               const cz = mz(ej.z)
               if (!inView(cx, cz)) continue
-              ctx.fillStyle = "#ff3366"
+              ctx.fillStyle =
+                playerJetY === null
+                  ? "#ff3366"
+                  : ej.y > playerJetY + 12
+                    ? "#ff8888" // above
+                    : ej.y < playerJetY - 12
+                      ? "#aa1133" // below
+                      : "#ff3366" // co-altitude
               ctx.beginPath()
               ctx.moveTo(cx, cz - 3.5)
               ctx.lineTo(cx + 3, cz)

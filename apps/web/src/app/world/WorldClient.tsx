@@ -26,7 +26,7 @@ const ThreeWorld = dynamic(() => import("./ThreeWorld"), {
 })
 
 export type GameMode = "wave_defense" | "ffa" | "tdm" | "zombie" | "invasion"
-export type GameMap = "urban" | "desert" | "snow"
+export type GameMap = "urban" | "desert" | "snow" | "sky"
 export type BotDifficulty = "easy" | "normal" | "hard"
 
 const STORAGE_MODE = "cw_mode"
@@ -49,7 +49,7 @@ export default function WorldClient() {
       const bc = localStorage.getItem(STORAGE_BOT_COUNT)
       const bd = localStorage.getItem(STORAGE_BOT_DIFF) as BotDifficulty | null
       if (m && ["wave_defense", "ffa", "tdm", "zombie", "invasion"].includes(m)) setMode(m)
-      if (mp && ["urban", "desert", "snow"].includes(mp)) setMapId(mp)
+      if (mp && ["urban", "desert", "snow", "sky"].includes(mp)) setMapId(mp)
       if (bc !== null) {
         const n = Number.parseInt(bc, 10)
         if (Number.isFinite(n) && n >= 0 && n <= 9) setBotCount(n)
@@ -179,6 +179,7 @@ export default function WorldClient() {
             { id: "urban" as GameMap, label: t.mode.urban, color: "#7a8aa0" },
             { id: "desert" as GameMap, label: t.mode.desert, color: "#c9a064" },
             { id: "snow" as GameMap, label: t.mode.snow, color: "#cce8ff" },
+            { id: "sky" as GameMap, label: t.mode.sky, color: "#7ec8ff" },
           ].map((m) => {
             const sel = mapId === m.id
             return (

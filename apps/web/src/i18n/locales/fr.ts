@@ -72,6 +72,7 @@ export const fr: typeof ja = {
     urban: "URBAIN",
     desert: "DÉSERT",
     snow: "NEIGE",
+    sky: "CIEL ✈",
     start: "▶ DÉPLOYER",
     vote: "Voter",
   },

@@ -65,6 +65,7 @@ export const zh: typeof ja = {
     urban: "都市",
     desert: "沙漠",
     snow: "雪山",
+    sky: "空域 ✈",
     start: "▶ 出战",
     vote: "投票",
   },
