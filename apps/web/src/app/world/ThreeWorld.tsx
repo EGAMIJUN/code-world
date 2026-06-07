@@ -8767,7 +8767,10 @@ export default function ThreeWorld({
         const dir = fwd3.clone().normalize()
         const start = new THREE.Vector3(
           focalPoint.x + dir.x * 1.2,
-          EYE_HEIGHT + dir.y * 1.2,
+          // Include the player's own altitude so rockets fired from a roof /
+          // ledge launch at eye level there — not from the ground (immediate
+          // self-collision).
+          focalPoint.y + EYE_HEIGHT + dir.y * 1.2,
           focalPoint.z + dir.z * 1.2,
         )
         const mesh = new THREE.Mesh(rpgRocketGeo, rpgRocketMat)
@@ -8808,7 +8811,18 @@ export default function ThreeWorld({
         const idx = WEAPONS.findIndex((w) => w.id === "rpg")
         if (idx < 0) return
         weaponAmmoRef.current[idx] = 1
-        setUnlockedWeapons((s) => (s.has("rpg") ? s : new Set([...s, "rpg"])))
+        setUnlockedWeapons((s) => {
+          if (s.has("rpg")) return s
+          const next = new Set([...s, "rpg"])
+          // Persist so the launcher survives a page refresh (startup reads this
+          // same key into unlockedWeapons).
+          try {
+            localStorage.setItem("fps_unlocked_weapons", JSON.stringify([...next]))
+          } catch {
+            /* ignore */
+          }
+          return next
+        })
         // Auto-equip the launcher (mirrors the inline switch the weapon UI uses).
         weaponAmmoRef.current[currentWeaponIdxRef.current] = ammoRef.current
         currentWeaponIdxRef.current = idx
