@@ -2451,14 +2451,24 @@ export default function ThreeWorld({
       // Ambient was 2.4 — washed out shadows entirely. Drop it to 0.45 and
       // let a HemisphereLight handle the sky-vs-ground gradient (gives
       // "outdoor day" feel without crushing shadow contrast).
-      // HUNT runs at night: crush the ambient/sun so the arena reads dark and
-      // the transfer-room interior stays moody (lit by the glowing orb only).
-      scene.add(new THREE.AmbientLight(theme.ambient, isHunt ? 0.32 : 0.45))
-      const hemi = new THREE.HemisphereLight(theme.sky, 0x4a4030, isHunt ? 0.3 : 0.55)
+      // HUNT runs at night but must stay legible: a brighter blue-white ambient
+      // + a cool moonlight key keep enemies/terrain visible while preserving the
+      // night mood (the transfer-room interior reads off the glowing orb too).
+      scene.add(
+        isHunt
+          ? new THREE.AmbientLight(0x8899bb, 0.35)
+          : new THREE.AmbientLight(theme.ambient, 0.45),
+      )
+      const hemi = new THREE.HemisphereLight(
+        isHunt ? 0x556688 : theme.sky,
+        0x4a4030,
+        isHunt ? 0.45 : 0.55,
+      )
       hemi.position.set(0, 50, 0)
       scene.add(hemi)
-      const sun = new THREE.DirectionalLight(theme.sun, isHunt ? 0.7 : 2.8)
-      sun.position.set(60, 80, 40)
+      // HUNT: the directional is a cool moonlight key (0xaabbcc) from high up.
+      const sun = new THREE.DirectionalLight(isHunt ? 0xaabbcc : theme.sun, isHunt ? 0.4 : 2.8)
+      sun.position.set(isHunt ? 50 : 60, isHunt ? 100 : 80, isHunt ? 30 : 40)
       sun.castShadow = true
       // Shadow map 1024 (was 2048) — quarter the memory + sampling cost.
       // Soft PCF blur covers the precision loss on most viewing angles.
@@ -2476,7 +2486,7 @@ export default function ThreeWorld({
       sun.shadow.radius = 2
       scene.add(sun)
       // Fill light from opposite side (gentle bounce-light proxy)
-      const fillLight = new THREE.DirectionalLight(0xb0c8ff, isHunt ? 0.18 : 0.45)
+      const fillLight = new THREE.DirectionalLight(0xb0c8ff, isHunt ? 0.3 : 0.45)
       fillLight.position.set(-40, 30, -20)
       scene.add(fillLight)
 
@@ -9135,11 +9145,13 @@ export default function ThreeWorld({
           }
         })
       }
-      function huntGlowEyes(e: CombatEnemy, hex: number) {
+      // Glowing eyes double as visibility landmarks in the dark arena, so the
+      // emissive is cranked up (minions 3.0, bosses 5.0).
+      function huntGlowEyes(e: CombatEnemy, hex: number, intensity: number) {
         const glow = new THREE.MeshStandardMaterial({
           color: hex,
           emissive: hex,
-          emissiveIntensity: 2.4,
+          emissiveIntensity: intensity,
         })
         if (e.leftEye) e.leftEye.material = glow
         if (e.rightEye) e.rightEye.material = glow
@@ -9147,7 +9159,7 @@ export default function ThreeWorld({
         if (eg instanceof THREE.MeshStandardMaterial) {
           eg.color.setHex(hex)
           eg.emissive.setHex(hex)
-          eg.emissiveIntensity = 2.6
+          eg.emissiveIntensity = intensity
         }
       }
       // Build one themed minion / boss, push it into `enemies`, return it.
@@ -9178,7 +9190,7 @@ export default function ThreeWorld({
         e.hp = hp
         e.maxHp = hp
         huntTint(e.mesh, tint, isBoss ? 0.6 : 0.78)
-        huntGlowEyes(e, eyes)
+        huntGlowEyes(e, eyes, isBoss ? 5.0 : 3.0)
         e.huntPoints = points
         e.huntName = name
         e.isHuntBoss = isBoss
