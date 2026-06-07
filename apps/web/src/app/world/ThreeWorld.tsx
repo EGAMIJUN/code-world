@@ -2331,13 +2331,17 @@ export default function ThreeWorld({
       // Fog distances stretched for the 6× larger open world so distant
       // areas (HARBOR / INDUSTRIAL) still fade out gracefully instead of
       // popping into view, while keeping the near band hazy on snow.
-      scene.fog = isSky
-        ? // Push the haze far out so looking down from altitude doesn't wash the
-          // ground into white — the terrain should stay legible from up high.
-          new THREE.Fog(theme.fog, 900, 3000)
-        : mapId === "snow"
-          ? new THREE.Fog(theme.fog, 80, 420)
-          : new THREE.Fog(theme.fog, 140, 680)
+      scene.fog = isHunt
+        ? // HUNT: no fog at all — visibility comes first (the fog was crushing
+          // the dark arena into an unreadable murk).
+          null
+        : isSky
+          ? // Push the haze far out so looking down from altitude doesn't wash the
+            // ground into white — the terrain should stay legible from up high.
+            new THREE.Fog(theme.fog, 900, 3000)
+          : mapId === "snow"
+            ? new THREE.Fog(theme.fog, 80, 420)
+            : new THREE.Fog(theme.fog, 140, 680)
 
       // ── Per-map material palette ───────────────────────────────────────────
       // The collision footprints (ALL_AABBS / floors / climb zones) are shared
@@ -2439,7 +2443,9 @@ export default function ThreeWorld({
       // highlight rolloff that COD/Battlefield use; exposure < 1 keeps the
       // bright sky from blowing out against PBR-lit concrete.
       renderer.toneMapping = THREE.ACESFilmicToneMapping
-      renderer.toneMappingExposure = 0.95
+      // HUNT prioritises visibility → full exposure (others keep the slightly
+      // darkened cinematic rolloff).
+      renderer.toneMappingExposure = isHunt ? 1.0 : 0.95
       renderer.outputColorSpace = THREE.SRGBColorSpace
       container.appendChild(renderer.domElement)
       rendererDomRef.current = renderer.domElement
@@ -2451,24 +2457,24 @@ export default function ThreeWorld({
       // Ambient was 2.4 — washed out shadows entirely. Drop it to 0.45 and
       // let a HemisphereLight handle the sky-vs-ground gradient (gives
       // "outdoor day" feel without crushing shadow contrast).
-      // HUNT runs at night but must stay legible: a brighter blue-white ambient
-      // + a cool moonlight key keep enemies/terrain visible while preserving the
-      // night mood (the transfer-room interior reads off the glowing orb too).
+      // HUNT prioritises gameplay visibility over mood: a strong white ambient +
+      // bright directional key + hemisphere fill so enemies/terrain read clearly.
+      // (Single instance of each light — values are overwritten, not stacked.)
       scene.add(
         isHunt
-          ? new THREE.AmbientLight(0x8899bb, 0.35)
+          ? new THREE.AmbientLight(0xffffff, 0.85)
           : new THREE.AmbientLight(theme.ambient, 0.45),
       )
       const hemi = new THREE.HemisphereLight(
-        isHunt ? 0x556688 : theme.sky,
-        0x4a4030,
-        isHunt ? 0.45 : 0.55,
+        isHunt ? 0xffffff : theme.sky,
+        isHunt ? 0x444444 : 0x4a4030,
+        isHunt ? 0.6 : 0.55,
       )
       hemi.position.set(0, 50, 0)
       scene.add(hemi)
-      // HUNT: the directional is a cool moonlight key (0xaabbcc) from high up.
-      const sun = new THREE.DirectionalLight(isHunt ? 0xaabbcc : theme.sun, isHunt ? 0.4 : 2.8)
-      sun.position.set(isHunt ? 50 : 60, isHunt ? 100 : 80, isHunt ? 30 : 40)
+      // HUNT: bright white directional key from high up for clear visibility.
+      const sun = new THREE.DirectionalLight(isHunt ? 0xffffff : theme.sun, isHunt ? 1.2 : 2.8)
+      sun.position.set(isHunt ? 100 : 60, isHunt ? 200 : 80, isHunt ? 100 : 40)
       sun.castShadow = true
       // Shadow map 1024 (was 2048) — quarter the memory + sampling cost.
       // Soft PCF blur covers the precision loss on most viewing angles.
@@ -9227,14 +9233,14 @@ export default function ThreeWorld({
         const group = new THREE.Group()
         group.position.set(cx, 0, cz)
         // ── Transfer-room lighting ──────────────────────────────────────────────
-        // A white fill ambient so the interior is actually legible. AmbientLight
-        // is global, so it's toggled OFF during a mission (updateHunt) to keep the
-        // night arena dark — the player is only ever in one place at a time.
-        huntRoomAmbient = new THREE.AmbientLight(0xffffff, 0.6)
+        // Dark-green fill ambient for the eerie room tint. AmbientLight is global,
+        // so it's toggled OFF during a mission (updateHunt) — the arena has its
+        // own (bright) ambient and shouldn't pick up the green cast.
+        huntRoomAmbient = new THREE.AmbientLight(0x003300, 1.0)
         group.add(huntRoomAmbient)
-        // One greenish point light near the ceiling for the eerie room tint. Its
-        // 20m range never reaches the distant arena, so it can stay on always.
-        const roomLight = new THREE.PointLight(0x004400, 2.0, 20)
+        // One bright green point light near the ceiling for visibility + tint.
+        // Its 30m range never reaches the distant arena, so it stays on always.
+        const roomLight = new THREE.PointLight(0x00ff44, 3.0, 30)
         roomLight.position.set(0, 4, 0)
         group.add(roomLight)
         const floor = new THREE.Mesh(new THREE.BoxGeometry(W * 2, 0.2, W * 2), floorMat)
