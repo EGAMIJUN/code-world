@@ -9205,22 +9205,38 @@ export default function ThreeWorld({
         setAliveEnemyCount(0)
       }
       // ── Transfer room (built once on init) ──────────────────────────────────
+      // Room fill ambient (global light): on while in the room, off during a
+      // mission so the night arena stays dark. Toggled in updateHunt.
+      let huntRoomAmbient: THREE.AmbientLight | null = null
       function buildHuntRoom() {
         const cx = HUNT_ROOM.x
         const cz = HUNT_ROOM.z
         const W = HUNT_ROOM_HALF + 1.5 // wall half-extent (interior is a bit smaller)
+        // Surfaces lifted out of near-black so the room's outline reads under the
+        // moody lighting (still dark enough to keep the claustrophobic feel).
         const wallMat = new THREE.MeshStandardMaterial({
-          color: 0x14161d,
+          color: 0x222233,
           roughness: 0.95,
           metalness: 0.05,
         })
         const floorMat = new THREE.MeshStandardMaterial({
-          color: 0x0c0d12,
+          color: 0x1a1b26,
           roughness: 1,
           metalness: 0,
         })
         const group = new THREE.Group()
         group.position.set(cx, 0, cz)
+        // ── Transfer-room lighting ──────────────────────────────────────────────
+        // A white fill ambient so the interior is actually legible. AmbientLight
+        // is global, so it's toggled OFF during a mission (updateHunt) to keep the
+        // night arena dark — the player is only ever in one place at a time.
+        huntRoomAmbient = new THREE.AmbientLight(0xffffff, 0.6)
+        group.add(huntRoomAmbient)
+        // One greenish point light near the ceiling for the eerie room tint. Its
+        // 20m range never reaches the distant arena, so it can stay on always.
+        const roomLight = new THREE.PointLight(0x004400, 2.0, 20)
+        roomLight.position.set(0, 4, 0)
+        group.add(roomLight)
         const floor = new THREE.Mesh(new THREE.BoxGeometry(W * 2, 0.2, W * 2), floorMat)
         floor.position.y = -0.1
         floor.receiveShadow = true
@@ -10075,6 +10091,9 @@ export default function ThreeWorld({
         const now = Date.now()
         const room = huntRoomRef.current
         const phase = huntPhaseRef.current
+        // Room fill ambient is global → keep it off during the mission so the
+        // night arena stays dark; on whenever the player is back in the room.
+        if (huntRoomAmbient) huntRoomAmbient.visible = phase !== "mission"
         // Keep the player boxed in the room during briefing/countdown.
         if (phase === "room" || phase === "countdown" || phase === "scoring") {
           focalPoint.x = Math.max(
