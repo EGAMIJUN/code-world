@@ -108,7 +108,7 @@ Hono ルーターで `/api/*` 配下にマウント。すべて JSON、共通エ
 | `/api/health`      | GET  | × | ヘルスチェック |
 | `/ws`              | WS   | × | PvP対応のルーム同期。 join({roomId, mode, mapId, username}) → joined(team) を返す。move/chat/pvp_hit/vote_map を受信、sync/pvp_damage/pvp_kill/pvp_respawn/vote_tally をブロードキャスト。TDM 時は両チームの kill score を保持 |
 
-加えて、レート制限が全 `/api/*` に対して IP ベースで 60秒60回適用される（ヘルスチェックと `/ws` を除く）。
+加えて、レート制限が全 `/api/*` に対して IP ベースで 60秒200回適用される（ヘルスチェックと `/ws` を除く）。
 
 ## Web ページ (apps/web)
 
@@ -116,7 +116,7 @@ Hono ルーターで `/api/*` 配下にマウント。すべて JSON、共通エ
 |---|---|
 | `/` | ランディングページ |
 | `/login` / `/signup` | フォーム認証 UI |
-| `/world` | メインの FPS ゲーム。`WorldClient` がモード/マップ選択画面 → `ThreeWorld.tsx` (約5,900行) |
+| `/world` | メインの FPS ゲーム。`WorldClient` がモード/マップ選択画面 → `ThreeWorld.tsx` (約16,500行・継続増加中) |
 | `/leaderboard` | totalScore ランキング |
 | `/profile` / `/profile/[id]` | プロフィール表示 |
 
@@ -136,6 +136,79 @@ Hono ルーターで `/api/*` 配下にマウント。すべて JSON、共通エ
 - 壁衝突: `WALL_AABBS` にタイプ別高さ `h` を持たせ、`pointInsideWall(x,y,z)` で弾の壁着弾、`fire()` の raycast は `wallMeshes` も対象にしてカバー越し射撃を遮断 (PvP も同様)
 - 安全スポーン: `findSafeSpawnNear(x, z, radius)` (同心円スパイラル探索) を `spawnEnemiesFromDef` / `spawnBots` / bot respawn 全てに通して建物内スポーンを回避
 - 死亡アニメ: `DEATH_ANIM_TOTAL = 4.0s` (`FALL 1.2s` で 0→π/2 を ease-out でプローン化 + 膝崩れ → `LIE 1.8s` 地面接地 → `FADE 1.0s` 不透明度フェード)。`deathFallDir` をキル時に shooter とのドット積で決定し、撃たれた方向へ倒れる。`mesh.position.y = sin(tilt) * 0.18` で胴体が地面に乗る
+
+### ⚠️ ThreeWorld.tsx 編集時の必読ルール（トークン上限）
+
+> **ThreeWorld.tsx は 16,500 行超。** 大型機能は必ず段階的に実装し、1回のコミットで追加・変更するのは
+> **最大 1,500 行程度**に抑えること。出力トークン上限（約 32k）に対してファイルが巨大なため、
+> 実装は**複数フェーズに分割してコミット**すること。1フェーズ＝1責務（例: データ定義 → 生成関数 →
+> 更新ループ統合 → HUD）を目安にする。ファイル全体の書き直し・大規模な行移動は禁止（差分が肥大化し
+> レビュー・レート制限・コンフリクトのすべてを悪化させる）。
+
+### ThreeWorld.tsx モジュール構造サマリー（実測値）
+
+| 行範囲 | 内容 |
+|---|---|
+| `1〜1,667` | 定数・型・純粋ヘルパー関数（モジュールスコープ。`WEAPONS` / `ENEMY_CONFIGS` / `MISSION_DEFS` / `WALL_AABBS` / `collidesWithWall` など） |
+| `1,669〜` | `ThreeWorld` コンポーネント本体開始 |
+| `1,669〜2,140` | `useRef`(129個) / `useState`(74個) の宣言密集帯（ゲーム状態はほぼ ref 経由の暗黙グローバル） |
+| `2,137〜13,100` | **巨大 useEffect**: Three.js シーン構築 + 全ゲームロジック + `animate()` ループを内包 |
+| `13,612〜16,506` | JSX return（HUD/UI 全体。60+ の条件付きオーバーレイ） |
+
+### ThreeWorld.tsx 主要システム関数マップ（巨大 useEffect 内・実測行番号）
+
+新機能やバグ修正の際は、まず該当システムの関数へ直行すること。
+
+**マップ/ジオメトリ生成**
+`makeNoiseTexture`(2356), `makeHollowBuilding`(3053), `addBuildingWindows`(3241), `makeRoofTower`(3484), `makeMansion`(3708), `makeLandmarkTower`(3968), `makeCrane`(4753)
+
+**プレイヤー/カメラ**
+`updateCamera`(5056), `buildPlayerAvatar`(5205), `showPlayerAvatar`(5270), `applyPlayerDamage`(6058)
+
+**車両（共通）**
+`makeVehicle`(5295), `spawnVehicle`(5606), `enterVehicle`(5890), `exitVehicle`(5962), `updateVehicle`(7359), `destroyActiveVehicle`(6024)
+
+**バイク**
+`makeBike`(5378), `addBikeSlot`(5672), `updateBikeRiders`(5766), `tryTerraformerSeekBike`(5720)
+
+**戦車**
+`makeTank`(5425), `fireCannon`(10471)
+
+**ジェット/航空戦**
+`makeJet`(5531), `spawnEnemyJet`(6655), `updateEnemyJets`(6691), `updateCrashJets`(6800), `ejectFromJet`(6880), `skySpawnSquadron`(6947), `updateSkyArena`(6961), `fireJetGun`(7049), `fireJetMissile`(7161), `updateJet`(7211)
+
+**対空砲(AA)**
+`makeAAGun`(6350), `fireAAShell`(6397), `updateAAGuns`(6409), `updateAAShells`(6432), `updateMountedAA`(6587)
+
+**敵生成/AI**
+`makeEnemy`(7558), `spawnEnemiesFromDef`(8396), `spawnBots`(8523), `updateEnemyClimb`(10789)
+
+**ミッション/ウェーブ**
+`spawnMission`(8645), `spawnWave`(8710), `spawnZombieWave`(8723), `spawnTerraformerWave`(8854), `updateRocketStrikes`(8901)
+
+**HUNT モード**
+`huntMakeEnemy`(8982), `buildHuntRoom`(9015), `huntStartRoom`(9251), `huntBeginMission`(9284), `huntHeadExplode`(9352), `huntReturnToRoom`(9373), `updateHunt`(9412)
+
+**武器/射撃/戦闘**
+`createBullet`(9627), `fire`(10505), `meleeAttack`(10384), `fireRocket`(10283), `detonateGrenade`(10212), `damageAllInRadius`(9920), `applyEnemyKill`(9754)
+
+**RPG**
+`makeRPGPickup`(10316), `collectRPG`(10332), `updateRPGPickups`(10359)
+
+**エフェクト**
+`spawnBlood`(9684), `spawnExplosion`(9709)
+
+**入力**
+`onMouseDown`(10732), `onMouseUp`(10749), `onKeyDown`(13156), `onKeyUp`(13240)
+
+**メインループ**
+`animate`(10872〜13070、約2,200行) — 上記すべての `update*()` を毎フレーム呼び出すオーケストレーター
+
+**JSX/HUD**
+`13,612〜16,506` — 60+ の条件付きオーバーレイ（設定モーダル・HUNT HUD・クロスヘア・ミニマップ・キルフィード・武器セレクタ・モバイルボタン群）
+
+> ⚠️ 行番号は実測時点の値。ファイルは継続増加中のため、編集前に `grep -n "function 関数名" ThreeWorld.tsx` で
+> 現在地を再確認すること。
 
 ### 操作キー (PC)
 
