@@ -41,6 +41,7 @@ export default function WorldClient() {
   const [mapId, setMapId] = useState<GameMap>("urban")
   const [botCount, setBotCount] = useState<number>(5)
   const [botDifficulty, setBotDifficulty] = useState<BotDifficulty>("normal")
+  const [huntClears, setHuntClears] = useState(0)
 
   useEffect(() => {
     try {
@@ -55,6 +56,8 @@ export default function WorldClient() {
         if (Number.isFinite(n) && n >= 0 && n <= 9) setBotCount(n)
       }
       if (bd && ["easy", "normal", "hard"].includes(bd)) setBotDifficulty(bd)
+      const hc = Number.parseInt(localStorage.getItem("hunt_clears") ?? "0", 10)
+      if (Number.isFinite(hc) && hc > 0) setHuntClears(hc)
     } catch {
       /* ignore */
     }
@@ -149,6 +152,11 @@ export default function WorldClient() {
                   }}
                 >
                   {sel ? `[${m.label}]` : m.label}
+                  {m.id === "hunt" && huntClears > 0 && (
+                    <span style={{ color: "#ffd700", marginLeft: "0.4rem" }}>
+                      ★{huntClears > 1 ? `×${huntClears}` : ""}
+                    </span>
+                  )}
                 </div>
                 <div style={{ fontSize: "0.7rem", color: "#00aa2a", lineHeight: 1.5 }}>
                   {m.desc}

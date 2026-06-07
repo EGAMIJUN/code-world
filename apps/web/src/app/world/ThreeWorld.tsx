@@ -610,6 +610,45 @@ const HUNT_LEVELS: HuntLevel[] = [
   },
 ]
 
+// ══ HUNT mode equipment (PR-Z2) ══════════════════════════════════════════════
+// Suit + four dedicated weapons + the rewards bought at the 100-pt menu. All of
+// this only exists while modeRef === "hunt"; the normal weapon system is left
+// untouched (HUNT weapons run on a parallel set of refs).
+const HUNT_SUIT_MAX = 300 // suit durability (absorbs hits before HP)
+const HUNT_SUIT_CUT = 0.3 // fraction of damage that reaches HP while suited
+const HUNT_SUIT_SPEED = 1.5 // movement multiplier while suited
+const HUNT_JUMP_SPEED = 6 // base jump impulse (HUNT only); suit ×3
+const HUNT_PUNCH_DAMAGE = 150 // suit melee
+const HUNT_PUNCH_RANGE = 2.2
+const HUNT_STEALTH_SIGHT = 15 // enemies only notice the player within this (m)
+const HUNT_TOTAL_KEY2 = "hunt_total_score" // (shared with PR-Z1)
+const HUNT_TICKETS_KEY = "hunt_revive_tickets"
+const HUNT_GRAVITY_KEY = "hunt_gravity_unlocked"
+const HUNT_CLEARS_KEY = "hunt_clears"
+const HUNT_REWARD_COST = 100
+const HUNT_MAX_TICKETS = 3
+// Pulse-weapon delayed in-body burst (seconds from hit to detonation).
+const HUNT_BURST_DELAY = 1.0
+type HuntWeaponId = "pulsegun" | "pulseshotgun" | "capturegun" | "blade" | "gravitycannon"
+interface HuntWeaponDef {
+  id: HuntWeaponId
+  name: string
+  slot: number // number key (6-9, 0 for gravity)
+  mag: number // -1 = melee/infinite
+  reloadMs: number
+  reward?: boolean // true → only from the 100-pt "gravity cannon" reward
+}
+const HUNT_WEAPONS: HuntWeaponDef[] = [
+  { id: "pulsegun", name: "PULSE GUN", slot: 6, mag: 8, reloadMs: 2000 },
+  { id: "pulseshotgun", name: "PULSE SG", slot: 7, mag: 6, reloadMs: 3000 },
+  { id: "capturegun", name: "CAPTURE GUN", slot: 8, mag: 3, reloadMs: 5000 },
+  { id: "blade", name: "BLADE", slot: 9, mag: -1, reloadMs: 0 },
+  { id: "gravitycannon", name: "GRAVITY CANNON", slot: 0, mag: 2, reloadMs: 10000, reward: true },
+]
+const HUNT_WEAPON_BY_ID: Record<HuntWeaponId, HuntWeaponDef> = Object.fromEntries(
+  HUNT_WEAPONS.map((w) => [w.id, w]),
+) as Record<HuntWeaponId, HuntWeaponDef>
+
 // ── Map object definitions [x, z, width, depth, type]
 // type: 0=building, 1=car, 2=barricade, 3=tank/pipe, 4=tree, 5=trench
 //
@@ -1841,6 +1880,128 @@ export default function ThreeWorld({
     pageAt: number // ms timestamp to flip the page
     jingled: boolean
   } | null>(null)
+
+  // ── HUNT equipment (PR-Z2) ──────────────────────────────────────────────────
+  // Equipment menu (opened at the rack in the room).
+  const huntNearRackRef = useRef(false)
+  const [huntNearRack, setHuntNearRack] = useState(false)
+  const [huntEquipOpen, setHuntEquipOpen] = useState(false)
+  const huntEquipOpenRef = useRef(false)
+  const huntInteractReqRef = useRef(false) // E / tap consumed by updateHunt
+  // Chosen loadout (kept across warps; weapons are "owned" once grabbed).
+  const huntSuitChosenRef = useRef(false)
+  const [huntSuitChosen, setHuntSuitChosen] = useState(false)
+  const huntOwnedRef = useRef<Set<HuntWeaponId>>(new Set())
+  const [huntOwned, setHuntOwned] = useState<HuntWeaponId[]>([])
+  // Active HUNT weapon (null → normal weapons) + per-weapon ammo + reload.
+  const huntWeaponRef = useRef<HuntWeaponId | null>(null)
+  const [huntWeapon, setHuntWeapon] = useState<HuntWeaponId | null>(null)
+  const huntAmmoRef = useRef<Record<string, number>>({})
+  const [huntAmmoUi, setHuntAmmoUi] = useState(0)
+  const huntReloadingRef = useRef(false)
+  const [huntReloadingUi, setHuntReloadingUi] = useState(false)
+  // Suit durability runtime.
+  const huntSuitDurRef = useRef(0)
+  const [huntSuitDur, setHuntSuitDur] = useState(0)
+  const huntSuitActiveRef = useRef(false) // chosen AND not broken this mission
+  const [huntSuitActive, setHuntSuitActive] = useState(false)
+  const [huntSuitFlash, setHuntSuitFlash] = useState(false)
+  // Pulse-gun lock-on targets (≤3) + blade hold charge + punch request.
+  const huntLockedRef = useRef<CombatEnemy[]>([])
+  const [huntLockCount, setHuntLockCount] = useState(0)
+  const huntBladeChargeRef = useRef(0)
+  const huntPunchReqRef = useRef(false)
+  const huntReloadReqRef = useRef(false)
+  // 100-pt rewards (persisted): revive tickets, gravity-cannon unlock, clears.
+  const huntTicketsRef = useRef(0)
+  const [huntTickets, setHuntTickets] = useState(0)
+  const huntGravityUnlockedRef = useRef(false)
+  const [huntGravityUnlocked, setHuntGravityUnlocked] = useState(false)
+  const huntClearsRef = useRef(0)
+  const huntRewardOpenRef = useRef(false)
+  const [huntRewardOpen, setHuntRewardOpen] = useState(false)
+  const huntReleasedRef = useRef(false)
+  const [huntReleased, setHuntReleased] = useState(false) // "released" ending overlay
+
+  // ── HUNT equipment menu / reward handlers (component scope, stable via
+  //    useCallback so both the JSX buttons and the key-event effect can use
+  //    them; they only touch refs/state setters).
+  const huntToggleSuitChoice = useCallback(() => {
+    const v = !huntSuitChosenRef.current
+    huntSuitChosenRef.current = v
+    setHuntSuitChosen(v)
+  }, [])
+  const huntPickupWeapon = useCallback((id: HuntWeaponId) => {
+    if (id === "gravitycannon" && !huntGravityUnlockedRef.current) return
+    const next = new Set(huntOwnedRef.current)
+    next.add(id)
+    huntOwnedRef.current = next
+    setHuntOwned([...next])
+    const def = HUNT_WEAPON_BY_ID[id]
+    if (def.mag >= 0) huntAmmoRef.current[id] = def.mag
+    // Auto-equip what you just grabbed.
+    huntWeaponRef.current = id
+    setHuntWeapon(id)
+    setHuntAmmoUi(def.mag)
+  }, [])
+  const huntSelectHuntWeapon = useCallback((id: HuntWeaponId) => {
+    if (!huntOwnedRef.current.has(id)) return
+    const def = HUNT_WEAPON_BY_ID[id]
+    huntWeaponRef.current = id
+    setHuntWeapon(id)
+    if (def.mag >= 0 && huntAmmoRef.current[id] === undefined) huntAmmoRef.current[id] = def.mag
+    setHuntAmmoUi(def.mag < 0 ? -1 : (huntAmmoRef.current[id] ?? def.mag))
+  }, [])
+  const huntClearHuntWeapon = useCallback(() => {
+    huntWeaponRef.current = null
+    setHuntWeapon(null)
+  }, [])
+  const huntChooseReward = useCallback((choice: 1 | 2 | 3) => {
+    if (choice === 1) {
+      huntClearsRef.current += 1
+      try {
+        localStorage.setItem(HUNT_CLEARS_KEY, String(huntClearsRef.current))
+        localStorage.setItem(HUNT_TOTAL_KEY2, "0")
+      } catch {
+        /* ignore */
+      }
+      huntTotalRef.current = 0
+      setHuntTotal(0)
+      huntRewardOpenRef.current = false
+      setHuntRewardOpen(false)
+      huntReleasedRef.current = true
+      setHuntReleased(true)
+      SOUNDS.huntJingle()
+      return
+    }
+    if (huntTotalRef.current < HUNT_REWARD_COST) return
+    huntTotalRef.current -= HUNT_REWARD_COST
+    setHuntTotal(huntTotalRef.current)
+    try {
+      localStorage.setItem(HUNT_TOTAL_KEY2, String(huntTotalRef.current))
+    } catch {
+      /* ignore */
+    }
+    if (choice === 2) {
+      huntGravityUnlockedRef.current = true
+      setHuntGravityUnlocked(true)
+      try {
+        localStorage.setItem(HUNT_GRAVITY_KEY, "1")
+      } catch {
+        /* ignore */
+      }
+    } else {
+      huntTicketsRef.current = Math.min(HUNT_MAX_TICKETS, huntTicketsRef.current + 1)
+      setHuntTickets(huntTicketsRef.current)
+      try {
+        localStorage.setItem(HUNT_TICKETS_KEY, String(huntTicketsRef.current))
+      } catch {
+        /* ignore */
+      }
+    }
+    huntRewardOpenRef.current = false
+    setHuntRewardOpen(false)
+  }, [])
 
   // Phase 3: extended stat refs
   const maxKillstreakRef = useRef(0)
@@ -6049,7 +6210,18 @@ export default function ThreeWorld({
       // is halved. No-op (×1) on foot or while driving. Hoisted so every player-
       // damage site can route through it.
       function aaShield(raw: number) {
-        return aaMountedRef.current ? raw * AA_MOUNT_DMG_MULT : raw
+        let dmg = aaMountedRef.current ? raw * AA_MOUNT_DMG_MULT : raw
+        // HUNT suit: durability soaks the hit and only HUNT_SUIT_CUT of it reaches
+        // HP; the suit breaks (all effects gone) once durability hits 0.
+        if (huntSuitActiveRef.current && huntSuitDurRef.current > 0) {
+          huntSuitDurRef.current = Math.max(0, huntSuitDurRef.current - dmg)
+          setHuntSuitDur(huntSuitDurRef.current)
+          setHuntSuitFlash(true)
+          window.setTimeout(() => setHuntSuitFlash(false), 130)
+          if (huntSuitDurRef.current <= 0) huntBreakSuit()
+          dmg = dmg * HUNT_SUIT_CUT
+        }
+        return dmg
       }
 
       // ── Enemy-driven vehicles ───────────────────────────────────────────────
@@ -8993,7 +9165,16 @@ export default function ThreeWorld({
         name: string,
       ): CombatEnemy {
         const e = makeEnemy(base, x, z, false, scale)
-        e.config = { ...e.config, hp, score: points, speed }
+        // Stealth (PR-Z2): HUNT enemies only notice the player up close, so the
+        // blade lets you pick them off quietly. Guns are still loud (the noise
+        // system aggros nearby enemies on fire).
+        e.config = {
+          ...e.config,
+          hp,
+          score: points,
+          speed,
+          sightRange: isBoss ? HUNT_STEALTH_SIGHT * 1.7 : HUNT_STEALTH_SIGHT,
+        }
         e.hp = hp
         e.maxHp = hp
         huntTint(e.mesh, tint, isBoss ? 0.6 : 0.78)
@@ -9267,7 +9448,8 @@ export default function ThreeWorld({
         camState.yaw = Math.PI
         camState.pitch = -0.05
       }
-      // Refill HP + reserve mags for the next run.
+      // Refill HP + reserve mags for the next run (suit durability + HUNT ammo
+      // are restored too, per the "帰還時に全回復" rule).
       function huntHeal() {
         playerHpRef.current = PLAYER_MAX_HP
         setPlayerHp(PLAYER_MAX_HP)
@@ -9279,6 +9461,20 @@ export default function ThreeWorld({
           ammoRef.current = mag
           setAmmo(mag)
         }
+        if (huntSuitChosenRef.current) {
+          huntSuitActiveRef.current = true
+          setHuntSuitActive(true)
+          huntSuitDurRef.current = HUNT_SUIT_MAX
+          setHuntSuitDur(HUNT_SUIT_MAX)
+        }
+        for (const w of HUNT_WEAPONS) {
+          if (
+            w.mag > 0 &&
+            (huntOwnedRef.current.has(w.id) || (w.reward && huntGravityUnlockedRef.current))
+          )
+            huntAmmoRef.current[w.id] = w.mag
+        }
+        if (huntWeaponRef.current) setHuntAmmoUi(huntAmmoRef.current[huntWeaponRef.current] ?? 0)
       }
       // Warp into the mission: spawn themed minions + boss, set limits.
       function huntBeginMission() {
@@ -9343,6 +9539,7 @@ export default function ThreeWorld({
         playerVelRef.current.x = 0
         playerVelRef.current.z = 0
         spawnInvulnUntilRef.current = Date.now() + 2500
+        huntInitEquipForMission() // suit durability, weapon ammo, clear locks
         huntMissionReadyRef.current = true
         huntPhaseRef.current = "mission"
         setHuntPhase("mission")
@@ -9407,7 +9604,459 @@ export default function ThreeWorld({
         huntPhaseRef.current = "scoring"
         setHuntPhase("scoring")
         huntScoringUntilRef.current = Date.now() + 7000
+        // 100-pt menu offered on the scoring screen when eligible (clear only).
+        if (outcome === "clear") huntOfferRewardIfEligible()
       }
+      // ══ HUNT equipment runtime (PR-Z2) ══════════════════════════════════════
+      // Delayed pulse bursts, captures, lock markers and gravity blasts — all
+      // pooled/reused arrays processed once per frame in huntUpdateEquip.
+      const huntBursts: { enemy: CombatEnemy; at: number; dmg: number; base: number }[] = []
+      const huntCaptures: {
+        enemy: CombatEnemy
+        until: number
+        wire: THREE.Line
+        ring: THREE.Mesh
+      }[] = []
+      const huntGravBlasts: { mesh: THREE.Mesh; t: number }[] = []
+      const huntMarkerPool: THREE.Mesh[] = []
+      const huntMarkerMat = new THREE.MeshBasicMaterial({ color: 0xffffff })
+      const huntMarkerGeo = new THREE.RingGeometry(0.5, 0.62, 16)
+      const huntWireMat = new THREE.LineBasicMaterial({ color: 0x66ddff })
+      const huntRingMat = new THREE.MeshBasicMaterial({
+        color: 0x66ddff,
+        transparent: true,
+        opacity: 0.7,
+        side: THREE.DoubleSide,
+      })
+      const huntPillarMat = new THREE.MeshBasicMaterial({
+        color: 0xaaffff,
+        transparent: true,
+        opacity: 0.55,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      })
+      const huntGravMat = new THREE.MeshBasicMaterial({ color: 0x050008 })
+      // Three reusable lock-on ring markers (created once, toggled via .visible).
+      for (let i = 0; i < 3; i++) {
+        const m = new THREE.Mesh(huntMarkerGeo, huntMarkerMat)
+        m.visible = false
+        m.renderOrder = 999
+        scene.add(m)
+        huntMarkerPool.push(m)
+      }
+
+      function huntPersistTickets() {
+        try {
+          localStorage.setItem(HUNT_TICKETS_KEY, String(huntTicketsRef.current))
+        } catch {
+          /* ignore */
+        }
+      }
+      // Center-screen raycast for the nearest enemy under the crosshair.
+      function huntRaycastEnemy(
+        maxDist = 140,
+      ): { enemy: CombatEnemy; point: THREE.Vector3 } | null {
+        pointer.set(0, 0)
+        raycaster.setFromCamera(pointer, camera)
+        const parts: THREE.Object3D[] = []
+        for (const e of enemies) {
+          if (e.hp <= 0 || e.aiDriving) continue
+          e.mesh.traverse((c) => {
+            if (c instanceof THREE.Mesh && c.userData.enemyId) parts.push(c)
+          })
+        }
+        const hit = raycaster.intersectObjects(parts, false)[0]
+        if (!hit || hit.distance > maxDist) return null
+        const id = hit.object.userData.enemyId as string
+        const e = enemies.find((x) => x.id === id)
+        return e ? { enemy: e, point: hit.point.clone() } : null
+      }
+      // Schedule a delayed in-body burst on an enemy (pulse weapons).
+      function huntScheduleBurst(e: CombatEnemy, dmg: number) {
+        huntBursts.push({
+          enemy: e,
+          at: Date.now() + HUNT_BURST_DELAY * 1000,
+          dmg,
+          base: e.mesh.scale.x,
+        })
+      }
+      // Suit damage: drain durability first, cut HP damage; break at 0.
+      function huntBreakSuit() {
+        if (!huntSuitActiveRef.current) return
+        huntSuitActiveRef.current = false
+        setHuntSuitActive(false)
+        SOUNDS.huntWarn()
+        SOUNDS.damage()
+        showNotification("⚠ スーツ破壊 — 生身だ")
+      }
+      // Initialise the loadout when a mission starts (durability, ammo, locks).
+      function huntInitEquipForMission() {
+        huntBursts.length = 0
+        huntLockedRef.current = []
+        setHuntLockCount(0)
+        for (const m of huntMarkerPool) m.visible = false
+        // Suit.
+        const suited = huntSuitChosenRef.current
+        huntSuitActiveRef.current = suited
+        setHuntSuitActive(suited)
+        huntSuitDurRef.current = suited ? HUNT_SUIT_MAX : 0
+        setHuntSuitDur(suited ? HUNT_SUIT_MAX : 0)
+        // Weapon ammo (owned + gravity if unlocked).
+        for (const w of HUNT_WEAPONS) {
+          if (w.mag < 0) continue
+          if (huntOwnedRef.current.has(w.id) || (w.reward && huntGravityUnlockedRef.current))
+            huntAmmoRef.current[w.id] = w.mag
+        }
+        huntReloadingRef.current = false
+        setHuntReloadingUi(false)
+        if (huntWeaponRef.current) setHuntAmmoUi(huntAmmoRef.current[huntWeaponRef.current] ?? 0)
+      }
+      // Reload the active HUNT weapon.
+      function huntReload() {
+        const id = huntWeaponRef.current
+        if (!id) return
+        const def = HUNT_WEAPON_BY_ID[id]
+        if (def.mag < 0 || huntReloadingRef.current) return
+        if ((huntAmmoRef.current[id] ?? 0) >= def.mag) return
+        huntReloadingRef.current = true
+        setHuntReloadingUi(true)
+        window.setTimeout(() => {
+          huntAmmoRef.current[id] = def.mag
+          if (huntWeaponRef.current === id) setHuntAmmoUi(def.mag)
+          huntReloadingRef.current = false
+          setHuntReloadingUi(false)
+        }, def.reloadMs)
+      }
+      // Consume one round; returns false (and auto-reloads) when empty.
+      function huntConsumeAmmo(id: HuntWeaponId): boolean {
+        const def = HUNT_WEAPON_BY_ID[id]
+        if (def.mag < 0) return true
+        const a = huntAmmoRef.current[id] ?? 0
+        if (a <= 0) {
+          huntReload()
+          return false
+        }
+        huntAmmoRef.current[id] = a - 1
+        setHuntAmmoUi(a - 1)
+        if (a - 1 <= 0) huntReload()
+        return true
+      }
+      // Suit punch ([F]) + blade slash/thrust — quiet melee in a forward cone.
+      function huntConeMelee(dmg: number, range: number, tag: string) {
+        camera.getWorldDirection(fwd3)
+        const flen = Math.hypot(fwd3.x, fwd3.z) || 1
+        const nfx = fwd3.x / flen
+        const nfz = fwd3.z / flen
+        const cosHalf = Math.cos(Math.PI / 5)
+        let struck = false
+        for (const e of enemies) {
+          if (e.hp <= 0 || e.aiDriving) continue
+          const dx = e.mesh.position.x - focalPoint.x
+          const dz = e.mesh.position.z - focalPoint.z
+          const d = Math.hypot(dx, dz)
+          if (d > range || d < 1e-3) continue
+          if ((dx / d) * nfx + (dz / d) * nfz < cosHalf) continue
+          struck = true
+          e.hp -= dmg
+          spawnBlood(new THREE.Vector3(e.mesh.position.x, EYE_HEIGHT * 0.8, e.mesh.position.z))
+          if (e.hp <= 0) applyEnemyKill(e, tag)
+        }
+        if (struck) SOUNDS.hit()
+        recoilRef.current = 0.05
+        knifeSwingRef.current = KNIFE_SWING_TIME
+      }
+      function huntPunch() {
+        if (!huntSuitActiveRef.current) return // punch unlocked only by the suit
+        const now = Date.now()
+        if (now - lastMeleeRef.current < KNIFE_COOLDOWN_MS) return
+        lastMeleeRef.current = now
+        huntConeMelee(HUNT_PUNCH_DAMAGE, HUNT_PUNCH_RANGE, "punch")
+      }
+      function huntBlade(thrust: boolean) {
+        const now = Date.now()
+        if (now - lastMeleeRef.current < KNIFE_COOLDOWN_MS) return
+        lastMeleeRef.current = now
+        SOUNDS.knife()
+        huntConeMelee(thrust ? 350 : 200, thrust ? 3.0 : 1.8, "blade")
+      }
+      // Capture wire/ring + teleport pillar (created per capture; ≤3 at once).
+      function huntStartCapture(e: CombatEnemy) {
+        const head = e.mesh.position.clone()
+        head.y = 1.2
+        const geo = new THREE.BufferGeometry().setFromPoints([
+          new THREE.Vector3(focalPoint.x, EYE_HEIGHT, focalPoint.z),
+          head,
+        ])
+        const wire = new THREE.Line(geo, huntWireMat)
+        scene.add(wire)
+        const ring = new THREE.Mesh(new THREE.TorusGeometry(0.9, 0.08, 6, 18), huntRingMat)
+        ring.rotation.x = Math.PI / 2
+        scene.add(ring)
+        huntCaptures.push({ enemy: e, until: Date.now() + 2000, wire, ring })
+      }
+      // Gravity blast at a point: black sphere expand→contract; zako die, boss −500.
+      function huntGravityBlast(center: THREE.Vector3) {
+        const mesh = new THREE.Mesh(new THREE.SphereGeometry(1, 16, 12), huntGravMat)
+        mesh.position.copy(center)
+        mesh.scale.setScalar(0.1)
+        scene.add(mesh)
+        huntGravBlasts.push({ mesh, t: 0 })
+        for (const e of enemies) {
+          if (e.hp <= 0 || e.aiDriving) continue
+          const d = Math.hypot(e.mesh.position.x - center.x, e.mesh.position.z - center.z)
+          if (d > 15) continue
+          if (e.isHuntBoss) {
+            e.hp -= 500
+            if (e.hp <= 0) applyEnemyKill(e, "gravity")
+          } else {
+            e.hp = 0
+            applyEnemyKill(e, "gravity")
+          }
+        }
+        cameraShakeRef.current.intensity = 5
+        SOUNDS.rpg()
+      }
+      // Dispatch a HUNT-weapon shot (called from fire() / blade handled separately).
+      function fireHuntWeapon() {
+        const id = huntWeaponRef.current
+        if (!id || huntReloadingRef.current) return
+        const now = Date.now()
+        if (id === "pulsegun") {
+          if (now - lastFireTimeRef.current < 250) return
+          lastFireTimeRef.current = now
+          if (!huntConsumeAmmo("pulsegun")) return
+          const targets =
+            huntLockedRef.current.length > 0
+              ? huntLockedRef.current.filter((e) => e.hp > 0)
+              : (() => {
+                  const h = huntRaycastEnemy()
+                  return h ? [h.enemy] : []
+                })()
+          for (const e of targets) huntScheduleBurst(e, 120)
+          huntLockedRef.current = []
+          setHuntLockCount(0)
+          for (const m of huntMarkerPool) m.visible = false
+          SOUNDS.sniper()
+          recoilRef.current = 0.12
+        } else if (id === "pulseshotgun") {
+          if (now - lastFireTimeRef.current < 600) return
+          lastFireTimeRef.current = now
+          if (!huntConsumeAmmo("pulseshotgun")) return
+          // 5 spread rays; each enemy hit gets its own 40-dmg delayed burst.
+          for (let p = 0; p < 5; p++) {
+            const sx = (Math.random() - 0.5) * 0.18
+            const sy = (Math.random() - 0.5) * 0.18
+            pointer.set(sx, sy)
+            raycaster.setFromCamera(pointer, camera)
+            const parts: THREE.Object3D[] = []
+            for (const e of enemies) {
+              if (e.hp <= 0 || e.aiDriving) continue
+              e.mesh.traverse((c) => {
+                if (c instanceof THREE.Mesh && c.userData.enemyId) parts.push(c)
+              })
+            }
+            const hit = raycaster.intersectObjects(parts, false)[0]
+            if (hit && hit.distance < 40) {
+              const e = enemies.find((x) => x.id === hit.object.userData.enemyId)
+              if (e) huntScheduleBurst(e, 40)
+            }
+          }
+          SOUNDS.shotgun()
+          recoilRef.current = 0.2
+        } else if (id === "capturegun") {
+          if (now - lastFireTimeRef.current < 400) return
+          lastFireTimeRef.current = now
+          if (huntCaptures.length >= 3) return
+          if (!huntConsumeAmmo("capturegun")) return
+          const h = huntRaycastEnemy(120)
+          if (h) huntStartCapture(h.enemy)
+          SOUNDS.huntWarp()
+          recoilRef.current = 0.1
+        } else if (id === "gravitycannon") {
+          if (now - lastFireTimeRef.current < 400) return
+          lastFireTimeRef.current = now
+          if (!huntConsumeAmmo("gravitycannon")) return
+          camera.getWorldDirection(fwd3)
+          const dir = fwd3.clone().normalize()
+          // Aim point: nearest enemy / wall hit, else 25m ahead, clamped to ground.
+          pointer.set(0, 0)
+          raycaster.setFromCamera(pointer, camera)
+          const wallHit = raycaster.intersectObjects(wallMeshes, false)[0]
+          const eh = huntRaycastEnemy(200)
+          let pt: THREE.Vector3
+          if (eh && (!wallHit || eh.point.distanceTo(camera.position) < wallHit.distance))
+            pt = eh.point
+          else if (wallHit) pt = wallHit.point.clone()
+          else
+            pt = new THREE.Vector3(
+              focalPoint.x + dir.x * 25,
+              EYE_HEIGHT + dir.y * 25,
+              focalPoint.z + dir.z * 25,
+            )
+          pt.y = Math.max(0.5, pt.y)
+          huntGravityBlast(pt)
+          recoilRef.current = 0.3
+        }
+      }
+      // Auto-consume a revive ticket on a lethal hit during a mission.
+      function huntTryRevive(): boolean {
+        if (modeRef.current !== "hunt" || huntPhaseRef.current !== "mission") return false
+        if (huntTicketsRef.current <= 0) return false
+        huntTicketsRef.current -= 1
+        setHuntTickets(huntTicketsRef.current)
+        huntPersistTickets()
+        // Undo the game-over set by the lethal hit earlier this frame.
+        gamePhaseRef.current = "playing"
+        setGamePhase("playing")
+        playerHpRef.current = PLAYER_MAX_HP
+        setPlayerHp(PLAYER_MAX_HP)
+        if (huntSuitChosenRef.current) {
+          huntSuitActiveRef.current = true
+          setHuntSuitActive(true)
+          huntSuitDurRef.current = HUNT_SUIT_MAX
+          setHuntSuitDur(HUNT_SUIT_MAX)
+        }
+        spawnInvulnUntilRef.current = Date.now() + 2000
+        cameraShakeRef.current.intensity = 6
+        SOUNDS.clear()
+        showNotification("復活チケット消費 — 蘇生")
+        return true
+      }
+      // Per-frame HUNT equipment update (locks / bursts / captures / gravity /
+      // blade hold). Only meaningful during a mission.
+      function huntUpdateEquip(dt: number) {
+        const now = Date.now()
+        // Pulse-gun lock-on: ADS held → add the centred enemy (≤3).
+        if (huntWeaponRef.current === "pulsegun" && isAimingRef.current) {
+          if (huntLockedRef.current.length < 3) {
+            const h = huntRaycastEnemy()
+            if (h && !huntLockedRef.current.includes(h.enemy)) {
+              huntLockedRef.current.push(h.enemy)
+              setHuntLockCount(huntLockedRef.current.length)
+            }
+          }
+        }
+        // Drop dead locks; park white ring markers above the live ones.
+        huntLockedRef.current = huntLockedRef.current.filter((e) => e.hp > 0)
+        for (let i = 0; i < huntMarkerPool.length; i++) {
+          const m = huntMarkerPool[i]
+          if (!m) continue
+          const e = huntLockedRef.current[i]
+          if (e) {
+            m.visible = true
+            m.position.set(e.mesh.position.x, e.mesh.position.y + 1.3, e.mesh.position.z)
+            m.lookAt(camera.position)
+          } else m.visible = false
+        }
+        // Delayed in-body bursts: swell then detonate.
+        for (let i = huntBursts.length - 1; i >= 0; i--) {
+          const b = huntBursts[i]
+          if (!b) continue
+          if (b.enemy.hp <= 0) {
+            huntBursts.splice(i, 1)
+            continue
+          }
+          const remain = (b.at - now) / 1000
+          const swell = 1 + 0.3 * Math.max(0, 1 - remain / HUNT_BURST_DELAY)
+          b.enemy.mesh.scale.setScalar(b.base * swell)
+          if (now >= b.at) {
+            b.enemy.mesh.scale.setScalar(b.base)
+            spawnExplosion(b.enemy.mesh.position.clone())
+            b.enemy.hp -= b.dmg
+            if (b.enemy.hp <= 0) applyEnemyKill(b.enemy, "pulse")
+            huntBursts.splice(i, 1)
+          }
+        }
+        // Captures: hold the wire/ring, then teleport (or snap on a healthy boss).
+        for (let i = huntCaptures.length - 1; i >= 0; i--) {
+          const c = huntCaptures[i]
+          if (!c) continue
+          const dead = c.enemy.hp <= 0
+          if (!dead) {
+            const head = c.enemy.mesh.position
+            const pts = [
+              new THREE.Vector3(focalPoint.x, EYE_HEIGHT, focalPoint.z),
+              new THREE.Vector3(head.x, head.y + 1.0, head.z),
+            ]
+            c.wire.geometry.setFromPoints(pts)
+            c.ring.position.set(head.x, head.y + 1.0, head.z)
+            c.ring.rotation.z += dt * 4
+          }
+          if (now >= c.until || dead) {
+            scene.remove(c.wire)
+            scene.remove(c.ring)
+            c.wire.geometry.dispose()
+            c.ring.geometry.dispose()
+            huntCaptures.splice(i, 1)
+            if (dead) continue
+            const healthyBoss = c.enemy.isHuntBoss && c.enemy.hp > c.enemy.maxHp * 0.3
+            if (healthyBoss) {
+              showNotification("拘束を引きちぎられた — ボスはHP30%以下で捕獲可")
+              continue
+            }
+            // Teleport kill: light pillar + capture bonus points.
+            const pillar = new THREE.Mesh(
+              new THREE.CylinderGeometry(0.8, 0.8, 40, 12, 1, true),
+              huntPillarMat,
+            )
+            pillar.position.set(c.enemy.mesh.position.x, 20, c.enemy.mesh.position.z)
+            scene.add(pillar)
+            huntGravBlasts.push({ mesh: pillar, t: 0 }) // reuse the fade pool
+            const mult = c.enemy.isHuntBoss ? 2 : 1.5
+            c.enemy.huntPoints = Math.round((c.enemy.huntPoints ?? 0) * mult)
+            c.enemy.hp = 0
+            applyEnemyKill(c.enemy, "capture")
+            SOUNDS.huntWarp()
+          }
+        }
+        // Gravity-blast / pillar fades (expand→contract / shrink-out).
+        for (let i = huntGravBlasts.length - 1; i >= 0; i--) {
+          const g = huntGravBlasts[i]
+          if (!g) continue
+          g.t += dt
+          const isPillar = g.mesh.geometry instanceof THREE.CylinderGeometry
+          if (isPillar) {
+            const m = g.mesh.material as THREE.MeshBasicMaterial
+            m.opacity = Math.max(0, 0.55 * (1 - g.t / 0.9))
+            g.mesh.scale.x = g.mesh.scale.z = 1 + g.t * 0.5
+          } else {
+            // expand to 15m by t=0.4, then contract.
+            const s = g.t < 0.4 ? (g.t / 0.4) * 15 : Math.max(0, 15 * (1 - (g.t - 0.4) / 0.4))
+            g.mesh.scale.setScalar(Math.max(0.1, s))
+          }
+          if (g.t > 0.9) {
+            scene.remove(g.mesh)
+            g.mesh.geometry.dispose()
+            huntGravBlasts.splice(i, 1)
+          }
+        }
+        // Blade: tap = slash, hold ≥0.4s = 3m thrust (fired on release).
+        if (huntWeaponRef.current === "blade") {
+          if (mouseDownRef.current) huntBladeChargeRef.current += dt
+          else if (huntBladeChargeRef.current > 0.001) {
+            huntBlade(huntBladeChargeRef.current >= 0.4)
+            huntBladeChargeRef.current = 0
+          }
+        }
+        // Suit punch request ([F] / mobile).
+        if (huntPunchReqRef.current) {
+          huntPunchReqRef.current = false
+          huntPunch()
+        }
+        // Reload request ([R] / mobile) for the active HUNT weapon.
+        if (huntReloadReqRef.current) {
+          huntReloadReqRef.current = false
+          huntReload()
+        }
+      }
+      // Offer the 100-pt menu (component-scope huntChooseReward resolves it).
+      function huntOfferRewardIfEligible() {
+        if (huntTotalRef.current >= 100) {
+          huntRewardOpenRef.current = true
+          setHuntRewardOpen(true)
+        }
+      }
+
       // Per-frame HUNT state machine.
       function updateHunt(dt: number) {
         if (modeRef.current !== "hunt") return
@@ -9425,6 +10074,27 @@ export default function ThreeWorld({
             Math.min(HUNT_ROOM.z + HUNT_ROOM_HALF, focalPoint.z),
           )
           focalPoint.y = 0
+        }
+        // Equipment rack: reachable during the briefing + countdown. [E]/tap
+        // toggles the loadout menu (and releases pointer-lock so it's clickable).
+        if (phase === "room" || phase === "countdown") {
+          if (!huntNearRackRef.current) {
+            huntNearRackRef.current = true
+            setHuntNearRack(true)
+          }
+          if (huntInteractReqRef.current) {
+            huntInteractReqRef.current = false
+            huntEquipOpenRef.current = !huntEquipOpenRef.current
+            setHuntEquipOpen(huntEquipOpenRef.current)
+            if (huntEquipOpenRef.current) document.exitPointerLock?.()
+          }
+        } else if (huntNearRackRef.current) {
+          huntNearRackRef.current = false
+          setHuntNearRack(false)
+          if (huntEquipOpenRef.current) {
+            huntEquipOpenRef.current = false
+            setHuntEquipOpen(false)
+          }
         }
         if (phase === "room" && room) {
           if (now >= room.pageAt) {
@@ -9460,8 +10130,15 @@ export default function ThreeWorld({
           }
         } else if (phase === "scoring") {
           if (room) room.door.rotation.y = Math.min(1.2, room.door.rotation.y + dt * 0.8)
-          if (now >= huntScoringUntilRef.current) huntStartRoom()
+          // Hold on the scoring screen while the 100-pt menu is open.
+          if (
+            now >= huntScoringUntilRef.current &&
+            !huntRewardOpenRef.current &&
+            !huntReleasedRef.current
+          )
+            huntStartRoom()
         } else if (phase === "mission" && huntMissionReadyRef.current) {
+          huntUpdateEquip(dt)
           // Arena boundary: shrink on Lv3, else fixed.
           const lv = HUNT_LEVELS[huntLevelIdxRef.current]
           if (lv?.shrink) {
@@ -9585,11 +10262,24 @@ export default function ThreeWorld({
         }
         huntTotalRef.current = saved
         setHuntTotal(saved)
+        // Persisted rewards from prior runs (PR-Z2).
+        try {
+          const tk = Number.parseInt(localStorage.getItem(HUNT_TICKETS_KEY) ?? "0", 10) || 0
+          huntTicketsRef.current = Math.max(0, Math.min(HUNT_MAX_TICKETS, tk))
+          setHuntTickets(huntTicketsRef.current)
+          const gv = localStorage.getItem(HUNT_GRAVITY_KEY) === "1"
+          huntGravityUnlockedRef.current = gv
+          setHuntGravityUnlocked(gv)
+          huntClearsRef.current =
+            Number.parseInt(localStorage.getItem(HUNT_CLEARS_KEY) ?? "0", 10) || 0
+        } catch {
+          /* ignore */
+        }
         huntLevelIdxRef.current = 0
         huntRepeatRef.current = 0
         buildHuntRoom()
         huntStartRoom()
-        showNotification("HUNT — 標的の情報を待て")
+        showNotification("HUNT — 標的の情報を待て・ラックで装備せよ [E]")
       }
 
       const bullets: Bullet[] = []
@@ -10516,6 +11206,12 @@ export default function ThreeWorld({
         if (aaMountedRef.current) return
         // Brief lock right after dismounting a vehicle (exposure window).
         if (Date.now() < fireLockUntilRef.current) return
+        // HUNT special weapon equipped → its own firing path (blade fires on
+        // release in huntUpdateEquip, so left-click is a no-op for it).
+        if (modeRef.current === "hunt" && huntWeaponRef.current) {
+          if (huntWeaponRef.current !== "blade") fireHuntWeapon()
+          return
+        }
         const weapon = WEAPONS[currentWeaponIdxRef.current]
         if (!weapon) return
         // Knife: melee swing instead of a projectile. Its own cooldown gate
@@ -11123,7 +11819,9 @@ export default function ThreeWorld({
         const fwdX = -Math.sin(camState.yaw)
         const fwdZ = -Math.cos(camState.yaw)
         const isSprinting = keysRef.current.has("Shift")
-        const spd = MOVE_SPEED * (isSprinting ? SPRINT_MULTIPLIER : 1)
+        // HUNT suit: +50% move speed while the suit holds.
+        const huntSuitSpeed = huntSuitActiveRef.current ? HUNT_SUIT_SPEED : 1
+        const spd = MOVE_SPEED * (isSprinting ? SPRINT_MULTIPLIER : 1) * huntSuitSpeed
         // Desired world-space velocity from input.
         const desiredVx = (fwdX * -inVz + Math.cos(camState.yaw) * inVx) * spd
         const desiredVz = (fwdZ * -inVz + -Math.sin(camState.yaw) * inVx) * spd
@@ -11324,7 +12022,8 @@ export default function ThreeWorld({
                 drop >= FALL_MIN_DROP &&
                 parachutePhaseRef.current === "none" &&
                 gamePhaseRef.current === "playing" &&
-                Date.now() > spawnInvulnUntilRef.current
+                Date.now() > spawnInvulnUntilRef.current &&
+                !huntSuitActiveRef.current // HUNT suit negates fall damage
               ) {
                 let dmg: number
                 if (drop >= FALL_LETHAL_DROP) {
@@ -11361,6 +12060,17 @@ export default function ThreeWorld({
               refs.focalPoint.y = groundY
               playerVelYRef.current = 0
             }
+          } else if (
+            modeRef.current === "hunt" &&
+            keysRef.current.has(" ") &&
+            !huntInputLockRef.current &&
+            !drivingRef.current
+          ) {
+            // HUNT jump: the suit triples the launch impulse (3× jump).
+            refs.focalPoint.y = groundY + 0.02
+            playerVelYRef.current = HUNT_JUMP_SPEED * (huntSuitActiveRef.current ? 3 : 1)
+            wasAirborneRef.current = true
+            fallStartYRef.current = refs.focalPoint.y
           } else {
             // Snap to floor (handles walking onto a new floor at the same Y
             // and the small auto step-up of low geometry).
@@ -12856,7 +13566,9 @@ export default function ThreeWorld({
             const W = mcanvas.width
             // SKY zooms the minimap out to an aviation-radar scale so the whole
             // dogfight (jets spread over hundreds of metres) fits the dial.
-            const VIEW = isSky ? 520 : 96 // world units shown across the minimap
+            // HUNT radar: zoom the minimap out so the whole arena (all enemies)
+            // is always visible (the controller-style radar from step 4).
+            const VIEW = isSky || modeRef.current === "hunt" ? 520 : 96
             const SCALE = W / VIEW
             const px = refs.focalPoint.x
             const pz = refs.focalPoint.z
@@ -12978,6 +13690,23 @@ export default function ThreeWorld({
               const cx = mx(enemy.mesh.position.x)
               const cz = mz(enemy.mesh.position.z)
               if (!inView(cx, cz)) continue
+              // HUNT radar: bosses are a big red triangle, minions small red dots.
+              if (modeRef.current === "hunt") {
+                ctx.fillStyle = "#ff2a2a"
+                if (enemy.isHuntBoss) {
+                  ctx.beginPath()
+                  ctx.moveTo(cx, cz - 6)
+                  ctx.lineTo(cx + 5, cz + 4)
+                  ctx.lineTo(cx - 5, cz + 4)
+                  ctx.closePath()
+                  ctx.fill()
+                } else {
+                  ctx.beginPath()
+                  ctx.arc(cx, cz, 2.5, 0, Math.PI * 2)
+                  ctx.fill()
+                }
+                continue
+              }
               ctx.fillStyle =
                 enemy.type === "heavy"
                   ? "#cc44ff"
@@ -13062,6 +13791,17 @@ export default function ThreeWorld({
             ctx.stroke()
             ctx.restore()
           }
+        }
+
+        // HUNT revive ticket: if a lethal hit set game-over this frame during a
+        // mission, auto-consume a ticket and undo it before the screen renders.
+        if (
+          modeRef.current === "hunt" &&
+          gamePhaseRef.current === "gameover" &&
+          huntPhaseRef.current === "mission" &&
+          huntTicketsRef.current > 0
+        ) {
+          huntTryRevive()
         }
 
         renderer.render(scene, camera)
@@ -13155,11 +13895,44 @@ export default function ThreeWorld({
 
     function onKeyDown(e: KeyboardEvent) {
       if (isTypingInInput(e)) return
+      // ── HUNT menus swallow keys while open ──────────────────────────────────
+      if (huntRewardOpenRef.current) {
+        if (e.key === "1") huntChooseReward(1)
+        else if (e.key === "2") huntChooseReward(2)
+        else if (e.key === "3") huntChooseReward(3)
+        return
+      }
+      if (huntEquipOpenRef.current) {
+        if (e.key === "1") huntToggleSuitChoice()
+        else if (e.key === "2") huntPickupWeapon("pulsegun")
+        else if (e.key === "3") huntPickupWeapon("pulseshotgun")
+        else if (e.key === "4") huntPickupWeapon("capturegun")
+        else if (e.key === "5") huntPickupWeapon("blade")
+        else if (e.key === "6") huntPickupWeapon("gravitycannon")
+        else if (e.key === "e" || e.key === "E" || e.key === "Escape") {
+          huntEquipOpenRef.current = false
+          setHuntEquipOpen(false)
+        }
+        return
+      }
       // Prevent browser default (scroll / focus shift) for movement keys
       if (MOVEMENT_KEYS.has(e.key)) e.preventDefault()
       // Normalize so Shift+WASD still triggers movement
       const stored = e.key.length === 1 ? e.key.toLowerCase() : e.key
       keysRef.current.add(stored)
+      // ── HUNT weapons + actions (slots 6-9 / 0, punch, reload, interact) ─────
+      if (modeRef.current === "hunt") {
+        if (e.key === "6") huntSelectHuntWeapon("pulsegun")
+        else if (e.key === "7") huntSelectHuntWeapon("pulseshotgun")
+        else if (e.key === "8") huntSelectHuntWeapon("capturegun")
+        else if (e.key === "9") huntSelectHuntWeapon("blade")
+        else if (e.key === "0") huntSelectHuntWeapon("gravitycannon")
+        if (e.key === "f" || e.key === "F") huntPunchReqRef.current = true
+        if (e.key === "r" || e.key === "R") huntReloadReqRef.current = true
+        // 1-5 fall through to the normal-weapon switch below, which also drops
+        // back off the HUNT weapon.
+        if (["1", "2", "3", "4", "5"].includes(e.key)) huntClearHuntWeapon()
+      }
       // In a tank, 1/2/3 pick handheld guns (and leave the cannon), 4 selects
       // the main cannon. On foot / in a car, 1/2/3/4 are the usual weapons.
       const drivingTank = drivingRef.current && drivingKindRef.current === "tank"
@@ -13186,6 +13959,8 @@ export default function ThreeWorld({
         // Climb interaction — animate loop consumes the request and only
         // fires if the player is currently inside a climb zone.
         climbRequestRef.current = true
+        // HUNT: same key toggles the equipment rack menu in the room.
+        if (modeRef.current === "hunt") huntInteractReqRef.current = true
       }
       if (e.key === "Alt" && drivingKindRef.current === "jet") {
         // Eject from the jet (consumed in updateJet).
@@ -13249,7 +14024,15 @@ export default function ThreeWorld({
       window.removeEventListener("keydown", onKeyDown)
       window.removeEventListener("keyup", onKeyUp)
     }
-  }, [showNotification, unlockedWeapons])
+  }, [
+    showNotification,
+    unlockedWeapons,
+    huntChooseReward,
+    huntToggleSuitChoice,
+    huntPickupWeapon,
+    huntSelectHuntWeapon,
+    huntClearHuntWeapon,
+  ])
 
   // ── WebSocket ──────────────────────────────────────────────────────────────
   // biome-ignore lint/correctness/useExhaustiveDependencies: WS connects once with initial mode/mapId
@@ -13889,6 +14672,370 @@ export default function ThreeWorld({
                   zIndex: 58,
                 }}
               />
+            )}
+
+            {/* ── Suit vignette + damage-line flash (worn = subtle black edges). */}
+            {huntSuitActive && gamePhase === "playing" && (
+              <div
+                style={{
+                  position: "absolute",
+                  inset: 0,
+                  pointerEvents: "none",
+                  zIndex: 5,
+                  boxShadow: huntSuitFlash
+                    ? "inset 0 0 60px 16px rgba(120,200,255,0.5)"
+                    : "inset 0 0 120px 30px rgba(0,0,0,0.55)",
+                  transition: "box-shadow 0.12s",
+                }}
+              />
+            )}
+
+            {/* ── Suit durability gauge (black bar above the HP bar). */}
+            {huntSuitChosen && gamePhase === "playing" && (
+              <div
+                style={{
+                  position: "absolute",
+                  bottom: isMobile ? "5.4rem" : "3.0rem",
+                  left: "1.4rem",
+                  width: isMobile ? "140px" : "200px",
+                  zIndex: 21,
+                  pointerEvents: "none",
+                  fontFamily: "monospace",
+                }}
+              >
+                <div
+                  style={{
+                    fontSize: "0.55rem",
+                    letterSpacing: "0.2em",
+                    color: huntSuitActive ? "#9fdfff" : "#ff5555",
+                    marginBottom: "2px",
+                  }}
+                >
+                  {huntSuitActive ? "SUIT" : "SUIT BROKEN"}
+                </div>
+                <div
+                  style={{
+                    height: "7px",
+                    background: "rgba(0,0,0,0.85)",
+                    border: "1px solid rgba(150,200,255,0.4)",
+                    overflow: "hidden",
+                  }}
+                >
+                  <div
+                    style={{
+                      height: "100%",
+                      width: `${Math.round((huntSuitDur / HUNT_SUIT_MAX) * 100)}%`,
+                      background: huntSuitActive
+                        ? "linear-gradient(90deg,#2a4a6a,#7fd0ff)"
+                        : "#552222",
+                      boxShadow: huntSuitActive ? "0 0 6px #66ccff" : "none",
+                      transition: "width 0.2s",
+                    }}
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* ── HUNT weapon readout (replaces the normal ammo HUD). */}
+            {huntWeapon && gamePhase === "playing" && (
+              <div
+                style={{
+                  position: "absolute",
+                  bottom: "1.4rem",
+                  right: "1.4rem",
+                  zIndex: 21,
+                  textAlign: "right",
+                  pointerEvents: "none",
+                  fontFamily: "monospace",
+                }}
+              >
+                <div style={{ color: "#9fffd0", fontSize: "0.65rem", letterSpacing: "0.18em" }}>
+                  {HUNT_WEAPON_BY_ID[huntWeapon].name}
+                  {huntReloadingUi && <span style={{ color: "#ffaa00" }}> RELOAD</span>}
+                  {huntWeapon === "pulsegun" && huntLockCount > 0 && (
+                    <span style={{ color: "#fff" }}> ◎{huntLockCount}/3</span>
+                  )}
+                </div>
+                <div
+                  style={{ color: "#fff", fontSize: "2.6rem", fontWeight: "bold", lineHeight: 1 }}
+                >
+                  {HUNT_WEAPON_BY_ID[huntWeapon].mag < 0 ? "∞" : huntAmmoUi}
+                </div>
+              </div>
+            )}
+
+            {/* ── Revive tickets. */}
+            {huntTickets > 0 && gamePhase === "playing" && (
+              <div
+                style={{
+                  position: "absolute",
+                  top: "0.5rem",
+                  right: "0.6rem",
+                  zIndex: 26,
+                  fontFamily: "monospace",
+                  color: "#ff88cc",
+                  fontSize: "0.8rem",
+                  pointerEvents: "none",
+                  textShadow: "0 0 6px rgba(255,80,160,0.7)",
+                }}
+              >
+                ♻ 復活 ×{huntTickets}
+              </div>
+            )}
+
+            {/* ── Rack prompt (room). */}
+            {huntNearRack && !huntEquipOpen && !isMobile && (
+              <div
+                style={{
+                  position: "absolute",
+                  bottom: "30%",
+                  left: "50%",
+                  transform: "translateX(-50%)",
+                  zIndex: 30,
+                  fontFamily: "monospace",
+                  color: "#39ff7a",
+                  fontSize: "0.95rem",
+                  pointerEvents: "none",
+                  textShadow: "0 0 8px #00ff55",
+                }}
+              >
+                [E] 装備ラック
+              </div>
+            )}
+
+            {/* ── Equipment menu (loadout chosen before the countdown ends). */}
+            {huntEquipOpen && (
+              <div
+                style={{
+                  position: "absolute",
+                  top: "50%",
+                  left: "50%",
+                  transform: "translate(-50%,-50%)",
+                  zIndex: 55,
+                  fontFamily: "monospace",
+                  background: "rgba(0,10,6,0.94)",
+                  border: "2px solid #00ff55",
+                  boxShadow: "0 0 28px rgba(0,255,80,0.4)",
+                  padding: "1.2rem 1.6rem",
+                  color: "#39ff7a",
+                  minWidth: "300px",
+                  pointerEvents: "auto",
+                }}
+              >
+                <div
+                  style={{
+                    fontSize: "1.2rem",
+                    fontWeight: "bold",
+                    letterSpacing: "0.2em",
+                    marginBottom: "0.8rem",
+                    textAlign: "center",
+                  }}
+                >
+                  装備ラック
+                </div>
+                <button
+                  type="button"
+                  onClick={huntToggleSuitChoice}
+                  style={{
+                    display: "block",
+                    width: "100%",
+                    marginBottom: "0.5rem",
+                    padding: "0.5rem",
+                    textAlign: "left",
+                    cursor: "pointer",
+                    fontFamily: "monospace",
+                    background: huntSuitChosen ? "rgba(0,120,255,0.25)" : "rgba(0,20,10,0.6)",
+                    border: `1px solid ${huntSuitChosen ? "#66ccff" : "#225544"}`,
+                    color: huntSuitChosen ? "#9fdfff" : "#7fbfa0",
+                  }}
+                >
+                  [1] 強化スーツ {huntSuitChosen ? "✓ 着用" : "— 未着用"}
+                </button>
+                {HUNT_WEAPONS.filter((w) => !w.reward || huntGravityUnlocked).map((w, i) => {
+                  const owned = huntOwned.includes(w.id)
+                  return (
+                    <button
+                      type="button"
+                      key={w.id}
+                      onClick={() => huntPickupWeapon(w.id)}
+                      style={{
+                        display: "block",
+                        width: "100%",
+                        marginBottom: "0.4rem",
+                        padding: "0.45rem",
+                        textAlign: "left",
+                        cursor: "pointer",
+                        fontFamily: "monospace",
+                        background: owned ? "rgba(0,80,40,0.5)" : "rgba(0,20,10,0.6)",
+                        border: `1px solid ${owned ? "#33cc77" : "#225544"}`,
+                        color: owned ? "#9fffc0" : "#7fbfa0",
+                      }}
+                    >
+                      [{i + 2}] {w.name} {owned ? "✓" : "取得"}
+                    </button>
+                  )
+                })}
+                <div style={{ fontSize: "0.62rem", opacity: 0.7, marginTop: "0.6rem" }}>
+                  カウントダウン終了までに選べ。選ばなければ生身＋既存武器で転送。[E]で閉じる
+                </div>
+              </div>
+            )}
+
+            {/* ── 100-pt reward menu (shown on the scoring screen when eligible). */}
+            {huntRewardOpen && (
+              <div
+                style={{
+                  position: "absolute",
+                  top: "50%",
+                  left: "50%",
+                  transform: "translate(-50%,-50%)",
+                  zIndex: 56,
+                  fontFamily: "monospace",
+                  background: "rgba(8,0,12,0.95)",
+                  border: "2px solid #cc66ff",
+                  boxShadow: "0 0 30px rgba(180,80,255,0.45)",
+                  padding: "1.4rem 1.8rem",
+                  color: "#e0b0ff",
+                  minWidth: "340px",
+                  textAlign: "center",
+                  pointerEvents: "auto",
+                }}
+              >
+                <div
+                  style={{
+                    fontSize: "1.3rem",
+                    fontWeight: "bold",
+                    letterSpacing: "0.18em",
+                    marginBottom: "0.4rem",
+                  }}
+                >
+                  100点に到達した
+                </div>
+                <div style={{ fontSize: "0.7rem", opacity: 0.8, marginBottom: "1rem" }}>
+                  累計 {huntTotal} pt — 選べ（タップ / キー 1・2・3）
+                </div>
+                {(
+                  [
+                    {
+                      n: 1 as const,
+                      t: "① 解放される",
+                      d: "HUNT クリア。記憶を消され外へ。累計リセット",
+                    },
+                    {
+                      n: 2 as const,
+                      t: "② 強力な武器を得る",
+                      d: "−100pt グラビティキャノン永久解放",
+                    },
+                    {
+                      n: 3 as const,
+                      t: "③ 復活チケット",
+                      d: `−100pt 蘇生を1枚（最大${HUNT_MAX_TICKETS}）`,
+                    },
+                  ] as const
+                ).map((c) => (
+                  <button
+                    type="button"
+                    key={c.n}
+                    onClick={() => huntChooseReward(c.n)}
+                    style={{
+                      display: "block",
+                      width: "100%",
+                      marginBottom: "0.5rem",
+                      padding: "0.6rem",
+                      textAlign: "left",
+                      cursor: "pointer",
+                      fontFamily: "monospace",
+                      background: "rgba(40,10,60,0.6)",
+                      border: "1px solid #aa55dd",
+                      color: "#e8c8ff",
+                    }}
+                  >
+                    <div style={{ fontWeight: "bold" }}>{c.t}</div>
+                    <div style={{ fontSize: "0.62rem", opacity: 0.8 }}>{c.d}</div>
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  onClick={() => {
+                    huntRewardOpenRef.current = false
+                    setHuntRewardOpen(false)
+                  }}
+                  style={{
+                    marginTop: "0.3rem",
+                    padding: "0.35rem 0.8rem",
+                    cursor: "pointer",
+                    fontFamily: "monospace",
+                    background: "transparent",
+                    border: "1px solid #553366",
+                    color: "#aa88bb",
+                    fontSize: "0.7rem",
+                  }}
+                >
+                  スキップ
+                </button>
+              </div>
+            )}
+
+            {/* ── "Released" ending overlay. */}
+            {huntReleased && (
+              <div
+                style={{
+                  position: "absolute",
+                  inset: 0,
+                  zIndex: 70,
+                  background: "rgba(255,255,255,0.97)",
+                  display: "flex",
+                  flexDirection: "column",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  fontFamily: "monospace",
+                  color: "#111",
+                  textAlign: "center",
+                  pointerEvents: "auto",
+                  animation: "huntRelease 2s ease-in",
+                }}
+              >
+                <style>
+                  {
+                    "@keyframes huntRelease { 0% { background: rgba(0,0,0,0.95); color: #fff; } 100% { background: rgba(255,255,255,0.97); color: #111; } }"
+                  }
+                </style>
+                <div style={{ fontSize: "2.2rem", fontWeight: "bold", letterSpacing: "0.3em" }}>
+                  解放
+                </div>
+                <div
+                  style={{
+                    fontSize: "0.95rem",
+                    marginTop: "1rem",
+                    maxWidth: "440px",
+                    lineHeight: 1.8,
+                  }}
+                >
+                  契約は果たされた。狩りの記憶は薄れ、あなたは元の日常へ還される……
+                  <br />
+                  もう、あの黒い球体を思い出すことはない。
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    huntReleasedRef.current = false
+                    setHuntReleased(false)
+                    onExit?.()
+                  }}
+                  style={{
+                    marginTop: "2rem",
+                    padding: "0.7rem 2.4rem",
+                    cursor: "pointer",
+                    fontFamily: "monospace",
+                    background: "#111",
+                    color: "#fff",
+                    border: "none",
+                    letterSpacing: "0.2em",
+                  }}
+                >
+                  ▶ モードセレクトへ
+                </button>
+              </div>
             )}
             {/* Persistent score banner: this mission + cumulative (+ quota). */}
             {gamePhase === "playing" && (
@@ -14632,7 +15779,7 @@ export default function ThreeWorld({
         )}
 
         {/* ── Bottom-right: Ammo display (COD style, desktop only) ─────── */}
-        {!isLoading && !error && !isMobile && gamePhase === "playing" && (
+        {!isLoading && !error && !isMobile && gamePhase === "playing" && !huntWeapon && (
           <div
             style={{
               position: "absolute",
@@ -15809,11 +16956,115 @@ export default function ThreeWorld({
               FIRE
             </button>
 
+            {/* ── HUNT mobile extras: PUNCH, EQUIP (room), HUNT weapon column. */}
+            {mode === "hunt" && (
+              <>
+                {huntSuitActive && (
+                  <button
+                    type="button"
+                    onPointerDown={(e) => {
+                      e.preventDefault()
+                      huntPunchReqRef.current = true
+                    }}
+                    style={{
+                      position: "absolute",
+                      bottom: isLandscape ? "7.5rem" : "11rem",
+                      right: isLandscape ? "9rem" : "9.5rem",
+                      width: "60px",
+                      height: "60px",
+                      borderRadius: "50%",
+                      background: "rgba(255,180,40,0.28)",
+                      border: "2px solid rgba(255,200,80,0.8)",
+                      color: "#ffe0a0",
+                      fontFamily: "monospace",
+                      fontSize: "0.7rem",
+                      fontWeight: "bold",
+                      touchAction: "none",
+                      userSelect: "none",
+                      zIndex: 32,
+                    }}
+                  >
+                    PUNCH
+                  </button>
+                )}
+                {huntNearRack && (
+                  <button
+                    type="button"
+                    onPointerDown={(e) => {
+                      e.preventDefault()
+                      huntInteractReqRef.current = true
+                    }}
+                    style={{
+                      position: "absolute",
+                      bottom: "30%",
+                      left: "50%",
+                      transform: "translateX(-50%)",
+                      padding: "0.7rem 1.4rem",
+                      borderRadius: "8px",
+                      background: "rgba(0,40,20,0.8)",
+                      border: "2px solid #00ff55",
+                      color: "#39ff7a",
+                      fontFamily: "monospace",
+                      fontSize: "0.9rem",
+                      fontWeight: "bold",
+                      touchAction: "none",
+                      userSelect: "none",
+                      zIndex: 33,
+                    }}
+                  >
+                    装備ラック
+                  </button>
+                )}
+                <div
+                  style={{
+                    position: "absolute",
+                    left: "0.4rem",
+                    top: "30%",
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: "0.3rem",
+                    zIndex: 32,
+                  }}
+                >
+                  {HUNT_WEAPONS.filter((w) => huntOwned.includes(w.id)).map((w) => (
+                    <button
+                      type="button"
+                      key={w.id}
+                      onPointerDown={(e) => {
+                        e.preventDefault()
+                        huntSelectHuntWeapon(w.id)
+                      }}
+                      style={{
+                        padding: "0.35rem 0.5rem",
+                        borderRadius: "6px",
+                        background:
+                          huntWeapon === w.id ? "rgba(0,200,120,0.4)" : "rgba(0,20,12,0.7)",
+                        border: `1px solid ${huntWeapon === w.id ? "#33ff99" : "#225544"}`,
+                        color: "#9fffc0",
+                        fontFamily: "monospace",
+                        fontSize: "0.58rem",
+                        fontWeight: "bold",
+                        touchAction: "none",
+                        userSelect: "none",
+                      }}
+                    >
+                      {w.name.split(" ")[0]}
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
+
             {/* RELOAD button (bottom-center) */}
             <button
               type="button"
               onPointerDown={(e) => {
                 e.preventDefault()
+                // HUNT weapon reload routes through its own request ref.
+                if (modeRef.current === "hunt" && huntWeaponRef.current) {
+                  huntReloadReqRef.current = true
+                  return
+                }
                 const weapon = WEAPONS[currentWeaponIdxRef.current]
                 if (
                   weapon &&
