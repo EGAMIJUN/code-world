@@ -485,6 +485,37 @@ const SOUNDS = {
   huntTally() {
     _tone(1320, 0.06, 0.2, "square")
   },
+  // Big Cockroach boss: a guttural descending roar.
+  bossRoar() {
+    const ctx = _getCtx()
+    const now = ctx.currentTime
+    const o = ctx.createOscillator()
+    o.type = "sawtooth"
+    o.frequency.setValueAtTime(120, now)
+    o.frequency.exponentialRampToValueAtTime(38, now + 1.4)
+    const g = ctx.createGain()
+    g.gain.setValueAtTime(0.0001, now)
+    g.gain.exponentialRampToValueAtTime(0.4, now + 0.2)
+    g.gain.exponentialRampToValueAtTime(0.001, now + 1.6)
+    const f = ctx.createBiquadFilter()
+    f.type = "lowpass"
+    f.frequency.value = 400
+    o.connect(f)
+    f.connect(g)
+    g.connect(ctx.destination)
+    o.start(now)
+    o.stop(now + 1.7)
+    _noise(1.4, 0.18, "lowpass", 180)
+  },
+  // Heavy stomp / building collapse — deep boom + crumbling noise.
+  bossStomp() {
+    _tone(46, 0.4, 0.55, "sawtooth")
+    _noise(0.5, 0.4, "lowpass", 300)
+  },
+  collapse() {
+    _noise(0.7, 0.45, "lowpass", 500)
+    _tone(70, 0.3, 0.3, "square", 40)
+  },
 }
 
 // ══ HUNT mode data (transfer missions) — PR-Z1 ═══════════════════════════════
@@ -777,7 +808,18 @@ function wallHeightFor(type: number, w: number, d: number): number {
 // the ground (y0=0), but railings/parapets float up on a deck — giving them a
 // real bottom lets a ground-level mover walk *underneath* them (e.g. into a
 // tower's central elevator pad) while they still block anyone up on the deck.
-type WallAABB = { x1: number; z1: number; x2: number; z2: number; h: number; y0?: number }
+// `disabled` is set when the Big Cockroach boss stomps a building flat. It's a
+// per-game runtime flag (reset on each mount) — collision + bullet checks skip
+// disabled walls so the rubble is walkable / shoot-through.
+type WallAABB = {
+  x1: number
+  z1: number
+  x2: number
+  z2: number
+  h: number
+  y0?: number
+  disabled?: boolean
+}
 const WALL_AABBS: WallAABB[] = MAP_OBJECTS.map(([x, z, w, d, type]) => ({
   x1: x,
   z1: z,
@@ -802,6 +844,7 @@ function collidesWithWall(px: number, pz: number, radius: number, feetY = 0): bo
   )
     return true
   for (const w of ALL_AABBS) {
+    if (w.disabled) continue
     if (
       px + radius > w.x1 &&
       px - radius < w.x2 &&
@@ -819,10 +862,189 @@ function collidesWithWall(px: number, pz: number, radius: number, feetY = 0): bo
 // y is checked so a barricade doesn't stop a shot flying over it at eye height.
 function pointInsideWall(px: number, py: number, pz: number): boolean {
   for (const w of ALL_AABBS) {
+    if (w.disabled) continue
     if (px > w.x1 && px < w.x2 && pz > w.z1 && pz < w.z2 && py >= (w.y0 ?? 0) && py <= w.h)
       return true
   }
   return false
+}
+
+// ══ Big Cockroach final boss (invasion Wave-5 boss) — PR-B1 ══════════════════
+// A Godzilla-scale roach (~60m long, ~25m tall) built from primitives. One
+// instance only, so per-boss materials are fine (still shared across its own
+// parts). Forward = -z (same convention as vehicles/enemies).
+const BOSS_HP = 50000
+const BOSS_SPEED = 3 // advance m/s (×1.5 in rage)
+const BOSS_STOMP_RANGE = 30 // player within this → can stomp
+const BOSS_STOMP_AOE = 12 // stomp blast radius (player + buildings)
+const BOSS_STOMP_DMG = 80
+const BOSS_BEAM_SECONDS = 5
+const BOSS_BEAM_DPS = 20
+const BOSS_POOL_RADIUS = 6 // poison pool radius
+const BOSS_POOL_DPS = 10
+const BOSS_POOL_LIFE = 10 // seconds the pool lingers
+const BOSS_SPAWN_COUNT = 8 // small roaches per SPAWN
+const BOSS_SMALL_MAX = 16 // cap of small roaches on the field
+const BOSS_SMALL_SCORE = 5
+const BOSS_KILL_SCORE = 5000
+const BOSS_RAGE_FRACTION = 0.5 // HP fraction that triggers rage
+const BOSS_EYE_HIT_RADIUS = 7 // weak-point sphere radius around the eyes (2× dmg)
+// The 60m body approximated as three circles (head / thorax / abdomen) along the
+// local forward (-z) axis — `lz` = local z offset, `r` = horizontal radius. Used
+// for AOE + AA hit tests so explosions near the head or tail still connect.
+const BOSS_HIT_PARTS: { lz: number; r: number }[] = [
+  { lz: -20, r: 9 }, // head (front)
+  { lz: -6, r: 12 }, // thorax
+  { lz: 16, r: 16 }, // abdomen (rear)
+]
+
+interface BigBoss {
+  group: THREE.Group
+  x: number
+  z: number
+  heading: number // yaw; forward = (-sin, -cos)
+  hp: number
+  state: "intro" | "advance" | "stomp" | "beam" | "spawn"
+  stateUntil: number // ms timestamp the current state ends
+  nextDecisionAt: number
+  rage: boolean
+  walkPhase: number
+  dyingStage: number // >0 once defeated: counts the explosion chain
+  dyingNextAt: number
+  introY: number // current drop-in height during the intro
+  legs: THREE.Object3D[]
+  antennae: THREE.Object3D[]
+  eyeMat: THREE.MeshStandardMaterial
+  wingL: THREE.Object3D
+  wingR: THREE.Object3D
+  headGroup: THREE.Object3D
+  beam: THREE.Mesh
+  // Transient attack state.
+  stompDone: boolean // stomp impact already applied this STOMP
+  spawnDone: boolean // roaches already released this SPAWN
+  beamTargetX: number // slowly-tracking beam aim point
+  beamTargetZ: number
+  poolDropAt: number // ms timestamp for the next beam poison pool
+  wingOpen: number // 0..1 elytra open amount
+}
+
+// Build the boss mesh hierarchy. Returns the group + the handles the AI needs
+// to animate (legs/antennae) and the shared emissive eye material (weak point /
+// rage glow). The beam cylinder is created by the caller (lives in the scene,
+// oriented per-frame).
+function makeBigCockroach(): {
+  group: THREE.Group
+  legs: THREE.Object3D[]
+  antennae: THREE.Object3D[]
+  eyeMat: THREE.MeshStandardMaterial
+  wingL: THREE.Object3D
+  wingR: THREE.Object3D
+  headGroup: THREE.Group
+} {
+  const group = new THREE.Group()
+  const chitinMat = new THREE.MeshStandardMaterial({
+    color: 0x3a2418,
+    roughness: 0.3,
+    metalness: 0.55,
+  })
+  const legMat = new THREE.MeshStandardMaterial({
+    color: 0x2a1810,
+    roughness: 0.4,
+    metalness: 0.5,
+  })
+  const eyeMat = new THREE.MeshStandardMaterial({
+    color: 0xff2200,
+    emissive: 0xff1500,
+    emissiveIntensity: 2.0,
+  })
+  const sphere = new THREE.SphereGeometry(1, 18, 14)
+  const BODY_Y = 14 // body centre height (legs lift it off the ground)
+  // Abdomen (big rear ellipsoid).
+  const abdomen = new THREE.Mesh(sphere, chitinMat)
+  abdomen.scale.set(15, 9, 26)
+  abdomen.position.set(0, BODY_Y, 16)
+  abdomen.castShadow = true
+  group.add(abdomen)
+  // Thorax (mid).
+  const thorax = new THREE.Mesh(sphere, chitinMat)
+  thorax.scale.set(12, 8, 11)
+  thorax.position.set(0, BODY_Y, -6)
+  thorax.castShadow = true
+  group.add(thorax)
+  // Head group (front, -z) carrying eyes + mandibles + beam origin.
+  const headGroup = new THREE.Group()
+  headGroup.position.set(0, BODY_Y - 1, -20)
+  group.add(headGroup)
+  const head = new THREE.Mesh(sphere, chitinMat)
+  head.scale.set(9, 7, 8)
+  head.castShadow = true
+  headGroup.add(head)
+  // Two glowing compound eyes (the weak point).
+  for (const sx of [-1, 1]) {
+    const eye = new THREE.Mesh(sphere, eyeMat)
+    eye.scale.set(2.6, 3.2, 2.2)
+    eye.position.set(sx * 5, 1.5, -5)
+    headGroup.add(eye)
+  }
+  // Mandibles (two angled cones at the mouth).
+  for (const sx of [-1, 1]) {
+    const mand = new THREE.Mesh(new THREE.ConeGeometry(1.2, 6, 8), legMat)
+    mand.position.set(sx * 2.5, -3, -8)
+    mand.rotation.set(-1.4, 0, sx * 0.4)
+    headGroup.add(mand)
+  }
+  // Antennae (long thin cylinders sweeping forward from the head; pivot groups
+  // so the AI can sway them).
+  const antennae: THREE.Object3D[] = []
+  for (const sx of [-1, 1]) {
+    const pivot = new THREE.Group()
+    pivot.position.set(sx * 3, 4, -7)
+    const ant = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.15, 26, 6), legMat)
+    ant.position.set(sx * 3, 6, -10)
+    ant.rotation.set(-1.1, 0, sx * 0.3)
+    pivot.add(ant)
+    headGroup.add(pivot)
+    antennae.push(pivot)
+  }
+  // Six legs (3 per side). Each is a pivot group at the body; an upper + lower
+  // segment reach out and down to a foot near the ground. Pivot.rotation.x
+  // swings the leg for the walk cycle.
+  const legs: THREE.Object3D[] = []
+  const legZ = [-8, 2, 14]
+  for (const side of [-1, 1]) {
+    for (const lz of legZ) {
+      const pivot = new THREE.Group()
+      pivot.position.set(side * 11, BODY_Y - 1, lz)
+      const upper = new THREE.Mesh(new THREE.CylinderGeometry(1.1, 0.8, 14, 7), legMat)
+      // angle the upper segment out + down
+      upper.position.set(side * 5, -3, 0)
+      upper.rotation.z = side * 1.0
+      pivot.add(upper)
+      const lower = new THREE.Mesh(new THREE.CylinderGeometry(0.7, 0.4, 14, 7), legMat)
+      lower.position.set(side * 9, -10, 0)
+      lower.rotation.z = side * 0.3
+      lower.castShadow = true
+      pivot.add(lower)
+      group.add(pivot)
+      legs.push(pivot)
+    }
+  }
+  // Wing covers (elytra) on top of the abdomen — two flattened shells with an
+  // inner-edge pivot so they hinge open during the SPAWN attack.
+  const makeWing = (side: number) => {
+    const pivot = new THREE.Group()
+    pivot.position.set(0, BODY_Y + 8, 16)
+    const shell = new THREE.Mesh(sphere, chitinMat)
+    shell.scale.set(7, 2, 22)
+    shell.position.set(side * 7, 0, 0)
+    shell.castShadow = true
+    pivot.add(shell)
+    group.add(pivot)
+    return pivot
+  }
+  const wingL = makeWing(-1)
+  const wingR = makeWing(1)
+  return { group, legs, antennae, eyeMat, wingL, wingR, headGroup }
 }
 
 // True if a torso-height wall sits between two ground points. Sampled at
@@ -1828,6 +2050,17 @@ export default function ThreeWorld({
   const invasionWaveRef = useRef(0)
   const invasionActiveRef = useRef(false)
   const invasionNextStrikeRef = useRef(0) // ms timestamp for the next rocket
+  // ── Big Cockroach boss (PR-B1) ──────────────────────────────────────────────
+  const bigBossRef = useRef<BigBoss | null>(null)
+  const bossPendingAtRef = useRef(0) // ms timestamp to spawn the boss (0 = none)
+  const bossDoneRef = useRef(false) // boss defeated → no respawn
+  const [bossActive, setBossActive] = useState(false) // drives the HUD HP bar
+  const [bossHpPct, setBossHpPct] = useState(100)
+  const [bossRageUi, setBossRageUi] = useState(false)
+  const [bossDefeated, setBossDefeated] = useState(false) // victory overlay
+  const [bossPoison, setBossPoison] = useState(false) // green poison vignette
+  const bossPoisonRef = useRef(false)
+  const bossPoisonHitAtRef = useRef(0) // ms timestamp of the last poison contact
 
   // ── HUNT mode controller (PR-Z1) ───────────────────────────────────────────
   // Sub-phase machine layered on top of the normal "playing" gamePhase.
@@ -2308,6 +2541,10 @@ export default function ThreeWorld({
 
       // ── Scene ──────────────────────────────────────────────────────────────
       const scene = new THREE.Scene()
+      // Clear any walls a previous session's Big Cockroach boss flattened —
+      // ALL_AABBS is module-scoped, so the `disabled` flag would otherwise leak
+      // into the next mount (walls/shots passing through phantom rubble).
+      for (const w of ALL_AABBS) w.disabled = false
       // SKY: a dedicated aerial-combat arena — you fight enemy jets in a high,
       // bright sky over the existing world (which reads as the distant terrain).
       const isSky = mapId === "sky"
@@ -6640,10 +6877,25 @@ export default function ThreeWorld({
               detonate = true
             }
           }
+          // Friendly shells also detonate against the Big Cockroach boss when a
+          // manually-aimed shot flies into its (huge) body volume.
+          if (
+            !detonate &&
+            s.friendly &&
+            s.pos.y > 1 &&
+            s.pos.y < 26 &&
+            isPointInBigBossHitVolume(s.pos.x, s.pos.z)
+          ) {
+            detonate = true
+            direct = true
+          }
           if (!detonate && (s.life <= 0 || s.pos.y <= 0)) detonate = true
           if (detonate) {
             spawnExplosion(s.pos.clone())
             if (s.friendly) {
+              if (isPointInBigBossHitVolume(s.pos.x, s.pos.z)) {
+                bossTakeDamage(direct ? AA_MOUNT_SHELL_DIRECT : AA_MOUNT_SHELL_SPLASH)
+              }
               if (targetJet && !targetJet.dead) {
                 const d = Math.hypot(
                   s.pos.x - targetJet.x,
@@ -9120,6 +9372,522 @@ export default function ThreeWorld({
         }
       }
 
+      // ══ Big Cockroach boss (PR-B1) ═══════════════════════════════════════════
+      // Brown dust puffs kicked up by the boss's footsteps / stomps / rubble.
+      // Lazy-growing object pool: meshes are created on demand the first time
+      // they're needed (so non-boss modes allocate nothing), then reused via the
+      // `active` flag — never create/dispose per spawn. Capped.
+      const BOSS_DUST_CAP = 48
+      const bossDust: { mesh: THREE.Mesh; life: number; active: boolean }[] = []
+      const bossDustGeo = new THREE.SphereGeometry(1, 6, 5)
+      function spawnBossDust(x: number, z: number, scale: number) {
+        let d = bossDust.find((p) => !p.active)
+        if (!d) {
+          if (bossDust.length >= BOSS_DUST_CAP) return
+          const mesh = new THREE.Mesh(
+            bossDustGeo,
+            new THREE.MeshBasicMaterial({
+              color: 0x6a5238,
+              transparent: true,
+              opacity: 0.5,
+              depthWrite: false,
+            }),
+          )
+          scene.add(mesh)
+          d = { mesh, life: 0, active: false }
+          bossDust.push(d)
+        }
+        d.active = true
+        d.life = 1.0
+        d.mesh.visible = true
+        d.mesh.position.set(x + (Math.random() - 0.5) * 4, 0.5, z + (Math.random() - 0.5) * 4)
+        d.mesh.scale.setScalar(scale * (0.6 + Math.random() * 0.6))
+        ;(d.mesh.material as THREE.MeshBasicMaterial).opacity = 0.5
+      }
+      function updateBossDust(dt: number) {
+        for (const d of bossDust) {
+          if (!d.active) continue
+          d.life -= dt
+          d.mesh.position.y += dt * 1.2
+          d.mesh.scale.multiplyScalar(1 + dt * 0.8)
+          ;(d.mesh.material as THREE.MeshBasicMaterial).opacity = Math.max(0, d.life * 0.5)
+          if (d.life <= 0) {
+            d.active = false
+            d.mesh.visible = false
+          }
+        }
+      }
+      // Poison pools left by the beam: green ground discs that hurt on contact.
+      // Same lazy-growing pool pattern (cap 12).
+      const BOSS_POOL_CAP = 12
+      const bossPools: { mesh: THREE.Mesh; x: number; z: number; life: number; active: boolean }[] =
+        []
+      const bossPoolGeo = new THREE.CircleGeometry(BOSS_POOL_RADIUS, 20)
+      function spawnBossPool(x: number, z: number) {
+        let p = bossPools.find((q) => !q.active)
+        if (!p) {
+          if (bossPools.length >= BOSS_POOL_CAP) return
+          const mesh = new THREE.Mesh(
+            bossPoolGeo,
+            new THREE.MeshBasicMaterial({
+              color: 0x33dd22,
+              transparent: true,
+              opacity: 0.5,
+              depthWrite: false,
+            }),
+          )
+          mesh.rotation.x = -Math.PI / 2
+          scene.add(mesh)
+          p = { mesh, x, z, life: 0, active: false }
+          bossPools.push(p)
+        }
+        p.active = true
+        p.x = x
+        p.z = z
+        p.life = BOSS_POOL_LIFE
+        p.mesh.visible = true
+        p.mesh.position.set(x, 0.05, z)
+        ;(p.mesh.material as THREE.MeshBasicMaterial).opacity = 0.5
+      }
+      function updateBossPools(dt: number) {
+        const px = focalPoint.x
+        const pz = focalPoint.z
+        for (const p of bossPools) {
+          if (!p.active) continue
+          p.life -= dt
+          ;(p.mesh.material as THREE.MeshBasicMaterial).opacity = Math.max(
+            0,
+            Math.min(0.5, p.life * 0.1),
+          )
+          // Standing in the pool → poison damage.
+          if (Math.hypot(px - p.x, pz - p.z) < BOSS_POOL_RADIUS) {
+            applyPlayerDamage(BOSS_POOL_DPS * dt, 0)
+            bossPoisonHitAtRef.current = Date.now()
+          }
+          if (p.life <= 0) {
+            p.active = false
+            p.mesh.visible = false
+          }
+        }
+      }
+
+      // Spawn the boss at the north map edge with a dramatic drop-in intro.
+      // (Wall `disabled` flags are reset at scene init, not here.)
+      function spawnBigBoss() {
+        const parts = makeBigCockroach()
+        const bx = 50
+        const bz = -30
+        parts.group.position.set(bx, 80, bz) // drops in during the intro
+        scene.add(parts.group)
+        // Reusable poison beam cylinder (oriented per-frame in BEAM; Phase 2).
+        const beam = new THREE.Mesh(
+          new THREE.CylinderGeometry(1.4, 1.4, 1, 10, 1, true),
+          new THREE.MeshBasicMaterial({
+            color: 0x66ff33,
+            transparent: true,
+            opacity: 0.7,
+            side: THREE.DoubleSide,
+            depthWrite: false,
+          }),
+        )
+        beam.visible = false
+        scene.add(beam)
+        const boss: BigBoss = {
+          group: parts.group,
+          x: bx,
+          z: bz,
+          heading: 0,
+          hp: BOSS_HP,
+          state: "intro",
+          stateUntil: Date.now() + 2600,
+          nextDecisionAt: 0,
+          rage: false,
+          walkPhase: 0,
+          dyingStage: 0,
+          dyingNextAt: 0,
+          introY: 80,
+          legs: parts.legs,
+          antennae: parts.antennae,
+          eyeMat: parts.eyeMat,
+          wingL: parts.wingL,
+          wingR: parts.wingR,
+          headGroup: parts.headGroup,
+          beam,
+          stompDone: false,
+          spawnDone: false,
+          beamTargetX: focalPoint.x,
+          beamTargetZ: focalPoint.z,
+          poolDropAt: 0,
+          wingOpen: 0,
+        }
+        bigBossRef.current = boss
+        setBossActive(true)
+        setBossHpPct(100)
+        setBossRageUi(false)
+        SOUNDS.bossRoar()
+        cameraShakeRef.current.intensity = 14
+        setWaveMessage("WARNING — 巨大ゴキブリ接近")
+        setTimeout(() => {
+          if (gamePhaseRef.current === "playing") setWaveMessage(null)
+        }, 3000)
+        // Phase 4 balance: drop two RPG launchers by the player for the fight
+        // (tanks / jets / AA guns are already staged on the invasion map).
+        makeRPGPickup(focalPoint.x + 7, focalPoint.z + 5)
+        makeRPGPickup(focalPoint.x - 7, focalPoint.z - 5)
+        showNotification("全兵器を使え — RPG投下・戦車/ジェット/対空砲で迎撃せよ")
+      }
+
+      // Animate the legs (tripod gait) + swaying antennae.
+      function animateBossBody(boss: BigBoss, dt: number, moving: boolean) {
+        if (moving) boss.walkPhase += dt * 6
+        for (let i = 0; i < boss.legs.length; i++) {
+          const leg = boss.legs[i]
+          if (!leg) continue
+          const swing = moving ? Math.sin(boss.walkPhase + (i % 2) * Math.PI) * 0.3 : 0
+          leg.rotation.x = swing
+        }
+        const t = Date.now() * 0.001
+        for (let i = 0; i < boss.antennae.length; i++) {
+          const a = boss.antennae[i]
+          if (!a) continue
+          a.rotation.x = Math.sin(t * 2 + i) * 0.2
+          a.rotation.z = Math.sin(t * 1.5 + i * 1.3) * 0.15
+        }
+      }
+
+      // Per-frame boss update (Phase 1: intro + advance + walk; attacks land in
+      // Phase 2, damage/death in Phase 3).
+      // Distance from a ground point to the boss's nearest body part surface
+      // (≤0 = inside the volume). Returns null when there's no live boss. Used so
+      // AOE falloff + AA hits match the elongated 60m shape, not a single circle.
+      function bigBossNearestDist(px: number, pz: number): number | null {
+        const boss = bigBossRef.current
+        if (!boss || boss.dyingStage > 0) return null
+        const s = Math.sin(boss.heading)
+        const c = Math.cos(boss.heading)
+        let best = Number.POSITIVE_INFINITY
+        for (const part of BOSS_HIT_PARTS) {
+          const cx = boss.x + part.lz * s
+          const cz = boss.z + part.lz * c
+          best = Math.min(best, Math.hypot(px - cx, pz - cz) - part.r)
+        }
+        return best
+      }
+      function isPointInBigBossHitVolume(px: number, pz: number): boolean {
+        const d = bigBossNearestDist(px, pz)
+        return d !== null && d <= 0
+      }
+
+      // World position of the boss's eyes (the 2× weak point).
+      function bossEyeWorld(boss: BigBoss): { x: number; y: number; z: number } {
+        const fx = -Math.sin(boss.heading)
+        const fz = -Math.cos(boss.heading)
+        return { x: boss.x + fx * 24, y: 14.5, z: boss.z + fz * 24 }
+      }
+      // Apply weapon damage to the boss. `point` (if given) enables the weak-point
+      // 2× when it lands on the head eyes. Shared by every weapon via
+      // collectHardTargets (hitscan) + damageAllInRadius (AOE).
+      function bossTakeDamage(amount: number, point?: THREE.Vector3) {
+        const boss = bigBossRef.current
+        if (!boss || boss.dyingStage > 0) return
+        let weak = false
+        if (point) {
+          const e = bossEyeWorld(boss)
+          if (Math.hypot(point.x - e.x, point.y - e.y, point.z - e.z) < BOSS_EYE_HIT_RADIUS)
+            weak = true
+        }
+        boss.hp -= amount * (weak ? 2 : 1)
+        if (weak) {
+          boss.eyeMat.emissiveIntensity = 7
+          window.setTimeout(() => {
+            if (bigBossRef.current === boss) boss.eyeMat.emissiveIntensity = boss.rage ? 4 : 2
+          }, 90)
+        }
+        setBossHpPct(Math.max(0, (boss.hp / BOSS_HP) * 100))
+        // Rage at 50% HP: faster, angrier, brighter eyes.
+        if (!boss.rage && boss.hp <= BOSS_HP * BOSS_RAGE_FRACTION) {
+          boss.rage = true
+          setBossRageUi(true)
+          boss.eyeMat.emissiveIntensity = 4
+          boss.eyeMat.emissive.setHex(0xff3300)
+          SOUNDS.bossRoar()
+          showNotification("☠ 巨大ゴキブリ 怒り狂う！")
+        }
+        if (boss.hp <= 0) {
+          boss.hp = 0
+          boss.dyingStage = 1
+          boss.dyingNextAt = Date.now()
+          boss.beam.visible = false
+        }
+      }
+      // Defeat sequence: topple + a chain of 5 explosions, then vanish + victory.
+      function updateBossDeath(boss: BigBoss, dt: number) {
+        const now = Date.now()
+        boss.group.rotation.z = Math.min(Math.PI / 2, boss.group.rotation.z + dt * 0.5)
+        boss.group.position.set(boss.x, 0, boss.z)
+        cameraShakeRef.current.intensity = Math.max(cameraShakeRef.current.intensity, 3)
+        if (now < boss.dyingNextAt) return
+        if (boss.dyingStage <= 5) {
+          for (let k = 0; k < 4; k++) {
+            spawnExplosion(
+              new THREE.Vector3(
+                boss.x + (Math.random() - 0.5) * 42,
+                6 + Math.random() * 12,
+                boss.z + (Math.random() - 0.5) * 42,
+              ),
+            )
+          }
+          cameraShakeRef.current.intensity = 12
+          SOUNDS.bossStomp()
+          boss.dyingStage++
+          boss.dyingNextAt = now + 600
+          return
+        }
+        // Final blast → remove the boss, award score, show the victory overlay.
+        for (let k = 0; k < 12; k++) {
+          spawnExplosion(
+            new THREE.Vector3(
+              boss.x + (Math.random() - 0.5) * 30,
+              4 + Math.random() * 14,
+              boss.z + (Math.random() - 0.5) * 30,
+            ),
+            false,
+            true,
+          )
+        }
+        scene.remove(boss.group)
+        scene.remove(boss.beam)
+        bigBossRef.current = null
+        bossDoneRef.current = true
+        scoreRef.current += BOSS_KILL_SCORE
+        setScore(scoreRef.current)
+        setBossActive(false)
+        setBossDefeated(true)
+        // Clear any lingering poison vignette (a kill right after a beam/pool
+        // hit would otherwise leave the green overlay stuck, with no boss to
+        // decay it).
+        bossPoisonRef.current = false
+        bossPoisonHitAtRef.current = 0
+        setBossPoison(false)
+        SOUNDS.clear()
+        // Clear the swarm + shield the player so the victory screen is safe.
+        for (const e of enemies) scene.remove(e.mesh)
+        enemies.length = 0
+        setAliveEnemyCount(0)
+        spawnInvulnUntilRef.current = Number.MAX_SAFE_INTEGER
+      }
+
+      // STOMP impact: flatten buildings + AOE the player at the foot point.
+      function bossStompImpact(fx: number, fz: number, boss: BigBoss) {
+        const footX = boss.x + fx * 22
+        const footZ = boss.z + fz * 22
+        cameraShakeRef.current.intensity = 14
+        SOUNDS.bossStomp()
+        for (let k = 0; k < 5; k++)
+          spawnBossDust(footX + (Math.random() - 0.5) * 16, footZ + (Math.random() - 0.5) * 16, 5)
+        // Player AOE.
+        if (Math.hypot(focalPoint.x - footX, focalPoint.z - footZ) < BOSS_STOMP_AOE) {
+          applyPlayerDamage(BOSS_STOMP_DMG, 9)
+        }
+        // Flatten any buildings within the blast: disable collision + hide mesh.
+        let crushed = false
+        for (const w of ALL_AABBS) {
+          if (w.disabled) continue
+          const wcx = (w.x1 + w.x2) / 2
+          const wcz = (w.z1 + w.z2) / 2
+          if (Math.hypot(wcx - footX, wcz - footZ) < BOSS_STOMP_AOE && w.h > 1.5) {
+            w.disabled = true
+            crushed = true
+          }
+        }
+        for (const m of wallMeshes) {
+          if (!m.visible) continue
+          if (Math.hypot(m.position.x - footX, m.position.z - footZ) < BOSS_STOMP_AOE) {
+            m.visible = false
+            spawnBossDust(m.position.x, m.position.z, 6)
+          }
+        }
+        if (crushed) SOUNDS.collapse()
+      }
+
+      // Release small roaches (existing terraformer AI, 0.5× brown, 5 pts each).
+      function bossSpawnRoaches(boss: BigBoss) {
+        const onField = enemies.filter(
+          (e) => e.type === "terraformer" && e.hp > 0 && (e.maxHp ?? 0) < 200,
+        ).length
+        const room = Math.max(0, BOSS_SMALL_MAX - onField)
+        const n = Math.min(BOSS_SPAWN_COUNT, room)
+        const fx = -Math.sin(boss.heading)
+        const fz = -Math.cos(boss.heading)
+        for (let i = 0; i < n; i++) {
+          const a = Math.random() * Math.PI * 2
+          const safe = findSafeSpawnNear(
+            boss.x + fx * 8 + Math.cos(a) * 10,
+            boss.z + fz * 8 + Math.sin(a) * 10,
+            ENEMY_RADIUS,
+          )
+          const r = makeEnemy("terraformer", safe.x, safe.z, false, 0.5)
+          r.config = { ...r.config, hp: 120, score: BOSS_SMALL_SCORE, speed: 7 }
+          r.hp = 120
+          r.maxHp = 120
+          r.aiTuning = TERRAFORMER_AI_TUNING
+          r.state = "alert"
+          r.lastSeenPlayer = { x: focalPoint.x, z: focalPoint.z }
+          enemies.push(r)
+        }
+        setAliveEnemyCount(enemies.filter((e) => e.hp > 0).length)
+      }
+
+      function updateBigBoss(dt: number) {
+        const boss = bigBossRef.current
+        if (!boss) return
+        if (boss.dyingStage > 0) {
+          updateBossDeath(boss, dt)
+          return
+        }
+        const now = Date.now()
+        // Poison vignette decays shortly after the last contact.
+        const poisoned = now - bossPoisonHitAtRef.current < 250
+        if (poisoned !== bossPoisonRef.current) {
+          bossPoisonRef.current = poisoned
+          setBossPoison(poisoned)
+        }
+        const dx = focalPoint.x - boss.x
+        const dz = focalPoint.z - boss.z
+        const dist = Math.hypot(dx, dz)
+        const desiredHeading = Math.atan2(-dx, -dz) // forward = -z
+        const fx = -Math.sin(boss.heading)
+        const fz = -Math.cos(boss.heading)
+        // Always ease the elytra back shut unless mid-SPAWN.
+        if (boss.state !== "spawn") boss.wingOpen = Math.max(0, boss.wingOpen - dt * 2)
+        boss.wingL.rotation.z = boss.wingOpen * 1.1
+        boss.wingR.rotation.z = -boss.wingOpen * 1.1
+        // Beam only visible during BEAM.
+        if (boss.state !== "beam") boss.beam.visible = false
+
+        if (boss.state === "intro") {
+          boss.introY = Math.max(0, boss.introY - dt * 34)
+          boss.group.position.set(boss.x, boss.introY, boss.z)
+          if (Math.random() < 0.4)
+            cameraShakeRef.current.intensity = Math.max(cameraShakeRef.current.intensity, 4)
+          animateBossBody(boss, dt, false)
+          if (boss.introY <= 0 && now >= boss.stateUntil) {
+            boss.state = "advance"
+            boss.nextDecisionAt = now + 3500
+          }
+          return
+        }
+
+        const speed = BOSS_SPEED * (boss.rage ? 1.5 : 1)
+        // Smooth turn toward the player (faster while attacking-aiming).
+        let dh = desiredHeading - boss.heading
+        while (dh > Math.PI) dh -= Math.PI * 2
+        while (dh < -Math.PI) dh += Math.PI * 2
+        const turn = (boss.state === "advance" ? 0.6 : 0.35) * dt
+        boss.heading += Math.max(-turn, Math.min(turn, dh))
+
+        if (boss.state === "advance") {
+          const moving = dist > 24
+          if (moving) {
+            boss.x += fx * speed * dt
+            boss.z += fz * speed * dt
+            if (
+              Math.floor(boss.walkPhase / Math.PI) !==
+              Math.floor((boss.walkPhase + dt * 6) / Math.PI)
+            ) {
+              cameraShakeRef.current.intensity = Math.max(cameraShakeRef.current.intensity, 2)
+              spawnBossDust(boss.x + fx * 18, boss.z + fz * 18, 3)
+            }
+          }
+          animateBossBody(boss, dt, moving)
+          // Pick the next attack.
+          if (now >= boss.nextDecisionAt) {
+            const r = Math.random()
+            if (dist < BOSS_STOMP_RANGE && r < 0.5) {
+              boss.state = "stomp"
+              boss.stompDone = false
+              boss.stateUntil = now + 1500
+            } else if (r < 0.78) {
+              boss.state = "beam"
+              boss.beamTargetX = focalPoint.x
+              boss.beamTargetZ = focalPoint.z
+              boss.poolDropAt = now + 400
+              boss.stateUntil = now + BOSS_BEAM_SECONDS * 1000
+              SOUNDS.bossRoar()
+            } else {
+              boss.state = "spawn"
+              boss.spawnDone = false
+              boss.stateUntil = now + 2200
+            }
+          }
+        } else if (boss.state === "stomp") {
+          // Raise the front legs, slam at ~0.8s, then recover.
+          const t = (now - (boss.stateUntil - 1500)) / 1500
+          const raise = t < 0.55 ? t / 0.55 : Math.max(0, 1 - (t - 0.55) / 0.25)
+          for (let i = 0; i < boss.legs.length; i++) {
+            const leg = boss.legs[i]
+            if (leg && (i === 0 || i === 3)) leg.rotation.x = -raise * 1.2 // front legs up
+          }
+          if (!boss.stompDone && t >= 0.8) {
+            boss.stompDone = true
+            bossStompImpact(fx, fz, boss)
+          }
+          if (now >= boss.stateUntil) {
+            boss.state = "advance"
+            boss.nextDecisionAt = now + (boss.rage ? 1200 : 2400)
+          }
+        } else if (boss.state === "beam") {
+          // Track the player slowly (dodgeable) and fire from the mouth.
+          boss.beamTargetX += (focalPoint.x - boss.beamTargetX) * Math.min(1, dt * 0.9)
+          boss.beamTargetZ += (focalPoint.z - boss.beamTargetZ) * Math.min(1, dt * 0.9)
+          const headX = boss.x + fx * 20
+          const headZ = boss.z + fz * 20
+          const headY = 13
+          const tx = boss.beamTargetX
+          const tz = boss.beamTargetZ
+          const dirx = tx - headX
+          const diry = 0.3 - headY
+          const dirz = tz - headZ
+          const len = Math.hypot(dirx, diry, dirz) || 1
+          boss.beam.visible = true
+          boss.beam.position.set((headX + tx) / 2, (headY + 0.3) / 2, (headZ + tz) / 2)
+          boss.beam.scale.set(1, len, 1)
+          boss.beam.quaternion.setFromUnitVectors(
+            new THREE.Vector3(0, 1, 0),
+            new THREE.Vector3(dirx / len, diry / len, dirz / len),
+          )
+          // Distance from the player to the beam's ground endpoint.
+          if (Math.hypot(focalPoint.x - tx, focalPoint.z - tz) < 4) {
+            applyPlayerDamage(BOSS_BEAM_DPS * dt, 1)
+            bossPoisonHitAtRef.current = now
+          }
+          if (now >= boss.poolDropAt) {
+            boss.poolDropAt = now + 500
+            spawnBossPool(tx, tz)
+          }
+          animateBossBody(boss, dt, false)
+          if (now >= boss.stateUntil) {
+            boss.beam.visible = false
+            boss.state = "advance"
+            boss.nextDecisionAt = now + (boss.rage ? 1000 : 2200)
+          }
+        } else if (boss.state === "spawn") {
+          boss.wingOpen = Math.min(1, boss.wingOpen + dt * 2)
+          if (!boss.spawnDone && boss.wingOpen >= 0.9) {
+            boss.spawnDone = true
+            bossSpawnRoaches(boss)
+            SOUNDS.bossRoar()
+          }
+          animateBossBody(boss, dt, false)
+          if (now >= boss.stateUntil) {
+            boss.state = "advance"
+            boss.nextDecisionAt = now + (boss.rage ? 1200 : 2600)
+          }
+        }
+        boss.group.position.set(boss.x, 0, boss.z)
+        boss.group.rotation.y = boss.heading
+      }
+
       // ══ HUNT mode (PR-Z1) — transfer room + leveled missions ════════════════
       function huntPersistTotal(n: number) {
         try {
@@ -10695,6 +11463,13 @@ export default function ThreeWorld({
             destroyAAGun(gun)
           }
         }
+        // Big Cockroach boss — explosives hit it too (RPG / grenade / tank shell
+        // / jet missile). Falloff uses the distance to the nearest body part so a
+        // blast near the head or tail still connects (not just the centre).
+        {
+          const near = bigBossNearestDist(center.x, center.z)
+          if (near !== null && near < radius) bossTakeDamage(falloff(Math.max(0, near)))
+        }
       }
 
       // Shared hitscan — push damage candidates for the "hard" (non-humanoid)
@@ -10870,6 +11645,17 @@ export default function ThreeWorld({
                 }
               },
             })
+          }
+        }
+        // Big Cockroach boss — every hitscan weapon hits it (head eyes = 2×).
+        {
+          const boss = bigBossRef.current
+          if (boss && boss.dyingStage === 0) {
+            const hit = raycaster.intersectObject(boss.group, true)[0]
+            if (hit) {
+              const pt = hit.point.clone()
+              cands.push({ dist: hit.distance, point: pt, apply: () => bossTakeDamage(damage, pt) })
+            }
           }
         }
         return cands
@@ -13464,35 +14250,61 @@ export default function ThreeWorld({
         // ── Invasion mode control: rocket strikes + terraformer waves ──────
         if (modeRef.current === "invasion" && gamePhaseRef.current === "playing") {
           updateRocketStrikes(dt)
-          const waveActive =
-            rocketStrikes.length > 0 ||
-            refs.enemies.some((e) => e.type === "terraformer" && (e.hp > 0 || e.dyingTimer >= 0))
-          if (waveActive) {
-            invasionActiveRef.current = true
-          } else {
-            if (invasionActiveRef.current) {
-              // Wave just cleared → breathe, then the next rocket comes.
-              invasionActiveRef.current = false
-              invasionNextStrikeRef.current = Date.now() + 7000
+          updateBossDust(dt)
+          updateBossPools(dt)
+          if (bigBossRef.current) {
+            // Boss is the whole encounter — normal waves are suspended.
+            updateBigBoss(dt)
+          } else if (bossPendingAtRef.current > 0) {
+            // 15s alarm interval before the boss drops in.
+            if (Date.now() >= bossPendingAtRef.current) {
+              bossPendingAtRef.current = 0
+              spawnBigBoss()
             }
-            if (Date.now() > invasionNextStrikeRef.current) {
-              const next = invasionWaveRef.current + 1
-              invasionWaveRef.current = next
-              setCurrentWave(next)
-              setWaveMessage(`INVASION WAVE ${next}`)
-              setTimeout(() => {
-                if (gamePhaseRef.current === "playing") setWaveMessage(null)
-              }, 2500)
-              const tx = Math.max(
-                6,
-                Math.min(MAP_SIZE - 6, refs.focalPoint.x + (Math.random() - 0.5) * 24),
-              )
-              const tz = Math.max(
-                6,
-                Math.min(MAP_SIZE - 6, refs.focalPoint.z + (Math.random() - 0.5) * 24),
-              )
-              triggerRocketStrike(tx, tz, next)
-              invasionNextStrikeRef.current = Number.MAX_SAFE_INTEGER // until cleared
+          } else {
+            const waveActive =
+              rocketStrikes.length > 0 ||
+              refs.enemies.some((e) => e.type === "terraformer" && (e.hp > 0 || e.dyingTimer >= 0))
+            if (waveActive) {
+              invasionActiveRef.current = true
+            } else {
+              if (invasionActiveRef.current) {
+                // Wave just cleared → breathe, then the next rocket comes.
+                invasionActiveRef.current = false
+                invasionNextStrikeRef.current = Date.now() + 7000
+                // Wave 5 down → schedule the final boss (after a 15s alarm lull).
+                if (invasionWaveRef.current >= 5 && !bossDoneRef.current) {
+                  bossPendingAtRef.current = Date.now() + 15000
+                  SOUNDS.alert()
+                  setWaveMessage("WAVE 5 制圧 — 最終ボス接近中…")
+                  setTimeout(() => {
+                    if (gamePhaseRef.current === "playing") setWaveMessage(null)
+                  }, 4000)
+                }
+              }
+              if (
+                invasionWaveRef.current < 5 &&
+                bossPendingAtRef.current === 0 &&
+                Date.now() > invasionNextStrikeRef.current
+              ) {
+                const next = invasionWaveRef.current + 1
+                invasionWaveRef.current = next
+                setCurrentWave(next)
+                setWaveMessage(`INVASION WAVE ${next} / 5`)
+                setTimeout(() => {
+                  if (gamePhaseRef.current === "playing") setWaveMessage(null)
+                }, 2500)
+                const tx = Math.max(
+                  6,
+                  Math.min(MAP_SIZE - 6, refs.focalPoint.x + (Math.random() - 0.5) * 24),
+                )
+                const tz = Math.max(
+                  6,
+                  Math.min(MAP_SIZE - 6, refs.focalPoint.z + (Math.random() - 0.5) * 24),
+                )
+                triggerRocketStrike(tx, tz, next)
+                invasionNextStrikeRef.current = Number.MAX_SAFE_INTEGER // until cleared
+              }
             }
           }
         }
@@ -16537,6 +17349,125 @@ export default function ThreeWorld({
         )}
 
         {/* Wave message */}
+        {/* ── Big Cockroach boss HP bar (top, 80% width red) ──────────────── */}
+        {bossActive && !isLoading && !error && gamePhase === "playing" && (
+          <div
+            style={{
+              position: "absolute",
+              top: "0.6rem",
+              left: "50%",
+              transform: "translateX(-50%)",
+              width: "80vw",
+              zIndex: 24,
+              pointerEvents: "none",
+              fontFamily: "monospace",
+              textAlign: "center",
+            }}
+          >
+            <div
+              style={{
+                color: bossRageUi ? "#ff2a2a" : "#ff6644",
+                fontSize: "0.85rem",
+                fontWeight: "bold",
+                letterSpacing: "0.25em",
+                textShadow: "0 0 12px rgba(255,0,0,0.9)",
+                marginBottom: "0.2rem",
+              }}
+            >
+              ☠ BIG COCKROACH {bossRageUi ? "— 怒" : ""}
+            </div>
+            <div
+              style={{
+                height: "16px",
+                background: "rgba(20,0,0,0.85)",
+                border: "2px solid #661111",
+                boxShadow: "0 0 14px rgba(255,0,0,0.4)",
+                overflow: "hidden",
+              }}
+            >
+              <div
+                style={{
+                  height: "100%",
+                  width: `${bossHpPct}%`,
+                  background: bossRageUi
+                    ? "linear-gradient(90deg,#ff0000,#ff7700)"
+                    : "linear-gradient(90deg,#aa0000,#ff3333)",
+                  transition: "width 0.2s",
+                }}
+              />
+            </div>
+          </div>
+        )}
+
+        {/* ── Poison vignette (beam / poison pool contact). ──────────────── */}
+        {bossPoison && gamePhase === "playing" && (
+          <div
+            style={{
+              position: "absolute",
+              inset: 0,
+              pointerEvents: "none",
+              zIndex: 6,
+              background:
+                "radial-gradient(ellipse at center, transparent 30%, rgba(40,200,40,0.5) 100%)",
+            }}
+          />
+        )}
+
+        {/* ── Boss victory overlay (Phase 3 sets bossDefeated). ───────────── */}
+        {bossDefeated && (
+          <div
+            style={{
+              position: "absolute",
+              inset: 0,
+              zIndex: 62,
+              background: "rgba(0,0,0,0.9)",
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              justifyContent: "center",
+              fontFamily: "monospace",
+              textAlign: "center",
+              pointerEvents: "auto",
+            }}
+          >
+            <div
+              style={{
+                color: "#ffcc00",
+                fontSize: "2.6rem",
+                fontWeight: "bold",
+                letterSpacing: "0.18em",
+                textShadow: "0 0 30px rgba(255,180,0,0.9)",
+              }}
+            >
+              TERRAFORMER QUEEN
+              <br />
+              DESTROYED
+            </div>
+            <div style={{ color: "#fff", fontSize: "1.4rem", marginTop: "1.2rem" }}>
+              SCORE {score.toString().padStart(6, "0")}
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setBossDefeated(false)
+                onExit?.()
+              }}
+              style={{
+                marginTop: "2rem",
+                padding: "0.7rem 2.4rem",
+                cursor: "pointer",
+                fontFamily: "monospace",
+                background: "rgba(60,40,0,0.7)",
+                border: "1px solid #ffcc00",
+                color: "#ffcc00",
+                letterSpacing: "0.2em",
+              }}
+            >
+              ▶ RESULT / MODE SELECT
+            </button>
+          </div>
+        )}
+
         {waveMessage && (
           <div
             style={{
