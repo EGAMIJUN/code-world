@@ -4964,6 +4964,111 @@ export default function ThreeWorld({
       }
       const bikeSlots: BikeSlot[] = []
 
+      // ── Visible player rider/pilot avatar (third-person vehicles) ────────────
+      // Driving uses a chase camera, so the seat would otherwise look empty (the
+      // FPS body is just the hidden focalPoint). This one humanoid — built from
+      // primitives, mirroring the terraformer riderEnemy approach — is parented
+      // onto whatever the player is driving and reused via .visible (never
+      // rebuilt on mount/dismount). Geometry/materials are shared.
+      const avatarSkinMat = new THREE.MeshStandardMaterial({ color: 0xe2b48c, roughness: 0.85 })
+      // Body/helmet pick up the player's team colour at mount time.
+      const avatarBodyMat = new THREE.MeshStandardMaterial({
+        color: 0xffcc00,
+        roughness: 0.55,
+        metalness: 0.25,
+      })
+      const avatarLimbMat = new THREE.MeshStandardMaterial({ color: 0x232a33, roughness: 0.7 })
+
+      function buildPlayerAvatar(): THREE.Group {
+        const g = new THREE.Group()
+        // Upper body tilts forward as a unit for the leaning riding pose.
+        const upper = new THREE.Group()
+        g.add(upper)
+        const torso = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.55, 0.26), avatarBodyMat)
+        torso.position.y = 0.33
+        torso.castShadow = true
+        upper.add(torso)
+        const head = new THREE.Mesh(new THREE.SphereGeometry(0.17, 12, 10), avatarSkinMat)
+        head.position.y = 0.78
+        head.castShadow = true
+        upper.add(head)
+        // Team-coloured helmet cap over the crown.
+        const helmet = new THREE.Mesh(
+          new THREE.SphereGeometry(0.185, 12, 8, 0, Math.PI * 2, 0, Math.PI / 2),
+          avatarBodyMat,
+        )
+        helmet.position.y = 0.8
+        upper.add(helmet)
+        // Arms swing forward + down from the shoulders to grip the controls
+        // (handlebars / stick / turret grips). Geometry is pivoted at the
+        // shoulder so the rotation reads as a reach, not a slide.
+        for (const s of [-1, 1]) {
+          const armGeo = new THREE.BoxGeometry(0.12, 0.5, 0.12)
+          armGeo.translate(0, -0.25, 0)
+          const arm = new THREE.Mesh(armGeo, avatarLimbMat)
+          arm.position.set(s * 0.27, 0.52, 0)
+          arm.rotation.x = 1.1 // reach forward (-z) and slightly down
+          upper.add(arm)
+        }
+        // Legs straddle the seat (hidden for tank/jet where they're inside the
+        // hull). Pivoted at the hip; angled forward a touch.
+        const legs = new THREE.Group()
+        g.add(legs)
+        for (const s of [-1, 1]) {
+          const legGeo = new THREE.BoxGeometry(0.15, 0.55, 0.15)
+          legGeo.translate(0, -0.275, 0)
+          const leg = new THREE.Mesh(legGeo, avatarLimbMat)
+          leg.position.set(s * 0.13, 0.02, 0)
+          leg.rotation.x = 0.45
+          legs.add(leg)
+        }
+        g.userData.upper = upper
+        g.userData.legs = legs
+        g.visible = false
+        return g
+      }
+
+      const playerAvatar = buildPlayerAvatar()
+      scene.add(playerAvatar)
+
+      // Seat placement per ridden thing, in the parent's local space (vehicle /
+      // AA-gun group; forward = -z). `lean` < 0 tips the upper body toward the
+      // nose; `legs` hides the legs for closed cockpits/hulls.
+      const AVATAR_SEATS: Record<string, { y: number; z: number; lean: number; legs: boolean }> = {
+        bike: { y: 0.74, z: 0.33, lean: -0.5, legs: true },
+        car: { y: 0.55, z: 0.05, lean: -0.12, legs: true },
+        tank: { y: 1.32, z: 0.3, lean: -0.05, legs: false },
+        jet: { y: 0.62, z: -1.05, lean: -0.15, legs: false },
+        aa: { y: 0.6, z: 0.95, lean: -0.25, legs: true },
+      }
+
+      // Parent the avatar onto `parent` at the seat for `kind` and reveal it.
+      // Re-parenting auto-detaches it from any previous mount.
+      function showPlayerAvatar(parent: THREE.Object3D, kind: string) {
+        const seat = AVATAR_SEATS[kind] ?? AVATAR_SEATS.car
+        if (!seat) return
+        playerAvatar.position.set(0, seat.y, seat.z)
+        playerAvatar.rotation.set(0, 0, 0)
+        const upper = playerAvatar.userData.upper as THREE.Group
+        const legs = playerAvatar.userData.legs as THREE.Group
+        upper.rotation.x = seat.lean
+        legs.visible = seat.legs
+        // Match the player's team colour (FFA → the default self colour).
+        const team = myTeamRef.current
+        avatarBodyMat.color.setHex(
+          team === "red" ? 0xff4444 : team === "blue" ? 0x4488ff : 0xffcc00,
+        )
+        parent.add(playerAvatar)
+        playerAvatar.visible = true
+      }
+
+      // Hide the avatar and detach it back to the scene root so a wreck being
+      // removed (destroyed / crashing jet) doesn't take the shared mesh with it.
+      function hidePlayerAvatar() {
+        playerAvatar.visible = false
+        scene.add(playerAvatar)
+      }
+
       function makeVehicle(color: number): THREE.Group {
         const g = new THREE.Group()
         const bodyMat = new THREE.MeshStandardMaterial({
@@ -5626,6 +5731,9 @@ export default function ThreeWorld({
           v.z - fz * VEHICLE_CAM_DIST,
         )
         camera.lookAt(v.x + fx * 4, 1.0, v.z + fz * 4)
+        // Show the player riding/piloting the vehicle (the seat is otherwise
+        // empty under the chase camera).
+        showPlayerAvatar(v.group, v.kind)
       }
 
       function exitVehicle() {
@@ -5633,6 +5741,7 @@ export default function ThreeWorld({
         drivingRef.current = false
         setInVehicle(false)
         gunGroup.visible = true
+        hidePlayerAvatar()
         if (v) {
           v.speed = 0
           // Step out to the left side of the car, nudged to clear ground.
@@ -6224,6 +6333,8 @@ export default function ThreeWorld({
         focalPoint.x = gun.x
         focalPoint.z = gun.z
         focalPoint.y = gun.baseY
+        // Show the gunner manning the turret.
+        showPlayerAvatar(gun.group, "aa")
       }
 
       function exitAAGun() {
@@ -6231,6 +6342,7 @@ export default function ThreeWorld({
         aaMountedRef.current = false
         setInAAGun(false)
         gunGroup.visible = true
+        hidePlayerAvatar()
         if (gun) {
           // Step out beside the gun, nudged clear of the pedestal.
           const safe = findSafeSpawnNear(gun.x + 2.2, gun.z + 0.6, PLAYER_RADIUS)
@@ -6566,6 +6678,9 @@ export default function ThreeWorld({
         }
         v.dead = true
         SOUNDS.damage()
+        // Detach the pilot before the jet flies on / is removed (so the empty
+        // jet crashes riderless and the shared avatar isn't taken with it).
+        hidePlayerAvatar()
         // Tear down driving (no side-step — we keep the player at altitude).
         drivingRef.current = false
         setInVehicle(false)
