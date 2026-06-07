@@ -886,7 +886,9 @@ const BOSS_POOL_LIFE = 10 // seconds the pool lingers
 const BOSS_SPAWN_COUNT = 8 // small roaches per SPAWN
 const BOSS_SMALL_MAX = 16 // cap of small roaches on the field
 const BOSS_SMALL_SCORE = 5
-// (damage / death tuning constants are added in Phase 3.)
+const BOSS_KILL_SCORE = 5000
+const BOSS_RAGE_FRACTION = 0.5 // HP fraction that triggers rage
+const BOSS_EYE_HIT_RADIUS = 7 // weak-point sphere radius around the eyes (2× dmg)
 
 interface BigBoss {
   group: THREE.Group
@@ -9500,6 +9502,99 @@ export default function ThreeWorld({
 
       // Per-frame boss update (Phase 1: intro + advance + walk; attacks land in
       // Phase 2, damage/death in Phase 3).
+      // World position of the boss's eyes (the 2× weak point).
+      function bossEyeWorld(boss: BigBoss): { x: number; y: number; z: number } {
+        const fx = -Math.sin(boss.heading)
+        const fz = -Math.cos(boss.heading)
+        return { x: boss.x + fx * 24, y: 14.5, z: boss.z + fz * 24 }
+      }
+      // Apply weapon damage to the boss. `point` (if given) enables the weak-point
+      // 2× when it lands on the head eyes. Shared by every weapon via
+      // collectHardTargets (hitscan) + damageAllInRadius (AOE).
+      function bossTakeDamage(amount: number, point?: THREE.Vector3) {
+        const boss = bigBossRef.current
+        if (!boss || boss.dyingStage > 0) return
+        let weak = false
+        if (point) {
+          const e = bossEyeWorld(boss)
+          if (Math.hypot(point.x - e.x, point.y - e.y, point.z - e.z) < BOSS_EYE_HIT_RADIUS)
+            weak = true
+        }
+        boss.hp -= amount * (weak ? 2 : 1)
+        if (weak) {
+          boss.eyeMat.emissiveIntensity = 7
+          window.setTimeout(() => {
+            if (bigBossRef.current === boss) boss.eyeMat.emissiveIntensity = boss.rage ? 4 : 2
+          }, 90)
+        }
+        setBossHpPct(Math.max(0, (boss.hp / BOSS_HP) * 100))
+        // Rage at 50% HP: faster, angrier, brighter eyes.
+        if (!boss.rage && boss.hp <= BOSS_HP * BOSS_RAGE_FRACTION) {
+          boss.rage = true
+          setBossRageUi(true)
+          boss.eyeMat.emissiveIntensity = 4
+          boss.eyeMat.emissive.setHex(0xff3300)
+          SOUNDS.bossRoar()
+          showNotification("☠ 巨大ゴキブリ 怒り狂う！")
+        }
+        if (boss.hp <= 0) {
+          boss.hp = 0
+          boss.dyingStage = 1
+          boss.dyingNextAt = Date.now()
+          boss.beam.visible = false
+        }
+      }
+      // Defeat sequence: topple + a chain of 5 explosions, then vanish + victory.
+      function updateBossDeath(boss: BigBoss, dt: number) {
+        const now = Date.now()
+        boss.group.rotation.z = Math.min(Math.PI / 2, boss.group.rotation.z + dt * 0.5)
+        boss.group.position.set(boss.x, 0, boss.z)
+        cameraShakeRef.current.intensity = Math.max(cameraShakeRef.current.intensity, 3)
+        if (now < boss.dyingNextAt) return
+        if (boss.dyingStage <= 5) {
+          for (let k = 0; k < 4; k++) {
+            spawnExplosion(
+              new THREE.Vector3(
+                boss.x + (Math.random() - 0.5) * 42,
+                6 + Math.random() * 12,
+                boss.z + (Math.random() - 0.5) * 42,
+              ),
+            )
+          }
+          cameraShakeRef.current.intensity = 12
+          SOUNDS.bossStomp()
+          boss.dyingStage++
+          boss.dyingNextAt = now + 600
+          return
+        }
+        // Final blast → remove the boss, award score, show the victory overlay.
+        for (let k = 0; k < 12; k++) {
+          spawnExplosion(
+            new THREE.Vector3(
+              boss.x + (Math.random() - 0.5) * 30,
+              4 + Math.random() * 14,
+              boss.z + (Math.random() - 0.5) * 30,
+            ),
+            false,
+            true,
+          )
+        }
+        scene.remove(boss.group)
+        scene.remove(boss.beam)
+        bigBossRef.current = null
+        bossDoneRef.current = true
+        scoreRef.current += BOSS_KILL_SCORE
+        setScore(scoreRef.current)
+        setBossActive(false)
+        setBossDefeated(true)
+        SOUNDS.clear()
+        // Clear the swarm + shield the player so the victory screen is safe.
+        for (const e of enemies) scene.remove(e.mesh)
+        enemies.length = 0
+        setAliveEnemyCount(0)
+        spawnInvulnUntilRef.current = Number.MAX_SAFE_INTEGER
+      }
+
       // STOMP impact: flatten buildings + AOE the player at the foot point.
       function bossStompImpact(fx: number, fz: number, boss: BigBoss) {
         const footX = boss.x + fx * 22
@@ -9564,6 +9659,10 @@ export default function ThreeWorld({
       function updateBigBoss(dt: number) {
         const boss = bigBossRef.current
         if (!boss) return
+        if (boss.dyingStage > 0) {
+          updateBossDeath(boss, dt)
+          return
+        }
         const now = Date.now()
         // Poison vignette decays shortly after the last contact.
         const poisoned = now - bossPoisonHitAtRef.current < 250
@@ -11282,6 +11381,15 @@ export default function ThreeWorld({
             destroyAAGun(gun)
           }
         }
+        // Big Cockroach boss — explosives hit it too (RPG / grenade / tank shell
+        // / jet missile). Generous radius since the body is huge.
+        {
+          const boss = bigBossRef.current
+          if (boss && boss.dyingStage === 0) {
+            const d = Math.hypot(boss.x - center.x, boss.z - center.z)
+            if (d < radius + 16) bossTakeDamage(falloff(d))
+          }
+        }
       }
 
       // Shared hitscan — push damage candidates for the "hard" (non-humanoid)
@@ -11457,6 +11565,17 @@ export default function ThreeWorld({
                 }
               },
             })
+          }
+        }
+        // Big Cockroach boss — every hitscan weapon hits it (head eyes = 2×).
+        {
+          const boss = bigBossRef.current
+          if (boss && boss.dyingStage === 0) {
+            const hit = raycaster.intersectObject(boss.group, true)[0]
+            if (hit) {
+              const pt = hit.point.clone()
+              cands.push({ dist: hit.distance, point: pt, apply: () => bossTakeDamage(damage, pt) })
+            }
           }
         }
         return cands
