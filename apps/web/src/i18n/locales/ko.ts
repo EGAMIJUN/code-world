@@ -61,6 +61,8 @@ export const ko: typeof ja = {
     zombieDesc: "끝없이 몰려오는 좀비 무리에서 살아남아라. 맨손의 민첩한 적이 무한히 등장한다.",
     invasion: "침공",
     invasionDesc: "갑자기 로켓이 떨어지고 테라포머가 몰려온다. 압도적인 강적에게서 살아남아라.",
+    hunt: "HUNT",
+    huntDesc: "검은 구체의 전송실에서 표적에게로. 제한 시간 안에 사냥하라. 도망칠 곳은 없다.",
     selectMap: "맵",
     urban: "도시",
     desert: "사막",

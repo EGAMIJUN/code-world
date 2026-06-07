@@ -61,6 +61,8 @@ export const zh: typeof ja = {
     zombieDesc: "在无尽的僵尸浪潮中幸存。徒手而敏捷的敌人无限涌来。",
     invasion: "入侵",
     invasionDesc: "火箭突然坠落，泰拉formers倾巢而出。在压倒性的强敌中幸存下来。",
+    hunt: "HUNT",
+    huntDesc: "从黑球转送室前往目标。在限时内猎杀目标。无处可逃。",
     selectMap: "地图",
     urban: "都市",
     desert: "沙漠",

@@ -59,6 +59,8 @@ export const ja = {
     zombieDesc: "押し寄せるゾンビの群れを生き延びろ。武器を持たぬ俊敏な敵が無限に湧く。",
     invasion: "INVASION",
     invasionDesc: "突如ロケットが飛来し、テラフォーマーズが襲来する。圧倒的な強敵から生き延びろ。",
+    hunt: "HUNT",
+    huntDesc: "黒い球体の転送ルームから標的の元へ。制限時間内にターゲットを狩れ。逃げ場はない。",
     selectMap: "MAP",
     urban: "URBAN",
     desert: "DESERT",

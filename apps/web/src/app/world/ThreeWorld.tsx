@@ -452,7 +452,163 @@ const SOUNDS = {
       o.stop(now + i * 0.24 + 0.48)
     })
   },
+  // HUNT — original glitchy electronic jingle played when the black orb opens
+  // (a rising arpeggio over a square-wave bass blip).
+  huntJingle() {
+    const ctx = _getCtx()
+    const now = ctx.currentTime
+    ;[392, 523, 659, 880, 1175].forEach((hz, i) => {
+      const o = ctx.createOscillator()
+      o.type = i % 2 === 0 ? "square" : "triangle"
+      o.frequency.setValueAtTime(hz, now + i * 0.11)
+      const g = ctx.createGain()
+      g.gain.setValueAtTime(0.0001, now + i * 0.11)
+      g.gain.exponentialRampToValueAtTime(0.22, now + i * 0.11 + 0.02)
+      g.gain.exponentialRampToValueAtTime(0.001, now + i * 0.11 + 0.26)
+      o.connect(g)
+      g.connect(ctx.destination)
+      o.start(now + i * 0.11)
+      o.stop(now + i * 0.11 + 0.3)
+    })
+    _tone(98, 0.5, 0.18, "square")
+  },
+  // HUNT — tense out-of-bounds warning beep.
+  huntWarn() {
+    _tone(880, 0.16, 0.26, "square", 660)
+  },
+  // HUNT — teleport whoosh (white-flash warp into / out of a mission).
+  huntWarp() {
+    _noise(0.5, 0.5, "highpass", 1200)
+    _tone(180, 0.45, 0.3, "sine", 1400)
+  },
+  // HUNT — single accounting blip used while the orb tallies the score list.
+  huntTally() {
+    _tone(1320, 0.06, 0.2, "square")
+  },
 }
+
+// ══ HUNT mode data (transfer missions) — PR-Z1 ═══════════════════════════════
+// An original "transfer to a hunting ground" mode (mechanics only — no existing
+// IP names/designs). The player spawns in a dark windowless room with a black
+// orb that briefs the target, then warps into a night version of the urban map
+// to wipe out themed minions + a boss under a time limit.
+const HUNT_TOTAL_KEY = "hunt_total_score" // cumulative score (localStorage)
+// Transfer-room centre — kept well inside world bounds and far from the arena so
+// the two never overlap. The player is clamped inside the room until the warp.
+const HUNT_ROOM = { x: 300, z: -200 }
+const HUNT_ROOM_HALF = 5 // interior half-extent (m) the player is clamped within
+const HUNT_ARENA = { x: 50, z: 50 } // mission arena centre (urban core)
+const HUNT_BASE_RADIUS = 250 // transfer-zone boundary radius (m)
+const HUNT_MIN_RADIUS = 80 // Lv3 fully-shrunk radius
+const HUNT_SHRINK_SEC = 600 // Lv3 shrink duration (250m → 80m over 10 min)
+const HUNT_OOB_GRACE_MS = 3000 // time outside the ring before the head pops
+const HUNT_QUOTA_MISS = 15 // quota set on the next mission after a time-out
+// Weird greetings: stiff politeness clashing with crude threats (original).
+const HUNT_GREETINGS = [
+  "ようこそおいで下さいました。てめえ達の命、私が有効に使わせて頂きます。",
+  "ご機嫌よう狩人さん。つべこべ言わず、さっさと標的をブチ殺して下さいまし。",
+  "本日はご足労いただき恐悦至極。さあ、薄汚い仕事の時間ですよクソ野郎共。",
+]
+interface HuntTarget {
+  name: string
+  trait: string // 特徴
+  likes: string // 好きなもの
+  phrase: string // 口癖
+}
+type HuntTheme = "A" | "B" | "C"
+interface HuntLevel {
+  level: number
+  timeLimitSec: number | null // null = no limit (shrinking arena instead)
+  theme: HuntTheme
+  zakoCount: number
+  bossHp: number
+  bossScale: number
+  bossScore: number
+  boss: "charge" | "ranged_summon" | "aoe_fast"
+  shrink: boolean
+  target: HuntTarget
+}
+// Per-theme minion spec — reuse an existing enemy model with a colour/scale
+// tweak. base = model, tint = body recolour, eyes = eye-glow colour.
+const HUNT_THEMES: Record<
+  HuntTheme,
+  {
+    base: "grunt" | "terraformer"
+    tint: number
+    eyes: number
+    scale: number
+    points: number
+    hp: number
+    speed: number
+  }
+> = {
+  // A: black humanoid, glowing red eyes (slow). B: small grey quadruped (fast,
+  // swarms). C: oversized stone-grey humanoid (tanky).
+  A: { base: "grunt", tint: 0x0a0a0c, eyes: 0xff2020, scale: 1.0, points: 2, hp: 70, speed: 2.4 },
+  B: {
+    base: "terraformer",
+    tint: 0x6b6b73,
+    eyes: 0xff3030,
+    scale: 0.55,
+    points: 3,
+    hp: 60,
+    speed: 7.0,
+  },
+  C: { base: "grunt", tint: 0x8a8a90, eyes: 0xfff0a0, scale: 2.0, points: 5, hp: 260, speed: 1.4 },
+}
+const HUNT_LEVELS: HuntLevel[] = [
+  {
+    level: 1,
+    timeLimitSec: 900,
+    theme: "A",
+    zakoCount: 15,
+    bossHp: 1500,
+    bossScale: 3.0,
+    bossScore: 30,
+    boss: "charge",
+    shrink: false,
+    target: {
+      name: "解体屋 ボロウ",
+      trait: "黒ずくめの大男・右腕が義手",
+      likes: "錆びた鉄と他人の悲鳴",
+      phrase: "「片付けの時間だ」",
+    },
+  },
+  {
+    level: 2,
+    timeLimitSec: 600,
+    theme: "B",
+    zakoCount: 20,
+    bossHp: 3000,
+    bossScale: 3.2,
+    bossScore: 45,
+    boss: "ranged_summon",
+    shrink: false,
+    target: {
+      name: "女王 セレネ",
+      trait: "群れを率いる痩躯・蒼白い肌",
+      likes: "従順な虫と静寂",
+      phrase: "「お黙りなさい」",
+    },
+  },
+  {
+    level: 3,
+    timeLimitSec: null,
+    theme: "C",
+    zakoCount: 10,
+    bossHp: 6000,
+    bossScale: 4.0,
+    bossScore: 60,
+    boss: "aoe_fast",
+    shrink: true,
+    target: {
+      name: "巨像 ガレオ",
+      trait: "石像のごとき巨躯・無表情",
+      likes: "崩落と沈黙",
+      phrase: "「……」",
+    },
+  },
+]
 
 // ── Map object definitions [x, z, width, depth, type]
 // type: 0=building, 1=car, 2=barricade, 3=tank/pipe, 4=tree, 5=trench
@@ -1205,6 +1361,11 @@ interface CombatEnemy {
   botReactMult?: number // 1.0 = stock; higher = slower fire interval
   botRespawnMs?: number // ms between death and respawn
   nameSprite?: THREE.Sprite | null
+  // HUNT mode: per-enemy score + label, and a boss flag (summon / AOE timers).
+  huntPoints?: number
+  huntName?: string
+  isHuntBoss?: boolean
+  huntNextSpecial?: number // ms timestamp for boss summon / AOE cadence
 
   // ── Aggressive-AI fields ────────────────────────────────────────────────
   // Until-when this enemy reacts to *external* stimulus (heard a shot or
@@ -1498,7 +1659,7 @@ function isMeleeChaser(type: EnemyType): boolean {
 const BOT_NAMES = ["Bot_α", "Bot_β", "Bot_γ", "Bot_δ", "Bot_ε", "Bot_ζ", "Bot_η", "Bot_θ", "Bot_ι"]
 
 export interface ThreeWorldProps {
-  mode?: "wave_defense" | "ffa" | "tdm" | "zombie" | "invasion"
+  mode?: "wave_defense" | "ffa" | "tdm" | "zombie" | "invasion" | "hunt"
   mapId?: "urban" | "desert" | "snow" | "sky"
   botCount?: number
   botDifficulty?: BotDifficulty
@@ -1628,6 +1789,58 @@ export default function ThreeWorld({
   const invasionWaveRef = useRef(0)
   const invasionActiveRef = useRef(false)
   const invasionNextStrikeRef = useRef(0) // ms timestamp for the next rocket
+
+  // ── HUNT mode controller (PR-Z1) ───────────────────────────────────────────
+  // Sub-phase machine layered on top of the normal "playing" gamePhase.
+  const huntPhaseRef = useRef<"room" | "countdown" | "warp" | "mission" | "scoring" | "dead">(
+    "room",
+  )
+  const [huntPhase, setHuntPhase] = useState<
+    "room" | "countdown" | "warp" | "mission" | "scoring" | "dead"
+  >("room")
+  const huntLevelIdxRef = useRef(0) // index into HUNT_LEVELS (Lv3 repeats)
+  const huntRepeatRef = useRef(0) // extra Lv3 loops → boss/zako HP +20% each
+  const huntScoreRef = useRef(0) // this-mission score
+  const [huntScore, setHuntScore] = useState(0)
+  const huntTotalRef = useRef(0) // cumulative score (persisted)
+  const [huntTotal, setHuntTotal] = useState(0)
+  const huntQuotaRef = useRef(0) // minimum points required this mission (penalty)
+  const [huntQuota, setHuntQuota] = useState(0)
+  const huntDeadlineRef = useRef(0) // ms timestamp the mission times out (0 = none)
+  const [huntTimeLeft, setHuntTimeLeft] = useState(0) // seconds, for the HUD
+  const huntRadiusRef = useRef(HUNT_BASE_RADIUS)
+  const [huntRadius, setHuntRadius] = useState(HUNT_BASE_RADIUS)
+  const huntShrinkStartRef = useRef(0) // ms timestamp the Lv3 shrink began
+  const huntOobSinceRef = useRef(0) // ms timestamp the player left the ring (0 = inside)
+  const [huntOob, setHuntOob] = useState(false)
+  const huntCountdownRef = useRef(0) // ms timestamp the 10s warp countdown ends
+  const [huntCountdown, setHuntCountdown] = useState(0) // whole seconds shown on the orb
+  const [huntWhiteFlash, setHuntWhiteFlash] = useState(false)
+  const huntInputLockRef = useRef(false) // kanashibari: freeze input during warp
+  const huntGreetingRef = useRef(0) // chosen greeting index
+  const huntKillLogRef = useRef<Map<string, { name: string; points: number; count: number }>>(
+    new Map(),
+  )
+  const [huntScoreList, setHuntScoreList] = useState<
+    { name: string; points: number; count: number }[]
+  >([])
+  const huntScoringUntilRef = useRef(0) // ms timestamp the scoring screen ends
+  const huntMissionReadyRef = useRef(false) // true once mission enemies are spawned
+  // Room/orb 3D handles + animation state (built once on init).
+  const huntRoomRef = useRef<{
+    orb: THREE.Mesh
+    canvas: HTMLCanvasElement
+    ctx: CanvasRenderingContext2D
+    texture: THREE.CanvasTexture
+    leftHalf: THREE.Object3D
+    rightHalf: THREE.Object3D
+    suitcase: THREE.Object3D
+    door: THREE.Object3D
+    open: number // 0..1 orb/rack open progress
+    page: number // current orb text page
+    pageAt: number // ms timestamp to flip the page
+    jingled: boolean
+  } | null>(null)
 
   // Phase 3: extended stat refs
   const maxKillstreakRef = useRef(0)
@@ -1937,8 +2150,11 @@ export default function ThreeWorld({
       // SKY: a dedicated aerial-combat arena — you fight enemy jets in a high,
       // bright sky over the existing world (which reads as the distant terrain).
       const isSky = mapId === "sky"
-      const theme =
-        modeRef.current === "invasion"
+      const isHunt = modeRef.current === "hunt"
+      const theme = isHunt
+        ? // HUNT: a dark night version of the urban map (also lights the room).
+          { sky: 0x05060a, fog: 0x070810, ambient: 0x2a3550, sun: 0x3a4a78 }
+        : modeRef.current === "invasion"
           ? // Invasion: an ominous blood-red sky regardless of map.
             { sky: 0x3a1812, fog: 0x33140e, ambient: 0xffcaa8, sun: 0xff7a4a }
           : isSky
@@ -2074,11 +2290,13 @@ export default function ThreeWorld({
       // Ambient was 2.4 — washed out shadows entirely. Drop it to 0.45 and
       // let a HemisphereLight handle the sky-vs-ground gradient (gives
       // "outdoor day" feel without crushing shadow contrast).
-      scene.add(new THREE.AmbientLight(theme.ambient, 0.45))
-      const hemi = new THREE.HemisphereLight(theme.sky, 0x4a4030, 0.55)
+      // HUNT runs at night: crush the ambient/sun so the arena reads dark and
+      // the transfer-room interior stays moody (lit by the glowing orb only).
+      scene.add(new THREE.AmbientLight(theme.ambient, isHunt ? 0.32 : 0.45))
+      const hemi = new THREE.HemisphereLight(theme.sky, 0x4a4030, isHunt ? 0.3 : 0.55)
       hemi.position.set(0, 50, 0)
       scene.add(hemi)
-      const sun = new THREE.DirectionalLight(theme.sun, 2.8)
+      const sun = new THREE.DirectionalLight(theme.sun, isHunt ? 0.7 : 2.8)
       sun.position.set(60, 80, 40)
       sun.castShadow = true
       // Shadow map 1024 (was 2048) — quarter the memory + sampling cost.
@@ -2097,7 +2315,7 @@ export default function ThreeWorld({
       sun.shadow.radius = 2
       scene.add(sun)
       // Fill light from opposite side (gentle bounce-light proxy)
-      const fillLight = new THREE.DirectionalLight(0xb0c8ff, 0.45)
+      const fillLight = new THREE.DirectionalLight(0xb0c8ff, isHunt ? 0.18 : 0.45)
       fillLight.position.set(-40, 30, -20)
       scene.add(fillLight)
 
@@ -4823,7 +5041,12 @@ export default function ThreeWorld({
       // z=57–70 (south) sit tight against the avenue (z≈44–57) so they
       // read as "the city's street walls" — no more "off in the distance".
       // SKY arena spawns the player on the airbase apron beside the runway.
-      const focalPoint = isSky ? new THREE.Vector3(20, 0, 126) : new THREE.Vector3(4, 0, 50)
+      const focalPoint =
+        modeRef.current === "hunt"
+          ? new THREE.Vector3(HUNT_ROOM.x, 0, HUNT_ROOM.z + 3) // inside the transfer room
+          : isSky
+            ? new THREE.Vector3(20, 0, 126)
+            : new THREE.Vector3(4, 0, 50)
       const camState = { yaw: -Math.PI / 2, pitch: 0 } // facing +X (east)
 
       function clampPitch(p: number) {
@@ -8715,6 +8938,606 @@ export default function ThreeWorld({
         }
       }
 
+      // ══ HUNT mode (PR-Z1) — transfer room + leveled missions ════════════════
+      function huntPersistTotal(n: number) {
+        try {
+          localStorage.setItem(HUNT_TOTAL_KEY, String(n))
+        } catch {
+          /* ignore */
+        }
+      }
+      // Strong themed body recolour (handles Standard + Lambert materials).
+      function huntTint(group: THREE.Object3D, hex: number, amt: number) {
+        const target = new THREE.Color(hex)
+        group.traverse((c) => {
+          if (!(c instanceof THREE.Mesh)) return
+          const m = c.material
+          if (Array.isArray(m)) return
+          if (
+            (m instanceof THREE.MeshStandardMaterial || m instanceof THREE.MeshLambertMaterial) &&
+            m.color
+          ) {
+            const cloned = m.clone()
+            cloned.color = m.color.clone().lerp(target, amt)
+            c.material = cloned
+          }
+        })
+      }
+      function huntGlowEyes(e: CombatEnemy, hex: number) {
+        const glow = new THREE.MeshStandardMaterial({
+          color: hex,
+          emissive: hex,
+          emissiveIntensity: 2.4,
+        })
+        if (e.leftEye) e.leftEye.material = glow
+        if (e.rightEye) e.rightEye.material = glow
+        const eg = e.eyeGlowMat
+        if (eg instanceof THREE.MeshStandardMaterial) {
+          eg.color.setHex(hex)
+          eg.emissive.setHex(hex)
+          eg.emissiveIntensity = 2.6
+        }
+      }
+      // Build one themed minion / boss, push it into `enemies`, return it.
+      function huntMakeEnemy(
+        base: EnemyType,
+        x: number,
+        z: number,
+        scale: number,
+        tint: number,
+        eyes: number,
+        points: number,
+        hp: number,
+        speed: number,
+        isBoss: boolean,
+        name: string,
+      ): CombatEnemy {
+        const e = makeEnemy(base, x, z, false, scale)
+        e.config = { ...e.config, hp, score: points, speed }
+        e.hp = hp
+        e.maxHp = hp
+        huntTint(e.mesh, tint, isBoss ? 0.6 : 0.78)
+        huntGlowEyes(e, eyes)
+        e.huntPoints = points
+        e.huntName = name
+        e.isHuntBoss = isBoss
+        if (isBoss) e.huntNextSpecial = Date.now() + 10000
+        enemies.push(e)
+        return e
+      }
+      // Remove every (live or dying) enemy mesh and empty the array.
+      function huntClearEnemies() {
+        for (const e of enemies) scene.remove(e.mesh)
+        enemies.length = 0
+        setAliveEnemyCount(0)
+      }
+      // ── Transfer room (built once on init) ──────────────────────────────────
+      function buildHuntRoom() {
+        const cx = HUNT_ROOM.x
+        const cz = HUNT_ROOM.z
+        const W = HUNT_ROOM_HALF + 1.5 // wall half-extent (interior is a bit smaller)
+        const wallMat = new THREE.MeshStandardMaterial({
+          color: 0x14161d,
+          roughness: 0.95,
+          metalness: 0.05,
+        })
+        const floorMat = new THREE.MeshStandardMaterial({
+          color: 0x0c0d12,
+          roughness: 1,
+          metalness: 0,
+        })
+        const group = new THREE.Group()
+        group.position.set(cx, 0, cz)
+        const floor = new THREE.Mesh(new THREE.BoxGeometry(W * 2, 0.2, W * 2), floorMat)
+        floor.position.y = -0.1
+        floor.receiveShadow = true
+        group.add(floor)
+        const ceil = new THREE.Mesh(new THREE.BoxGeometry(W * 2, 0.2, W * 2), wallMat)
+        ceil.position.y = 4.0
+        group.add(ceil)
+        // Four walls (a doorway gap is faked with a separate sliding door panel).
+        for (const [dx, dz, sx, sz] of [
+          [0, -W, W * 2, 0.3],
+          [0, W, W * 2, 0.3],
+          [-W, 0, 0.3, W * 2],
+          [W, 0, 0.3, W * 2],
+        ] as const) {
+          const wall = new THREE.Mesh(new THREE.BoxGeometry(sx, 4.2, sz), wallMat)
+          wall.position.set(dx, 2.0, dz)
+          group.add(wall)
+        }
+        // Inert door on the +z wall (opens only as post-mission flavour).
+        const door = new THREE.Mesh(
+          new THREE.BoxGeometry(1.6, 3.2, 0.16),
+          new THREE.MeshStandardMaterial({ color: 0x202530, roughness: 0.8, metalness: 0.3 }),
+        )
+        door.position.set(1.0, 1.6, W - 0.05)
+        group.add(door)
+        // Pedestal under the orb.
+        const pedestal = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.7, 0.9, 0.8, 16),
+          new THREE.MeshStandardMaterial({ color: 0x191b22, roughness: 0.7, metalness: 0.4 }),
+        )
+        pedestal.position.set(0, 0.4, 0)
+        group.add(pedestal)
+        // The black orb (glossy). Diameter 2m.
+        const orb = new THREE.Mesh(
+          new THREE.SphereGeometry(1.0, 32, 24),
+          new THREE.MeshStandardMaterial({ color: 0x040406, roughness: 0.12, metalness: 0.85 }),
+        )
+        orb.position.set(0, 1.7, 0)
+        group.add(orb)
+        // Green-text readout the orb projects toward the spawn (+z). Carries the
+        // CanvasTexture so the brief literally reads off the orb's face.
+        const canvas = document.createElement("canvas")
+        canvas.width = 1024
+        canvas.height = 512
+        const ctx = canvas.getContext("2d")
+        if (!ctx) return
+        const texture = new THREE.CanvasTexture(canvas)
+        const readout = new THREE.Mesh(
+          new THREE.PlaneGeometry(1.9, 0.95),
+          new THREE.MeshBasicMaterial({ map: texture, transparent: true, depthWrite: false }),
+        )
+        readout.position.set(0, 1.7, 1.02)
+        group.add(readout)
+        // Split shells (hidden until the orb "opens").
+        const shellMat = new THREE.MeshStandardMaterial({
+          color: 0x050507,
+          roughness: 0.15,
+          metalness: 0.85,
+          side: THREE.DoubleSide,
+        })
+        const leftHalf = new THREE.Mesh(
+          new THREE.SphereGeometry(1.04, 24, 18, 0, Math.PI),
+          shellMat,
+        )
+        const rightHalf = new THREE.Mesh(
+          new THREE.SphereGeometry(1.04, 24, 18, Math.PI, Math.PI),
+          shellMat,
+        )
+        leftHalf.position.copy(orb.position)
+        rightHalf.position.copy(orb.position)
+        leftHalf.visible = false
+        rightHalf.visible = false
+        group.add(leftHalf)
+        group.add(rightHalf)
+        // Weapon rack revealed on open (cosmetic — equipment lands in PR-Z2).
+        const rackMat = new THREE.MeshStandardMaterial({
+          color: 0x2a2f38,
+          roughness: 0.5,
+          metalness: 0.7,
+          emissive: 0x113322,
+          emissiveIntensity: 0.4,
+        })
+        const weaponRack = new THREE.Group()
+        for (const gx of [-0.45, 0.45]) {
+          const gun = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.12, 0.9), rackMat)
+          gun.position.set(gx, 1.7, 0)
+          weaponRack.add(gun)
+        }
+        weaponRack.visible = false
+        group.add(weaponRack)
+        // Suitcase that rises from behind the orb on open.
+        const suitcase = new THREE.Mesh(
+          new THREE.BoxGeometry(0.9, 0.6, 0.25),
+          new THREE.MeshStandardMaterial({
+            color: 0x3a2a16,
+            roughness: 0.6,
+            metalness: 0.3,
+            emissive: 0x221100,
+            emissiveIntensity: 0.3,
+          }),
+        )
+        suitcase.position.set(0, 1.7, -0.9)
+        suitcase.visible = false
+        group.add(suitcase)
+        scene.add(group)
+        huntRoomRef.current = {
+          orb,
+          canvas,
+          ctx,
+          texture,
+          leftHalf,
+          rightHalf,
+          suitcase,
+          door,
+          open: 0,
+          page: 0,
+          pageAt: 0,
+          jingled: false,
+        }
+        // `weaponRack` is parked on the orb so the open anim can find it.
+        orb.userData.weaponRack = weaponRack
+      }
+      // Draw the orb readout for the given page (0 greeting / 1 target / 2 time).
+      function huntDrawOrb(page: number) {
+        const room = huntRoomRef.current
+        if (!room) return
+        const { ctx, canvas, texture } = room
+        const W = canvas.width
+        const H = canvas.height
+        ctx.clearRect(0, 0, W, H)
+        ctx.fillStyle = "rgba(0,10,2,0.55)"
+        ctx.fillRect(0, 0, W, H)
+        ctx.strokeStyle = "rgba(0,255,80,0.5)"
+        ctx.lineWidth = 6
+        ctx.strokeRect(14, 14, W - 28, H - 28)
+        ctx.fillStyle = "#39ff7a"
+        ctx.shadowColor = "#00ff55"
+        ctx.shadowBlur = 18
+        ctx.textAlign = "center"
+        const lv = HUNT_LEVELS[huntLevelIdxRef.current]
+        if (!lv) return
+        const wrap = (text: string, font: string, y: number, lh: number, maxW: number) => {
+          ctx.font = font
+          const words = text.split("")
+          let line = ""
+          let yy = y
+          for (const ch of words) {
+            if (ctx.measureText(line + ch).width > maxW && line) {
+              ctx.fillText(line, W / 2, yy)
+              line = ch
+              yy += lh
+            } else line += ch
+          }
+          if (line) ctx.fillText(line, W / 2, yy)
+          return yy
+        }
+        if (page === 0) {
+          ctx.font = "bold 54px monospace"
+          ctx.fillText(`HUNT  Lv.${lv.level}`, W / 2, 90)
+          wrap(HUNT_GREETINGS[huntGreetingRef.current] ?? "", "30px monospace", 190, 52, W - 90)
+        } else if (page === 1) {
+          ctx.font = "bold 46px monospace"
+          ctx.fillText("◆ 標的 TARGET ◆", W / 2, 80)
+          // Simple green humanoid silhouette.
+          ctx.fillStyle = "rgba(57,255,122,0.85)"
+          ctx.beginPath()
+          ctx.arc(150, 150, 34, 0, Math.PI * 2)
+          ctx.fill()
+          ctx.fillRect(120, 190, 60, 130)
+          ctx.fillRect(96, 200, 24, 90)
+          ctx.fillRect(180, 200, 24, 90)
+          ctx.fillRect(122, 320, 24, 110)
+          ctx.fillRect(154, 320, 24, 110)
+          ctx.fillStyle = "#39ff7a"
+          ctx.textAlign = "left"
+          ctx.font = "bold 38px monospace"
+          ctx.fillText(lv.target.name, 280, 150)
+          ctx.font = "26px monospace"
+          ctx.fillText(`特徴 : ${lv.target.trait}`, 280, 220)
+          ctx.fillText(`好きなもの : ${lv.target.likes}`, 280, 270)
+          ctx.fillText(`口癖 : ${lv.target.phrase}`, 280, 320)
+          ctx.textAlign = "center"
+        } else {
+          ctx.font = "bold 50px monospace"
+          ctx.fillText("◆ 制限時間 ◆", W / 2, 130)
+          ctx.font = "bold 92px monospace"
+          if (lv.timeLimitSec === null) {
+            ctx.fillText("無制限", W / 2, 270)
+            ctx.font = "30px monospace"
+            ctx.fillText("ただしエリアが徐々に縮小する", W / 2, 350)
+          } else {
+            const mm = Math.floor(lv.timeLimitSec / 60)
+            ctx.fillText(`${mm}:00`, W / 2, 280)
+          }
+        }
+        ctx.shadowBlur = 0
+        texture.needsUpdate = true
+      }
+      // Apply the open-progress to the orb shells / rack / suitcase.
+      function huntApplyOrbOpen(open: number) {
+        const room = huntRoomRef.current
+        if (!room) return
+        const opening = open > 0.001
+        room.orb.visible = !opening
+        room.leftHalf.visible = opening
+        room.rightHalf.visible = opening
+        room.leftHalf.position.x = -open * 0.9
+        room.rightHalf.position.x = open * 0.9
+        room.leftHalf.rotation.y = -open * 0.6
+        room.rightHalf.rotation.y = open * 0.6
+        const rack = room.orb.userData.weaponRack as THREE.Object3D | undefined
+        if (rack) {
+          rack.visible = opening
+          rack.scale.setScalar(0.2 + open * 0.8)
+        }
+        room.suitcase.visible = opening
+        room.suitcase.position.z = -0.9 - open * 0.7
+        room.suitcase.position.y = 1.7 + open * 0.3
+      }
+      // (Re)start the room briefing for the current level.
+      function huntStartRoom() {
+        const room = huntRoomRef.current
+        huntGreetingRef.current = Math.floor(Math.random() * HUNT_GREETINGS.length)
+        if (room) {
+          room.open = 0
+          room.page = 0
+          room.pageAt = Date.now() + 2500
+          room.jingled = false
+          room.door.rotation.y = 0
+          huntApplyOrbOpen(0)
+          huntDrawOrb(0)
+        }
+        huntPhaseRef.current = "room"
+        setHuntPhase("room")
+        huntInputLockRef.current = false
+        focalPoint.set(HUNT_ROOM.x, 0, HUNT_ROOM.z + 3)
+        camState.yaw = Math.PI
+        camState.pitch = -0.05
+      }
+      // Refill HP + reserve mags for the next run.
+      function huntHeal() {
+        playerHpRef.current = PLAYER_MAX_HP
+        setPlayerHp(PLAYER_MAX_HP)
+        weaponAmmoRef.current[1] = 8
+        weaponAmmoRef.current[2] = 5
+        const cur = currentWeaponIdxRef.current
+        const mag = weaponAmmoRef.current[cur]
+        if (mag !== undefined) {
+          ammoRef.current = mag
+          setAmmo(mag)
+        }
+      }
+      // Warp into the mission: spawn themed minions + boss, set limits.
+      function huntBeginMission() {
+        const lv = HUNT_LEVELS[huntLevelIdxRef.current]
+        if (!lv) return
+        huntClearEnemies()
+        huntKillLogRef.current = new Map()
+        huntScoreRef.current = 0
+        setHuntScore(0)
+        const hpScale = lv.level === 3 ? 1 + 0.2 * huntRepeatRef.current : 1
+        const th = HUNT_THEMES[lv.theme]
+        // Minions ring the arena centre.
+        for (let i = 0; i < lv.zakoCount; i++) {
+          const ang = Math.random() * Math.PI * 2
+          const r = 28 + Math.random() * 150
+          const safe = findSafeSpawnNear(
+            HUNT_ARENA.x + Math.cos(ang) * r,
+            HUNT_ARENA.z + Math.sin(ang) * r,
+            ENEMY_RADIUS,
+          )
+          huntMakeEnemy(
+            th.base,
+            safe.x,
+            safe.z,
+            th.scale,
+            th.tint,
+            th.eyes,
+            th.points,
+            Math.round(th.hp * hpScale),
+            th.speed,
+            false,
+            "minion",
+          )
+        }
+        // Boss: charge/aoe → terraformer (melee), ranged_summon → grunt (shoots).
+        const bossBase: EnemyType = lv.boss === "ranged_summon" ? "grunt" : "terraformer"
+        const bsafe = findSafeSpawnNear(HUNT_ARENA.x, HUNT_ARENA.z - 60, ENEMY_RADIUS)
+        huntMakeEnemy(
+          bossBase,
+          bsafe.x,
+          bsafe.z,
+          lv.bossScale,
+          0x101014,
+          0xff2200,
+          lv.bossScore,
+          Math.round(lv.bossHp * hpScale),
+          lv.boss === "aoe_fast" ? 5.5 : 3.0,
+          true,
+          lv.target.name,
+        )
+        setAliveEnemyCount(enemies.filter((e) => e.hp > 0).length)
+        // Boundary + timer.
+        huntRadiusRef.current = HUNT_BASE_RADIUS
+        setHuntRadius(HUNT_BASE_RADIUS)
+        huntShrinkStartRef.current = Date.now()
+        huntDeadlineRef.current = lv.timeLimitSec ? Date.now() + lv.timeLimitSec * 1000 : 0
+        huntOobSinceRef.current = 0
+        setHuntOob(false)
+        // Drop the player into the arena centre (nudged clear of any building).
+        const psafe = findSafeSpawnNear(HUNT_ARENA.x, HUNT_ARENA.z, PLAYER_RADIUS)
+        focalPoint.set(psafe.x, 0, psafe.z)
+        playerVelRef.current.x = 0
+        playerVelRef.current.z = 0
+        spawnInvulnUntilRef.current = Date.now() + 2500
+        huntMissionReadyRef.current = true
+        huntPhaseRef.current = "mission"
+        setHuntPhase("mission")
+        showNotification(`Lv.${lv.level} — ${lv.target.name} を狩れ`)
+      }
+      // Head-pop death (boundary breach / quota miss): red burst + game over.
+      function huntHeadExplode(reason: string) {
+        const head = new THREE.Vector3(focalPoint.x, EYE_HEIGHT, focalPoint.z)
+        spawnExplosion(head, false, true)
+        spawnExplosion(head, false, true)
+        cameraShakeRef.current.intensity = 8
+        SOUNDS.gameover()
+        huntMissionReadyRef.current = false
+        huntPhaseRef.current = "dead"
+        setHuntPhase("dead")
+        gamePhaseRef.current = "gameover"
+        setGamePhase("gameover")
+        deathsRef.current += 1
+        setDeaths(deathsRef.current)
+        showNotification(reason)
+      }
+      // Build the scoring list (this mission's kills) for the orb + HUD.
+      function huntBuildScoreList() {
+        const list = [...huntKillLogRef.current.values()].sort((a, b) => b.points - a.points)
+        setHuntScoreList(list)
+      }
+      // Return to the room after a mission (outcome: clear or timeout).
+      function huntReturnToRoom(outcome: "clear" | "timeout") {
+        // Quota set by a prior time-out: this mission had to clear the bar.
+        if (huntQuotaRef.current > 0 && huntScoreRef.current < huntQuotaRef.current) {
+          focalPoint.set(HUNT_ROOM.x, 0, HUNT_ROOM.z + 3)
+          huntClearEnemies()
+          huntHeadExplode("ノルマ未達 — 制裁執行")
+          return
+        }
+        huntQuotaRef.current = 0
+        setHuntQuota(0)
+        huntClearEnemies()
+        huntMissionReadyRef.current = false
+        focalPoint.set(HUNT_ROOM.x, 0, HUNT_ROOM.z + 3)
+        playerVelRef.current.x = 0
+        playerVelRef.current.z = 0
+        camState.yaw = Math.PI
+        camState.pitch = -0.05
+        if (outcome === "timeout") {
+          // Forfeit this run AND the whole cumulative bank; arm the next quota.
+          huntScoreRef.current = 0
+          setHuntScore(0)
+          huntTotalRef.current = 0
+          setHuntTotal(0)
+          huntPersistTotal(0)
+          huntQuotaRef.current = HUNT_QUOTA_MISS
+          setHuntQuota(HUNT_QUOTA_MISS)
+          showNotification("時間切れ — 得点没収。次は最低ノルマ達成せよ")
+        } else {
+          if (huntLevelIdxRef.current < HUNT_LEVELS.length - 1) huntLevelIdxRef.current++
+          else huntRepeatRef.current++ // Lv3 cleared → repeat tougher (+20% HP)
+          SOUNDS.clear()
+        }
+        huntBuildScoreList()
+        huntHeal()
+        huntPhaseRef.current = "scoring"
+        setHuntPhase("scoring")
+        huntScoringUntilRef.current = Date.now() + 7000
+      }
+      // Per-frame HUNT state machine.
+      function updateHunt(dt: number) {
+        if (modeRef.current !== "hunt") return
+        const now = Date.now()
+        const room = huntRoomRef.current
+        const phase = huntPhaseRef.current
+        // Keep the player boxed in the room during briefing/countdown.
+        if (phase === "room" || phase === "countdown" || phase === "scoring") {
+          focalPoint.x = Math.max(
+            HUNT_ROOM.x - HUNT_ROOM_HALF,
+            Math.min(HUNT_ROOM.x + HUNT_ROOM_HALF, focalPoint.x),
+          )
+          focalPoint.z = Math.max(
+            HUNT_ROOM.z - HUNT_ROOM_HALF,
+            Math.min(HUNT_ROOM.z + HUNT_ROOM_HALF, focalPoint.z),
+          )
+          focalPoint.y = 0
+        }
+        if (phase === "room" && room) {
+          if (now >= room.pageAt) {
+            if (room.page < 2) {
+              room.page++
+              huntDrawOrb(room.page)
+              room.pageAt = now + 4500
+              SOUNDS.huntTally()
+            } else if (!room.jingled) {
+              room.jingled = true
+              SOUNDS.huntJingle()
+              huntCountdownRef.current = now + 10000
+              huntPhaseRef.current = "countdown"
+              setHuntPhase("countdown")
+            }
+          }
+        } else if (phase === "countdown" && room) {
+          room.open = Math.min(1, room.open + dt * 0.7)
+          huntApplyOrbOpen(room.open)
+          const sec = Math.max(0, Math.ceil((huntCountdownRef.current - now) / 1000))
+          setHuntCountdown(sec)
+          if (sec <= 3) huntInputLockRef.current = true // 金縛り
+          if (now >= huntCountdownRef.current) {
+            huntPhaseRef.current = "warp"
+            setHuntPhase("warp")
+            SOUNDS.huntWarp()
+            setHuntWhiteFlash(true)
+            window.setTimeout(() => {
+              huntBeginMission()
+              setHuntWhiteFlash(false)
+              huntInputLockRef.current = false
+            }, 480)
+          }
+        } else if (phase === "scoring") {
+          if (room) room.door.rotation.y = Math.min(1.2, room.door.rotation.y + dt * 0.8)
+          if (now >= huntScoringUntilRef.current) huntStartRoom()
+        } else if (phase === "mission" && huntMissionReadyRef.current) {
+          // Arena boundary: shrink on Lv3, else fixed.
+          const lv = HUNT_LEVELS[huntLevelIdxRef.current]
+          if (lv?.shrink) {
+            const tt = Math.min(1, (now - huntShrinkStartRef.current) / (HUNT_SHRINK_SEC * 1000))
+            huntRadiusRef.current = HUNT_BASE_RADIUS - (HUNT_BASE_RADIUS - HUNT_MIN_RADIUS) * tt
+          }
+          setHuntRadius(Math.round(huntRadiusRef.current))
+          // Out-of-bounds → warn, then head-pop after the grace period.
+          const dist = Math.hypot(focalPoint.x - HUNT_ARENA.x, focalPoint.z - HUNT_ARENA.z)
+          if (dist > huntRadiusRef.current) {
+            if (huntOobSinceRef.current === 0) {
+              huntOobSinceRef.current = now
+              setHuntOob(true)
+            }
+            if (Math.floor(now / 600) % 2 === 0) SOUNDS.huntWarn()
+            if (now - huntOobSinceRef.current > HUNT_OOB_GRACE_MS) {
+              huntHeadExplode("境界侵犯 — 頭部爆散")
+              return
+            }
+          } else if (huntOobSinceRef.current !== 0) {
+            huntOobSinceRef.current = 0
+            setHuntOob(false)
+          }
+          // Boss special behaviours (light PR-Z1 versions).
+          const boss = enemies.find((e) => e.isHuntBoss && e.hp > 0)
+          if (boss && lv && boss.huntNextSpecial && now >= boss.huntNextSpecial) {
+            if (lv.boss === "ranged_summon") {
+              const th = HUNT_THEMES[lv.theme]
+              for (let i = 0; i < 2; i++) {
+                const a = Math.random() * Math.PI * 2
+                const safe = findSafeSpawnNear(
+                  boss.mesh.position.x + Math.cos(a) * 4,
+                  boss.mesh.position.z + Math.sin(a) * 4,
+                  ENEMY_RADIUS,
+                )
+                huntMakeEnemy(
+                  th.base,
+                  safe.x,
+                  safe.z,
+                  th.scale,
+                  th.tint,
+                  th.eyes,
+                  th.points,
+                  th.hp,
+                  th.speed,
+                  false,
+                  "minion",
+                )
+              }
+              boss.huntNextSpecial = now + 12000
+            } else if (lv.boss === "aoe_fast") {
+              spawnExplosion(boss.mesh.position.clone(), false, true)
+              const bd = Math.hypot(
+                focalPoint.x - boss.mesh.position.x,
+                focalPoint.z - boss.mesh.position.z,
+              )
+              if (bd < 9 && Date.now() > spawnInvulnUntilRef.current) applyPlayerDamage(26, 5)
+              boss.huntNextSpecial = now + 6000
+            }
+          }
+          // Timer (Lv1/Lv2): survive → return with the bank forfeited.
+          if (huntDeadlineRef.current > 0) {
+            const left = Math.max(0, Math.ceil((huntDeadlineRef.current - now) / 1000))
+            setHuntTimeLeft(left)
+            if (now >= huntDeadlineRef.current) {
+              huntReturnToRoom("timeout")
+              return
+            }
+          }
+          // Clear: every enemy dead.
+          if (enemies.filter((e) => e.hp > 0).length === 0) {
+            huntReturnToRoom("clear")
+          }
+        }
+      }
+
       // Auto-spawn bots for FFA/TDM modes (wave_defense uses mission select).
       if (!isSky && (modeRef.current === "ffa" || modeRef.current === "tdm") && botCount > 0) {
         spawnBots(botCount, botDifficulty, modeRef.current)
@@ -8749,6 +9572,24 @@ export default function ThreeWorld({
           if (gamePhaseRef.current === "playing") setWaveMessage(null)
         }, 3500)
         showNotification("INVASION MODE — 空を警戒せよ")
+      }
+
+      // HUNT mode: build the transfer room and start the first briefing. The
+      // cumulative score is restored from localStorage (PR-Z2 100-pt menu).
+      if (modeRef.current === "hunt") {
+        let saved = 0
+        try {
+          saved = Number.parseInt(localStorage.getItem(HUNT_TOTAL_KEY) ?? "0", 10) || 0
+        } catch {
+          /* ignore */
+        }
+        huntTotalRef.current = saved
+        setHuntTotal(saved)
+        huntLevelIdxRef.current = 0
+        huntRepeatRef.current = 0
+        buildHuntRoom()
+        huntStartRoom()
+        showNotification("HUNT — 標的の情報を待て")
       }
 
       const bullets: Bullet[] = []
@@ -8864,7 +9705,8 @@ export default function ThreeWorld({
       }
 
       // ── Spawn explosion / spark particles ─────────────────────────────────
-      function spawnExplosion(pos: THREE.Vector3, isSpark = false) {
+      // `gore` (HUNT head-pop) swaps the orange fireball for a red blood burst.
+      function spawnExplosion(pos: THREE.Vector3, isSpark = false, gore = false) {
         const refs = sceneRef.current
         if (!refs) return
         const baseCount = isSpark ? 6 : 18
@@ -8874,7 +9716,15 @@ export default function ThreeWorld({
         const speed = isSpark ? 5 : 3.5
         for (let i = 0; i < count; i++) {
           const size = isSpark ? 0.03 : 0.06 + Math.random() * 0.1
-          const color = isSpark ? 0xffaa00 : i % 2 === 0 ? 0xff6600 : 0xffcc00
+          const color = gore
+            ? i % 2 === 0
+              ? 0xcc0000
+              : 0xff3322
+            : isSpark
+              ? 0xffaa00
+              : i % 2 === 0
+                ? 0xff6600
+                : 0xffcc00
           const geo = new THREE.BoxGeometry(size, size, size)
           const mat = new THREE.MeshBasicMaterial({ color })
           const mesh = new THREE.Mesh(geo, mat)
@@ -8940,6 +9790,23 @@ export default function ThreeWorld({
         setKills(killsRef.current)
         scoreRef.current += hitEnemy.config.score
         setScore(scoreRef.current)
+        // HUNT: route points to the mission + cumulative tallies and log the kill
+        // for the post-mission scoring screen.
+        if (modeRef.current === "hunt" && hitEnemy.huntPoints) {
+          huntScoreRef.current += hitEnemy.huntPoints
+          setHuntScore(huntScoreRef.current)
+          huntTotalRef.current += hitEnemy.huntPoints
+          setHuntTotal(huntTotalRef.current)
+          huntPersistTotal(huntTotalRef.current)
+          const key = hitEnemy.isHuntBoss ? `boss:${hitEnemy.huntName}` : "minion"
+          const label = hitEnemy.isHuntBoss
+            ? `★ ${hitEnemy.huntName}`
+            : `雑魚 (${hitEnemy.huntPoints}pt)`
+          const log = huntKillLogRef.current
+          const cur = log.get(key)
+          if (cur) cur.count += 1
+          else log.set(key, { name: label, points: hitEnemy.huntPoints, count: 1 })
+        }
         // TDM: opposite-team bot kill awards a point to the player's team locally.
         if (
           hitEnemy.isBot &&
@@ -10031,7 +10898,11 @@ export default function ThreeWorld({
           const mdy = mouseDeltaRef.current.y * APPLY
           mouseDeltaRef.current.x -= mdx
           mouseDeltaRef.current.y -= mdy
-          if (mdx !== 0 || mdy !== 0) {
+          // HUNT teleport: "金縛り" — freeze the view (drop the buffered delta).
+          if (huntInputLockRef.current) {
+            mouseDeltaRef.current.x = 0
+            mouseDeltaRef.current.y = 0
+          } else if (mdx !== 0 || mdy !== 0) {
             // Base sensitivity dropped 0.002 → 0.0012 (≈40% slower default).
             // Player can scale 0.5x–2.0x via the settings panel.
             const sens = 0.0012 * mouseSensRef.current
@@ -10196,6 +11067,7 @@ export default function ThreeWorld({
         updateRPGPickups(dt) // PR-G1 handheld launcher pickups
         updateBikeRiders(dt) // motorcycle: drive terraformer-ridden bikes
         if (bikeSlots.length > 0) updateBikeRespawns(Date.now()) // refill taken bikes
+        if (modeRef.current === "hunt") updateHunt(dt) // HUNT transfer-mission FSM
         // PR-F2 air war: AA guns (sleep unless the player is flying), their
         // shells, enemy jets, and any ownerless crashing jet.
         updateAAGuns(dt)
@@ -10236,6 +11108,11 @@ export default function ThreeWorld({
         if (keysRef.current.has("ArrowRight") || keysRef.current.has("d")) inVx += 1
         if (keysRef.current.has("ArrowUp") || keysRef.current.has("w")) inVz -= 1
         if (keysRef.current.has("ArrowDown") || keysRef.current.has("s")) inVz += 1
+        // HUNT teleport: freeze movement during the paralysis/warp window.
+        if (huntInputLockRef.current) {
+          inVx = 0
+          inVz = 0
+        }
         // Normalize once magnitude exceeds 1 so diagonal isn't √2 faster.
         const inMag = Math.hypot(inVx, inVz)
         if (inMag > 1) {
@@ -12159,6 +13036,17 @@ export default function ThreeWorld({
               ctx.arc(cx, cz, 2.5, 0, Math.PI * 2)
               ctx.fill()
             }
+            // HUNT arena boundary ring (drawn on top so it reads clearly).
+            if (modeRef.current === "hunt" && huntPhaseRef.current === "mission") {
+              const bx = mx(HUNT_ARENA.x)
+              const bz = mz(HUNT_ARENA.z)
+              const br = huntRadiusRef.current * SCALE
+              ctx.strokeStyle = huntOobSinceRef.current ? "#ff2222" : "rgba(255,70,70,0.8)"
+              ctx.lineWidth = 2
+              ctx.beginPath()
+              ctx.arc(bx, bz, br, 0, Math.PI * 2)
+              ctx.stroke()
+            }
             ctx.save()
             ctx.translate(W / 2, W / 2)
             ctx.rotate(-camState.yaw)
@@ -12987,6 +13875,214 @@ export default function ThreeWorld({
           />
         )}
 
+        {/* ══ HUNT mode HUD (PR-Z1) ══════════════════════════════════════════ */}
+        {mode === "hunt" && !isLoading && !error && (
+          <>
+            {/* White teleport flash. */}
+            {huntWhiteFlash && (
+              <div
+                style={{
+                  position: "absolute",
+                  inset: 0,
+                  background: "rgba(255,255,255,0.96)",
+                  pointerEvents: "none",
+                  zIndex: 58,
+                }}
+              />
+            )}
+            {/* Persistent score banner: this mission + cumulative (+ quota). */}
+            {gamePhase === "playing" && (
+              <div
+                style={{
+                  position: "absolute",
+                  top: "0.5rem",
+                  left: "0.6rem",
+                  zIndex: 26,
+                  fontFamily: "monospace",
+                  background: "rgba(0,8,4,0.7)",
+                  border: "1px solid rgba(0,255,90,0.4)",
+                  padding: "0.4rem 0.7rem",
+                  color: "#39ff7a",
+                  lineHeight: 1.5,
+                  pointerEvents: "none",
+                }}
+              >
+                <div style={{ fontSize: "0.62rem", letterSpacing: "0.15em", opacity: 0.7 }}>
+                  MISSION
+                </div>
+                <div
+                  style={{ fontSize: "1.5rem", fontWeight: "bold", textShadow: "0 0 8px #00ff55" }}
+                >
+                  {huntScore} pt
+                </div>
+                <div style={{ fontSize: "0.7rem", opacity: 0.85 }}>累計 {huntTotal} pt</div>
+                {huntQuota > 0 && (
+                  <div style={{ fontSize: "0.7rem", color: "#ffcc44", marginTop: "0.2rem" }}>
+                    ノルマ {huntScore}/{huntQuota}
+                  </div>
+                )}
+              </div>
+            )}
+            {/* Top-center: time remaining (Lv1/2) or arena radius (Lv3). */}
+            {huntPhase === "mission" && (
+              <div
+                style={{
+                  position: "absolute",
+                  top: "0.4rem",
+                  left: "50%",
+                  transform: "translateX(-50%)",
+                  zIndex: 26,
+                  fontFamily: "monospace",
+                  textAlign: "center",
+                  color: "#ffffff",
+                  pointerEvents: "none",
+                }}
+              >
+                {huntDeadlineRef.current > 0 ? (
+                  <div
+                    style={{
+                      fontSize: "2.2rem",
+                      fontWeight: "bold",
+                      color: huntTimeLeft <= 30 ? "#ff4040" : "#ffffff",
+                      textShadow: "0 0 14px rgba(0,0,0,0.9)",
+                    }}
+                  >
+                    {Math.floor(huntTimeLeft / 60)}:{String(huntTimeLeft % 60).padStart(2, "0")}
+                  </div>
+                ) : (
+                  <div
+                    style={{
+                      fontSize: "1.9rem",
+                      fontWeight: "bold",
+                      color: "#ff7766",
+                      textShadow: "0 0 14px rgba(0,0,0,0.9)",
+                    }}
+                  >
+                    ◎ {huntRadius}m
+                  </div>
+                )}
+              </div>
+            )}
+            {/* Orb countdown number (room). */}
+            {huntPhase === "countdown" && (
+              <div
+                style={{
+                  position: "absolute",
+                  top: "16%",
+                  left: "50%",
+                  transform: "translateX(-50%)",
+                  zIndex: 40,
+                  fontFamily: "monospace",
+                  fontSize: "4.5rem",
+                  fontWeight: "bold",
+                  color: "#39ff7a",
+                  textShadow: "0 0 30px #00ff55",
+                  pointerEvents: "none",
+                }}
+              >
+                {huntCountdown}
+              </div>
+            )}
+            {/* Out-of-bounds warning. */}
+            {huntOob && gamePhase === "playing" && (
+              <>
+                <div
+                  style={{
+                    position: "absolute",
+                    inset: 0,
+                    background:
+                      "radial-gradient(ellipse at center, transparent 30%, rgba(220,0,0,0.6) 100%)",
+                    pointerEvents: "none",
+                    zIndex: 7,
+                  }}
+                />
+                <div
+                  style={{
+                    position: "absolute",
+                    top: "30%",
+                    left: "50%",
+                    transform: "translateX(-50%)",
+                    zIndex: 41,
+                    fontFamily: "monospace",
+                    fontSize: "2rem",
+                    fontWeight: "bold",
+                    color: "#ff3030",
+                    textShadow: "0 0 18px rgba(255,0,0,0.9)",
+                    pointerEvents: "none",
+                    textAlign: "center",
+                  }}
+                >
+                  ⚠ 境界侵犯 ⚠<br />
+                  <span style={{ fontSize: "1rem" }}>3秒以内に戻れ — さもなくば頭部爆散</span>
+                </div>
+              </>
+            )}
+            {/* Post-mission scoring screen. */}
+            {huntPhase === "scoring" && gamePhase === "playing" && (
+              <div
+                style={{
+                  position: "absolute",
+                  top: "50%",
+                  left: "50%",
+                  transform: "translate(-50%,-50%)",
+                  zIndex: 42,
+                  fontFamily: "monospace",
+                  background: "rgba(0,10,4,0.86)",
+                  border: "2px solid #00ff55",
+                  boxShadow: "0 0 28px rgba(0,255,80,0.35)",
+                  padding: "1.4rem 2rem",
+                  color: "#39ff7a",
+                  textAlign: "center",
+                  minWidth: "320px",
+                  pointerEvents: "none",
+                }}
+              >
+                <div
+                  style={{
+                    fontSize: "1.6rem",
+                    fontWeight: "bold",
+                    letterSpacing: "0.2em",
+                    textShadow: "0 0 12px #00ff55",
+                    marginBottom: "0.8rem",
+                  }}
+                >
+                  MISSION CLEAR
+                </div>
+                {huntScoreList.map((k) => (
+                  <div
+                    key={k.name}
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      fontSize: "0.85rem",
+                      padding: "0.15rem 0",
+                    }}
+                  >
+                    <span>
+                      {k.name} ×{k.count}
+                    </span>
+                    <span style={{ color: "#ffcc44" }}>+{k.points * k.count} pt</span>
+                  </div>
+                ))}
+                <div
+                  style={{
+                    marginTop: "0.7rem",
+                    paddingTop: "0.5rem",
+                    borderTop: "1px solid rgba(0,255,80,0.3)",
+                    fontSize: "1.1rem",
+                    fontWeight: "bold",
+                  }}
+                >
+                  今回 {huntScore} pt ／ 累計 {huntTotal} pt
+                </div>
+                <div style={{ marginTop: "0.5rem", fontSize: "0.7rem", opacity: 0.7 }}>
+                  HP・弾薬 回復 — 次の標的へ…
+                </div>
+              </div>
+            )}
+          </>
+        )}
+
         {/* Fall-damage number — rises + fades on a hard landing. */}
         {fallDmgPopup && (
           <div
@@ -13017,7 +14113,7 @@ export default function ThreeWorld({
 
         {/* ── Top-center: Score / Kills (desktop only — mobile shows these in
             the compact top HUD bar below to avoid stacking two panels) ──── */}
-        {!isLoading && !error && !isMobile && gamePhase === "playing" && (
+        {!isLoading && !error && !isMobile && gamePhase === "playing" && mode !== "hunt" && (
           <div
             style={{
               position: "absolute",
@@ -13841,6 +14937,7 @@ export default function ThreeWorld({
           gamePhase === "playing" &&
           !showMissionSelect &&
           !isMobile &&
+          mode !== "hunt" &&
           aliveEnemyCount > 0 && (
             <div
               style={{
