@@ -62,6 +62,9 @@ export const en: typeof ja = {
     invasion: "INVASION",
     invasionDesc:
       "A rocket crashes from the sky and Terraformers swarm out. Survive the overwhelming horde.",
+    hunt: "HUNT",
+    huntDesc:
+      "Transfer from a black-orb room to your mark. Hunt the target before time runs out. No escape.",
     selectMap: "MAP",
     urban: "URBAN",
     desert: "DESERT",

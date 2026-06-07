@@ -62,6 +62,9 @@ export const es: typeof ja = {
     invasion: "INVASIÓN",
     invasionDesc:
       "Un cohete cae del cielo y los Terraformers salen en masa. Sobrevive a la horda implacable.",
+    hunt: "HUNT",
+    huntDesc:
+      "Teletranspórtate desde la sala de la esfera negra hasta tu objetivo. Caza antes de que acabe el tiempo. No hay escape.",
     selectMap: "MAPA",
     urban: "URBANO",
     desert: "DESIERTO",
