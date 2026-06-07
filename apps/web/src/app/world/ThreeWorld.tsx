@@ -73,6 +73,22 @@ const VEHICLE_TANK_MAX_SPEED = 8.1 // slow & heavy; nerfed 10% from 9
 const VEHICLE_TANK_REVERSE = 3.6 // nerfed 10% from 4
 const VEHICLE_TANK_ACCEL = 8 // sluggish throttle response
 const VEHICLE_TANK_TURN = 1.05 // ponderous hull steering (car is 1.9)
+// ── Motorcycle (drivable; also ridden by terraformers for swarm charges) ────
+// Light, nimble, fast: quicker accel + higher top speed + tighter turning than
+// a car, but fragile.
+const VEHICLE_BIKE_RADIUS = 0.7 // small collision body (slips through gaps)
+const VEHICLE_BIKE_HP = 90 // very fragile
+const VEHICLE_BIKE_MAX_SPEED = 22 // top speed (faster than the car's 16)
+const VEHICLE_BIKE_REVERSE = 5
+const VEHICLE_BIKE_ACCEL = 24 // snappy throttle response (car is 14)
+const VEHICLE_BIKE_TURN = 2.6 // tight steering (car is 1.9)
+// Terraformer bike-charge tuning.
+const BIKE_MOUNT_SEEK_RANGE = 30 // a free bike within this → a terraformer goes for it
+const BIKE_MOUNT_RADIUS = 2.6 // close enough to actually climb aboard
+const BIKE_PLAYER_FAR = 50 // …but only when the player is at least this far off
+const BIKE_RIDER_RAM_DMG = 22 // per swarm bike (low; the threat is volume)
+const BIKE_RIDER_SEAT_Y = 0.9 // rider mesh sits this high on the bike
+const BIKE_RESPAWN_MS = 20000 // a taken / destroyed bike refills its slot after this
 // Small-arms (bullets / claws) only chip the tank; explosives hit full.
 // Bumped from 0.12 → 0.25 so sustained enemy fire actually wears it down.
 const TANK_ARMOR_BULLET = 0.25
@@ -1170,6 +1186,11 @@ interface CombatEnemy {
   // True while this enemy is the AI driver of a vehicle — its normal on-foot
   // AI is skipped (the vehicle update drives it) and its mesh is hidden.
   aiDriving?: boolean
+  // PR motorcycle: true while this terraformer is RIDING a bike (the bike's
+  // updateBikeRiders drives it). Unlike aiDriving, the rider stays visible +
+  // hittable — shoot it off and the bike goes driverless. The bike is found via
+  // vehicles.find(v => v.riderEnemy === enemy).
+  riding?: boolean
   // Bot fields (FFA/TDM): set only when this enemy is a bot player
   isBot?: boolean
   botName?: string
@@ -1662,7 +1683,7 @@ export default function ThreeWorld({
   const drivingRef = useRef(false)
   // Kind of the vehicle currently driven (for input handlers in other effects
   // that can't see the scene-effect-local `activeVehicle`). null when on foot.
-  const drivingKindRef = useRef<"car" | "tank" | "jet" | null>(null)
+  const drivingKindRef = useRef<"car" | "tank" | "jet" | "bike" | null>(null)
   const [inVehicle, setInVehicle] = useState(false)
   // True while on foot next to a boardable car (shows the "乗る" prompt).
   const [nearVehicle, setNearVehicle] = useState(false)
@@ -4891,7 +4912,7 @@ export default function ThreeWorld({
         hp: number
         maxHp: number
         dead: boolean // true once destroyed (no longer boardable)
-        kind: "car" | "tank" | "jet"
+        kind: "car" | "tank" | "jet" | "bike"
         // Tank only: turret yaws to the aim, barrelPivot pitches the gun.
         // (undefined for cars — required-but-nullable to satisfy exactOptional.)
         turret: THREE.Object3D | undefined
@@ -4899,6 +4920,11 @@ export default function ThreeWorld({
         // Set when an AI enemy has commandeered this vehicle (it then hunts the
         // player). The player can't board it until it's destroyed.
         aiDriver: CombatEnemy | null
+        // Bike only: the terraformer riding this bike. Unlike aiDriver, the
+        // rider stays VISIBLE + HITTABLE (you shoot the roach off, not the
+        // bike), so bikes are intentionally kept out of the aiDriver damage
+        // path. null = free (player-boardable). PR motorcycle.
+        riderEnemy: CombatEnemy | null
         // Tank AI cannon cadence + ram-damage cooldown timestamps (ms).
         aiNextCannon: number
         aiNextRam: number
@@ -4908,6 +4934,17 @@ export default function ThreeWorld({
       }
       const vehicles: Vehicle[] = []
       let activeVehicle: Vehicle | null = null
+      // PR motorcycle: a fixed set of bike parking slots. Each refills itself
+      // (BIKE_RESPAWN_MS) once its bike is driven off / ridden away / destroyed,
+      // so the map stays stocked with rides for the player and the swarm.
+      interface BikeSlot {
+        x: number
+        z: number
+        heading: number
+        bike: Vehicle | null
+        respawnAt: number // 0 = stocked; else the ms timestamp to refill
+      }
+      const bikeSlots: BikeSlot[] = []
 
       function makeVehicle(color: number): THREE.Group {
         const g = new THREE.Group()
@@ -4964,6 +5001,75 @@ export default function ThreeWorld({
           wheel.castShadow = true
           g.add(wheel)
         }
+        return g
+      }
+
+      // ── Motorcycle ──────────────────────────────────────────────────────────
+      // Shared materials (created once; every bike instance reuses them, so a
+      // swarm of terraformer bikes costs almost nothing). Forward = -z, matching
+      // the car / tank / jet convention.
+      const bikeFrameMat = new THREE.MeshStandardMaterial({
+        color: 0x33373c,
+        roughness: 0.4,
+        metalness: 0.7,
+      })
+      const bikeAccentMat = new THREE.MeshStandardMaterial({
+        color: 0xb22222,
+        roughness: 0.45,
+        metalness: 0.5,
+      })
+      const bikeTireMat = new THREE.MeshLambertMaterial({ color: 0x0d0d0d })
+      const bikeSeatMat = new THREE.MeshStandardMaterial({
+        color: 0x141414,
+        roughness: 0.7,
+        metalness: 0.2,
+      })
+      const bikeHeadlightMat = new THREE.MeshStandardMaterial({
+        color: 0xfff2b0,
+        emissive: 0xffe070,
+        emissiveIntensity: 1.2,
+      })
+      function makeBike(): THREE.Group {
+        const g = new THREE.Group()
+        // Two wheels: front (-z), rear (+z).
+        for (const wz of [-0.62, 0.62]) {
+          const wheel = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.34, 0.34, 0.16, 14),
+            bikeTireMat,
+          )
+          wheel.rotation.z = Math.PI / 2
+          wheel.position.set(0, 0.34, wz)
+          wheel.castShadow = true
+          g.add(wheel)
+        }
+        // Frame spine connecting the wheels.
+        const spine = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.1, 1.2), bikeFrameMat)
+        spine.position.set(0, 0.5, 0)
+        g.add(spine)
+        // Fuel tank (accent colour) + engine block.
+        const tank = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.3, 0.6), bikeAccentMat)
+        tank.position.set(0, 0.66, 0.05)
+        tank.castShadow = true
+        g.add(tank)
+        const engine = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.26, 0.4), bikeFrameMat)
+        engine.position.set(0, 0.42, 0.05)
+        g.add(engine)
+        // Seat (toward the rear / +z).
+        const seat = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.12, 0.5), bikeSeatMat)
+        seat.position.set(0, 0.74, 0.42)
+        g.add(seat)
+        // Front fork (angled down to the front wheel) + handlebar.
+        const fork = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.5, 0.08), bikeFrameMat)
+        fork.position.set(0, 0.55, -0.55)
+        fork.rotation.x = 0.4
+        g.add(fork)
+        const bar = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.06, 0.06), bikeFrameMat)
+        bar.position.set(0, 0.82, -0.52)
+        g.add(bar)
+        // Headlight on the nose.
+        const hl = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.14, 0.06), bikeHeadlightMat)
+        hl.position.set(0, 0.7, -0.62)
+        g.add(hl)
         return g
       }
 
@@ -5156,14 +5262,16 @@ export default function ThreeWorld({
         z: number,
         heading: number,
         color: number,
-        kind: "car" | "tank" | "jet" = "car",
-      ) {
+        kind: "car" | "tank" | "jet" | "bike" = "car",
+      ): Vehicle {
         const radius =
           kind === "tank"
             ? VEHICLE_TANK_RADIUS
             : kind === "jet"
               ? VEHICLE_JET_RADIUS
-              : VEHICLE_RADIUS
+              : kind === "bike"
+                ? VEHICLE_BIKE_RADIUS
+                : VEHICLE_RADIUS
         const safe = findSafeSpawnNear(x, z, radius)
         let group: THREE.Group
         let turret: THREE.Object3D | undefined
@@ -5175,6 +5283,8 @@ export default function ThreeWorld({
           barrelPivot = t.barrelPivot
         } else if (kind === "jet") {
           group = makeJet(color)
+        } else if (kind === "bike") {
+          group = makeBike()
         } else {
           group = makeVehicle(color)
         }
@@ -5182,8 +5292,14 @@ export default function ThreeWorld({
         group.rotation.y = heading
         scene.add(group)
         const maxHp =
-          kind === "tank" ? VEHICLE_TANK_HP : kind === "jet" ? VEHICLE_JET_HP : VEHICLE_CAR_HP
-        vehicles.push({
+          kind === "tank"
+            ? VEHICLE_TANK_HP
+            : kind === "jet"
+              ? VEHICLE_JET_HP
+              : kind === "bike"
+                ? VEHICLE_BIKE_HP
+                : VEHICLE_CAR_HP
+        const vehicle: Vehicle = {
           group,
           x: safe.x,
           z: safe.z,
@@ -5196,11 +5312,174 @@ export default function ThreeWorld({
           turret,
           barrelPivot,
           aiDriver: null,
+          riderEnemy: null,
           aiNextCannon: 0,
           aiNextRam: 0,
           y: 0,
           airborne: false,
-        })
+        }
+        vehicles.push(vehicle)
+        return vehicle
+      }
+
+      // Register a bike parking slot and stock it with a bike right away.
+      function addBikeSlot(x: number, z: number, heading: number) {
+        const slot: BikeSlot = { x, z, heading, bike: null, respawnAt: 0 }
+        slot.bike = spawnVehicle(x, z, heading, 0xb22222, "bike")
+        bikeSlots.push(slot)
+      }
+
+      // Refill bike slots whose bike has been taken (player-driven, ridden by a
+      // terraformer, destroyed, or just driven away) after BIKE_RESPAWN_MS.
+      function updateBikeRespawns(now: number) {
+        for (const slot of bikeSlots) {
+          const b = slot.bike
+          const vacated =
+            !b ||
+            b.dead ||
+            b === activeVehicle ||
+            b.riderEnemy !== null ||
+            Math.hypot(b.x - slot.x, b.z - slot.z) > 6
+          if (vacated) {
+            if (slot.respawnAt === 0) slot.respawnAt = now + BIKE_RESPAWN_MS
+            else if (now >= slot.respawnAt) {
+              slot.bike = spawnVehicle(slot.x, slot.z, slot.heading, 0xb22222, "bike")
+              slot.respawnAt = 0
+            }
+          } else {
+            slot.respawnAt = 0
+          }
+        }
+      }
+
+      // ── Terraformer bike-charge AI ──────────────────────────────────────────
+      // A terraformer grabs a free bike (WALK → RIDE) and high-speed charges the
+      // player. The rider stays visible + hittable; shoot it off and the bike
+      // halts. Multiple terraformers grabbing bikes → an emergent swarm charge.
+
+      // Detach a terraformer from its bike (death, or the player closed in mid-
+      // approach). Clears the claim and stops the now-riderless bike.
+      function dismountRider(enemy: CombatEnemy) {
+        const bike = vehicles.find((v) => v.riderEnemy === enemy)
+        if (bike) {
+          bike.riderEnemy = null
+          bike.speed = 0
+        }
+        enemy.riding = false
+      }
+
+      // Walk a terraformer toward a free bike and mount it once close. Returns
+      // true if it handled the enemy's movement this frame (caller skips normal
+      // AI), false if no bike was worth pursuing.
+      function tryTerraformerSeekBike(enemy: CombatEnemy, dt: number): boolean {
+        const ex = enemy.mesh.position.x
+        const ez = enemy.mesh.position.z
+        // Keep the bike it already claimed; else find the nearest free one.
+        let bike = vehicles.find((v) => v.riderEnemy === enemy) ?? null
+        if (!bike) {
+          let bestD = BIKE_MOUNT_SEEK_RANGE
+          for (const v of vehicles) {
+            if (v.kind !== "bike" || v.dead || v.aiDriver || v.riderEnemy) continue
+            const d = Math.hypot(v.x - ex, v.z - ez)
+            if (d < bestD) {
+              bestD = d
+              bike = v
+            }
+          }
+          if (!bike) return false
+          bike.riderEnemy = enemy // claim it (blocks the player + other roaches)
+        }
+        const dx = bike.x - ex
+        const dz = bike.z - ez
+        const d = Math.hypot(dx, dz)
+        if (d <= BIKE_MOUNT_RADIUS) {
+          // Mount: aim the bike at the player and start the charge.
+          enemy.riding = true
+          bike.heading = Math.atan2(-(focalPoint.x - bike.x), -(focalPoint.z - bike.z))
+          bike.speed = 0
+          bike.aiNextRam = 0
+          enemy.mesh.position.set(bike.x, BIKE_RIDER_SEAT_Y, bike.z)
+          enemy.mesh.rotation.y = bike.heading
+          return true
+        }
+        // Stride toward the bike (wall-aware, same steering the roaches use).
+        const spd = enemy.config.speed * dt
+        const now = Date.now()
+        const dir = zombieSteer(enemy, ex, ez, dx, dz, now)
+        const nx = ex + dir.x * spd
+        const nz = ez + dir.z * spd
+        if (!collidesWithWall(nx, ez, ENEMY_RADIUS)) enemy.mesh.position.x = nx
+        if (!collidesWithWall(enemy.mesh.position.x, nz, ENEMY_RADIUS)) enemy.mesh.position.z = nz
+        enemy.facing.set(dir.x, 0, dir.z)
+        enemy.smoothedYaw = Math.atan2(dir.x, dir.z)
+        return true
+      }
+
+      // Per-frame: drive every terraformer-ridden bike toward the player (fast,
+      // rams on contact) and coast any newly-riderless bike to a halt.
+      function updateBikeRiders(dt: number) {
+        const now = Date.now()
+        for (const v of vehicles) {
+          if (v.kind !== "bike" || v.dead) continue
+          const rider = v.riderEnemy
+          if (!rider || !rider.riding || rider.hp <= 0) {
+            // Riderless (or rider only approaching / just died): coast to a stop.
+            if (!rider && Math.abs(v.speed) > 0.02) {
+              v.speed *= Math.max(0, 1 - dt * 3)
+              const fx = -Math.sin(v.heading)
+              const fz = -Math.cos(v.heading)
+              const nx = v.x + fx * v.speed * dt
+              const nz = v.z + fz * v.speed * dt
+              if (!collidesWithWall(nx, v.z, VEHICLE_BIKE_RADIUS)) v.x = nx
+              if (!collidesWithWall(v.x, nz, VEHICLE_BIKE_RADIUS)) v.z = nz
+              v.group.position.set(v.x, 0, v.z)
+            }
+            continue
+          }
+          // Steer the heading toward the player; throttle hard when aimed.
+          const tx = focalPoint.x - v.x
+          const tz = focalPoint.z - v.z
+          const dist = Math.max(0.001, Math.hypot(tx, tz))
+          const desired = Math.atan2(-tx, -tz)
+          let dh = desired - v.heading
+          while (dh > Math.PI) dh -= Math.PI * 2
+          while (dh < -Math.PI) dh += Math.PI * 2
+          const turnStep = VEHICLE_BIKE_TURN * dt
+          v.heading += Math.max(-turnStep, Math.min(turnStep, dh))
+          const throttle = Math.abs(dh) < 0.9 ? 1 : 0.45
+          v.speed += throttle * VEHICLE_BIKE_ACCEL * dt
+          v.speed = Math.max(-2, Math.min(VEHICLE_BIKE_MAX_SPEED, v.speed))
+          const fx = -Math.sin(v.heading)
+          const fz = -Math.cos(v.heading)
+          const nx = v.x + fx * v.speed * dt
+          const nz = v.z + fz * v.speed * dt
+          let moved = false
+          if (!collidesWithWall(nx, v.z, VEHICLE_BIKE_RADIUS)) {
+            v.x = nx
+            moved = true
+          }
+          if (!collidesWithWall(v.x, nz, VEHICLE_BIKE_RADIUS)) {
+            v.z = nz
+            moved = true
+          }
+          if (!moved) {
+            v.speed *= 0.3
+            v.heading += turnStep * (dh >= 0 ? 1 : -1) // wriggle off the wall
+          }
+          v.group.position.set(v.x, 0, v.z)
+          v.group.rotation.y = v.heading
+          // Carry the (visible) rider on the bike, facing forward.
+          rider.mesh.position.set(v.x, BIKE_RIDER_SEAT_Y, v.z)
+          rider.mesh.rotation.y = v.heading
+          rider.smoothedYaw = v.heading
+          rider.facing.set(fx, 0, fz)
+          // Ram the player on contact (low per-bike; the swarm is the threat).
+          const ramReach = VEHICLE_BIKE_RADIUS + PLAYER_RADIUS + 0.6
+          if (dist < ramReach && Math.abs(v.speed) > 2 && now > v.aiNextRam) {
+            v.aiNextRam = now + 700
+            applyPlayerDamage(BIKE_RIDER_RAM_DMG, 4)
+          }
+        }
       }
 
       // Park a few intact cars along the central avenue (z ≈ 50). Heading
@@ -5238,13 +5517,21 @@ export default function ThreeWorld({
         // Fighter jet parked at the west end of the HARBOR airfield runway,
         // nose pointing +x (east) down the strip for a clean takeoff run.
         spawnVehicle(-10, 136, -Math.PI / 2, 0x33557a, "jet")
+        // Motorcycles — fast, nimble rides scattered across the districts. In
+        // INVASION mode terraformers grab the free ones and swarm-charge, so a
+        // few are staged near the central arena where the horde lands.
+        addBikeSlot(20, 52, -Math.PI / 2) // city avenue
+        addBikeSlot(44, 44, -Math.PI / 2) // city, near spawn
+        addBikeSlot(60, 58, Math.PI / 2) // city east
+        addBikeSlot(50, -40, Math.PI) // toward INDUSTRIAL
+        addBikeSlot(50, 150, 0) // toward HARBOR
       }
 
       function nearestVehicle(): Vehicle | null {
         let best: Vehicle | null = null
         let bestD = VEHICLE_ENTER_RADIUS
         for (const v of vehicles) {
-          if (v.dead || v.aiDriver) continue // occupied by an enemy → can't board
+          if (v.dead || v.aiDriver || v.riderEnemy) continue // occupied → can't board
           const d = Math.hypot(v.x - focalPoint.x, v.z - focalPoint.z)
           if (d < bestD) {
             bestD = d
@@ -6766,13 +7053,23 @@ export default function ThreeWorld({
         throttle = Math.max(-1, Math.min(1, throttle))
         steer = Math.max(-1, Math.min(1, steer))
 
-        // Per-kind handling: tanks are slow, heavy, ponderous; cars are nimble.
+        // Per-kind handling: tanks are slow, heavy, ponderous; cars are nimble;
+        // bikes are the nimblest — quick accel, high top speed, tight turning.
         const isTank = v.kind === "tank"
-        const ACCEL = isTank ? VEHICLE_TANK_ACCEL : VEHICLE_ACCEL
-        const MAXS = isTank ? VEHICLE_TANK_MAX_SPEED : VEHICLE_MAX_SPEED
-        const REVS = isTank ? VEHICLE_TANK_REVERSE : VEHICLE_REVERSE_SPEED
-        const TURN = isTank ? VEHICLE_TANK_TURN : VEHICLE_TURN_RATE
-        const RADIUS = isTank ? VEHICLE_TANK_RADIUS : VEHICLE_RADIUS
+        const isBike = v.kind === "bike"
+        const ACCEL = isTank ? VEHICLE_TANK_ACCEL : isBike ? VEHICLE_BIKE_ACCEL : VEHICLE_ACCEL
+        const MAXS = isTank
+          ? VEHICLE_TANK_MAX_SPEED
+          : isBike
+            ? VEHICLE_BIKE_MAX_SPEED
+            : VEHICLE_MAX_SPEED
+        const REVS = isTank
+          ? VEHICLE_TANK_REVERSE
+          : isBike
+            ? VEHICLE_BIKE_REVERSE
+            : VEHICLE_REVERSE_SPEED
+        const TURN = isTank ? VEHICLE_TANK_TURN : isBike ? VEHICLE_BIKE_TURN : VEHICLE_TURN_RATE
+        const RADIUS = isTank ? VEHICLE_TANK_RADIUS : isBike ? VEHICLE_BIKE_RADIUS : VEHICLE_RADIUS
 
         // Longitudinal dynamics (accel under throttle, engine-brake when coasting).
         if (Math.abs(throttle) > 0.01) {
@@ -7760,6 +8057,11 @@ export default function ThreeWorld({
             v.aiDriver = null
             v.speed = 0
             v.hp = v.maxHp
+          }
+          // Bikes: drop the (now-removed) terraformer rider so the bike frees up.
+          if (v.riderEnemy) {
+            v.riderEnemy = null
+            v.speed = 0
           }
         }
       }
@@ -9615,6 +9917,8 @@ export default function ThreeWorld({
         if (drivingRef.current) updateVehicle(dt)
         if (aaMountedRef.current) updateMountedAA(dt) // PR-G1 manned AA turret
         updateRPGPickups(dt) // PR-G1 handheld launcher pickups
+        updateBikeRiders(dt) // motorcycle: drive terraformer-ridden bikes
+        if (bikeSlots.length > 0) updateBikeRespawns(Date.now()) // refill taken bikes
         // PR-F2 air war: AA guns (sleep unless the player is flying), their
         // shells, enemy jets, and any ownerless crashing jet.
         updateAAGuns(dt)
@@ -10295,6 +10599,8 @@ export default function ThreeWorld({
                 if (enemy.fallFromY === undefined) {
                   enemy.fallFromY = enemy.mesh.position.y > 3 ? enemy.mesh.position.y : 0
                   enemy.climb = null
+                  // Shot off a bike → fall off; the riderless bike halts.
+                  if (enemy.riding) dismountRider(enemy)
                 }
                 const tElapsed = DEATH_ANIM_TOTAL - Math.max(0, enemy.dyingTimer)
                 const fallRaw = Math.min(1, tElapsed / DEATH_ANIM_FALL)
@@ -10428,6 +10734,20 @@ export default function ThreeWorld({
             const toPx = fp.x - ex
             const toPz = fp.z - ez
             const distToPlayer = Math.sqrt(toPx * toPx + toPz * toPz)
+
+            // ── PR motorcycle: terraformer bike-charge ───────────────────────
+            // Riders are driven by updateBikeRiders — skip their on-foot AI.
+            if (enemy.riding) continue
+            // A terraformer with the player far off peels away to grab a free
+            // bike (WALK → RIDE). If the player closes in, abandon the claim
+            // and fight on foot.
+            if (enemy.type === "terraformer") {
+              if (distToPlayer > BIKE_PLAYER_FAR) {
+                if (tryTerraformerSeekBike(enemy, dt)) continue
+              } else {
+                dismountRider(enemy) // release any claimed-but-unmounted bike
+              }
+            }
 
             // ── Elevator chase (PR-C) ────────────────────────────────────────
             // Already committed to a lift? The FSM owns approach/riding/descend
@@ -11487,13 +11807,14 @@ export default function ThreeWorld({
                 }
               }
             }
-            // Vehicles — cyan squares (occupied/enemy ones go orange-red).
+            // Vehicles — cyan squares (occupied/enemy ones go orange-red; a
+            // terraformer-ridden bike flashes bright red).
             for (const v of vehicles) {
               if (v.dead) continue
               const cx = mx(v.x)
               const cz = mz(v.z)
               if (!inView(cx, cz)) continue
-              ctx.fillStyle = v.aiDriver ? "#ff7733" : "#33d6ff"
+              ctx.fillStyle = v.riderEnemy ? "#ff3344" : v.aiDriver ? "#ff7733" : "#33d6ff"
               ctx.fillRect(cx - 2, cz - 2, 4, 4)
             }
             // Draw enemies on minimap (color by type/state)
