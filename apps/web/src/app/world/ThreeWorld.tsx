@@ -175,9 +175,15 @@ const RPG_SPEED = 55
 const RPG_RADIUS = 9 // AOE blast radius
 const RPG_DIRECT = 60 // direct-hit damage
 const RPG_SPLASH = 25 // splash damage at the rim
-const RPG_HOMING_TURN = 1.6 // rad/s steering toward the locked jet (medium)
+const RPG_HOMING_TURN = 1.6 // rad/s steering toward the locked target (medium)
 const RPG_LIFE = 5.0 // seconds before self-detonate
-const RPG_DIRECT_RADIUS = 4 // proximity-fuse radius around a jet
+const RPG_DIRECT_RADIUS = 4 // proximity-fuse radius around the locked target
+// Half-angle of the launch lock-on cone: at fire time the nearest enemy of any
+// type within this cone of the aim direction becomes the homing target.
+const RPG_LOCK_COS = Math.cos((20 * Math.PI) / 180)
+// Aim-assist sphere radius for the jet nose gun firing at ground targets — the
+// jet is fast, so a small forgiveness keeps air-to-ground strafing usable.
+const JET_GROUND_ASSIST = 3.5
 const PARACHUTE_GRAVITY = 11 // descent ≈ GRAVITY/2 (was /6 — too floaty)
 const PARACHUTE_MAX_SINK = 12 // terminal descent speed under canopy (3× faster)
 const PARACHUTE_OPEN_DELAY_MS = 1000 // free-fall before the canopy deploys
@@ -1260,12 +1266,24 @@ interface Bullet {
   // tank-damage multiplier so enemy *tank shells* (also explosive grenades)
   // don't inherit it.
   isAntiTankGrenade?: boolean
-  // RPG rocket: homes on the nearest enemy jet, ignores gravity, and AOE-
-  // explodes (hitting jets, AA guns, enemy vehicles and ground enemies) on
-  // proximity / impact / fuse-expiry via detonateRocket.
+  // RPG rocket: homes on the target locked at launch (the nearest enemy of
+  // ANY type inside the aim cone — jet, ground enemy, vehicle or AA gun),
+  // ignores gravity, and AOE-explodes (hitting every enemy type) on proximity
+  // / impact / fuse-expiry via detonateRocket.
   isRocket?: boolean
+  // The rocket's locked homing target (resolved each frame to a live position;
+  // null once it dies / despawns → the rocket flies straight on). Absent when
+  // the launch found no enemy inside the aim cone.
+  homingTarget?: HomingTarget | null
   // Smoke-trail bookkeeping for the rocket (seconds until next puff).
   trailT?: number
+}
+
+// A locked homing target for the RPG rocket. `pos()` returns the entity's
+// current world position, or null once it's dead / gone (the rocket then flies
+// straight). Abstracts over the four enemy kinds so one rocket can chase any.
+interface HomingTarget {
+  pos(): { x: number; y: number; z: number } | null
 }
 
 interface GoalMarker {
@@ -6718,93 +6736,60 @@ export default function ThreeWorld({
         }
         const enemyHit = raycaster.intersectObjects(parts, false)[0]
         const wallHit = raycaster.intersectObjects(wallMeshes, false)[0]
-        // AA guns + enemy jets are shootable too (HP 80 / 150).
-        const aaMeshes: THREE.Object3D[] = []
-        const aaMap = new Map<THREE.Object3D, AAGun>()
-        for (const gun of aaGuns) {
-          if (gun.dead) continue
-          for (const m of gun.meshes) {
-            aaMeshes.push(m)
-            aaMap.set(m, gun)
-          }
-        }
-        const ejMeshes: THREE.Object3D[] = []
-        const ejMap = new Map<THREE.Object3D, EnemyJet>()
-        for (const ej of enemyJets) {
-          if (ej.dead) continue
-          ej.group.traverse((c) => {
-            if (c instanceof THREE.Mesh) {
-              ejMeshes.push(c)
-              ejMap.set(c, ej)
-            }
-          })
-        }
-        const aaHit = aaMeshes.length ? raycaster.intersectObjects(aaMeshes, false)[0] : undefined
-        const ejHit = ejMeshes.length ? raycaster.intersectObjects(ejMeshes, false)[0] : undefined
+        // Enemy-driven vehicles, AA guns and enemy jets via the shared hitscan
+        // helper — a forgiving ground aim-assist lets fast strafing runs land on
+        // vehicles / AA. (Air-to-air stays exact mesh.) Run before resetting far
+        // so the helper's raycasts respect JET_GUN_RANGE.
+        const cands = collectHardTargets(raycaster, JET_GUN_DAMAGE, {
+          jetAssistR: 0,
+          groundAssistR: JET_GROUND_ASSIST,
+          jetRange: JET_GUN_RANGE,
+        })
         raycaster.far = prevFar
-        // Resolve the nearest hittable target, respecting wall occlusion.
-        const cands: { dist: number; point: THREE.Vector3; apply: () => void }[] = []
+        // Ground enemies (infantry / terraformers / bike riders): exact mesh
+        // first, then the same forgiving sphere assist so a diving strafe run
+        // reliably connects on the small, moving figures below.
+        let enemyCand: { dist: number; point: THREE.Vector3; en: CombatEnemy } | null = null
         if (enemyHit) {
           const id = enemyHit.object.userData.enemyId as string | undefined
           const en = enemies.find((e) => e.id === id)
-          if (en) {
-            cands.push({
-              dist: enemyHit.distance,
-              point: enemyHit.point,
-              apply: () => {
-                en.hp -= JET_GUN_DAMAGE
-                spawnBlood(enemyHit.point)
-                scoreRef.current += JET_GUN_DAMAGE * 8
-                setScore(scoreRef.current)
-                if (en.hp <= 0) applyEnemyKill(en, "jet")
-              },
-            })
+          if (en) enemyCand = { dist: enemyHit.distance, point: enemyHit.point.clone(), en }
+        }
+        if (!enemyCand) {
+          const ray = raycaster.ray
+          let bestT = Number.POSITIVE_INFINITY
+          for (const e of enemies) {
+            if (e.hp <= 0 || e.aiDriving) continue
+            const ex = e.mesh.position.x
+            const ey = e.mesh.position.y
+            const ez = e.mesh.position.z
+            const ox = ex - ray.origin.x
+            const oy = ey - ray.origin.y
+            const oz = ez - ray.origin.z
+            const t = ox * ray.direction.x + oy * ray.direction.y + oz * ray.direction.z
+            if (t <= 0 || t > JET_GUN_RANGE || t >= bestT) continue
+            const px = ray.origin.x + ray.direction.x * t
+            const py = ray.origin.y + ray.direction.y * t
+            const pz = ray.origin.z + ray.direction.z * t
+            if (Math.hypot(ex - px, ey - py, ez - pz) > JET_GROUND_ASSIST + e.config.bodyH * 0.5)
+              continue
+            bestT = t
+            enemyCand = { dist: t, point: new THREE.Vector3(px, py, pz), en: e }
           }
         }
-        if (aaHit) {
-          const gun = aaMap.get(aaHit.object)
-          if (gun) {
-            cands.push({
-              dist: aaHit.distance,
-              point: aaHit.point,
-              apply: () => {
-                gun.hp -= JET_GUN_DAMAGE
-                if (gun.hp <= 0) {
-                  scoreRef.current += 600
-                  setScore(scoreRef.current)
-                  destroyAAGun(gun)
-                }
-              },
-            })
-          }
-        }
-        if (ejHit) {
-          const ej = ejMap.get(ejHit.object)
-          if (ej) {
-            cands.push({
-              dist: ejHit.distance,
-              point: ejHit.point,
-              apply: () => {
-                ej.hp -= JET_GUN_DAMAGE
-                if (ej.hp <= 0) {
-                  scoreRef.current += 1200
-                  setScore(scoreRef.current)
-                  // On SKY, a downed bandit counts as a kill (FFA/TDM scoring).
-                  if (isSky) {
-                    killsRef.current += 1
-                    setKills(killsRef.current)
-                  }
-                  killEnemyJet(ej)
-                } else {
-                  // Took a hit → break off and evade for a beat.
-                  ej.state = "evade"
-                  ej.stateUntil = Date.now() + 1500
-                  ej.evadeYaw =
-                    ej.heading + (Math.random() < 0.5 ? -1 : 1) * (0.8 + Math.random() * 0.8)
-                }
-              },
-            })
-          }
+        if (enemyCand) {
+          const { en, point } = enemyCand
+          cands.push({
+            dist: enemyCand.dist,
+            point,
+            apply: () => {
+              en.hp -= JET_GUN_DAMAGE
+              spawnBlood(point)
+              scoreRef.current += JET_GUN_DAMAGE * 8
+              setScore(scoreRef.current)
+              if (en.hp <= 0) applyEnemyKill(en, "jet")
+            },
+          })
         }
         cands.sort((a, b) => a.dist - b.dist)
         const best = cands[0]
@@ -8938,6 +8923,305 @@ export default function ThreeWorld({
         weaponKillsRef.current[weaponKey] = (weaponKillsRef.current[weaponKey] ?? 0) + 1
       }
 
+      // ══ Universal weapon targeting ═══════════════════════════════════════════
+      // One source of truth for "what can a weapon hit". Every enemy kind the
+      // player can damage is enumerated here so each weapon (hitscan + AOE +
+      // homing) shares the exact same target set: ground infantry / terraformers
+      // / bike riders (the `enemies` array, minus hidden vehicle drivers), enemy
+      // jets, enemy-driven vehicles, and enemy AA guns (the one the player is
+      // manning is always spared).
+
+      // Shared explosive AOE — damage every enemy type within `radius` of
+      // `center`. `falloff(d)` returns the damage at distance d; `tag` labels
+      // ground-enemy kills. Used by the RPG rocket, the jet missile and every
+      // player grenade / tank shell so all explosives hit the same full set.
+      function damageAllInRadius(
+        center: THREE.Vector3,
+        radius: number,
+        falloff: (d: number) => number,
+        tag: string,
+      ) {
+        // Ground enemies (infantry / terraformers / bike riders). Hidden
+        // vehicle drivers are skipped — they take damage via their vehicle.
+        for (const enemy of enemies) {
+          if (enemy.hp <= 0 || enemy.aiDriving) continue
+          const d = Math.hypot(
+            enemy.mesh.position.x - center.x,
+            enemy.mesh.position.y - center.y,
+            enemy.mesh.position.z - center.z,
+          )
+          if (d >= radius) continue
+          enemy.hp = Math.max(0, enemy.hp - falloff(d))
+          if (enemy.hp <= 0) {
+            spawnExplosion(enemy.mesh.position.clone())
+            applyEnemyKill(enemy, tag)
+          }
+        }
+        // Enemy jets.
+        for (const ej of enemyJets) {
+          if (ej.dead) continue
+          const d = Math.hypot(ej.x - center.x, ej.y - center.y, ej.z - center.z)
+          if (d >= radius) continue
+          ej.hp -= falloff(d)
+          if (ej.hp <= 0) {
+            scoreRef.current += 1200
+            setScore(scoreRef.current)
+            if (isSky) {
+              killsRef.current += 1
+              setKills(killsRef.current)
+            }
+            killEnemyJet(ej)
+          }
+        }
+        // Enemy-driven vehicles (explosive bypasses tank armor).
+        for (const vv of vehicles) {
+          if (vv.dead || !vv.aiDriver) continue
+          const d = Math.hypot(vv.x - center.x, vv.z - center.z)
+          if (d >= radius) continue
+          damageEnemyVehicle(vv, falloff(d), "explosive")
+        }
+        // Enemy AA guns (the one the player currently mans is spared).
+        for (const gun of aaGuns) {
+          if (gun.dead || gun === activeAAGun) continue
+          const d = Math.hypot(gun.x - center.x, gun.baseY + 1.0 - center.y, gun.z - center.z)
+          if (d >= radius) continue
+          gun.hp -= falloff(d)
+          if (gun.hp <= 0) {
+            scoreRef.current += 600
+            setScore(scoreRef.current)
+            destroyAAGun(gun)
+          }
+        }
+      }
+
+      // Shared hitscan — push damage candidates for the "hard" (non-humanoid)
+      // enemy types along `raycaster`'s ray: enemy-driven vehicles, enemy AA
+      // guns and enemy jets. Each candidate is { dist, point, apply }; the
+      // caller merges these with its own ground-enemy / PvP candidates, sorts by
+      // distance and applies the nearest one a wall doesn't occlude. `jetAssistR`
+      // / `groundAssistR` > 0 add a ray-vs-sphere aim-assist (jets are tiny and
+      // fast → ground AA needs it; the jet gun needs it air-to-ground); 0 = exact
+      // mesh only. Used by the on-foot weapons (fire) and the jet nose gun
+      // (fireJetGun) so every gun reaches every target type through one path.
+      function collectHardTargets(
+        raycaster: THREE.Raycaster,
+        damage: number,
+        opts: { jetAssistR: number; groundAssistR: number; jetRange: number },
+      ): { dist: number; point: THREE.Vector3; apply: () => void }[] {
+        const cands: { dist: number; point: THREE.Vector3; apply: () => void }[] = []
+        const ray = raycaster.ray
+        // Nearest point along the ray to (x,y,z); returns { t, px, py, pz } with
+        // t = signed distance from origin (negative ⇒ behind the shooter).
+        const project = (x: number, y: number, z: number) => {
+          const ox = x - ray.origin.x
+          const oy = y - ray.origin.y
+          const oz = z - ray.origin.z
+          const t = ox * ray.direction.x + oy * ray.direction.y + oz * ray.direction.z
+          return {
+            t,
+            px: ray.origin.x + ray.direction.x * t,
+            py: ray.origin.y + ray.direction.y * t,
+            pz: ray.origin.z + ray.direction.z * t,
+          }
+        }
+        // Enemy-driven vehicles (bullets chip; tank armor reduces them).
+        {
+          const meshes: THREE.Object3D[] = []
+          const map = new Map<THREE.Object3D, Vehicle>()
+          for (const vv of vehicles) {
+            if (vv.dead || !vv.aiDriver) continue
+            vv.group.traverse((c) => {
+              if (c instanceof THREE.Mesh) {
+                meshes.push(c)
+                map.set(c, vv)
+              }
+            })
+          }
+          const hit = meshes.length ? raycaster.intersectObjects(meshes, false)[0] : undefined
+          let vv = hit ? (map.get(hit.object) ?? null) : null
+          let dist = hit ? hit.distance : Number.POSITIVE_INFINITY
+          let point = hit ? hit.point.clone() : null
+          if (!vv && opts.groundAssistR > 0) {
+            let bestT = Number.POSITIVE_INFINITY
+            for (const cand of vehicles) {
+              if (cand.dead || !cand.aiDriver) continue
+              const { t, px, py, pz } = project(cand.x, 1, cand.z)
+              if (t <= 0 || t > opts.jetRange || t >= bestT) continue
+              if (
+                Math.hypot(cand.x - px, 1 - py, cand.z - pz) >
+                opts.groundAssistR + VEHICLE_RADIUS
+              )
+                continue
+              bestT = t
+              vv = cand
+              dist = t
+              point = new THREE.Vector3(px, py, pz)
+            }
+          }
+          if (vv && point) {
+            const target = vv
+            cands.push({
+              dist,
+              point,
+              apply: () => damageEnemyVehicle(target, damage, "bullet"),
+            })
+          }
+        }
+        // Enemy AA guns (the manned one is spared).
+        {
+          const meshes: THREE.Object3D[] = []
+          const map = new Map<THREE.Object3D, AAGun>()
+          for (const gun of aaGuns) {
+            if (gun.dead || gun === activeAAGun) continue
+            for (const m of gun.meshes) {
+              meshes.push(m)
+              map.set(m, gun)
+            }
+          }
+          const hit = meshes.length ? raycaster.intersectObjects(meshes, false)[0] : undefined
+          let gun = hit ? (map.get(hit.object) ?? null) : null
+          let dist = hit ? hit.distance : Number.POSITIVE_INFINITY
+          let point = hit ? hit.point.clone() : null
+          if (!gun && opts.groundAssistR > 0) {
+            let bestT = Number.POSITIVE_INFINITY
+            for (const cand of aaGuns) {
+              if (cand.dead || cand === activeAAGun) continue
+              const cy = cand.baseY + 1.1
+              const { t, px, py, pz } = project(cand.x, cy, cand.z)
+              if (t <= 0 || t > opts.jetRange || t >= bestT) continue
+              if (Math.hypot(cand.x - px, cy - py, cand.z - pz) > opts.groundAssistR + 1.0) continue
+              bestT = t
+              gun = cand
+              dist = t
+              point = new THREE.Vector3(px, py, pz)
+            }
+          }
+          if (gun && point) {
+            const target = gun
+            cands.push({
+              dist,
+              point,
+              apply: () => {
+                target.hp -= damage
+                if (target.hp <= 0) {
+                  scoreRef.current += 600
+                  setScore(scoreRef.current)
+                  destroyAAGun(target)
+                }
+              },
+            })
+          }
+        }
+        // Enemy jets — exact mesh, then a ray-vs-sphere aim-assist fallback for
+        // the tiny, fast targets (only when jetAssistR > 0).
+        {
+          const meshes: THREE.Object3D[] = []
+          const map = new Map<THREE.Object3D, EnemyJet>()
+          for (const ej of enemyJets) {
+            if (ej.dead) continue
+            ej.group.traverse((c) => {
+              if (c instanceof THREE.Mesh) {
+                meshes.push(c)
+                map.set(c, ej)
+              }
+            })
+          }
+          const hit = meshes.length ? raycaster.intersectObjects(meshes, false)[0] : undefined
+          let ej = hit ? (map.get(hit.object) ?? null) : null
+          let dist = hit ? hit.distance : Number.POSITIVE_INFINITY
+          let point = hit ? hit.point.clone() : null
+          if (!ej && opts.jetAssistR > 0) {
+            let bestT = Number.POSITIVE_INFINITY
+            for (const cand of enemyJets) {
+              if (cand.dead) continue
+              const { t, px, py, pz } = project(cand.x, cand.y, cand.z)
+              if (t <= 0 || t > opts.jetRange || t >= bestT) continue
+              if (Math.hypot(cand.x - px, cand.y - py, cand.z - pz) > opts.jetAssistR) continue
+              bestT = t
+              ej = cand
+              dist = t
+              point = new THREE.Vector3(px, py, pz)
+            }
+          }
+          if (ej && point) {
+            const target = ej
+            cands.push({
+              dist,
+              point,
+              apply: () => {
+                target.hp -= damage
+                if (target.hp <= 0) {
+                  scoreRef.current += 1200
+                  setScore(scoreRef.current)
+                  if (isSky) {
+                    killsRef.current += 1
+                    setKills(killsRef.current)
+                  }
+                  killEnemyJet(target)
+                } else {
+                  // Took a hit → break off and evade for a beat.
+                  target.state = "evade"
+                  target.stateUntil = Date.now() + 1500
+                  target.evadeYaw =
+                    target.heading + (Math.random() < 0.5 ? -1 : 1) * (0.8 + Math.random() * 0.8)
+                }
+              },
+            })
+          }
+        }
+        return cands
+      }
+
+      // Lock the RPG's homing target at launch: the nearest enemy of ANY type
+      // whose bearing from `origin` lies inside the aim cone around `dir`.
+      // Returns a HomingTarget wrapping the live entity, or null when the cone
+      // is empty (the rocket then flies straight). Covers every enemy kind so
+      // the launcher is no longer jet-only.
+      function acquireRocketTarget(origin: THREE.Vector3, dir: THREE.Vector3): HomingTarget | null {
+        let best: HomingTarget | null = null
+        let bestD = Number.POSITIVE_INFINITY
+        const consider = (
+          x: number,
+          y: number,
+          z: number,
+          live: () => { x: number; y: number; z: number } | null,
+        ) => {
+          const ox = x - origin.x
+          const oy = y - origin.y
+          const oz = z - origin.z
+          const d = Math.hypot(ox, oy, oz)
+          if (d < 1e-3 || d >= bestD) return
+          // Bearing inside the lock cone?
+          if ((ox * dir.x + oy * dir.y + oz * dir.z) / d < RPG_LOCK_COS) return
+          bestD = d
+          best = { pos: live }
+        }
+        for (const e of enemies) {
+          if (e.hp <= 0 || e.aiDriving) continue
+          consider(e.mesh.position.x, e.mesh.position.y, e.mesh.position.z, () =>
+            e.hp > 0 && !e.aiDriving
+              ? { x: e.mesh.position.x, y: e.mesh.position.y, z: e.mesh.position.z }
+              : null,
+          )
+        }
+        for (const ej of enemyJets) {
+          if (ej.dead) continue
+          consider(ej.x, ej.y, ej.z, () => (ej.dead ? null : { x: ej.x, y: ej.y, z: ej.z }))
+        }
+        for (const vv of vehicles) {
+          if (vv.dead || !vv.aiDriver) continue
+          consider(vv.x, 1, vv.z, () =>
+            vv.dead || !vv.aiDriver ? null : { x: vv.x, y: 1, z: vv.z },
+          )
+        }
+        for (const gun of aaGuns) {
+          if (gun.dead || gun === activeAAGun) continue
+          const gy = gun.baseY + 1.1
+          consider(gun.x, gy, gun.z, () => (gun.dead ? null : { x: gun.x, y: gy, z: gun.z }))
+        }
+        return best
+      }
+
       // ── Grenade detonation (shared) ─────────────────────────────────────────
       // AOE blast for any thrown grenade. Enemy-thrown grenades (fromEnemy)
       // damage the player; player-thrown grenades damage enemies. Called from
@@ -8984,83 +9268,33 @@ export default function ThreeWorld({
           }
           return
         }
-        // Player-thrown: AOE-damage every living enemy in range.
-        for (const enemy of enemies) {
-          if (enemy.hp <= 0 || enemy.aiDriving) continue // drivers hit via their vehicle
-          const dx = enemy.mesh.position.x - center.x
-          const dz = enemy.mesh.position.z - center.z
-          const d2 = dx * dx + dz * dz
-          if (d2 >= radius * radius) continue
-          const dist = Math.sqrt(d2)
-          const dmg = Math.max(20, Math.floor(120 * (1 - dist / radius)))
-          enemy.hp = Math.max(0, enemy.hp - dmg)
-          if (enemy.hp <= 0) {
-            spawnExplosion(enemy.mesh.position.clone())
-            applyEnemyKill(enemy, "grenade")
-          }
-        }
-        // Explosives also hit enemy-driven vehicles (full damage — bypasses
-        // tank armor). Player grenades + the tank cannon are the intended counter.
-        for (const vv of vehicles) {
-          if (vv.dead || !vv.aiDriver) continue
-          const dx = vv.x - center.x
-          const dz = vv.z - center.z
-          const vd2 = dx * dx + dz * dz
-          if (vd2 >= radius * radius) continue
-          const vdist = Math.sqrt(vd2)
-          damageEnemyVehicle(vv, Math.max(40, Math.floor(160 * (1 - vdist / radius))), "explosive")
-        }
+        // Player-thrown (frag / tank shell / jet missile): AOE-damage every
+        // enemy type in range through the shared target set — infantry,
+        // terraformers, bike riders, enemy jets, enemy vehicles and AA guns.
+        damageAllInRadius(
+          center,
+          radius,
+          (d) => Math.max(20, Math.floor(120 * (1 - d / radius))),
+          "grenade",
+        )
       }
 
       // ── PR-G1: RPG rocket — fire + homing detonation ─────────────────────────
-      // AOE blast: hits enemy jets, ground enemies (terraformers / bots) and
-      // enemy-driven vehicles. Direct (centre) damage falls off to splash at
-      // the rim. Mountable AA guns are deliberately spared (player tools).
+      // AOE blast through the shared target set: ground enemies (terraformers /
+      // infantry / bike riders), enemy jets, enemy-driven vehicles and enemy AA
+      // guns. Direct (centre) damage falls off to splash at the rim.
       function detonateRocket(center: THREE.Vector3) {
         center.y = Math.max(0.3, center.y)
         spawnExplosion(center)
         spawnExplosion(center.clone(), true)
         lastNoiseRef.current = { x: center.x, z: center.z, expires: Date.now() + 4000 }
         const radius = RPG_RADIUS
-        const falloff = (d: number) =>
-          Math.max(RPG_SPLASH, Math.floor(RPG_DIRECT * (1 - d / radius)))
-        // Ground enemies.
-        for (const enemy of enemies) {
-          if (enemy.hp <= 0 || enemy.aiDriving) continue
-          const dx = enemy.mesh.position.x - center.x
-          const dy = enemy.mesh.position.y - center.y
-          const dz = enemy.mesh.position.z - center.z
-          const d = Math.hypot(dx, dy, dz)
-          if (d >= radius) continue
-          enemy.hp = Math.max(0, enemy.hp - falloff(d))
-          if (enemy.hp <= 0) {
-            spawnExplosion(enemy.mesh.position.clone())
-            applyEnemyKill(enemy, "rpg")
-          }
-        }
-        // Enemy jets.
-        for (const ej of enemyJets) {
-          if (ej.dead) continue
-          const d = Math.hypot(ej.x - center.x, ej.y - center.y, ej.z - center.z)
-          if (d >= radius) continue
-          ej.hp -= falloff(d)
-          if (ej.hp <= 0) {
-            scoreRef.current += 1200
-            setScore(scoreRef.current)
-            if (isSky) {
-              killsRef.current += 1
-              setKills(killsRef.current)
-            }
-            killEnemyJet(ej)
-          }
-        }
-        // Enemy-driven vehicles (explosive bypasses tank armor).
-        for (const vv of vehicles) {
-          if (vv.dead || !vv.aiDriver) continue
-          const d = Math.hypot(vv.x - center.x, vv.z - center.z)
-          if (d >= radius) continue
-          damageEnemyVehicle(vv, falloff(d), "explosive")
-        }
+        damageAllInRadius(
+          center,
+          radius,
+          (d) => Math.max(RPG_SPLASH, Math.floor(RPG_DIRECT * (1 - d / radius))),
+          "rpg",
+        )
       }
 
       // Launch a single homing rocket from the camera along the aim direction.
@@ -9079,6 +9313,9 @@ export default function ThreeWorld({
         mesh.position.copy(start)
         mesh.lookAt(start.clone().add(dir))
         scene.add(mesh)
+        // Lock onto the nearest enemy of ANY type inside the aim cone (must run
+        // before dir is scaled into the velocity below).
+        const homingTarget = acquireRocketTarget(start, dir)
         bullets.push({
           mesh,
           velocity: dir.multiplyScalar(RPG_SPEED),
@@ -9086,6 +9323,7 @@ export default function ThreeWorld({
           isEnemy: false,
           damage: 0,
           isRocket: true,
+          homingTarget,
           trailT: 0,
         })
         SOUNDS.rpg()
@@ -9386,107 +9624,31 @@ export default function ThreeWorld({
         // skipped — otherwise one bullet would pass through and multi-hit.
         let shotConsumed = false
 
-        // Enemy-driven vehicles are shootable. If one is the closest thing in
-        // the crosshair (nearer than any wall / enemy), the shot chips it
-        // (tank armor reduces bullets) and is consumed.
+        // Hard (non-humanoid) targets — enemy-driven vehicles, enemy AA guns and
+        // enemy jets — share one hitscan helper. Jets are small, fast and fly at
+        // 150–300m, so a pixel-perfect centre ray almost never connects; the
+        // helper adds a ray-vs-sphere aim assist (scoped wider for the sniper)
+        // out to JET_GROUND_RANGE so ground fire can actually down a bandit. We
+        // take the nearest such candidate, provided no wall or infantry sits in
+        // front of it (a single shot only damages one thing).
         {
-          const vehMeshes: THREE.Object3D[] = []
-          const vehMap = new Map<THREE.Object3D, Vehicle>()
-          for (const vv of vehicles) {
-            if (vv.dead || !vv.aiDriver) continue
-            vv.group.traverse((c) => {
-              if (c instanceof THREE.Mesh) {
-                vehMeshes.push(c)
-                vehMap.set(c, vv)
-              }
-            })
-          }
-          if (vehMeshes.length > 0) {
-            const vHit = raycaster.intersectObjects(vehMeshes, false)[0]
-            const blockedByWall = !!(nearestWall && vHit && nearestWall.distance < vHit.distance)
-            const blockedByEnemy = !!(enemyHits[0] && vHit && enemyHits[0].distance < vHit.distance)
-            // No !shotConsumed guard here: the vehicle is the first target pass,
-            // so shotConsumed is always false at this point (CodeQL flagged the
-            // redundant check). It SETS the flag so later passes skip.
-            if (vHit && !blockedByWall && !blockedByEnemy) {
-              const vv = vehMap.get(vHit.object)
-              if (vv) {
-                damageEnemyVehicle(vv, weapon.hitDamage, "bullet")
-                SOUNDS.hit()
-                spawnExplosion(vHit.point.clone(), true)
-                enemyHits = [] // consumed by the vehicle
-                shotConsumed = true
-              }
-            }
-          }
-        }
-
-        // Enemy jets are shootable from the ground too (pistol / shotgun /
-        // sniper). PR-G1: jets are small, fast and fly at 150–300m, so a
-        // pixel-perfect centre ray almost never connects — that's why PR #61's
-        // hitscan felt broken (the fire() ray is already unbounded; range was
-        // never the real limiter). Alongside the exact mesh raycast we run a
-        // ray-vs-sphere aim assist (generous, scoped wider for the sniper) out
-        // to JET_GROUND_RANGE so ground AA can actually down a bandit.
-        if (!shotConsumed) {
-          const ray = raycaster.ray
           const assistR =
             JET_AIM_ASSIST_RADIUS * (weapon.id === "sniper" ? JET_AIM_ASSIST_SNIPER_MULT : 1)
-          const ejMeshes: THREE.Object3D[] = []
-          const ejMap = new Map<THREE.Object3D, EnemyJet>()
-          for (const ej of enemyJets) {
-            if (ej.dead) continue
-            ej.group.traverse((c) => {
-              if (c instanceof THREE.Mesh) {
-                ejMeshes.push(c)
-                ejMap.set(c, ej)
-              }
-            })
-          }
-          // Exact mesh hit gives the precise impact point; fall back to the
-          // nearest jet whose centre lies inside the aim-assist cylinder.
-          const jHit = ejMeshes.length ? raycaster.intersectObjects(ejMeshes, false)[0] : undefined
-          let targetJet: EnemyJet | null = jHit ? (ejMap.get(jHit.object) ?? null) : null
-          let hitDist = jHit ? jHit.distance : Number.POSITIVE_INFINITY
-          let hitPoint = jHit ? jHit.point.clone() : null
-          if (!targetJet) {
-            let bestT = Number.POSITIVE_INFINITY
-            for (const ej of enemyJets) {
-              if (ej.dead) continue
-              const ox = ej.x - ray.origin.x
-              const oy = ej.y - ray.origin.y
-              const oz = ej.z - ray.origin.z
-              const t = ox * ray.direction.x + oy * ray.direction.y + oz * ray.direction.z
-              if (t <= 0 || t > JET_GROUND_RANGE || t >= bestT) continue
-              const px = ray.origin.x + ray.direction.x * t
-              const py = ray.origin.y + ray.direction.y * t
-              const pz = ray.origin.z + ray.direction.z * t
-              if (Math.hypot(ej.x - px, ej.y - py, ej.z - pz) > assistR) continue
-              bestT = t
-              targetJet = ej
-              hitDist = t
-              hitPoint = new THREE.Vector3(px, py, pz)
+          const hard = collectHardTargets(raycaster, weapon.hitDamage, {
+            jetAssistR: assistR,
+            groundAssistR: 0,
+            jetRange: JET_GROUND_RANGE,
+          }).sort((a, b) => a.dist - b.dist)[0]
+          if (hard) {
+            const blockedByWall = !!(nearestWall && nearestWall.distance < hard.dist)
+            const blockedByEnemy = !!(enemyHits[0] && enemyHits[0].distance < hard.dist)
+            if (!blockedByWall && !blockedByEnemy) {
+              hard.apply()
+              SOUNDS.hit()
+              spawnExplosion(hard.point.clone(), true)
+              enemyHits = [] // consumed by the hard target
+              shotConsumed = true
             }
-          }
-          // Same occlusion rule as every other pass: a nearer wall or infantry
-          // between the camera and the jet blocks the shot.
-          const blockedByWall = !!(nearestWall && targetJet && nearestWall.distance < hitDist)
-          const blockedByEnemy = !!(enemyHits[0] && targetJet && enemyHits[0].distance < hitDist)
-          if (targetJet && !targetJet.dead && !blockedByWall && !blockedByEnemy && hitPoint) {
-            targetJet.hp -= weapon.hitDamage
-            SOUNDS.hit()
-            spawnExplosion(hitPoint.clone(), true)
-            if (targetJet.hp <= 0) {
-              scoreRef.current += 1200
-              setScore(scoreRef.current)
-              if (isSky) {
-                killsRef.current += 1
-                setKills(killsRef.current)
-              }
-              killEnemyJet(targetJet)
-            }
-            enemyHits = [] // consumed by the jet
-            shotConsumed = true
           }
         }
 
@@ -10354,11 +10516,12 @@ export default function ThreeWorld({
         for (let i = refs.bullets.length - 1; i >= 0; i--) {
           const b = refs.bullets[i]
           if (!b) continue
-          // RPG rocket: homes on the nearest enemy jet (medium turn rate, no
-          // gravity), trails smoke, and AOE-explodes on proximity / impact /
-          // fuse expiry via detonateRocket. Fully self-contained → continue.
+          // RPG rocket: homes on the target locked at launch — any enemy type
+          // (medium turn rate, no gravity) — trails smoke, and AOE-explodes on
+          // proximity / impact / fuse expiry via detonateRocket. With no lock it
+          // flies straight. Fully self-contained → continue.
           if (b.isRocket) {
-            const tgt = nearestJetTo(b.mesh.position.x, b.mesh.position.y, b.mesh.position.z)
+            const tgt = b.homingTarget ? b.homingTarget.pos() : null
             if (tgt) {
               const speed = b.velocity.length() || RPG_SPEED
               const want = new THREE.Vector3(
