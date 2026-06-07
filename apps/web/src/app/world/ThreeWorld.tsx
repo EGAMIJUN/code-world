@@ -6865,10 +6865,30 @@ export default function ThreeWorld({
               detonate = true
             }
           }
+          // Friendly shells also detonate against the Big Cockroach boss when a
+          // manually-aimed shot flies into its (huge) body volume.
+          if (!detonate && s.friendly) {
+            const boss = bigBossRef.current
+            if (boss && boss.dyingStage === 0) {
+              const bd = Math.hypot(s.pos.x - boss.x, s.pos.z - boss.z)
+              if (bd < 14 && s.pos.y > 1 && s.pos.y < 26) {
+                detonate = true
+                direct = true
+              }
+            }
+          }
           if (!detonate && (s.life <= 0 || s.pos.y <= 0)) detonate = true
           if (detonate) {
             spawnExplosion(s.pos.clone())
             if (s.friendly) {
+              const boss = bigBossRef.current
+              if (
+                boss &&
+                boss.dyingStage === 0 &&
+                Math.hypot(s.pos.x - boss.x, s.pos.z - boss.z) < 14
+              ) {
+                bossTakeDamage(direct ? AA_MOUNT_SHELL_DIRECT : AA_MOUNT_SHELL_SPLASH)
+              }
               if (targetJet && !targetJet.dead) {
                 const d = Math.hypot(
                   s.pos.x - targetJet.x,
@@ -9480,6 +9500,11 @@ export default function ThreeWorld({
         setTimeout(() => {
           if (gamePhaseRef.current === "playing") setWaveMessage(null)
         }, 3000)
+        // Phase 4 balance: drop two RPG launchers by the player for the fight
+        // (tanks / jets / AA guns are already staged on the invasion map).
+        makeRPGPickup(focalPoint.x + 7, focalPoint.z + 5)
+        makeRPGPickup(focalPoint.x - 7, focalPoint.z - 5)
+        showNotification("全兵器を使え — RPG投下・戦車/ジェット/対空砲で迎撃せよ")
       }
 
       // Animate the legs (tripod gait) + swaying antennae.
