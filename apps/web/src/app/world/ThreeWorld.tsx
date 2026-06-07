@@ -889,6 +889,14 @@ const BOSS_SMALL_SCORE = 5
 const BOSS_KILL_SCORE = 5000
 const BOSS_RAGE_FRACTION = 0.5 // HP fraction that triggers rage
 const BOSS_EYE_HIT_RADIUS = 7 // weak-point sphere radius around the eyes (2× dmg)
+// The 60m body approximated as three circles (head / thorax / abdomen) along the
+// local forward (-z) axis — `lz` = local z offset, `r` = horizontal radius. Used
+// for AOE + AA hit tests so explosions near the head or tail still connect.
+const BOSS_HIT_PARTS: { lz: number; r: number }[] = [
+  { lz: -20, r: 9 }, // head (front)
+  { lz: -6, r: 12 }, // thorax
+  { lz: 16, r: 16 }, // abdomen (rear)
+]
 
 interface BigBoss {
   group: THREE.Group
@@ -2533,6 +2541,10 @@ export default function ThreeWorld({
 
       // ── Scene ──────────────────────────────────────────────────────────────
       const scene = new THREE.Scene()
+      // Clear any walls a previous session's Big Cockroach boss flattened —
+      // ALL_AABBS is module-scoped, so the `disabled` flag would otherwise leak
+      // into the next mount (walls/shots passing through phantom rubble).
+      for (const w of ALL_AABBS) w.disabled = false
       // SKY: a dedicated aerial-combat arena — you fight enemy jets in a high,
       // bright sky over the existing world (which reads as the distant terrain).
       const isSky = mapId === "sky"
@@ -6867,26 +6879,21 @@ export default function ThreeWorld({
           }
           // Friendly shells also detonate against the Big Cockroach boss when a
           // manually-aimed shot flies into its (huge) body volume.
-          if (!detonate && s.friendly) {
-            const boss = bigBossRef.current
-            if (boss && boss.dyingStage === 0) {
-              const bd = Math.hypot(s.pos.x - boss.x, s.pos.z - boss.z)
-              if (bd < 14 && s.pos.y > 1 && s.pos.y < 26) {
-                detonate = true
-                direct = true
-              }
-            }
+          if (
+            !detonate &&
+            s.friendly &&
+            s.pos.y > 1 &&
+            s.pos.y < 26 &&
+            isPointInBigBossHitVolume(s.pos.x, s.pos.z)
+          ) {
+            detonate = true
+            direct = true
           }
           if (!detonate && (s.life <= 0 || s.pos.y <= 0)) detonate = true
           if (detonate) {
             spawnExplosion(s.pos.clone())
             if (s.friendly) {
-              const boss = bigBossRef.current
-              if (
-                boss &&
-                boss.dyingStage === 0 &&
-                Math.hypot(s.pos.x - boss.x, s.pos.z - boss.z) < 14
-              ) {
+              if (isPointInBigBossHitVolume(s.pos.x, s.pos.z)) {
                 bossTakeDamage(direct ? AA_MOUNT_SHELL_DIRECT : AA_MOUNT_SHELL_SPLASH)
               }
               if (targetJet && !targetJet.dead) {
@@ -9366,84 +9373,107 @@ export default function ThreeWorld({
       }
 
       // ══ Big Cockroach boss (PR-B1) ═══════════════════════════════════════════
-      // Pooled brown dust puffs kicked up by the boss's footsteps (Phase 1) and
-      // reused for rubble (Phase 2). Each: { mesh, life }.
-      const bossDust: { mesh: THREE.Mesh; life: number }[] = []
+      // Brown dust puffs kicked up by the boss's footsteps / stomps / rubble.
+      // Lazy-growing object pool: meshes are created on demand the first time
+      // they're needed (so non-boss modes allocate nothing), then reused via the
+      // `active` flag — never create/dispose per spawn. Capped.
+      const BOSS_DUST_CAP = 48
+      const bossDust: { mesh: THREE.Mesh; life: number; active: boolean }[] = []
       const bossDustGeo = new THREE.SphereGeometry(1, 6, 5)
-      const bossDustMat = new THREE.MeshBasicMaterial({
-        color: 0x6a5238,
-        transparent: true,
-        opacity: 0.5,
-        depthWrite: false,
-      })
       function spawnBossDust(x: number, z: number, scale: number) {
-        const mesh = new THREE.Mesh(bossDustGeo, bossDustMat.clone())
-        mesh.position.set(x + (Math.random() - 0.5) * 4, 0.5, z + (Math.random() - 0.5) * 4)
-        mesh.scale.setScalar(scale * (0.6 + Math.random() * 0.6))
-        scene.add(mesh)
-        bossDust.push({ mesh, life: 1.0 })
+        let d = bossDust.find((p) => !p.active)
+        if (!d) {
+          if (bossDust.length >= BOSS_DUST_CAP) return
+          const mesh = new THREE.Mesh(
+            bossDustGeo,
+            new THREE.MeshBasicMaterial({
+              color: 0x6a5238,
+              transparent: true,
+              opacity: 0.5,
+              depthWrite: false,
+            }),
+          )
+          scene.add(mesh)
+          d = { mesh, life: 0, active: false }
+          bossDust.push(d)
+        }
+        d.active = true
+        d.life = 1.0
+        d.mesh.visible = true
+        d.mesh.position.set(x + (Math.random() - 0.5) * 4, 0.5, z + (Math.random() - 0.5) * 4)
+        d.mesh.scale.setScalar(scale * (0.6 + Math.random() * 0.6))
+        ;(d.mesh.material as THREE.MeshBasicMaterial).opacity = 0.5
       }
       function updateBossDust(dt: number) {
-        for (let i = bossDust.length - 1; i >= 0; i--) {
-          const d = bossDust[i]
-          if (!d) continue
+        for (const d of bossDust) {
+          if (!d.active) continue
           d.life -= dt
           d.mesh.position.y += dt * 1.2
           d.mesh.scale.multiplyScalar(1 + dt * 0.8)
-          const m = d.mesh.material as THREE.MeshBasicMaterial
-          m.opacity = Math.max(0, d.life * 0.5)
+          ;(d.mesh.material as THREE.MeshBasicMaterial).opacity = Math.max(0, d.life * 0.5)
           if (d.life <= 0) {
-            scene.remove(d.mesh)
-            ;(d.mesh.material as THREE.Material).dispose() // geometry is shared
-            bossDust.splice(i, 1)
+            d.active = false
+            d.mesh.visible = false
           }
         }
       }
       // Poison pools left by the beam: green ground discs that hurt on contact.
-      const bossPools: { mesh: THREE.Mesh; x: number; z: number; life: number }[] = []
+      // Same lazy-growing pool pattern (cap 12).
+      const BOSS_POOL_CAP = 12
+      const bossPools: { mesh: THREE.Mesh; x: number; z: number; life: number; active: boolean }[] =
+        []
       const bossPoolGeo = new THREE.CircleGeometry(BOSS_POOL_RADIUS, 20)
       function spawnBossPool(x: number, z: number) {
-        if (bossPools.length > 10) return // cap
-        const mesh = new THREE.Mesh(
-          bossPoolGeo,
-          new THREE.MeshBasicMaterial({
-            color: 0x33dd22,
-            transparent: true,
-            opacity: 0.5,
-            depthWrite: false,
-          }),
-        )
-        mesh.rotation.x = -Math.PI / 2
-        mesh.position.set(x, 0.05, z)
-        scene.add(mesh)
-        bossPools.push({ mesh, x, z, life: BOSS_POOL_LIFE })
+        let p = bossPools.find((q) => !q.active)
+        if (!p) {
+          if (bossPools.length >= BOSS_POOL_CAP) return
+          const mesh = new THREE.Mesh(
+            bossPoolGeo,
+            new THREE.MeshBasicMaterial({
+              color: 0x33dd22,
+              transparent: true,
+              opacity: 0.5,
+              depthWrite: false,
+            }),
+          )
+          mesh.rotation.x = -Math.PI / 2
+          scene.add(mesh)
+          p = { mesh, x, z, life: 0, active: false }
+          bossPools.push(p)
+        }
+        p.active = true
+        p.x = x
+        p.z = z
+        p.life = BOSS_POOL_LIFE
+        p.mesh.visible = true
+        p.mesh.position.set(x, 0.05, z)
+        ;(p.mesh.material as THREE.MeshBasicMaterial).opacity = 0.5
       }
       function updateBossPools(dt: number) {
         const px = focalPoint.x
         const pz = focalPoint.z
-        for (let i = bossPools.length - 1; i >= 0; i--) {
-          const p = bossPools[i]
-          if (!p) continue
+        for (const p of bossPools) {
+          if (!p.active) continue
           p.life -= dt
-          const m = p.mesh.material as THREE.MeshBasicMaterial
-          m.opacity = Math.max(0, Math.min(0.5, p.life * 0.1))
+          ;(p.mesh.material as THREE.MeshBasicMaterial).opacity = Math.max(
+            0,
+            Math.min(0.5, p.life * 0.1),
+          )
           // Standing in the pool → poison damage.
           if (Math.hypot(px - p.x, pz - p.z) < BOSS_POOL_RADIUS) {
             applyPlayerDamage(BOSS_POOL_DPS * dt, 0)
             bossPoisonHitAtRef.current = Date.now()
           }
           if (p.life <= 0) {
-            scene.remove(p.mesh)
-            ;(p.mesh.material as THREE.Material).dispose()
-            bossPools.splice(i, 1)
+            p.active = false
+            p.mesh.visible = false
           }
         }
       }
 
       // Spawn the boss at the north map edge with a dramatic drop-in intro.
+      // (Wall `disabled` flags are reset at scene init, not here.)
       function spawnBigBoss() {
-        // Reset any walls a previous game's boss flattened (module-level flag).
-        for (const w of ALL_AABBS) w.disabled = false
         const parts = makeBigCockroach()
         const bx = 50
         const bz = -30
@@ -9527,6 +9557,27 @@ export default function ThreeWorld({
 
       // Per-frame boss update (Phase 1: intro + advance + walk; attacks land in
       // Phase 2, damage/death in Phase 3).
+      // Distance from a ground point to the boss's nearest body part surface
+      // (≤0 = inside the volume). Returns null when there's no live boss. Used so
+      // AOE falloff + AA hits match the elongated 60m shape, not a single circle.
+      function bigBossNearestDist(px: number, pz: number): number | null {
+        const boss = bigBossRef.current
+        if (!boss || boss.dyingStage > 0) return null
+        const s = Math.sin(boss.heading)
+        const c = Math.cos(boss.heading)
+        let best = Number.POSITIVE_INFINITY
+        for (const part of BOSS_HIT_PARTS) {
+          const cx = boss.x + part.lz * s
+          const cz = boss.z + part.lz * c
+          best = Math.min(best, Math.hypot(px - cx, pz - cz) - part.r)
+        }
+        return best
+      }
+      function isPointInBigBossHitVolume(px: number, pz: number): boolean {
+        const d = bigBossNearestDist(px, pz)
+        return d !== null && d <= 0
+      }
+
       // World position of the boss's eyes (the 2× weak point).
       function bossEyeWorld(boss: BigBoss): { x: number; y: number; z: number } {
         const fx = -Math.sin(boss.heading)
@@ -9612,6 +9663,12 @@ export default function ThreeWorld({
         setScore(scoreRef.current)
         setBossActive(false)
         setBossDefeated(true)
+        // Clear any lingering poison vignette (a kill right after a beam/pool
+        // hit would otherwise leave the green overlay stuck, with no boss to
+        // decay it).
+        bossPoisonRef.current = false
+        bossPoisonHitAtRef.current = 0
+        setBossPoison(false)
         SOUNDS.clear()
         // Clear the swarm + shield the player so the victory screen is safe.
         for (const e of enemies) scene.remove(e.mesh)
@@ -11407,13 +11464,11 @@ export default function ThreeWorld({
           }
         }
         // Big Cockroach boss — explosives hit it too (RPG / grenade / tank shell
-        // / jet missile). Generous radius since the body is huge.
+        // / jet missile). Falloff uses the distance to the nearest body part so a
+        // blast near the head or tail still connects (not just the centre).
         {
-          const boss = bigBossRef.current
-          if (boss && boss.dyingStage === 0) {
-            const d = Math.hypot(boss.x - center.x, boss.z - center.z)
-            if (d < radius + 16) bossTakeDamage(falloff(d))
-          }
+          const near = bigBossNearestDist(center.x, center.z)
+          if (near !== null && near < radius) bossTakeDamage(falloff(Math.max(0, near)))
         }
       }
 
