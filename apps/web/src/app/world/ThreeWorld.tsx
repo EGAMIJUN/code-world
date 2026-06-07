@@ -136,6 +136,32 @@ const ENEMY_JET_ATTACK_RANGE = 100
 const ENEMY_JET_GUN_COOLDOWN_MS = 150
 const ENEMY_JET_GUN_DAMAGE = 6
 const ENEMY_JET_TURN = 0.7 // rad/s steering toward the target
+// ── PR-G1: ground anti-air (jet hitscan fix, mountable AA gun, RPG) ──────────
+// Ground weapons engage jets out to here. The fire() raycaster is otherwise
+// unbounded, but jets are small, fast aerial targets — a pixel-perfect centre
+// ray rarely connects. So we add a ray-vs-sphere aim assist within this range.
+const JET_GROUND_RANGE = 600 // max ground→jet engagement distance (m)
+const JET_AIM_ASSIST_RADIUS = 5 // perpendicular ray-miss tolerance (m), base
+const JET_AIM_ASSIST_SNIPER_MULT = 2.4 // sniper is far more forgiving (scoped)
+// Player-mounted AA gun (board an existing aaGun and fire it yourself).
+const AA_MOUNT_RADIUS = 3.4 // how close on foot to board the AA gun
+const AA_MOUNT_MANUAL_AIM = Math.PI / 6 // ±30° manual barrel correction
+const AA_MOUNT_FIRE_INTERVAL_MS = 1500 // player AA cadence
+const AA_MOUNT_SHELL_DIRECT = 40 // direct-hit damage (stronger than AI's 30)
+const AA_MOUNT_SHELL_SPLASH = 15 // near-miss splash (vs AI's 10)
+const AA_MOUNT_CAM_DIST = 7.0 // third-person trail behind the turret
+const AA_MOUNT_CAM_HEIGHT = 4.5
+const AA_MOUNT_DMG_MULT = 0.5 // the turret shields the gunner (half damage)
+const AA_MOUNT_SHELL_SPEED = 120 // faster than AI shells so leading is easier
+// RPG rocket launcher (handheld anti-air; also hits ground targets).
+const RPG_RELOAD_MS = 8000
+const RPG_SPEED = 55
+const RPG_RADIUS = 9 // AOE blast radius
+const RPG_DIRECT = 60 // direct-hit damage
+const RPG_SPLASH = 25 // splash damage at the rim
+const RPG_HOMING_TURN = 1.6 // rad/s steering toward the locked jet (medium)
+const RPG_LIFE = 5.0 // seconds before self-detonate
+const RPG_DIRECT_RADIUS = 4 // proximity-fuse radius around a jet
 const PARACHUTE_GRAVITY = 11 // descent ≈ GRAVITY/2 (was /6 — too floaty)
 const PARACHUTE_MAX_SINK = 12 // terminal descent speed under canopy (3× faster)
 const PARACHUTE_OPEN_DELAY_MS = 1000 // free-fall before the canopy deploys
@@ -175,7 +201,7 @@ const DEATH_ANIM_TOTAL = DEATH_ANIM_FALL + DEATH_ANIM_LIE + DEATH_ANIM_FADE
 
 // ── Weapon definitions ─────────────────────────────────────────────────────────
 interface WeaponDef {
-  id: "pistol" | "shotgun" | "sniper" | "knife"
+  id: "pistol" | "shotgun" | "sniper" | "knife" | "rpg"
   name: string
   maxAmmo: number // -1 = infinite
   hitDamage: number
@@ -189,6 +215,9 @@ interface WeaponDef {
   // melee swing instead of spawning bullets. Optional so the existing ranged
   // weapon literals stay untouched.
   melee?: boolean
+  // Rocket weapon (RPG): fire() launches a single homing rocket that AOE-
+  // explodes. Locked until picked up off the map. PR-G1.
+  rocket?: boolean
 }
 
 // Knife melee tuning — forward fan-shaped hitbox.
@@ -247,6 +276,19 @@ const WEAPONS: WeaponDef[] = [
     bulletColor: 0xcccccc,
     recoil: 0.05,
     melee: true,
+  },
+  {
+    id: "rpg",
+    name: "RPG",
+    maxAmmo: 1, // single rocket; reloads one round
+    hitDamage: RPG_DIRECT,
+    reloadTime: RPG_RELOAD_MS,
+    spread: 0,
+    pellets: 1,
+    bulletLifetime: RPG_LIFE,
+    bulletColor: 0xff6622,
+    recoil: 0.3,
+    rocket: true,
   },
 ]
 
@@ -315,6 +357,12 @@ const SOUNDS = {
   knife() {
     _noise(0.16, 0.4, "highpass", 1800)
     _tone(620, 0.1, 0.14, "sine", 220)
+  },
+  // RPG launch — deep whoosh + low thump (the rocket's own AOE blast reuses
+  // the explosion SFX). Also keeps SOUNDS indexable by every WeaponDef.id.
+  rpg() {
+    _noise(0.3, 0.7, "lowpass", 420)
+    _tone(48, 0.26, 0.4, "sawtooth")
   },
   // Distant zombie groan — low growl + filtered noise rumble. Used as the
   // sparse ambient sting at the start of each zombie wave.
@@ -1191,6 +1239,12 @@ interface Bullet {
   // tank-damage multiplier so enemy *tank shells* (also explosive grenades)
   // don't inherit it.
   isAntiTankGrenade?: boolean
+  // RPG rocket: homes on the nearest enemy jet, ignores gravity, and AOE-
+  // explodes (hitting jets, AA guns, enemy vehicles and ground enemies) on
+  // proximity / impact / fuse-expiry via detonateRocket.
+  isRocket?: boolean
+  // Smoke-trail bookkeeping for the rocket (seconds until next puff).
+  trailT?: number
 }
 
 interface GoalMarker {
@@ -1523,7 +1577,7 @@ export default function ThreeWorld({
   // Weapon refs
   const currentWeaponIdxRef = useRef(0)
   // 4-slot: pistol(∞) / shotgun(8) / sniper(5) / knife(∞). -1 = infinite.
-  const weaponAmmoRef = useRef<[number, number, number, number]>([-1, 8, 5, -1])
+  const weaponAmmoRef = useRef<[number, number, number, number, number]>([-1, 8, 5, -1, 0])
   // Knife: timestamp gate (anti re-input during swing) + active swing timer
   // (seconds remaining, drives the first-person swing animation).
   const lastMeleeRef = useRef(0)
@@ -1615,6 +1669,20 @@ export default function ThreeWorld({
   const prevNearVehicleRef = useRef(false)
   // Set by the E key / mobile board-exit button; consumed once in the loop.
   const vehicleActionRef = useRef(false)
+  // ── PR-G1: mounted AA gun state ─────────────────────────────────────────────
+  // True while the player is manning a fixed AA gun (movement locked, third-
+  // person turret view, FIRE shoots AA shells at jets).
+  const aaMountedRef = useRef(false)
+  const [inAAGun, setInAAGun] = useState(false)
+  // True while on foot next to a boardable AA gun (shows the mount prompt).
+  const [nearAAGun, setNearAAGun] = useState(false)
+  const prevNearAAGunRef = useRef(false)
+  // Set by the E key / mobile mount-exit button; consumed once in the loop.
+  const aaMountActionRef = useRef(false)
+  // Manual ±30° barrel correction on top of the auto-track, driven by the
+  // mouse / right look-stick while mounted. Radians, clamped to ±AA_MOUNT_MANUAL_AIM.
+  const aaManualYawRef = useRef(0)
+  const aaManualPitchRef = useRef(0)
   // Active vehicle HP (drives the HUD bar while driving). 0 when on foot.
   const [vehicleHp, setVehicleHp] = useState(0)
   const [vehicleMaxHp, setVehicleMaxHp] = useState(0)
@@ -5340,6 +5408,13 @@ export default function ThreeWorld({
         scene.remove(v.group)
       }
 
+      // PR-G1: a mounted AA gunner is shielded by the turret, so incoming damage
+      // is halved. No-op (×1) on foot or while driving. Hoisted so every player-
+      // damage site can route through it.
+      function aaShield(raw: number) {
+        return aaMountedRef.current ? raw * AA_MOUNT_DMG_MULT : raw
+      }
+
       // ── Enemy-driven vehicles ───────────────────────────────────────────────
       // Apply damage to the player, routed through their own vehicle if they're
       // riding one (the shield rule from PR1). Shared by enemy rams / shells.
@@ -5349,7 +5424,7 @@ export default function ThreeWorld({
           damageActiveVehicle(dmg, "bullet")
           return
         }
-        playerHpRef.current = Math.max(0, playerHpRef.current - dmg)
+        playerHpRef.current = Math.max(0, playerHpRef.current - aaShield(dmg))
         setPlayerHp(playerHpRef.current)
         lastDamageTimeRef.current = Date.now()
         cameraShakeRef.current.intensity = shake
@@ -5521,6 +5596,32 @@ export default function ThreeWorld({
         emissiveIntensity: 0.6,
       })
 
+      // ── PR-G1: RPG rocket + smoke trail + map pickups (shared geo/mat) ──────
+      const rpgRocketGeo = new THREE.BoxGeometry(0.22, 0.22, 1.0)
+      const rpgRocketMat = new THREE.MeshStandardMaterial({
+        color: 0x553322,
+        roughness: 0.5,
+        metalness: 0.5,
+        emissive: 0xff5522,
+        emissiveIntensity: 0.7,
+      })
+      const rpgSmokeGeo = new THREE.SphereGeometry(0.4, 6, 5)
+      const rpgSmokeMat = new THREE.MeshBasicMaterial({
+        color: 0xbbbbbb,
+        transparent: true,
+        opacity: 0.32,
+        depthWrite: false,
+      })
+      const rpgPickupMat = new THREE.MeshStandardMaterial({
+        color: 0x556622,
+        roughness: 0.6,
+        metalness: 0.4,
+        emissive: 0xff6622,
+        emissiveIntensity: 0.45,
+      })
+      // Cosmetic rocket exhaust puffs (cheap; scale-grow, no per-puff fade).
+      const rocketPuffs: { mesh: THREE.Mesh; life: number }[] = []
+
       // ── PR-F2 systems: anti-air guns, enemy jets, crashing jets, parachute ──
       // Shared materials / geometry (created once; reused per instance).
       const AA_FWD = new THREE.Vector3(0, 0, -1)
@@ -5551,11 +5652,24 @@ export default function ThreeWorld({
         meshes: THREE.Mesh[]
       }
       const aaGuns: AAGun[] = []
+      // PR-G1: handheld RPG pickups scattered on the map. Walk over one to arm
+      // the launcher.
+      interface RPGPickup {
+        group: THREE.Group
+        x: number
+        z: number
+        y: number
+        taken: boolean
+      }
+      const rpgPickups: RPGPickup[] = []
       interface AAShell {
         mesh: THREE.Mesh
         pos: THREE.Vector3
         vel: THREE.Vector3
         life: number
+        // PR-G1: true for shells the player fires from a mounted AA gun — these
+        // hunt enemy jets instead of the (AI-only) "damage the player jet" path.
+        friendly?: boolean
       }
       const aaShells: AAShell[] = []
       interface EnemyJet {
@@ -5661,7 +5775,7 @@ export default function ThreeWorld({
         const now = Date.now()
         const jy = jet.y ?? 0
         for (const gun of aaGuns) {
-          if (gun.dead) continue
+          if (gun.dead || gun === activeAAGun) continue // the player mans this one
           const gunY = gun.baseY + 1.1
           const dx = jet.x - gun.x
           const dy = jy - gunY
@@ -5688,8 +5802,18 @@ export default function ThreeWorld({
           s.life -= dt
           let detonate = false
           let direct = false
-          if (jet) {
-            const d = Math.hypot(s.pos.x - jet.x, s.pos.y - (jet.y ?? 0), s.pos.z - jet.z)
+          // Player shells hunt the nearest enemy jet; AI shells chase the
+          // player's jet (the original behaviour).
+          const targetJet = s.friendly ? nearestJetTo(s.pos.x, s.pos.y, s.pos.z) : null
+          const tgt = s.friendly
+            ? targetJet
+              ? { x: targetJet.x, y: targetJet.y, z: targetJet.z }
+              : null
+            : jet
+              ? { x: jet.x, y: jet.y ?? 0, z: jet.z }
+              : null
+          if (tgt) {
+            const d = Math.hypot(s.pos.x - tgt.x, s.pos.y - tgt.y, s.pos.z - tgt.z)
             if (d < AA_DIRECT_RADIUS) {
               detonate = true
               direct = true
@@ -5700,7 +5824,27 @@ export default function ThreeWorld({
           if (!detonate && (s.life <= 0 || s.pos.y <= 0)) detonate = true
           if (detonate) {
             spawnExplosion(s.pos.clone())
-            if (
+            if (s.friendly) {
+              if (targetJet && !targetJet.dead) {
+                const d = Math.hypot(
+                  s.pos.x - targetJet.x,
+                  s.pos.y - targetJet.y,
+                  s.pos.z - targetJet.z,
+                )
+                if (direct || d < AA_SPLASH_RADIUS) {
+                  targetJet.hp -= direct ? AA_MOUNT_SHELL_DIRECT : AA_MOUNT_SHELL_SPLASH
+                  if (targetJet.hp <= 0) {
+                    scoreRef.current += 1200
+                    setScore(scoreRef.current)
+                    if (isSky) {
+                      killsRef.current += 1
+                      setKills(killsRef.current)
+                    }
+                    killEnemyJet(targetJet)
+                  }
+                }
+              }
+            } else if (
               jet &&
               (direct ||
                 Math.hypot(s.pos.x - jet.x, s.pos.y - (jet.y ?? 0), s.pos.z - jet.z) <
@@ -5711,6 +5855,158 @@ export default function ThreeWorld({
             scene.remove(s.mesh)
             aaShells.splice(i, 1)
           }
+        }
+      }
+
+      // ── PR-G1: player-mounted AA gun ────────────────────────────────────────
+      // Board a fixed AA gun with [E]: the turret auto-tracks the nearest jet
+      // (slerp) while the player adds a ±30° manual correction with the mouse,
+      // and FIRE launches shells that hunt enemy jets. Third-person turret view;
+      // on-foot movement is locked while seated.
+      let activeAAGun: AAGun | null = null
+      let lastAAMountFire = 0
+
+      function nearestAAGunTo(): AAGun | null {
+        let best: AAGun | null = null
+        let bestD = AA_MOUNT_RADIUS
+        for (const gun of aaGuns) {
+          if (gun.dead) continue
+          const d = Math.hypot(gun.x - focalPoint.x, gun.z - focalPoint.z)
+          if (d < bestD) {
+            bestD = d
+            best = gun
+          }
+        }
+        return best
+      }
+
+      function nearestJetTo(x: number, y: number, z: number): EnemyJet | null {
+        let best: EnemyJet | null = null
+        let bestD = Number.POSITIVE_INFINITY
+        for (const ej of enemyJets) {
+          if (ej.dead) continue
+          const d = Math.hypot(ej.x - x, ej.y - y, ej.z - z)
+          if (d < bestD) {
+            bestD = d
+            best = ej
+          }
+        }
+        return best
+      }
+
+      function enterAAGun(gun: AAGun) {
+        activeAAGun = gun
+        aaMountedRef.current = true
+        setInAAGun(true)
+        setNearAAGun(false)
+        prevNearAAGunRef.current = false
+        // Drop the vehicle + climb prompts — both blocks are inert while mounted.
+        setNearVehicle(false)
+        prevNearVehicleRef.current = false
+        setNearClimb(false)
+        prevNearClimbRef.current = false
+        // Cancel combat state so nothing leaks into the turret.
+        playerVelRef.current.x = 0
+        playerVelRef.current.z = 0
+        mouseDownRef.current = false
+        isAimingRef.current = false
+        setIsAiming(false)
+        gunGroup.visible = false
+        aaManualYawRef.current = 0
+        aaManualPitchRef.current = 0
+        lastAAMountFire = 0
+        // Snap the (hidden) player onto the gun base.
+        focalPoint.x = gun.x
+        focalPoint.z = gun.z
+        focalPoint.y = gun.baseY
+      }
+
+      function exitAAGun() {
+        const gun = activeAAGun
+        aaMountedRef.current = false
+        setInAAGun(false)
+        gunGroup.visible = true
+        if (gun) {
+          // Step out beside the gun, nudged clear of the pedestal.
+          const safe = findSafeSpawnNear(gun.x + 2.2, gun.z + 0.6, PLAYER_RADIUS)
+          focalPoint.x = safe.x
+          focalPoint.z = safe.z
+          focalPoint.y = gun.baseY
+          camState.pitch = 0
+          updateCamera()
+        }
+        activeAAGun = null
+        playerVelRef.current.x = 0
+        playerVelRef.current.z = 0
+        // Same brief fire-lock as dismounting a vehicle (exposure window).
+        fireLockUntilRef.current = Date.now() + VEHICLE_EXIT_FIRE_LOCK_MS
+      }
+
+      // Per-frame while mounted: aim the turret (auto-track + manual ±30°), park
+      // the chase camera behind it, and fire on the player's cadence.
+      function updateMountedAA(dt: number) {
+        const gun = activeAAGun
+        if (!gun || gun.dead) {
+          if (aaMountedRef.current) exitAAGun() // gun destroyed under us
+          return
+        }
+        const gunY = gun.baseY + 1.1
+        // Auto-track the nearest jet (default: forward + up when none in sight).
+        const jet = nearestJetTo(gun.x, gunY, gun.z)
+        let az: number
+        let el: number
+        if (jet) {
+          const dx = jet.x - gun.x
+          const dy = jet.y - gunY
+          const dz = jet.z - gun.z
+          az = Math.atan2(dx, dz) // azimuth, 0 = +z
+          el = Math.atan2(dy, Math.max(0.001, Math.hypot(dx, dz)))
+        } else {
+          az = camState.yaw
+          el = 0.5 // ~29° up when nothing to track
+        }
+        // Player's manual ±30° correction on top of the lock.
+        az += aaManualYawRef.current
+        el = Math.max(-0.2, Math.min(1.3, el + aaManualPitchRef.current))
+        const ch = Math.cos(el)
+        const aim = new THREE.Vector3(Math.sin(az) * ch, Math.sin(el), Math.cos(az) * ch)
+        // Slerp the turret toward the aim (barrels point -z → AA_FWD).
+        const tq = new THREE.Quaternion().setFromUnitVectors(AA_FWD, aim)
+        gun.turret.quaternion.slerp(tq, 1 - Math.exp(-dt * 8))
+        // Third-person chase camera behind the turret, looking along the aim.
+        const camX = gun.x - aim.x * AA_MOUNT_CAM_DIST
+        const camY = gunY + AA_MOUNT_CAM_HEIGHT - aim.y * 1.5
+        const camZ = gun.z - aim.z * AA_MOUNT_CAM_DIST
+        const blend = 1 - Math.exp(-dt * 12)
+        camera.position.x += (camX - camera.position.x) * blend
+        camera.position.y += (camY - camera.position.y) * blend
+        camera.position.z += (camZ - camera.position.z) * blend
+        camera.lookAt(gun.x + aim.x * 6, gunY + aim.y * 6, gun.z + aim.z * 6)
+        // Fire on the player's cadence while FIRE is held.
+        const now = Date.now()
+        if (
+          mouseDownRef.current &&
+          gamePhaseRef.current === "playing" &&
+          now - lastAAMountFire >= AA_MOUNT_FIRE_INTERVAL_MS
+        ) {
+          lastAAMountFire = now
+          const muzzle = new THREE.Vector3(
+            gun.x + aim.x * 2.4,
+            gunY + aim.y * 2.4,
+            gun.z + aim.z * 2.4,
+          )
+          const mesh = new THREE.Mesh(aaShellGeo, aaShellMat)
+          mesh.position.copy(muzzle)
+          scene.add(mesh)
+          aaShells.push({
+            mesh,
+            pos: muzzle.clone(),
+            vel: aim.clone().multiplyScalar(AA_MOUNT_SHELL_SPEED),
+            life: 5,
+            friendly: true,
+          })
+          SOUNDS.pistol()
+          cameraShakeRef.current.intensity = 1.5
         }
       }
 
@@ -6087,6 +6383,9 @@ export default function ThreeWorld({
         // Initial bandit flight at altitude; waves / respawns continue from here.
         skySpawnSquadron(modeRef.current === "wave_defense" ? 0 : 4)
         if (modeRef.current === "wave_defense") skyWaveInterUntil = Date.now() + 4000
+        // RPG pickups on the airbase apron (handheld anti-air on the ground).
+        makeRPGPickup(8, 136)
+        makeRPGPickup(-4, 130)
       } else if (modeRef.current !== "ffa" && modeRef.current !== "tdm") {
         makeAAGun(26, 235, 6.0) // west warehouse roof
         makeAAGun(74, 236, 6.0) // central warehouse roof
@@ -6094,6 +6393,12 @@ export default function ThreeWorld({
         makeAAGun(88, 205, 0) // east container-yard edge
         spawnEnemyJet(-12, 134, -Math.PI / 2)
         spawnEnemyJet(-12, 139, -Math.PI / 2)
+        // RPG pickups: 2 in the HARBOR (near the airfield + container yard) and
+        // 2 in the URBAN core, so every area has a way to answer enemy jets.
+        makeRPGPickup(30, 200) // HARBOR — airfield apron edge
+        makeRPGPickup(70, 232) // HARBOR — by the warehouses
+        makeRPGPickup(40, 60) // URBAN — central avenue
+        makeRPGPickup(-18, 32) // URBAN — west side street
       }
 
       // Nose machine gun: cooldown-gated hitscan from the jet's nose along the
@@ -8360,7 +8665,7 @@ export default function ThreeWorld({
               const vDmg = activeVehicle.kind === "tank" && antiTank ? dmg * TANK_GRENADE_MULT : dmg
               damageActiveVehicle(vDmg, "explosive")
             } else {
-              playerHpRef.current = Math.max(0, playerHpRef.current - dmg)
+              playerHpRef.current = Math.max(0, playerHpRef.current - aaShield(dmg))
               setPlayerHp(playerHpRef.current)
               lastDamageTimeRef.current = Date.now()
               cameraShakeRef.current.intensity = 3
@@ -8402,6 +8707,150 @@ export default function ThreeWorld({
           if (vd2 >= radius * radius) continue
           const vdist = Math.sqrt(vd2)
           damageEnemyVehicle(vv, Math.max(40, Math.floor(160 * (1 - vdist / radius))), "explosive")
+        }
+      }
+
+      // ── PR-G1: RPG rocket — fire + homing detonation ─────────────────────────
+      // AOE blast: hits enemy jets, ground enemies (terraformers / bots) and
+      // enemy-driven vehicles. Direct (centre) damage falls off to splash at
+      // the rim. Mountable AA guns are deliberately spared (player tools).
+      function detonateRocket(center: THREE.Vector3) {
+        center.y = Math.max(0.3, center.y)
+        spawnExplosion(center)
+        spawnExplosion(center.clone(), true)
+        lastNoiseRef.current = { x: center.x, z: center.z, expires: Date.now() + 4000 }
+        const radius = RPG_RADIUS
+        const falloff = (d: number) =>
+          Math.max(RPG_SPLASH, Math.floor(RPG_DIRECT * (1 - d / radius)))
+        // Ground enemies.
+        for (const enemy of enemies) {
+          if (enemy.hp <= 0 || enemy.aiDriving) continue
+          const dx = enemy.mesh.position.x - center.x
+          const dy = enemy.mesh.position.y - center.y
+          const dz = enemy.mesh.position.z - center.z
+          const d = Math.hypot(dx, dy, dz)
+          if (d >= radius) continue
+          enemy.hp = Math.max(0, enemy.hp - falloff(d))
+          if (enemy.hp <= 0) {
+            spawnExplosion(enemy.mesh.position.clone())
+            applyEnemyKill(enemy, "rpg")
+          }
+        }
+        // Enemy jets.
+        for (const ej of enemyJets) {
+          if (ej.dead) continue
+          const d = Math.hypot(ej.x - center.x, ej.y - center.y, ej.z - center.z)
+          if (d >= radius) continue
+          ej.hp -= falloff(d)
+          if (ej.hp <= 0) {
+            scoreRef.current += 1200
+            setScore(scoreRef.current)
+            if (isSky) {
+              killsRef.current += 1
+              setKills(killsRef.current)
+            }
+            killEnemyJet(ej)
+          }
+        }
+        // Enemy-driven vehicles (explosive bypasses tank armor).
+        for (const vv of vehicles) {
+          if (vv.dead || !vv.aiDriver) continue
+          const d = Math.hypot(vv.x - center.x, vv.z - center.z)
+          if (d >= radius) continue
+          damageEnemyVehicle(vv, falloff(d), "explosive")
+        }
+      }
+
+      // Launch a single homing rocket from the camera along the aim direction.
+      function fireRocket() {
+        camera.getWorldDirection(fwd3)
+        const dir = fwd3.clone().normalize()
+        const start = new THREE.Vector3(
+          focalPoint.x + dir.x * 1.2,
+          // Include the player's own altitude so rockets fired from a roof /
+          // ledge launch at eye level there — not from the ground (immediate
+          // self-collision).
+          focalPoint.y + EYE_HEIGHT + dir.y * 1.2,
+          focalPoint.z + dir.z * 1.2,
+        )
+        const mesh = new THREE.Mesh(rpgRocketGeo, rpgRocketMat)
+        mesh.position.copy(start)
+        mesh.lookAt(start.clone().add(dir))
+        scene.add(mesh)
+        bullets.push({
+          mesh,
+          velocity: dir.multiplyScalar(RPG_SPEED),
+          life: RPG_LIFE,
+          isEnemy: false,
+          damage: 0,
+          isRocket: true,
+          trailT: 0,
+        })
+        SOUNDS.rpg()
+        cameraShakeRef.current.intensity = 3
+      }
+
+      // ── PR-G1: RPG pickups (arm the launcher by walking over one) ────────────
+      function makeRPGPickup(x: number, z: number, y = 0) {
+        const safe = findSafeSpawnNear(x, z, 0.6)
+        const g = new THREE.Group()
+        const tube = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.15, 1.4, 8), rpgPickupMat)
+        tube.rotation.z = Math.PI / 2
+        tube.position.y = 1.0
+        g.add(tube)
+        const warhead = new THREE.Mesh(new THREE.ConeGeometry(0.26, 0.5, 8), rpgPickupMat)
+        warhead.rotation.z = -Math.PI / 2
+        warhead.position.set(0.85, 1.0, 0)
+        g.add(warhead)
+        g.position.set(safe.x, y, safe.z)
+        scene.add(g)
+        rpgPickups.push({ group: g, x: safe.x, z: safe.z, y, taken: false })
+      }
+
+      function collectRPG() {
+        const idx = WEAPONS.findIndex((w) => w.id === "rpg")
+        if (idx < 0) return
+        weaponAmmoRef.current[idx] = 1
+        setUnlockedWeapons((s) => {
+          if (s.has("rpg")) return s
+          const next = new Set([...s, "rpg"])
+          // Persist so the launcher survives a page refresh (startup reads this
+          // same key into unlockedWeapons).
+          try {
+            localStorage.setItem("fps_unlocked_weapons", JSON.stringify([...next]))
+          } catch {
+            /* ignore */
+          }
+          return next
+        })
+        // Auto-equip the launcher (mirrors the inline switch the weapon UI uses).
+        weaponAmmoRef.current[currentWeaponIdxRef.current] = ammoRef.current
+        currentWeaponIdxRef.current = idx
+        ammoRef.current = 1
+        setAmmo(1)
+        setCurrentWeaponIdx(idx)
+        showNotification("RPG 取得 — 対空ロケット装備！")
+        SOUNDS.pistol()
+      }
+
+      // Bob / spin the pickups and collect any the (on-foot) player walks over.
+      function updateRPGPickups(dt: number) {
+        if (rpgPickups.length === 0) return
+        const grabbable = !drivingRef.current && !aaMountedRef.current
+        const bob = Math.sin(Date.now() * 0.003) * 0.15
+        for (const p of rpgPickups) {
+          if (p.taken) continue
+          p.group.rotation.y += dt * 1.5
+          p.group.position.y = p.y + 0.3 + bob
+          if (!grabbable) continue
+          if (
+            Math.hypot(p.x - focalPoint.x, p.z - focalPoint.z) < 2.0 &&
+            Math.abs(p.y - focalPoint.y) < 3
+          ) {
+            p.taken = true
+            scene.remove(p.group)
+            collectRPG()
+          }
         }
       }
 
@@ -8541,6 +8990,8 @@ export default function ThreeWorld({
         // In the jet, the nose MG is fired continuously from updateJet while
         // the button is held (mouseDownRef) — nothing to do here.
         if (drivingRef.current && activeVehicle?.kind === "jet") return
+        // Manning an AA gun: shells fire on their own cadence in updateMountedAA.
+        if (aaMountedRef.current) return
         // Brief lock right after dismounting a vehicle (exposure window).
         if (Date.now() < fireLockUntilRef.current) return
         const weapon = WEAPONS[currentWeaponIdxRef.current]
@@ -8568,6 +9019,15 @@ export default function ThreeWorld({
           ammoRef.current -= 1
           weaponAmmoRef.current[currentWeaponIdxRef.current] = ammoRef.current
           setAmmo(ammoRef.current)
+        }
+
+        // RPG: launch one homing rocket, then auto-reload (8s). The rocket
+        // carries its own AOE damage, so skip the hitscan path entirely.
+        if (weapon.rocket) {
+          recoilRef.current = weapon.recoil
+          fireRocket()
+          if (ammoRef.current <= 0) startReload(weapon)
+          return
         }
 
         recoilRef.current = weapon.recoil
@@ -8660,8 +9120,16 @@ export default function ThreeWorld({
         }
 
         // Enemy jets are shootable from the ground too (pistol / shotgun /
-        // sniper). Same occlusion rules: a nearer wall or enemy blocks the shot.
-        {
+        // sniper). PR-G1: jets are small, fast and fly at 150–300m, so a
+        // pixel-perfect centre ray almost never connects — that's why PR #61's
+        // hitscan felt broken (the fire() ray is already unbounded; range was
+        // never the real limiter). Alongside the exact mesh raycast we run a
+        // ray-vs-sphere aim assist (generous, scoped wider for the sniper) out
+        // to JET_GROUND_RANGE so ground AA can actually down a bandit.
+        if (!shotConsumed) {
+          const ray = raycaster.ray
+          const assistR =
+            JET_AIM_ASSIST_RADIUS * (weapon.id === "sniper" ? JET_AIM_ASSIST_SNIPER_MULT : 1)
           const ejMeshes: THREE.Object3D[] = []
           const ejMap = new Map<THREE.Object3D, EnemyJet>()
           for (const ej of enemyJets) {
@@ -8673,29 +9141,50 @@ export default function ThreeWorld({
               }
             })
           }
-          if (ejMeshes.length > 0) {
-            const jHit = raycaster.intersectObjects(ejMeshes, false)[0]
-            const blockedByWall = !!(nearestWall && jHit && nearestWall.distance < jHit.distance)
-            const blockedByEnemy = !!(enemyHits[0] && jHit && enemyHits[0].distance < jHit.distance)
-            if (!shotConsumed && jHit && !blockedByWall && !blockedByEnemy) {
-              const ej = ejMap.get(jHit.object)
-              if (ej && !ej.dead) {
-                ej.hp -= weapon.hitDamage
-                SOUNDS.hit()
-                spawnExplosion(jHit.point.clone(), true)
-                if (ej.hp <= 0) {
-                  scoreRef.current += 1200
-                  setScore(scoreRef.current)
-                  if (isSky) {
-                    killsRef.current += 1
-                    setKills(killsRef.current)
-                  }
-                  killEnemyJet(ej)
-                }
-                enemyHits = [] // consumed by the jet
-                shotConsumed = true
-              }
+          // Exact mesh hit gives the precise impact point; fall back to the
+          // nearest jet whose centre lies inside the aim-assist cylinder.
+          const jHit = ejMeshes.length ? raycaster.intersectObjects(ejMeshes, false)[0] : undefined
+          let targetJet: EnemyJet | null = jHit ? (ejMap.get(jHit.object) ?? null) : null
+          let hitDist = jHit ? jHit.distance : Number.POSITIVE_INFINITY
+          let hitPoint = jHit ? jHit.point.clone() : null
+          if (!targetJet) {
+            let bestT = Number.POSITIVE_INFINITY
+            for (const ej of enemyJets) {
+              if (ej.dead) continue
+              const ox = ej.x - ray.origin.x
+              const oy = ej.y - ray.origin.y
+              const oz = ej.z - ray.origin.z
+              const t = ox * ray.direction.x + oy * ray.direction.y + oz * ray.direction.z
+              if (t <= 0 || t > JET_GROUND_RANGE || t >= bestT) continue
+              const px = ray.origin.x + ray.direction.x * t
+              const py = ray.origin.y + ray.direction.y * t
+              const pz = ray.origin.z + ray.direction.z * t
+              if (Math.hypot(ej.x - px, ej.y - py, ej.z - pz) > assistR) continue
+              bestT = t
+              targetJet = ej
+              hitDist = t
+              hitPoint = new THREE.Vector3(px, py, pz)
             }
+          }
+          // Same occlusion rule as every other pass: a nearer wall or infantry
+          // between the camera and the jet blocks the shot.
+          const blockedByWall = !!(nearestWall && targetJet && nearestWall.distance < hitDist)
+          const blockedByEnemy = !!(enemyHits[0] && targetJet && enemyHits[0].distance < hitDist)
+          if (targetJet && !targetJet.dead && !blockedByWall && !blockedByEnemy && hitPoint) {
+            targetJet.hp -= weapon.hitDamage
+            SOUNDS.hit()
+            spawnExplosion(hitPoint.clone(), true)
+            if (targetJet.hp <= 0) {
+              scoreRef.current += 1200
+              setScore(scoreRef.current)
+              if (isSky) {
+                killsRef.current += 1
+                setKills(killsRef.current)
+              }
+              killEnemyJet(targetJet)
+            }
+            enemyHits = [] // consumed by the jet
+            shotConsumed = true
           }
         }
 
@@ -8967,15 +9456,29 @@ export default function ThreeWorld({
             // Base sensitivity dropped 0.002 → 0.0012 (≈40% slower default).
             // Player can scale 0.5x–2.0x via the settings panel.
             const sens = 0.0012 * mouseSensRef.current
-            camState.yaw -= mdx * sens
-            camState.pitch = clampPitch(camState.pitch - mdy * sens)
-            if (drivingRef.current) {
-              // Free-aim while driving: the chase camera (updateVehicle) reads
-              // camState and owns the camera. Just flag active aiming so it
-              // doesn't auto-recenter behind the hull mid-aim.
-              lastDriveAimRef.current = Date.now()
+            if (aaMountedRef.current) {
+              // Manning the AA gun: the mouse nudges the ±30° manual barrel
+              // correction (updateMountedAA owns the camera + turret).
+              const lim = AA_MOUNT_MANUAL_AIM
+              aaManualYawRef.current = Math.max(
+                -lim,
+                Math.min(lim, aaManualYawRef.current - mdx * sens),
+              )
+              aaManualPitchRef.current = Math.max(
+                -lim,
+                Math.min(lim, aaManualPitchRef.current - mdy * sens),
+              )
             } else {
-              updateCamera()
+              camState.yaw -= mdx * sens
+              camState.pitch = clampPitch(camState.pitch - mdy * sens)
+              if (drivingRef.current) {
+                // Free-aim while driving: the chase camera (updateVehicle) reads
+                // camState and owns the camera. Just flag active aiming so it
+                // doesn't auto-recenter behind the hull mid-aim.
+                lastDriveAimRef.current = Date.now()
+              } else {
+                updateCamera()
+              }
             }
           }
         }
@@ -9067,7 +9570,7 @@ export default function ThreeWorld({
               vehicleActionRef.current = false
               exitVehicle()
             }
-          } else {
+          } else if (!aaMountedRef.current) {
             const nv = nearestVehicle()
             const nowNear = nv !== null
             if (nowNear !== prevNearVehicleRef.current) {
@@ -9083,7 +9586,35 @@ export default function ThreeWorld({
             vehicleActionRef.current = false
           }
         }
+
+        // ── PR-G1: AA gun mount / dismount (E key or mobile button) ──────────
+        // Mirrors the vehicle board flow. Runs after it so a vehicle wins if the
+        // player somehow stands next to both; consumes the same E press.
+        {
+          const wantAction = climbRequestRef.current || aaMountActionRef.current
+          if (aaMountedRef.current) {
+            if (wantAction) {
+              climbRequestRef.current = false
+              aaMountActionRef.current = false
+              exitAAGun()
+            }
+          } else if (!drivingRef.current) {
+            const ng = nearestAAGunTo()
+            const nowNear = ng !== null
+            if (nowNear !== prevNearAAGunRef.current) {
+              prevNearAAGunRef.current = nowNear
+              setNearAAGun(nowNear)
+            }
+            if (wantAction && ng) {
+              climbRequestRef.current = false
+              enterAAGun(ng)
+            }
+            aaMountActionRef.current = false
+          }
+        }
         if (drivingRef.current) updateVehicle(dt)
+        if (aaMountedRef.current) updateMountedAA(dt) // PR-G1 manned AA turret
+        updateRPGPickups(dt) // PR-G1 handheld launcher pickups
         // PR-F2 air war: AA guns (sleep unless the player is flying), their
         // shells, enemy jets, and any ownerless crashing jet.
         updateAAGuns(dt)
@@ -9145,7 +9676,7 @@ export default function ThreeWorld({
         const pv = playerVelRef.current
         const playerSpeed = Math.hypot(pv.x, pv.z)
         // On-foot movement is suspended while driving (the car owns focalPoint).
-        if (!drivingRef.current && playerSpeed > 0.01) {
+        if (!drivingRef.current && !aaMountedRef.current && playerSpeed > 0.01) {
           const nx = refs.focalPoint.x + pv.x * dt
           const nz = refs.focalPoint.z + pv.z * dt
           // Failsafe: if the player is somehow already inside a wall (bad
@@ -9501,10 +10032,75 @@ export default function ThreeWorld({
         // Continuous fire
         if (mouseDownRef.current && gamePhaseRef.current === "playing") fire()
 
+        // ── PR-G1: rocket exhaust puffs (scale-grow, then despawn) ───────────
+        for (let i = rocketPuffs.length - 1; i >= 0; i--) {
+          const p = rocketPuffs[i]
+          if (!p) continue
+          p.life -= dt
+          if (p.life <= 0) {
+            refs.scene.remove(p.mesh)
+            rocketPuffs.splice(i, 1)
+            continue
+          }
+          const s = 0.4 + (0.5 - p.life) * 1.2
+          p.mesh.scale.setScalar(Math.max(0.2, s))
+        }
+
         // ── Bullets ────────────────────────────────────────────────────────
         for (let i = refs.bullets.length - 1; i >= 0; i--) {
           const b = refs.bullets[i]
           if (!b) continue
+          // RPG rocket: homes on the nearest enemy jet (medium turn rate, no
+          // gravity), trails smoke, and AOE-explodes on proximity / impact /
+          // fuse expiry via detonateRocket. Fully self-contained → continue.
+          if (b.isRocket) {
+            const tgt = nearestJetTo(b.mesh.position.x, b.mesh.position.y, b.mesh.position.z)
+            if (tgt) {
+              const speed = b.velocity.length() || RPG_SPEED
+              const want = new THREE.Vector3(
+                tgt.x - b.mesh.position.x,
+                tgt.y - b.mesh.position.y,
+                tgt.z - b.mesh.position.z,
+              ).normalize()
+              const cur = b.velocity.clone().normalize()
+              // Rotate the heading toward the target, capped at RPG_HOMING_TURN.
+              const ang = cur.angleTo(want)
+              if (ang > 1e-3) {
+                const t = Math.min(1, (RPG_HOMING_TURN * dt) / ang)
+                cur.lerp(want, t).normalize()
+                b.velocity.copy(cur.multiplyScalar(speed))
+              }
+            }
+            b.mesh.position.addScaledVector(b.velocity, dt)
+            b.mesh.lookAt(b.mesh.position.clone().add(b.velocity))
+            b.life -= dt
+            // Smoke trail.
+            b.trailT = (b.trailT ?? 0) - dt
+            if ((b.trailT ?? 0) <= 0) {
+              b.trailT = 0.04
+              const puff = new THREE.Mesh(rpgSmokeGeo, rpgSmokeMat)
+              puff.position.copy(b.mesh.position)
+              puff.scale.setScalar(0.3)
+              refs.scene.add(puff)
+              rocketPuffs.push({ mesh: puff, life: 0.5 })
+            }
+            // Proximity fuse on jets, plus ground / wall / fuse-expiry.
+            const near = tgt
+              ? Math.hypot(
+                  b.mesh.position.x - tgt.x,
+                  b.mesh.position.y - tgt.y,
+                  b.mesh.position.z - tgt.z,
+                ) < RPG_DIRECT_RADIUS
+              : false
+            const hitGround = b.mesh.position.y <= 0.2
+            const inWall = pointInsideWall(b.mesh.position.x, b.mesh.position.y, b.mesh.position.z)
+            if (near || hitGround || inWall || b.life <= 0) {
+              detonateRocket(b.mesh.position.clone())
+              refs.scene.remove(b.mesh)
+              refs.bullets.splice(i, 1)
+            }
+            continue
+          }
           // Grenades arc under gravity (plain bullets travel in straight
           // lines — flag-gated so we don't pay this cost on every shot).
           if (b.isGrenade) b.velocity.y -= 12 * dt
@@ -9560,7 +10156,7 @@ export default function ThreeWorld({
                 if (riding) {
                   damageActiveVehicle(b.damage) // vehicle soaks it (player shielded)
                 } else {
-                  playerHpRef.current = Math.max(0, playerHpRef.current - b.damage)
+                  playerHpRef.current = Math.max(0, playerHpRef.current - aaShield(b.damage))
                   setPlayerHp(playerHpRef.current)
                   lastDamageTimeRef.current = Date.now()
                   cameraShakeRef.current.intensity = 2
@@ -10145,7 +10741,10 @@ export default function ThreeWorld({
                   // Clawing the vehicle chips its HP, not the shielded driver.
                   damageActiveVehicle(enemy.config.attackDamage)
                 } else {
-                  playerHpRef.current = Math.max(0, playerHpRef.current - enemy.config.attackDamage)
+                  playerHpRef.current = Math.max(
+                    0,
+                    playerHpRef.current - aaShield(enemy.config.attackDamage),
+                  )
                   setPlayerHp(playerHpRef.current)
                   lastDamageTimeRef.current = Date.now()
                   cameraShakeRef.current.intensity = 2
@@ -11095,6 +11694,7 @@ export default function ThreeWorld({
           switchWeapon(3)
         }
       }
+      if (e.key === "5") switchWeapon(4) // PR-G1: RPG (locked until picked up)
       if (e.key === "e" || e.key === "E") {
         // Climb interaction — animate loop consumes the request and only
         // fires if the player is currently inside a climb zone.
@@ -11972,6 +12572,32 @@ export default function ThreeWorld({
               {inVehicle ? "[E] 降りる" : "[E] 車に乗る"}
             </div>
           )}
+
+        {/* AA gun mount / exit prompt (desktop) — PR-G1 */}
+        {(nearAAGun || inAAGun) && !isLoading && !error && !isMobile && gamePhase === "playing" && (
+          <div
+            style={{
+              position: "absolute",
+              bottom: inAAGun ? "12%" : "26%",
+              left: "50%",
+              transform: "translateX(-50%)",
+              zIndex: 25,
+              pointerEvents: "none",
+              fontFamily: "monospace",
+              fontSize: "1rem",
+              color: "#ffaa33",
+              background: "rgba(0,0,0,0.78)",
+              border: "1px solid #ffaa33",
+              padding: "0.45rem 1.1rem",
+              letterSpacing: "0.15em",
+              textShadow: "0 0 8px rgba(255,170,60,0.6)",
+              boxShadow: "0 0 14px rgba(255,170,60,0.3)",
+              borderRadius: "2px",
+            }}
+          >
+            {inAAGun ? "[E] 降りる" : "[E] 対空砲に乗る"}
+          </div>
+        )}
 
         {/* Vehicle HP bar — shown while driving (mobile + desktop). */}
         {inVehicle && vehicleMaxHp > 0 && !isLoading && !error && gamePhase === "playing" && (
@@ -13643,7 +14269,12 @@ export default function ThreeWorld({
             >
               {/* In a tank: 3 gun slots + a 主砲 (cannon) toggle. Otherwise the
                   usual [1][2][3][4] weapon row. */}
-              {(inTank ? [0, 1, 2, -1] : [0, 1, 2, 3]).map((idx) => {
+              {(inTank
+                ? [0, 1, 2, -1]
+                : unlockedWeapons.has("rpg")
+                  ? [0, 1, 2, 3, 4]
+                  : [0, 1, 2, 3]
+              ).map((idx) => {
                 const isCannon = idx === -1
                 const w = isCannon ? null : WEAPONS[idx]
                 if (!isCannon && !w) return null
@@ -13777,6 +14408,42 @@ export default function ThreeWorld({
                 }}
               >
                 {inVehicle ? "降りる" : "乗る"}
+              </button>
+            )}
+
+            {/* AA gun mount / exit button (mobile) — PR-G1. Routes through
+                aaMountActionRef, same path as the PC "E" key. Sits one slot
+                higher than the vehicle button so they never overlap. */}
+            {(nearAAGun || inAAGun) && (
+              <button
+                type="button"
+                onPointerDown={(e) => {
+                  e.preventDefault()
+                  aaMountActionRef.current = true
+                }}
+                style={{
+                  position: "absolute",
+                  bottom: isLandscape ? "20rem" : "25rem",
+                  right: isLandscape ? "1rem" : "2rem",
+                  width: isLandscape ? "64px" : "72px",
+                  height: isLandscape ? "64px" : "72px",
+                  borderRadius: "50%",
+                  background: "rgba(255,170,60,0.22)",
+                  border: "3px solid #ffaa33",
+                  boxShadow: "0 0 16px rgba(255,170,60,0.4)",
+                  color: "#ffe0b0",
+                  fontFamily: "monospace",
+                  fontSize: isLandscape ? "0.74rem" : "0.84rem",
+                  letterSpacing: "0.08em",
+                  fontWeight: "bold",
+                  textShadow: "0 0 10px rgba(255,170,60,0.7)",
+                  lineHeight: 1.15,
+                  touchAction: "none",
+                  userSelect: "none",
+                  zIndex: 32,
+                }}
+              >
+                {inAAGun ? "降りる" : "対空砲"}
               </button>
             )}
 
