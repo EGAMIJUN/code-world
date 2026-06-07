@@ -2451,14 +2451,24 @@ export default function ThreeWorld({
       // Ambient was 2.4 — washed out shadows entirely. Drop it to 0.45 and
       // let a HemisphereLight handle the sky-vs-ground gradient (gives
       // "outdoor day" feel without crushing shadow contrast).
-      // HUNT runs at night: crush the ambient/sun so the arena reads dark and
-      // the transfer-room interior stays moody (lit by the glowing orb only).
-      scene.add(new THREE.AmbientLight(theme.ambient, isHunt ? 0.32 : 0.45))
-      const hemi = new THREE.HemisphereLight(theme.sky, 0x4a4030, isHunt ? 0.3 : 0.55)
+      // HUNT runs at night but must stay legible: a brighter blue-white ambient
+      // + a cool moonlight key keep enemies/terrain visible while preserving the
+      // night mood (the transfer-room interior reads off the glowing orb too).
+      scene.add(
+        isHunt
+          ? new THREE.AmbientLight(0x8899bb, 0.35)
+          : new THREE.AmbientLight(theme.ambient, 0.45),
+      )
+      const hemi = new THREE.HemisphereLight(
+        isHunt ? 0x556688 : theme.sky,
+        0x4a4030,
+        isHunt ? 0.45 : 0.55,
+      )
       hemi.position.set(0, 50, 0)
       scene.add(hemi)
-      const sun = new THREE.DirectionalLight(theme.sun, isHunt ? 0.7 : 2.8)
-      sun.position.set(60, 80, 40)
+      // HUNT: the directional is a cool moonlight key (0xaabbcc) from high up.
+      const sun = new THREE.DirectionalLight(isHunt ? 0xaabbcc : theme.sun, isHunt ? 0.4 : 2.8)
+      sun.position.set(isHunt ? 50 : 60, isHunt ? 100 : 80, isHunt ? 30 : 40)
       sun.castShadow = true
       // Shadow map 1024 (was 2048) — quarter the memory + sampling cost.
       // Soft PCF blur covers the precision loss on most viewing angles.
@@ -2476,7 +2486,7 @@ export default function ThreeWorld({
       sun.shadow.radius = 2
       scene.add(sun)
       // Fill light from opposite side (gentle bounce-light proxy)
-      const fillLight = new THREE.DirectionalLight(0xb0c8ff, isHunt ? 0.18 : 0.45)
+      const fillLight = new THREE.DirectionalLight(0xb0c8ff, isHunt ? 0.3 : 0.45)
       fillLight.position.set(-40, 30, -20)
       scene.add(fillLight)
 
@@ -9135,11 +9145,13 @@ export default function ThreeWorld({
           }
         })
       }
-      function huntGlowEyes(e: CombatEnemy, hex: number) {
+      // Glowing eyes double as visibility landmarks in the dark arena, so the
+      // emissive is cranked up (minions 3.0, bosses 5.0).
+      function huntGlowEyes(e: CombatEnemy, hex: number, intensity: number) {
         const glow = new THREE.MeshStandardMaterial({
           color: hex,
           emissive: hex,
-          emissiveIntensity: 2.4,
+          emissiveIntensity: intensity,
         })
         if (e.leftEye) e.leftEye.material = glow
         if (e.rightEye) e.rightEye.material = glow
@@ -9147,7 +9159,7 @@ export default function ThreeWorld({
         if (eg instanceof THREE.MeshStandardMaterial) {
           eg.color.setHex(hex)
           eg.emissive.setHex(hex)
-          eg.emissiveIntensity = 2.6
+          eg.emissiveIntensity = intensity
         }
       }
       // Build one themed minion / boss, push it into `enemies`, return it.
@@ -9178,7 +9190,7 @@ export default function ThreeWorld({
         e.hp = hp
         e.maxHp = hp
         huntTint(e.mesh, tint, isBoss ? 0.6 : 0.78)
-        huntGlowEyes(e, eyes)
+        huntGlowEyes(e, eyes, isBoss ? 5.0 : 3.0)
         e.huntPoints = points
         e.huntName = name
         e.isHuntBoss = isBoss
@@ -9193,22 +9205,38 @@ export default function ThreeWorld({
         setAliveEnemyCount(0)
       }
       // ── Transfer room (built once on init) ──────────────────────────────────
+      // Room fill ambient (global light): on while in the room, off during a
+      // mission so the night arena stays dark. Toggled in updateHunt.
+      let huntRoomAmbient: THREE.AmbientLight | null = null
       function buildHuntRoom() {
         const cx = HUNT_ROOM.x
         const cz = HUNT_ROOM.z
         const W = HUNT_ROOM_HALF + 1.5 // wall half-extent (interior is a bit smaller)
+        // Surfaces lifted out of near-black so the room's outline reads under the
+        // moody lighting (still dark enough to keep the claustrophobic feel).
         const wallMat = new THREE.MeshStandardMaterial({
-          color: 0x14161d,
+          color: 0x222233,
           roughness: 0.95,
           metalness: 0.05,
         })
         const floorMat = new THREE.MeshStandardMaterial({
-          color: 0x0c0d12,
+          color: 0x1a1b26,
           roughness: 1,
           metalness: 0,
         })
         const group = new THREE.Group()
         group.position.set(cx, 0, cz)
+        // ── Transfer-room lighting ──────────────────────────────────────────────
+        // A white fill ambient so the interior is actually legible. AmbientLight
+        // is global, so it's toggled OFF during a mission (updateHunt) to keep the
+        // night arena dark — the player is only ever in one place at a time.
+        huntRoomAmbient = new THREE.AmbientLight(0xffffff, 0.6)
+        group.add(huntRoomAmbient)
+        // One greenish point light near the ceiling for the eerie room tint. Its
+        // 20m range never reaches the distant arena, so it can stay on always.
+        const roomLight = new THREE.PointLight(0x004400, 2.0, 20)
+        roomLight.position.set(0, 4, 0)
+        group.add(roomLight)
         const floor = new THREE.Mesh(new THREE.BoxGeometry(W * 2, 0.2, W * 2), floorMat)
         floor.position.y = -0.1
         floor.receiveShadow = true
@@ -10063,6 +10091,9 @@ export default function ThreeWorld({
         const now = Date.now()
         const room = huntRoomRef.current
         const phase = huntPhaseRef.current
+        // Room fill ambient is global → keep it off during the mission so the
+        // night arena stays dark; on whenever the player is back in the room.
+        if (huntRoomAmbient) huntRoomAmbient.visible = phase !== "mission"
         // Keep the player boxed in the room during briefing/countdown.
         if (phase === "room" || phase === "countdown" || phase === "scoring") {
           focalPoint.x = Math.max(
