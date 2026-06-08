@@ -7321,7 +7321,10 @@ export default function ThreeWorld({
               const muzzle = new THREE.Vector3(ej.x + fx * 3, ej.y + fy * 3, ej.z + fz * 3)
               const dir = new THREE.Vector3(
                 focalPoint.x - ej.x,
-                0.4 - ej.y,
+                // Aim at the player's torso at their actual altitude (foot Y +
+                // ~1.0), so a strafe lined up on a player on a roof / ledge
+                // instead of always raking near the ground.
+                focalPoint.y + 1.0 - ej.y,
                 focalPoint.z - ej.z,
               ).normalize()
               const tracer = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.06, 2.0), jetTracerMat)
