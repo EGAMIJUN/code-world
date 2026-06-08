@@ -2693,7 +2693,9 @@ export default function ThreeWorld({
       // ~2.5× pixel count of desktop while having a fraction of the GPU.
       const isTouch = typeof navigator !== "undefined" && navigator.maxTouchPoints > 0
       renderer.setPixelRatio(
-        Math.min(window.devicePixelRatio, isMobileDevice ? 1.5 : isTouch ? 1.25 : 1.75),
+        // isTouch first: a phone is both touch + mobile, and the stricter 1.25
+        // cap should win over 1.5 (performance priority).
+        Math.min(window.devicePixelRatio, isTouch ? 1.25 : isMobileDevice ? 1.5 : 1.75),
       )
       renderer.shadowMap.enabled = true
       renderer.shadowMap.type = THREE.PCFSoftShadowMap
@@ -8988,8 +8990,9 @@ export default function ThreeWorld({
 
       // ── Bot spawner (FFA / TDM only) ──────────────────────────────────────
       function spawnBots(count: number, diff: BotDifficulty, gameMode: "ffa" | "tdm") {
-        // Mobile: half the bots to keep the framerate up.
-        const n = isMobileDevice ? Math.max(1, Math.ceil(count / 2)) : count
+        // Mobile: half the bots to keep the framerate up. Guard count>0 so a
+        // zero request stays zero (Math.max(1,…) would otherwise spawn one).
+        const n = isMobileDevice && count > 0 ? Math.max(1, Math.ceil(count / 2)) : count
         if (n <= 0) return
         const tuning = BOT_DIFFICULTY_CONFIGS[diff]
         const shuffled = [...SPAWN_POINTS].sort(() => Math.random() - 0.5)
