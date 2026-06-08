@@ -10613,25 +10613,98 @@ export default function ThreeWorld({
           wrap(HUNT_GREETINGS[huntGreetingRef.current] ?? "", "30px monospace", 190, 52, W - 90)
         } else if (page === 1) {
           ctx.font = "bold 46px monospace"
-          ctx.fillText("◆ 標的 TARGET ◆", W / 2, 80)
-          // Simple green humanoid silhouette.
-          ctx.fillStyle = "rgba(57,255,122,0.85)"
-          ctx.beginPath()
-          ctx.arc(150, 150, 34, 0, Math.PI * 2)
-          ctx.fill()
-          ctx.fillRect(120, 190, 60, 130)
-          ctx.fillRect(96, 200, 24, 90)
-          ctx.fillRect(180, 200, 24, 90)
-          ctx.fillRect(122, 320, 24, 110)
-          ctx.fillRect(154, 320, 24, 110)
-          ctx.fillStyle = "#39ff7a"
+          ctx.fillText("◆ 標的 TARGET ◆", W / 2, 70)
+          const th = HUNT_THEMES[lv.theme]
+          const green = "rgba(57,255,122,0.85)"
+          ctx.fillStyle = green
+          ctx.strokeStyle = green
+          const sx = 160
+          const sy = 250
+          // Original monster silhouette per creature theme.
+          if (th.creature === "fleshball") {
+            ctx.beginPath()
+            ctx.arc(sx, sy - 20, 78, 0, Math.PI * 2)
+            ctx.fill()
+            for (let i = 0; i < 6; i++) {
+              const a = (i / 6) * Math.PI * 2
+              ctx.beginPath()
+              ctx.arc(sx + Math.cos(a) * 70, sy - 20 + Math.sin(a) * 70, 20, 0, Math.PI * 2)
+              ctx.fill()
+            }
+            ctx.lineWidth = 11
+            for (let i = 0; i < 5; i++) {
+              const x = sx - 60 + i * 30
+              ctx.beginPath()
+              ctx.moveTo(x, sy + 50)
+              ctx.lineTo(x + (i - 2) * 10, sy + 150)
+              ctx.stroke()
+            }
+            ctx.fillStyle = "#04140a"
+            for (let i = 0; i < 9; i++) {
+              const a = (i / 9) * Math.PI * 2
+              const r = 28 + (i % 3) * 18
+              ctx.beginPath()
+              ctx.arc(sx + Math.cos(a) * r, sy - 20 + Math.sin(a) * r, 7, 0, Math.PI * 2)
+              ctx.fill()
+            }
+            ctx.fillStyle = green
+          } else if (th.creature === "tall") {
+            ctx.beginPath()
+            ctx.ellipse(sx, sy - 130, 26, 40, 0, 0, Math.PI * 2)
+            ctx.fill()
+            ctx.fillRect(sx - 16, sy - 90, 32, 150)
+            ctx.lineWidth = 13
+            ctx.beginPath()
+            ctx.moveTo(sx - 14, sy - 70)
+            ctx.lineTo(sx - 70, sy + 4)
+            ctx.lineTo(sx - 56, sy + 140)
+            ctx.stroke()
+            ctx.beginPath()
+            ctx.moveTo(sx + 14, sy - 70)
+            ctx.lineTo(sx + 70, sy + 4)
+            ctx.lineTo(sx + 56, sy + 140)
+            ctx.stroke()
+            ctx.beginPath()
+            ctx.moveTo(sx - 10, sy + 60)
+            ctx.lineTo(sx - 22, sy + 200)
+            ctx.stroke()
+            ctx.beginPath()
+            ctx.moveTo(sx + 10, sy + 60)
+            ctx.lineTo(sx + 22, sy + 200)
+            ctx.stroke()
+          } else {
+            ctx.fillRect(sx - 75, sy, 150, 64)
+            for (const lx of [-60, -22, 22, 60]) ctx.fillRect(sx + lx, sy + 60, 15, 75)
+            ctx.lineWidth = 13
+            for (let i = 0; i < 3; i++) {
+              const hx = sx - 52 + i * 52
+              ctx.beginPath()
+              ctx.moveTo(hx, sy)
+              ctx.lineTo(hx, sy - 76)
+              ctx.stroke()
+              ctx.beginPath()
+              ctx.arc(hx, sy - 92, 22, 0, Math.PI * 2)
+              ctx.fill()
+            }
+          }
+          const weak =
+            th.creature === "fleshball"
+              ? "群がる眼を狙え"
+              : th.creature === "tall"
+                ? "細い首・関節が脆い"
+                : "各頭を潰せ"
           ctx.textAlign = "left"
-          ctx.font = "bold 38px monospace"
-          ctx.fillText(lv.target.name, 280, 150)
-          ctx.font = "26px monospace"
-          ctx.fillText(`特徴 : ${lv.target.trait}`, 280, 220)
-          ctx.fillText(`好きなもの : ${lv.target.likes}`, 280, 270)
-          ctx.fillText(`口癖 : ${lv.target.phrase}`, 280, 320)
+          ctx.fillStyle = green
+          ctx.font = "bold 42px monospace"
+          ctx.fillText(lv.target.name, 320, 130)
+          ctx.fillStyle = "#ffd24a"
+          ctx.font = "bold 32px monospace"
+          ctx.fillText(`撃破  +${lv.bossScore}点`, 320, 188)
+          ctx.fillStyle = green
+          ctx.font = "25px monospace"
+          ctx.fillText(`特徴 : ${lv.target.trait}`, 320, 245)
+          ctx.fillText(`弱点 : ${weak}`, 320, 292)
+          ctx.fillText(`雑魚 : +${th.points}点  ×${lv.zakoCount}`, 320, 339)
           ctx.textAlign = "center"
         } else {
           ctx.font = "bold 50px monospace"
