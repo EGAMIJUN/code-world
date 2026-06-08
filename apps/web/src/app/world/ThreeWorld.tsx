@@ -2067,6 +2067,9 @@ export default function ThreeWorld({
   const huntPhaseRef = useRef<"room" | "countdown" | "warp" | "mission" | "scoring" | "dead">(
     "room",
   )
+  // Compass arrow that points toward the transfer-room orb (room phase only).
+  // Driven imperatively from the animate loop to avoid per-frame re-renders.
+  const huntCompassRef = useRef<HTMLDivElement>(null)
   const [huntPhase, setHuntPhase] = useState<
     "room" | "countdown" | "warp" | "mission" | "scoring" | "dead"
   >("room")
@@ -2290,6 +2293,8 @@ export default function ThreeWorld({
   const [error, setError] = useState<string | null>(null)
   const [notification, setNotification] = useState<string | null>(null)
   const [onlineCount, setOnlineCount] = useState(1)
+  // Mobile: tap the minimap to toggle an enlarged view (PC has no tap-expand).
+  const [mapExpanded, setMapExpanded] = useState(false)
   const [isMobile, setIsMobile] = useState(false)
   const [isLandscape, setIsLandscape] = useState(false)
   // True while the player is inside (or right next to) any ClimbZone — the
@@ -2557,6 +2562,9 @@ export default function ThreeWorld({
       // counts; this one gates the new mobile-perf paths.
       const isMobileDevice =
         typeof navigator !== "undefined" && /iPhone|iPad|iPod|Android/i.test(navigator.userAgent)
+      // Halve sphere/cylinder tessellation on mobile (fewer verts per draw on
+      // the many reused/instanced geometries). Floored to a sane minimum.
+      const sseg = (n: number) => (isMobileDevice ? Math.max(4, Math.floor(n / 2)) : n)
       const theme = isHunt
         ? // HUNT: a dark night version of the urban map (also lights the room).
           { sky: 0x05060a, fog: 0x070810, ambient: 0x2a3550, sun: 0x3a4a78 }
@@ -2693,11 +2701,12 @@ export default function ThreeWorld({
       // ~2.5× pixel count of desktop while having a fraction of the GPU.
       const isTouch = typeof navigator !== "undefined" && navigator.maxTouchPoints > 0
       renderer.setPixelRatio(
-        // isTouch first: a phone is both touch + mobile, and the stricter 1.25
-        // cap should win over 1.5 (performance priority).
-        Math.min(window.devicePixelRatio, isTouch ? 1.25 : isMobileDevice ? 1.5 : 1.75),
+        // Render at native 1.0 on phones/tablets — the single biggest fill-rate
+        // win. Desktop keeps the retina cap.
+        Math.min(window.devicePixelRatio, isTouch || isMobileDevice ? 1.0 : 1.75),
       )
-      renderer.shadowMap.enabled = true
+      // Shadow maps are an expensive extra depth pass — off on mobile.
+      renderer.shadowMap.enabled = !isMobileDevice
       renderer.shadowMap.type = THREE.PCFSoftShadowMap
       // ACESFilmic + linear→sRGB output gives the "cinematic" desaturated
       // highlight rolloff that COD/Battlefield use; exposure < 1 keeps the
@@ -5070,12 +5079,12 @@ export default function ThreeWorld({
         const unitBox = new THREE.BoxGeometry(1, 1, 1)
         const containerGeo = new THREE.BoxGeometry(6, 2.6, 2.5) // long axis = X
         const chimneyGeo = new THREE.CylinderGeometry(0.9, 1.25, 16, 12)
-        const tankSphereGeo = new THREE.SphereGeometry(3.2, 16, 12)
+        const tankSphereGeo = new THREE.SphereGeometry(3.2, sseg(16), sseg(12))
         const tankCylGeo = new THREE.CylinderGeometry(2.4, 2.4, 6, 16)
         const fencePostGeo = new THREE.BoxGeometry(0.12, 1.7, 0.12)
         const fenceRailGeo = new THREE.BoxGeometry(1, 0.1, 0.1)
         const lampPostGeo = new THREE.CylinderGeometry(0.1, 0.14, 5, 6)
-        const lampHeadGeo = new THREE.SphereGeometry(0.26, 8, 6)
+        const lampHeadGeo = new THREE.SphereGeometry(0.26, sseg(8), sseg(6))
         const craneBeamGeo = new THREE.BoxGeometry(0.6, 0.6, 9)
         const craneBoomGeo = new THREE.BoxGeometry(0.55, 0.55, 15)
         const pierPlankGeo = new THREE.BoxGeometry(3.4, 0.2, 22)
@@ -5394,7 +5403,7 @@ export default function ThreeWorld({
         // ── Chimney smoke pool ──────────────────────────────────────────────
         // A fixed pool of puffs per chimney (no per-frame allocation). Each
         // rises, expands and fades, then loops. Updated in the animate loop.
-        const smokeGeo = new THREE.SphereGeometry(0.85, 8, 6)
+        const smokeGeo = new THREE.SphereGeometry(0.85, sseg(8), sseg(6))
         // Halve the puff pool on touch devices (mobile GPU budget).
         const puffsPerChimney = isTouch ? 2 : 4
         for (const [cx, cz] of chimneySpots) {
@@ -5435,7 +5444,7 @@ export default function ThreeWorld({
         park.receiveShadow = true
         scene.add(park)
         const parkTreeGeo = new THREE.CylinderGeometry(0.16, 0.24, 2.2, 6)
-        const parkLeafGeo = new THREE.SphereGeometry(1.2, 8, 6)
+        const parkLeafGeo = new THREE.SphereGeometry(1.2, sseg(8), sseg(6))
         const treeSpots: [number, number][] = [
           [3, 45],
           [12, 46],
@@ -6692,7 +6701,7 @@ export default function ThreeWorld({
         emissive: 0xff5522,
         emissiveIntensity: 0.7,
       })
-      const rpgSmokeGeo = new THREE.SphereGeometry(0.4, 6, 5)
+      const rpgSmokeGeo = new THREE.SphereGeometry(0.4, sseg(6), sseg(5))
       const rpgSmokeMat = new THREE.MeshBasicMaterial({
         color: 0xbbbbbb,
         transparent: true,
@@ -6723,7 +6732,7 @@ export default function ThreeWorld({
         metalness: 0.6,
       })
       const aaShellMat = new THREE.MeshBasicMaterial({ color: 0xffdd66 })
-      const aaShellGeo = new THREE.SphereGeometry(0.26, 6, 5)
+      const aaShellGeo = new THREE.SphereGeometry(0.26, sseg(6), sseg(5))
       // Canopy materials are created per-deploy (in openChute) so closeChute can
       // dispose them along with the geometry without affecting a later chute.
 
@@ -8014,7 +8023,7 @@ export default function ThreeWorld({
       // Shared terraformer gross-out assets — one sphere geometry + one glossy
       // pustule material reused across every terraformer (pustules are scaled
       // per-mesh). Dark wet red-purple with a faint glow.
-      const TERRA_PUSTULE_GEO = new THREE.SphereGeometry(1, 6, 5)
+      const TERRA_PUSTULE_GEO = new THREE.SphereGeometry(1, sseg(6), sseg(5))
       const terraPustuleMat = new THREE.MeshStandardMaterial({
         color: 0x3a0a1e,
         emissive: 0x2a0512,
@@ -9419,7 +9428,7 @@ export default function ThreeWorld({
       // `active` flag — never create/dispose per spawn. Capped.
       const BOSS_DUST_CAP = isMobileDevice ? 24 : 48 // half the dust pool on mobile
       const bossDust: { mesh: THREE.Mesh; life: number; active: boolean }[] = []
-      const bossDustGeo = new THREE.SphereGeometry(1, 6, 5)
+      const bossDustGeo = new THREE.SphereGeometry(1, sseg(6), sseg(5))
       function spawnBossDust(x: number, z: number, scale: number) {
         let d = bossDust.find((p) => !p.active)
         if (!d) {
@@ -10079,7 +10088,7 @@ export default function ThreeWorld({
         group.add(pedestal)
         // The black orb (glossy). Diameter 2m.
         const orb = new THREE.Mesh(
-          new THREE.SphereGeometry(1.0, 32, 24),
+          new THREE.SphereGeometry(1.0, sseg(32), sseg(24)),
           new THREE.MeshStandardMaterial({ color: 0x040406, roughness: 0.12, metalness: 0.85 }),
         )
         orb.position.set(0, 1.7, 0)
@@ -10106,11 +10115,11 @@ export default function ThreeWorld({
           side: THREE.DoubleSide,
         })
         const leftHalf = new THREE.Mesh(
-          new THREE.SphereGeometry(1.04, 24, 18, 0, Math.PI),
+          new THREE.SphereGeometry(1.04, sseg(24), sseg(18), 0, Math.PI),
           shellMat,
         )
         const rightHalf = new THREE.Mesh(
-          new THREE.SphereGeometry(1.04, 24, 18, Math.PI, Math.PI),
+          new THREE.SphereGeometry(1.04, sseg(24), sseg(18), Math.PI, Math.PI),
           shellMat,
         )
         leftHalf.position.copy(orb.position)
@@ -12457,8 +12466,9 @@ export default function ThreeWorld({
             mouseDeltaRef.current.y = 0
           } else if (mdx !== 0 || mdy !== 0) {
             // Base sensitivity dropped 0.002 → 0.0012 (≈40% slower default).
-            // Player can scale 0.5x–2.0x via the settings panel.
-            const sens = 0.0012 * mouseSensRef.current
+            // Player can scale 0.5x–2.0x via the settings panel. Mobile drags
+            // are coarser than a mouse, so trim touch look to 0.7× for control.
+            const sens = 0.0012 * mouseSensRef.current * (isMobileDevice ? 0.7 : 1)
             if (aaMountedRef.current) {
               // Manning the AA gun: the mouse nudges the ±30° manual barrel
               // correction (updateMountedAA owns the camera + turret).
@@ -12619,6 +12629,25 @@ export default function ThreeWorld({
         if (aaMountedRef.current) updateMountedAA(dt) // PR-G1 manned AA turret
         if (bikeSlots.length > 0) updateBikeRespawns(Date.now()) // refill taken bikes
         if (modeRef.current === "hunt") updateHunt(dt) // HUNT transfer-mission FSM
+        // HUNT room compass: rotate the on-screen arrow toward the orb (which
+        // sits at the room centre) in the player's local frame. Room phase only.
+        if (modeRef.current === "hunt" && huntCompassRef.current) {
+          const el = huntCompassRef.current
+          if (huntPhaseRef.current === "room") {
+            const dx = HUNT_ROOM.x - focalPoint.x
+            const dz = HUNT_ROOM.z - focalPoint.z
+            const cy = Math.cos(camState.yaw)
+            const sy = Math.sin(camState.yaw)
+            // forward = (-sin, -cos), screen-right = (-cos, sin)
+            const fwdComp = dx * -sy + dz * -cy
+            const rightComp = dx * -cy + dz * sy
+            const ang = Math.atan2(rightComp, fwdComp)
+            el.style.opacity = "0.9"
+            el.style.transform = `translate(-50%, -50%) rotate(${ang}rad)`
+          } else {
+            el.style.opacity = "0"
+          }
+        }
         // Projectiles run every frame (skipping risks tunnelling through targets).
         updateAAShells(dt)
         updateCrashJets(dt)
@@ -14672,13 +14701,16 @@ export default function ThreeWorld({
             ctx.save()
             ctx.translate(W / 2, W / 2)
             ctx.rotate(-camState.yaw)
-            ctx.fillStyle = "#00ff41"
-            ctx.strokeStyle = "rgba(0,0,0,0.85)"
-            ctx.lineWidth = 1
+            // White self-marker, 2× larger, with a heavy black outline so the
+            // player's own heading is always obvious at a glance.
+            ctx.fillStyle = "#ffffff"
+            ctx.strokeStyle = "rgba(0,0,0,0.9)"
+            ctx.lineWidth = 2
             ctx.beginPath()
-            ctx.moveTo(0, -5)
-            ctx.lineTo(3.5, 3)
-            ctx.lineTo(-3.5, 3)
+            ctx.moveTo(0, -10)
+            ctx.lineTo(7, 6)
+            ctx.lineTo(0, 3)
+            ctx.lineTo(-7, 6)
             ctx.closePath()
             ctx.fill()
             ctx.stroke()
@@ -15208,6 +15240,14 @@ export default function ThreeWorld({
         if (activeId !== -1) return
         const t = e.changedTouches[0]
         if (!t) return
+        // A button tap must never start a look-drag. Touch + pointer are
+        // separate event streams, so the button's onPointerDown can't stop this
+        // native touchstart — we guard on the touch target instead.
+        const tgt = e.target as HTMLElement | null
+        if (tgt?.closest("button, [data-ui]")) return
+        // Look is the RIGHT half of the screen; the left half is the movement
+        // joystick zone (clear move/look separation, no cross-talk).
+        if (t.clientX < window.innerWidth / 2) return
         e.preventDefault()
         activeId = t.identifier
         lastX = t.clientX
@@ -16778,17 +16818,26 @@ export default function ThreeWorld({
             ADS button. */}
         {!isLoading && !error && isMobile && (
           <div
+            data-ui="minimap"
+            onPointerUp={(e) => {
+              e.preventDefault()
+              e.stopPropagation()
+              setMapExpanded((v) => !v)
+            }}
             style={{
               position: "absolute",
               top: "0.5rem",
               right: "0.5rem",
-              zIndex: 20,
-              width: "62px",
-              height: "62px",
-              borderRadius: "50%",
+              zIndex: 23,
+              width: mapExpanded ? "300px" : "62px",
+              height: mapExpanded ? "300px" : "62px",
+              borderRadius: mapExpanded ? "12px" : "50%",
               overflow: "hidden",
               border: "2px solid rgba(255,255,255,0.28)",
               boxShadow: "0 0 10px rgba(0,0,0,0.7)",
+              background: mapExpanded ? "rgba(0,0,0,0.85)" : "transparent",
+              transition: "all 0.2s ease",
+              touchAction: "none",
             }}
           >
             <canvas
@@ -16802,6 +16851,34 @@ export default function ThreeWorld({
                 imageRendering: "pixelated",
               }}
             />
+            {mapExpanded && (
+              <button
+                type="button"
+                onPointerUp={(e) => {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  setMapExpanded(false)
+                }}
+                style={{
+                  position: "absolute",
+                  top: "4px",
+                  right: "4px",
+                  width: "34px",
+                  height: "34px",
+                  borderRadius: "8px",
+                  background: "rgba(0,0,0,0.6)",
+                  border: "1px solid rgba(255,255,255,0.45)",
+                  color: "#fff",
+                  fontSize: "1.1rem",
+                  fontWeight: "bold",
+                  lineHeight: 1,
+                  touchAction: "none",
+                  zIndex: 24,
+                }}
+              >
+                ✕
+              </button>
+            )}
           </div>
         )}
 
@@ -17013,6 +17090,79 @@ export default function ThreeWorld({
               </div>
             </div>
           )}
+
+        {/* ── Remaining-enemy / boss readout (top-right). Shown where the
+            top-center count is hidden — on mobile and in HUNT — so there's
+            always a clear, large "残り" tally. Sits below the minimap. */}
+        {!isLoading &&
+          !error &&
+          gamePhase === "playing" &&
+          !showMissionSelect &&
+          (isMobile || mode === "hunt") &&
+          (aliveEnemyCount > 0 || bossActive) && (
+            <div
+              style={{
+                position: "absolute",
+                top: "5rem",
+                right: "0.6rem",
+                zIndex: 21,
+                pointerEvents: "none",
+                fontFamily: "monospace",
+                textAlign: "right",
+                textShadow: "0 2px 4px rgba(0,0,0,0.95), 0 0 6px rgba(0,0,0,0.9)",
+              }}
+            >
+              {aliveEnemyCount > 0 && (
+                <div
+                  style={{
+                    color: "#ffffff",
+                    fontSize: "1.3rem",
+                    fontWeight: "bold",
+                    lineHeight: 1.1,
+                  }}
+                >
+                  残り: {aliveEnemyCount}体
+                </div>
+              )}
+              {bossActive && (
+                <div
+                  style={{
+                    color: "#ff8866",
+                    fontSize: "1.1rem",
+                    fontWeight: "bold",
+                    lineHeight: 1.2,
+                  }}
+                >
+                  BOSS HP: {Math.round(bossHpPct)}%
+                </div>
+              )}
+            </div>
+          )}
+
+        {/* ── HUNT compass: arrow rotates toward the transfer-room orb (room
+            phase). Orientation + opacity are driven from the animate loop via
+            huntCompassRef. */}
+        {!isLoading && !error && gamePhase === "playing" && mode === "hunt" && (
+          <div
+            ref={huntCompassRef}
+            style={{
+              position: "absolute",
+              top: "38%",
+              left: "50%",
+              transform: "translate(-50%, -50%)",
+              zIndex: 21,
+              pointerEvents: "none",
+              opacity: 0,
+              transition: "opacity 0.2s",
+              color: "#00ff66",
+              fontSize: "2.4rem",
+              lineHeight: 1,
+              textShadow: "0 0 10px rgba(0,255,80,0.9), 0 2px 4px rgba(0,0,0,0.9)",
+            }}
+          >
+            ▲
+          </div>
+        )}
 
         {/* ── Kill feed (right side; shifted left on mobile so action buttons stay clear) */}
         {!isLoading && !error && killFeed.length > 0 && (
@@ -17935,6 +18085,7 @@ export default function ThreeWorld({
               type="button"
               onPointerDown={(e) => {
                 e.preventDefault()
+                e.stopPropagation()
                 mouseDownRef.current = true
               }}
               onPointerUp={(e) => {
@@ -18072,6 +18223,7 @@ export default function ThreeWorld({
               type="button"
               onPointerDown={(e) => {
                 e.preventDefault()
+                e.stopPropagation()
                 // HUNT weapon reload routes through its own request ref.
                 if (modeRef.current === "hunt" && huntWeaponRef.current) {
                   huntReloadReqRef.current = true
@@ -18131,6 +18283,7 @@ export default function ThreeWorld({
                 type="button"
                 onPointerDown={(e) => {
                   e.preventDefault()
+                  e.stopPropagation()
                   isAimingRef.current = true
                   setIsAiming(true)
                 }}
@@ -18176,6 +18329,7 @@ export default function ThreeWorld({
               type="button"
               onPointerDown={(e) => {
                 e.preventDefault()
+                e.stopPropagation()
                 const now = Date.now()
                 if (now - lastGrenadeRef.current > 5000) {
                   lastGrenadeRef.current = now
@@ -18249,6 +18403,7 @@ export default function ThreeWorld({
                     key={isCannon ? "cannon" : idx}
                     onPointerDown={(e) => {
                       e.preventDefault()
+                      e.stopPropagation()
                       if (isCannon) {
                         cannonModeRef.current = true
                         setCannonActive(true)
