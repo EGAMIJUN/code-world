@@ -152,6 +152,13 @@ const ENEMY_JET_ATTACK_RANGE = 100
 const ENEMY_JET_GUN_COOLDOWN_MS = 150
 const ENEMY_JET_GUN_DAMAGE = 6
 const ENEMY_JET_TURN = 0.7 // rad/s steering toward the target
+// Ground-strafe runs: when the player is on foot, bandits occasionally dive and
+// machine-gun the ground before pulling back up.
+const ENEMY_JET_STRAFE_INTERVAL_MS = 20000 // ~one strafing run per jet per 20s
+const ENEMY_JET_STRAFE_DAMAGE = 15 // per strafing hit on the on-foot player
+const ENEMY_JET_STRAFE_DIVE_ALT = 12 // dive target altitude (noses down at the player)
+const ENEMY_JET_STRAFE_PULLUP_ALT = 24 // break off + climb once this low
+const ENEMY_JET_STRAFE_RANGE = 260 // only begins a run if the player is within this
 // ── PR-G1: ground anti-air (jet hitscan fix, mountable AA gun, RPG) ──────────
 // Ground weapons engage jets out to here. The fire() raycaster is otherwise
 // unbounded, but jets are small, fast aerial targets — a pixel-perfect centre
@@ -2564,7 +2571,10 @@ export default function ThreeWorld({
         typeof navigator !== "undefined" && /iPhone|iPad|iPod|Android/i.test(navigator.userAgent)
       // Halve sphere/cylinder tessellation on mobile (fewer verts per draw on
       // the many reused/instanced geometries). Floored to a sane minimum.
-      const sseg = (n: number) => (isMobileDevice ? Math.max(4, Math.floor(n / 2)) : n)
+      // Gentle tessellation trim on mobile — 0.75× (not 0.5×), floored at 6, so
+      // spheres stay round. Vehicles keep their full segment counts (they read
+      // up close). Bigger perf wins live elsewhere (pixel ratio, shadows, AI).
+      const sseg = (n: number) => (isMobileDevice ? Math.max(6, Math.round(n * 0.75)) : n)
       const theme = isHunt
         ? // HUNT: a dark night version of the urban map (also lights the room).
           { sky: 0x05060a, fog: 0x070810, ambient: 0x2a3550, sun: 0x3a4a78 }
@@ -2701,9 +2711,11 @@ export default function ThreeWorld({
       // ~2.5× pixel count of desktop while having a fraction of the GPU.
       const isTouch = typeof navigator !== "undefined" && navigator.maxTouchPoints > 0
       renderer.setPixelRatio(
-        // Render at native 1.0 on phones/tablets — the single biggest fill-rate
-        // win. Desktop keeps the retina cap.
-        Math.min(window.devicePixelRatio, isTouch || isMobileDevice ? 1.0 : 1.75),
+        // 1.0 was too soft (vehicles looked jagged); 1.5 restores legible detail
+        // while still rendering ~2.25× fewer pixels than native retina. The
+        // savings now come from shadows-off + shorter draw distance + half-rate
+        // AI rather than from undersampling the whole frame.
+        Math.min(window.devicePixelRatio, isTouch || isMobileDevice ? 1.5 : 2.0),
       )
       // Shadow maps are an expensive extra depth pass — off on mobile.
       renderer.shadowMap.enabled = !isMobileDevice
@@ -5079,7 +5091,9 @@ export default function ThreeWorld({
         const unitBox = new THREE.BoxGeometry(1, 1, 1)
         const containerGeo = new THREE.BoxGeometry(6, 2.6, 2.5) // long axis = X
         const chimneyGeo = new THREE.CylinderGeometry(0.9, 1.25, 16, 12)
-        const tankSphereGeo = new THREE.SphereGeometry(3.2, sseg(16), sseg(12))
+        // Vehicle geometry keeps full tessellation — it's seen up close, so a
+        // faceted tank reads as a quality bug.
+        const tankSphereGeo = new THREE.SphereGeometry(3.2, 16, 12)
         const tankCylGeo = new THREE.CylinderGeometry(2.4, 2.4, 6, 16)
         const fencePostGeo = new THREE.BoxGeometry(0.12, 1.7, 0.12)
         const fenceRailGeo = new THREE.BoxGeometry(1, 0.1, 0.1)
@@ -6778,12 +6792,13 @@ export default function ThreeWorld({
         speed: number
         hp: number
         dead: boolean
-        state: "patrol" | "chase" | "attack" | "evade"
+        state: "patrol" | "chase" | "attack" | "evade" | "ground_strafe"
         stateUntil: number
         nextFire: number
         evadeYaw: number
         wpIndex: number
         noCrashUntil: number
+        nextGroundStrafe: number // ms timestamp the next ground-strafe run is allowed
       }
       const enemyJets: EnemyJet[] = []
       interface CrashJet {
@@ -7149,6 +7164,8 @@ export default function ThreeWorld({
           // Altitude spawns get a short grace so the bounds / collision check
           // can't kill them on the very first frame; ground launches get longer.
           noCrashUntil: Date.now() + (y > 5 ? 3000 : 4500),
+          // Stagger the first strafe (8–18s) so a flight doesn't dive in unison.
+          nextGroundStrafe: Date.now() + 8000 + Math.random() * 10000,
         })
       }
 
@@ -7178,7 +7195,26 @@ export default function ThreeWorld({
           const pdist = jet ? Math.hypot(pdx, pdy, pdz) : Number.POSITIVE_INFINITY
           if (ej.state === "evade" && now > ej.stateUntil) ej.state = "patrol"
           if (!jet) {
-            if (ej.state !== "evade") ej.state = "patrol"
+            // Player is on foot (or in a ground vehicle). Patrol, but peel off
+            // into a strafing run on a timer when they're within range. SKY is
+            // excluded (no ground to strafe there).
+            if (ej.state === "ground_strafe") {
+              // keep strafing — the pull-up check below ends the run
+            } else if (ej.state !== "evade") {
+              const fhoriz = Math.hypot(focalPoint.x - ej.x, focalPoint.z - ej.z)
+              if (
+                !isSky &&
+                gamePhaseRef.current === "playing" &&
+                now > ej.nextGroundStrafe &&
+                now > ej.noCrashUntil &&
+                fhoriz < ENEMY_JET_STRAFE_RANGE
+              ) {
+                ej.state = "ground_strafe"
+                ej.nextGroundStrafe = now + ENEMY_JET_STRAFE_INTERVAL_MS + Math.random() * 10000
+              } else {
+                ej.state = "patrol"
+              }
+            }
           } else if (ej.state !== "evade") {
             // Facing test for ATTACK.
             const fwd = new THREE.Vector3(
@@ -7196,6 +7232,11 @@ export default function ThreeWorld({
             tx = ej.x + -Math.sin(ej.evadeYaw) * 100
             ty = ej.y + 6
             tz = ej.z + -Math.cos(ej.evadeYaw) * 100
+          } else if (ej.state === "ground_strafe") {
+            // Dive toward a low point at the player so the nose drops onto them.
+            tx = focalPoint.x
+            ty = ENEMY_JET_STRAFE_DIVE_ALT
+            tz = focalPoint.z
           } else if (ej.state === "patrol" || !jet) {
             const wp = ENEMY_JET_WAYPOINTS[ej.wpIndex % ENEMY_JET_WAYPOINTS.length] ?? [0, 40, 150]
             tx = wp[0]
@@ -7267,6 +7308,43 @@ export default function ThreeWorld({
               damage: 0,
             })
             if (Math.random() < 0.6) damageActiveVehicle(ENEMY_JET_GUN_DAMAGE, "bullet")
+          }
+          // GROUND_STRAFE fire: machine-gun the ground player on the dive, then
+          // pull up + break off once low enough (climbs away as "evade").
+          if (ej.state === "ground_strafe") {
+            if (ej.y <= ENEMY_JET_STRAFE_PULLUP_ALT) {
+              ej.state = "evade"
+              ej.stateUntil = now + 3500
+              ej.evadeYaw = ej.heading
+            } else if (now > ej.nextFire) {
+              ej.nextFire = now + ENEMY_JET_GUN_COOLDOWN_MS
+              const muzzle = new THREE.Vector3(ej.x + fx * 3, ej.y + fy * 3, ej.z + fz * 3)
+              const dir = new THREE.Vector3(
+                focalPoint.x - ej.x,
+                // Aim at the player's torso at their actual altitude (foot Y +
+                // ~1.0), so a strafe lined up on a player on a roof / ledge
+                // instead of always raking near the ground.
+                focalPoint.y + 1.0 - ej.y,
+                focalPoint.z - ej.z,
+              ).normalize()
+              const tracer = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.06, 2.0), jetTracerMat)
+              tracer.position.copy(muzzle)
+              tracer.lookAt(muzzle.clone().add(dir))
+              scene.add(tracer)
+              bullets.push({
+                mesh: tracer,
+                velocity: dir.clone().multiplyScalar(180),
+                life: 0.5,
+                isEnemy: false,
+                damage: 0,
+              })
+              // Land hits when the run passes close overhead. applyPlayerDamage
+              // routes to a ridden vehicle if the player is driving one.
+              const fhoriz = Math.hypot(focalPoint.x - ej.x, focalPoint.z - ej.z)
+              if (fhoriz < 30 && Math.random() < 0.4) {
+                applyPlayerDamage(ENEMY_JET_STRAFE_DAMAGE, 4)
+              }
+            }
           }
         }
       }
@@ -15240,14 +15318,14 @@ export default function ThreeWorld({
         if (activeId !== -1) return
         const t = e.changedTouches[0]
         if (!t) return
-        // A button tap must never start a look-drag. Touch + pointer are
-        // separate event streams, so the button's onPointerDown can't stop this
-        // native touchstart — we guard on the touch target instead.
+        // A button / UI tap (buttons, the move stick, the minimap — all tagged
+        // button or [data-ui]) must never start a look-drag. Touch + pointer are
+        // separate event streams, so a button's onPointerDown can't stop this
+        // native touchstart — we guard on the touch target instead. Everywhere
+        // else on screen (the whole canvas) is fair game for looking, so the
+        // player can always turn right past the right-side action buttons.
         const tgt = e.target as HTMLElement | null
         if (tgt?.closest("button, [data-ui]")) return
-        // Look is the RIGHT half of the screen; the left half is the movement
-        // joystick zone (clear move/look separation, no cross-talk).
-        if (t.clientX < window.innerWidth / 2) return
         e.preventDefault()
         activeId = t.identifier
         lastX = t.clientX
@@ -16842,8 +16920,11 @@ export default function ThreeWorld({
           >
             <canvas
               ref={minimapRef}
-              width={92}
-              height={92}
+              // Match the buffer resolution to the expanded display size so the
+              // minimap is drawn sharp (the draw reads canvas.width), instead of
+              // CSS-stretching a 92px buffer to 300px (blurry).
+              width={mapExpanded ? 300 : 92}
+              height={mapExpanded ? 300 : 92}
               style={{
                 display: "block",
                 width: "100%",
@@ -18038,6 +18119,7 @@ export default function ThreeWorld({
         {isMobile && !isLoading && !error && (
           <div
             ref={joyContainerRef}
+            data-ui="joystick"
             style={{
               position: "absolute",
               bottom: isLandscape ? "0.6rem" : "1.2rem",
