@@ -578,7 +578,7 @@ interface HuntLevel {
 }
 // Per-theme minion spec — reuse an existing enemy model with a colour/scale
 // tweak. base = model, tint = body recolour, eyes = eye-glow colour.
-type HuntCreatureKind = "fleshball" | "tall" | "multihead"
+type HuntCreatureKind = "leek" | "fleshball" | "tall" | "multihead"
 const HUNT_THEMES: Record<
   HuntTheme,
   {
@@ -598,9 +598,9 @@ const HUNT_THEMES: Record<
   // B: tall blank-faced creeper (fast). C: multi-headed beast (big, tanky).
   A: {
     base: "grunt",
-    creature: "fleshball",
-    tint: 0xb88a86,
-    eyes: 0xff2020,
+    creature: "leek",
+    tint: 0xf5f5f5, // white bulb body
+    eyes: 0xff0000, // glowing red eyes
     scale: 1.0,
     points: 2,
     hp: 70,
@@ -630,19 +630,19 @@ const HUNT_THEMES: Record<
 const HUNT_LEVELS: HuntLevel[] = [
   {
     level: 1,
-    timeLimitSec: 900,
+    timeLimitSec: 720, // 12 min — fewer minions, so leave room for the boss fight
     theme: "A",
-    zakoCount: 15,
+    zakoCount: 8, // lighter wave of leek-aliens
     bossHp: 1500,
     bossScale: 3.0,
     bossScore: 30,
     boss: "charge",
     shrink: false,
     target: {
-      name: "解体屋 ボロウ",
-      trait: "黒ずくめの大男・右腕が義手",
-      likes: "錆びた鉄と他人の悲鳴",
-      phrase: "「片付けの時間だ」",
+      name: "白葱の主 ネブロ",
+      trait: "白い球根の胴・揺れる長い緑葉",
+      likes: "湿った畑と夜の静寂",
+      phrase: "「刈り取りの時間だ」",
     },
   },
   {
@@ -10106,9 +10106,15 @@ export default function ThreeWorld({
       const huntBlobGeo = new THREE.SphereGeometry(1, sseg(8), sseg(6))
       const huntBoxGeo = new THREE.BoxGeometry(1, 1, 1)
       const huntConeGeo = new THREE.ConeGeometry(1, 1, sseg(6))
-      // Build one of three original creature bodies, sized ~1.5–2.2 units tall
-      // (the enemy root scale resizes it). Returns the group + animation handles.
-      function makeHuntCreature(kind: HuntCreatureKind, bodyColor: number, eyeColor: number) {
+      const huntStalkGeo = new THREE.CylinderGeometry(0.5, 0.32, 1, sseg(6)) // tapered leaf/root
+      // Build one original creature body, sized ~1.5–2.2 units tall (the enemy
+      // root scale resizes it). Returns the group + animation handles.
+      function makeHuntCreature(
+        kind: HuntCreatureKind,
+        bodyColor: number,
+        eyeColor: number,
+        isBoss: boolean,
+      ) {
         const group = new THREE.Group()
         const bodyMat = new THREE.MeshStandardMaterial({
           color: bodyColor,
@@ -10135,7 +10141,61 @@ export default function ThreeWorld({
           m.scale.setScalar(r)
           parent.add(m)
         }
-        if (kind === "fleshball") {
+        if (kind === "leek") {
+          // "Leek-alien": a white bulb body on thin roots, with long green
+          // leaves that sway from the top, and glowing red eyes. The boss is
+          // the same shape with more, thicker leaves and twice the eyes.
+          const greenMat = new THREE.MeshStandardMaterial({
+            color: 0x228b22,
+            roughness: 0.7,
+            metalness: 0,
+          })
+          // White bulb body.
+          const bulb = new THREE.Mesh(huntBlobGeo, bodyMat)
+          bulb.position.y = 0.55
+          bulb.scale.set(0.5, 0.62, 0.5)
+          group.add(bulb)
+          twitch.push(bulb)
+          // Thin roots splaying down from the bulb.
+          for (let i = 0; i < 5; i++) {
+            const a = (i / 5) * Math.PI * 2
+            const root = new THREE.Mesh(huntStalkGeo, bodyMat)
+            root.scale.set(0.06, 0.4, 0.06)
+            root.position.set(Math.cos(a) * 0.18, 0.1, Math.sin(a) * 0.18)
+            root.rotation.set(Math.sin(a) * 0.5, 0, -Math.cos(a) * 0.5)
+            group.add(root)
+          }
+          // Long green leaves, pivoted at the bulb top so they sway (stored in
+          // `heads` → animated by updateHuntCreatures). Tips bend slightly.
+          const leafCount = isBoss ? 6 : 3
+          const thick = isBoss ? 0.13 : 0.08
+          const leafLen = isBoss ? 1.3 : 1.0
+          for (let i = 0; i < leafCount; i++) {
+            const a = (i / leafCount) * Math.PI * 2
+            const leaf = new THREE.Group()
+            leaf.position.set(Math.cos(a) * 0.12, 0.95, Math.sin(a) * 0.12)
+            leaf.rotation.z = Math.cos(a) * 0.18
+            leaf.rotation.x = Math.sin(a) * 0.18
+            const blade = new THREE.Mesh(huntStalkGeo, greenMat)
+            blade.scale.set(thick, leafLen, thick)
+            blade.position.y = leafLen / 2
+            leaf.add(blade)
+            const tip = new THREE.Mesh(huntStalkGeo, greenMat)
+            tip.scale.set(thick * 0.7, leafLen * 0.5, thick * 0.7)
+            tip.position.set(0, leafLen * 0.95, 0.08)
+            tip.rotation.x = 0.5
+            leaf.add(tip)
+            group.add(leaf)
+            heads.push(leaf)
+          }
+          // Glowing red eyes on the bulb front (-z, the enemy facing axis).
+          const eyeCount = isBoss ? 4 : 2
+          const eyeR = isBoss ? 0.07 : 0.055
+          for (let i = 0; i < eyeCount; i++) {
+            const ex = (i - (eyeCount - 1) / 2) * 0.13
+            addEye(group, ex, 0.6, -0.46, eyeR)
+          }
+        } else if (kind === "fleshball") {
           // A lump of pale meat covered in eyes + maws, crawling on stubby tentacles.
           const core = new THREE.Mesh(huntBlobGeo, bodyMat)
           core.position.y = 0.95
@@ -10308,7 +10368,7 @@ export default function ThreeWorld({
         // (the skeleton still drives AI + death), then ride a creature on the
         // root. The eyes glow strongly for night visibility (boss brighter).
         for (const c of e.mesh.children) c.visible = false
-        const cr = makeHuntCreature(creatureKind, tint, eyes)
+        const cr = makeHuntCreature(creatureKind, tint, eyes, isBoss)
         for (const m of cr.eyeMats) m.emissiveIntensity = isBoss ? 5.0 : 3.0
         e.mesh.add(cr.group)
         e.huntCreature = {
@@ -10702,7 +10762,36 @@ export default function ThreeWorld({
           const sx = 160
           const sy = 250
           // Original monster silhouette per creature theme.
-          if (th.creature === "fleshball") {
+          if (th.creature === "leek") {
+            // White bulb + long leaves + roots (drawn in CRT green).
+            ctx.beginPath()
+            ctx.ellipse(sx, sy + 40, 48, 60, 0, 0, Math.PI * 2)
+            ctx.fill()
+            ctx.lineWidth = 12
+            for (let i = 0; i < 5; i++) {
+              const x = sx - 40 + i * 20
+              ctx.beginPath()
+              ctx.moveTo(x, sy - 10)
+              ctx.lineTo(x + (i - 2) * 14, sy - 180)
+              ctx.stroke()
+            }
+            ctx.lineWidth = 6
+            for (let i = 0; i < 4; i++) {
+              const x = sx - 30 + i * 20
+              ctx.beginPath()
+              ctx.moveTo(x, sy + 95)
+              ctx.lineTo(x + (i - 1.5) * 8, sy + 165)
+              ctx.stroke()
+            }
+            ctx.fillStyle = "#04140a"
+            ctx.beginPath()
+            ctx.arc(sx - 16, sy + 30, 7, 0, Math.PI * 2)
+            ctx.fill()
+            ctx.beginPath()
+            ctx.arc(sx + 16, sy + 30, 7, 0, Math.PI * 2)
+            ctx.fill()
+            ctx.fillStyle = green
+          } else if (th.creature === "fleshball") {
             ctx.beginPath()
             ctx.arc(sx, sy - 20, 78, 0, Math.PI * 2)
             ctx.fill()
@@ -10769,11 +10858,13 @@ export default function ThreeWorld({
             }
           }
           const weak =
-            th.creature === "fleshball"
-              ? "群がる眼を狙え"
-              : th.creature === "tall"
-                ? "細い首・関節が脆い"
-                : "各頭を潰せ"
+            th.creature === "leek"
+              ? "白い球根が本体"
+              : th.creature === "fleshball"
+                ? "群がる眼を狙え"
+                : th.creature === "tall"
+                  ? "細い首・関節が脆い"
+                  : "各頭を潰せ"
           ctx.textAlign = "left"
           ctx.fillStyle = green
           ctx.font = "bold 42px monospace"
