@@ -633,8 +633,8 @@ const HUNT_LEVELS: HuntLevel[] = [
     timeLimitSec: 720, // 12 min — fewer minions, so leave room for the boss fight
     theme: "A",
     zakoCount: 8, // lighter wave of leek-aliens
-    bossHp: 1500,
-    bossScale: 3.0,
+    bossHp: 3000,
+    bossScale: 5.0, // ~5× a minion → a screen-filling ~7.5m elder leek
     bossScore: 30,
     boss: "charge",
     shrink: false,
@@ -1673,9 +1673,14 @@ interface CombatEnemy {
     eyeMats: THREE.MeshStandardMaterial[]
     twitch: THREE.Object3D[]
     heads: THREE.Object3D[]
+    bodyMats: THREE.MeshStandardMaterial[] // recolourable body/leaf mats (rage)
     phase: number
     nextJerk: number
   }
+  // Lv1 elder-leek boss: rise-from-ground intro + rage state.
+  huntRising?: boolean
+  huntRiseStart?: number
+  huntRaged?: boolean
 
   // ── Aggressive-AI fields ────────────────────────────────────────────────
   // Until-when this enemy reacts to *external* stimulus (heard a shot or
@@ -10135,6 +10140,7 @@ export default function ThreeWorld({
         const eyeMats = [eyeMat]
         const twitch: THREE.Object3D[] = []
         const heads: THREE.Object3D[] = []
+        const bodyMats: THREE.MeshStandardMaterial[] = []
         const addEye = (parent: THREE.Object3D, x: number, y: number, z: number, r: number) => {
           const m = new THREE.Mesh(huntEyeGeo, eyeMat)
           m.position.set(x, y, z)
@@ -10143,33 +10149,44 @@ export default function ThreeWorld({
         }
         if (kind === "leek") {
           // "Leek-alien": a white bulb body on thin roots, with long green
-          // leaves that sway from the top, and glowing red eyes. The boss is
-          // the same shape with more, thicker leaves and twice the eyes.
+          // leaves that sway from the top, and glowing red eyes. The boss is a
+          // hulking elder: more, thicker, sharp-tipped leaves, a wide root mass,
+          // six eyes and a faint sickly body glow.
           const greenMat = new THREE.MeshStandardMaterial({
             color: 0x228b22,
             roughness: 0.7,
             metalness: 0,
+            emissive: isBoss ? 0x002200 : 0x000000,
+            emissiveIntensity: isBoss ? 0.5 : 0,
           })
+          bodyMats.push(greenMat)
+          if (isBoss) {
+            bodyMat.emissive.setHex(0x002200) // faint full-body glow on the elder
+            bodyMat.emissiveIntensity = 0.35
+          }
           // White bulb body.
           const bulb = new THREE.Mesh(huntBlobGeo, bodyMat)
           bulb.position.y = 0.55
           bulb.scale.set(0.5, 0.62, 0.5)
           group.add(bulb)
           twitch.push(bulb)
-          // Thin roots splaying down from the bulb.
-          for (let i = 0; i < 5; i++) {
-            const a = (i / 5) * Math.PI * 2
+          // Roots splaying down from the bulb — a wide, planted mass on the boss.
+          const rootCount = isBoss ? 6 : 5
+          const rootThick = isBoss ? 0.11 : 0.06
+          const rootSpread = isBoss ? 0.34 : 0.18
+          for (let i = 0; i < rootCount; i++) {
+            const a = (i / rootCount) * Math.PI * 2
             const root = new THREE.Mesh(huntStalkGeo, bodyMat)
-            root.scale.set(0.06, 0.4, 0.06)
-            root.position.set(Math.cos(a) * 0.18, 0.1, Math.sin(a) * 0.18)
-            root.rotation.set(Math.sin(a) * 0.5, 0, -Math.cos(a) * 0.5)
+            root.scale.set(rootThick, 0.5, rootThick)
+            root.position.set(Math.cos(a) * rootSpread, 0.08, Math.sin(a) * rootSpread)
+            root.rotation.set(Math.sin(a) * 0.7, 0, -Math.cos(a) * 0.7)
             group.add(root)
           }
           // Long green leaves, pivoted at the bulb top so they sway (stored in
-          // `heads` → animated by updateHuntCreatures). Tips bend slightly.
-          const leafCount = isBoss ? 6 : 3
-          const thick = isBoss ? 0.13 : 0.08
-          const leafLen = isBoss ? 1.3 : 1.0
+          // `heads` → animated by updateHuntCreatures). Sharp tips on the boss.
+          const leafCount = isBoss ? 8 : 3
+          const thick = isBoss ? 0.17 : 0.08
+          const leafLen = isBoss ? 1.5 : 1.0
           for (let i = 0; i < leafCount; i++) {
             const a = (i / leafCount) * Math.PI * 2
             const leaf = new THREE.Group()
@@ -10180,20 +10197,23 @@ export default function ThreeWorld({
             blade.scale.set(thick, leafLen, thick)
             blade.position.y = leafLen / 2
             leaf.add(blade)
-            const tip = new THREE.Mesh(huntStalkGeo, greenMat)
-            tip.scale.set(thick * 0.7, leafLen * 0.5, thick * 0.7)
-            tip.position.set(0, leafLen * 0.95, 0.08)
-            tip.rotation.x = 0.5
+            // Sharp pointed tip (cone) — a blade that can sweep.
+            const tip = new THREE.Mesh(huntConeGeo, greenMat)
+            tip.scale.set(thick * 1.1, leafLen * (isBoss ? 0.55 : 0.4), thick * 1.1)
+            tip.position.set(0, leafLen * 1.05, 0.06)
+            tip.rotation.x = 0.4
             leaf.add(tip)
             group.add(leaf)
             heads.push(leaf)
           }
           // Glowing red eyes on the bulb front (-z, the enemy facing axis).
-          const eyeCount = isBoss ? 4 : 2
-          const eyeR = isBoss ? 0.07 : 0.055
+          const eyeCount = isBoss ? 6 : 2
+          const eyeR = isBoss ? 0.06 : 0.055
           for (let i = 0; i < eyeCount; i++) {
-            const ex = (i - (eyeCount - 1) / 2) * 0.13
-            addEye(group, ex, 0.6, -0.46, eyeR)
+            const row = i < 3 ? 0 : 1
+            const col = i % 3
+            const ex = (col - 1) * 0.16
+            addEye(group, ex, 0.66 - row * 0.16, -0.46, eyeR)
           }
         } else if (kind === "fleshball") {
           // A lump of pale meat covered in eyes + maws, crawling on stubby tentacles.
@@ -10328,7 +10348,7 @@ export default function ThreeWorld({
             addEye(headG, 0.06, 0.05, -0.18, 0.04)
           }
         }
-        return { group, eyeMats, twitch, heads }
+        return { group, eyeMats, twitch, heads, bodyMats }
       }
       // Build one themed minion / boss, push it into `enemies`, return it.
       function huntMakeEnemy(
@@ -10375,6 +10395,7 @@ export default function ThreeWorld({
           eyeMats: cr.eyeMats,
           twitch: cr.twitch,
           heads: cr.heads,
+          bodyMats: cr.bodyMats,
           phase: Math.random() * Math.PI * 2,
           nextJerk: Date.now() + 1000 + Math.random() * 3000,
         }
@@ -10421,6 +10442,9 @@ export default function ThreeWorld({
       // Warm "sunrise through the window" key light — on in the room, off during
       // a mission (toggled in updateHunt) so it doesn't tint the night arena.
       let huntRoomSun: THREE.DirectionalLight | null = null
+      // Lv1 elder-leek boss handle + a one-shot death-FX guard.
+      let huntLeekBoss: CombatEnemy | null = null
+      let huntLeekBossFxDone = false
       function buildHuntRoom() {
         const cx = HUNT_ROOM.x
         const cz = HUNT_ROOM.z
@@ -11004,7 +11028,7 @@ export default function ThreeWorld({
         // It's a giant version of the level's creature (its eyes tinted red).
         const bossBase: EnemyType = lv.boss === "ranged_summon" ? "grunt" : "terraformer"
         const bsafe = findSafeSpawnNear(HUNT_ARENA.x, HUNT_ARENA.z - 60, ENEMY_RADIUS)
-        huntMakeEnemy(
+        const bossEnt = huntMakeEnemy(
           bossBase,
           bsafe.x,
           bsafe.z,
@@ -11013,11 +11037,26 @@ export default function ThreeWorld({
           0xff2200,
           lv.bossScore,
           Math.round(lv.bossHp * hpScale),
-          lv.boss === "aoe_fast" ? 5.5 : 3.0,
+          // The elder leek charges fast enough to run a fleeing player down.
+          lv.boss === "aoe_fast" ? 5.5 : lv.boss === "charge" ? 5.0 : 3.0,
           true,
           lv.target.name,
           th.creature,
         )
+        // Lv1 elder leek: emerge from the ground over 1.5s, then attack on a
+        // 3–5s cadence (set up + tracked in updateHunt).
+        huntLeekBoss = null
+        huntLeekBossFxDone = false
+        if (lv.boss === "charge") {
+          bossEnt.huntRising = true
+          bossEnt.huntRiseStart = Date.now()
+          bossEnt.huntRaged = false
+          bossEnt.huntNextSpecial = Date.now() + 3000
+          bossEnt.mesh.position.y = -5
+          huntLeekBoss = bossEnt
+          SOUNDS.huntOrbOpen()
+          cameraShakeRef.current.intensity = 8
+        }
         setAliveEnemyCount(enemies.filter((e) => e.hp > 0).length)
         // Boundary + timer.
         huntRadiusRef.current = HUNT_BASE_RADIUS
@@ -11708,6 +11747,93 @@ export default function ThreeWorld({
               )
               if (bd < 9 && Date.now() > spawnInvulnUntilRef.current) applyPlayerDamage(26, 5)
               boss.huntNextSpecial = now + 6000
+            } else if (lv.boss === "charge" && !boss.huntRising) {
+              // Elder leek: cycle three telegraphed attacks. Each shows a tell
+              // now, then checks range ~0.45s later so it can be dodged. Faster
+              // cadence + harder hits once enraged.
+              const raged = boss.huntRaged === true
+              boss.huntNextSpecial =
+                now + (raged ? 1800 + Math.random() * 1400 : 3000 + Math.random() * 2000)
+              const atk = Math.floor(Math.random() * 3)
+              const hit = (radius: number, dmg: number, delay: number) => {
+                window.setTimeout(() => {
+                  if (gamePhaseRef.current !== "playing" || boss.hp <= 0) return
+                  if (Date.now() <= spawnInvulnUntilRef.current) return
+                  const d = Math.hypot(
+                    focalPoint.x - boss.mesh.position.x,
+                    focalPoint.z - boss.mesh.position.z,
+                  )
+                  if (d < radius) applyPlayerDamage(dmg, 7)
+                }, delay)
+              }
+              if (atk === 0) {
+                // Leaf sweep — wide 5m AOE, 40 dmg.
+                spawnExplosion(boss.mesh.position.clone(), true)
+                SOUNDS.huntWarn()
+                cameraShakeRef.current.intensity = 4
+                hit(5, 40, 450)
+              } else if (atk === 1) {
+                // Charge — a fast lunge (dash burst) + 50 dmg on contact.
+                boss.dashUntil = now + 900
+                SOUNDS.huntOrbOpen()
+                cameraShakeRef.current.intensity = 5
+                hit(6, 50, 520)
+              } else {
+                // Root stomp — tight 3m ground AOE, 30 dmg.
+                spawnExplosion(boss.mesh.position.clone())
+                SOUNDS.bossStomp()
+                cameraShakeRef.current.intensity = 6
+                hit(3, 30, 420)
+              }
+            }
+          }
+          // Elder leek per-frame: emerge from the ground, enrage at 50% HP, and
+          // a chained death blast when it finally falls.
+          if (lv?.boss === "charge" && huntLeekBoss) {
+            const lb = huntLeekBoss
+            if (lb.hp <= 0) {
+              if (!huntLeekBossFxDone) {
+                huntLeekBossFxDone = true
+                const c = lb.mesh.position.clone()
+                for (let i = 0; i < 5; i++) {
+                  window.setTimeout(() => {
+                    spawnExplosion(
+                      new THREE.Vector3(
+                        c.x + (Math.random() - 0.5) * 5,
+                        1 + Math.random() * 4,
+                        c.z + (Math.random() - 0.5) * 5,
+                      ),
+                    )
+                  }, i * 140)
+                }
+                huntGreenSplatter(c)
+                cameraShakeRef.current.intensity = 14
+                SOUNDS.bossRoar()
+              }
+              huntLeekBoss = null
+            } else {
+              if (lb.huntRising) {
+                const t = (now - (lb.huntRiseStart ?? now)) / 1500
+                lb.mesh.position.y = -5 + 5 * Math.min(1, t)
+                if (t >= 1) {
+                  lb.huntRising = false
+                  lb.mesh.position.y = 0
+                }
+              }
+              if (!lb.huntRaged && lb.hp <= lb.maxHp * 0.5) {
+                lb.huntRaged = true
+                lb.config = { ...lb.config, speed: lb.config.speed * 1.3 }
+                const cr = lb.huntCreature
+                if (cr) {
+                  for (const m of cr.bodyMats) {
+                    m.color.setHex(0x1a0000)
+                    m.emissive.setHex(0x1a0000)
+                  }
+                }
+                cameraShakeRef.current.intensity = 7
+                SOUNDS.bossRoar()
+                showNotification("最強成体ネギ異体 — 激昂")
+              }
             }
           }
           // Timer (Lv1/Lv2): survive → return with the bank forfeited.
@@ -11901,6 +12027,28 @@ export default function ThreeWorld({
             velocity: vel,
             life: PARTICLE_LIFETIME,
             maxLife: PARTICLE_LIFETIME,
+          })
+        }
+      }
+      // Green ichor burst — the elder leek's death splatter (reuses the blood
+      // particle pool + update with a green tint).
+      function huntGreenSplatter(pos: THREE.Vector3) {
+        const n = isTouch ? 16 : 30
+        for (let i = 0; i < n; i++) {
+          const geo = new THREE.SphereGeometry(0.06 + Math.random() * 0.09, 5, 4)
+          const mat = new THREE.MeshBasicMaterial({ color: i % 2 ? 0x33cc33 : 0x6aff44 })
+          const mesh = new THREE.Mesh(geo, mat)
+          mesh.position.set(pos.x, pos.y + 1 + Math.random() * 2.5, pos.z)
+          scene.add(mesh)
+          bloodParticles.push({
+            mesh,
+            velocity: new THREE.Vector3(
+              (Math.random() - 0.5) * 8,
+              Math.random() * 6 + 2,
+              (Math.random() - 0.5) * 8,
+            ),
+            life: PARTICLE_LIFETIME * 1.6,
+            maxLife: PARTICLE_LIFETIME * 1.6,
           })
         }
       }
@@ -14158,6 +14306,9 @@ export default function ThreeWorld({
             // ── PR motorcycle: terraformer bike-charge ───────────────────────
             // Riders are driven by updateBikeRiders — skip their on-foot AI.
             if (enemy.riding) continue
+            // The elder leek boss stays planted while it rises from the ground
+            // (updateHunt drives its emerging Y) — skip its on-foot AI.
+            if (enemy.huntRising) continue
             // A terraformer with the player far off peels away to grab a free
             // bike (WALK → RIDE). If the player closes in, abandon the claim
             // and fight on foot.
