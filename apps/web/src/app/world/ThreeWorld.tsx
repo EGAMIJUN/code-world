@@ -573,12 +573,23 @@ interface HuntLevel {
   bossScale: number
   bossScore: number
   boss: "charge" | "ranged_summon" | "aoe_fast"
+  // Dedicated original boss shape for this level (distinct from the theme's
+  // minion creature). Falls back to the minion creature if omitted.
+  bossCreature: HuntCreatureKind
   shrink: boolean
   target: HuntTarget
 }
 // Per-theme minion spec — reuse an existing enemy model with a colour/scale
 // tweak. base = model, tint = body recolour, eyes = eye-glow colour.
-type HuntCreatureKind = "leek" | "fleshball" | "tall" | "multihead"
+type HuntCreatureKind =
+  | "leek"
+  | "fleshball"
+  | "tall"
+  | "multihead"
+  // PR boss-designs: dedicated original boss shapes (one per HUNT level).
+  | "multihead_boss"
+  | "splitskin_boss"
+  | "amalgam_boss"
 const HUNT_THEMES: Record<
   HuntTheme,
   {
@@ -637,6 +648,7 @@ const HUNT_LEVELS: HuntLevel[] = [
     bossScale: 3.0,
     bossScore: 30,
     boss: "charge",
+    bossCreature: "multihead_boss",
     shrink: false,
     target: {
       name: "白葱の主 ネブロ",
@@ -654,6 +666,7 @@ const HUNT_LEVELS: HuntLevel[] = [
     bossScale: 3.2,
     bossScore: 45,
     boss: "ranged_summon",
+    bossCreature: "splitskin_boss",
     shrink: false,
     target: {
       name: "女王 セレネ",
@@ -671,6 +684,7 @@ const HUNT_LEVELS: HuntLevel[] = [
     bossScale: 4.0,
     bossScore: 60,
     boss: "aoe_fast",
+    bossCreature: "amalgam_boss",
     shrink: true,
     target: {
       name: "巨像 ガレオ",
@@ -1573,6 +1587,21 @@ interface AnimPose {
   eyeOpenness: number // 1 = wide, 0 = blinking
 }
 
+// PR boss-designs: per-frame animation handles for the dedicated HUNT boss
+// shapes. Only the fields relevant to a given boss kind are populated.
+interface HuntBossParts {
+  kind: "multihead_boss" | "splitskin_boss" | "amalgam_boss"
+  eyeballs: THREE.Object3D[] // multihead: pulsating eyeballs
+  body?: THREE.Object3D // splitskin: torso (breathing scale.y)
+  faceMats: THREE.MeshLambertMaterial[] // splitskin: inner-face emissive flicker
+  faceEyeMats: THREE.MeshLambertMaterial[] // splitskin/amalgam: red eyes (rage glow)
+  armFaces: THREE.Object3D[] // splitskin: arm-tip faces tracking the player
+  core?: THREE.Object3D // amalgam: central blob (scale pulse)
+  coreMat?: THREE.MeshLambertMaterial // amalgam: core colour (rage shift)
+  arms: THREE.Object3D[] // amalgam: tendril arms (vertical bob)
+  armBaseY: number[] // amalgam: rest Y per arm
+}
+
 interface CombatEnemy {
   id: string
   mesh: THREE.Group // humanoid root group
@@ -1675,6 +1704,7 @@ interface CombatEnemy {
     heads: THREE.Object3D[]
     phase: number
     nextJerk: number
+    boss?: HuntBossParts // PR boss-designs: dedicated boss animation handles
   }
 
   // ── Aggressive-AI fields ────────────────────────────────────────────────
@@ -10135,6 +10165,7 @@ export default function ThreeWorld({
         const eyeMats = [eyeMat]
         const twitch: THREE.Object3D[] = []
         const heads: THREE.Object3D[] = []
+        let bossParts: HuntBossParts | undefined
         const addEye = (parent: THREE.Object3D, x: number, y: number, z: number, r: number) => {
           const m = new THREE.Mesh(huntEyeGeo, eyeMat)
           m.position.set(x, y, z)
@@ -10284,6 +10315,261 @@ export default function ThreeWorld({
           head.add(mask)
           addEye(head, -0.07, 0.02, -0.15, 0.04)
           addEye(head, 0.07, 0.02, -0.15, 0.04)
+        } else if (kind === "multihead_boss") {
+          // ── Lv1 boss: MULTI-HEAD ── a hunched skin-coloured body with three
+          // twitching skulls and eyeballs sprouting all over it.
+          const S = isBoss ? 3.0 : 1.0
+          const skinMat = new THREE.MeshLambertMaterial({ color: 0xc8b8a2 })
+          const ebGeo = new THREE.SphereGeometry(0.06, 6, 6)
+          const pupilGeo = new THREE.SphereGeometry(0.03, 6, 6)
+          const eyeballMat = new THREE.MeshLambertMaterial({ color: 0xf0f0f0, emissive: 0x220000 })
+          const pupilMat = new THREE.MeshLambertMaterial({ color: 0x000000 })
+          const eyeballs: THREE.Object3D[] = []
+          // Trunk.
+          const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.4, 0.5, 1.8, 8), skinMat)
+          torso.position.y = 1.5
+          group.add(torso)
+          twitch.push(torso)
+          // Arms ×2, splayed outward.
+          for (const s of [-1, 1]) {
+            const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 1.2, 6), skinMat)
+            arm.position.set(s * 0.55, 1.7, 0)
+            arm.rotation.z = s * 0.3
+            group.add(arm)
+            twitch.push(arm)
+          }
+          // Legs ×2.
+          for (const s of [-1, 1]) {
+            const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.1, 0.9, 6), skinMat)
+            leg.position.set(s * 0.2, 0.45, 0)
+            group.add(leg)
+          }
+          // Heads ×3 in a triangle on the upper trunk, each slightly tilted.
+          const headSlots: [number, number, number][] = [
+            [0, 2.55, 0.06],
+            [-0.28, 2.36, -0.06],
+            [0.28, 2.36, -0.06],
+          ]
+          for (let i = 0; i < 3; i++) {
+            const hd = new THREE.Group()
+            const [hx, hy, hz] = headSlots[i] ?? [0, 2.5, 0]
+            hd.position.set(hx, hy, hz)
+            hd.rotation.z = (i - 1) * 0.22
+            const skull = new THREE.Mesh(new THREE.SphereGeometry(0.25, 8, 8), skinMat)
+            hd.add(skull)
+            group.add(hd)
+            heads.push(hd)
+          }
+          // Eyeballs ×10 scattered over body / arms / heads, each with a pupil.
+          for (let i = 0; i < 10; i++) {
+            const a = Math.random() * Math.PI * 2
+            const rr = 0.28 + Math.random() * 0.26
+            const yy = 1.0 + Math.random() * 1.6
+            const eb = new THREE.Mesh(ebGeo, eyeballMat)
+            eb.position.set(Math.cos(a) * rr, yy, Math.sin(a) * rr - 0.12)
+            const pupil = new THREE.Mesh(pupilGeo, pupilMat)
+            pupil.position.set(0, 0, -0.05)
+            eb.add(pupil)
+            group.add(eb)
+            eyeballs.push(eb)
+          }
+          group.scale.setScalar(S)
+          bossParts = {
+            kind,
+            eyeballs,
+            faceMats: [],
+            faceEyeMats: [],
+            armFaces: [],
+            arms: [],
+            armBaseY: [],
+          }
+        } else if (kind === "splitskin_boss") {
+          // ── Lv2 boss: SPLIT-SKIN ── a translucent dark figure whose skin is
+          // splitting open to reveal screaming faces underneath.
+          const S = isBoss ? 3.0 : 1.0
+          const skinMat = new THREE.MeshLambertMaterial({
+            color: 0x2a2a2a,
+            transparent: true,
+            opacity: 0.75,
+          })
+          const faceMats: THREE.MeshLambertMaterial[] = []
+          const faceEyeMats: THREE.MeshLambertMaterial[] = []
+          const armFaces: THREE.Object3D[] = []
+          // Torso + head (translucent dark skin).
+          const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.7, 0.8, 2.4, 8), skinMat)
+          torso.position.y = 1.9
+          group.add(torso)
+          twitch.push(torso)
+          const head = new THREE.Mesh(new THREE.SphereGeometry(0.45, 8, 8), skinMat)
+          head.position.y = 3.35
+          group.add(head)
+          // Arms ×2 with a face on each fist.
+          for (const s of [-1, 1]) {
+            const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.15, 2.0, 6), skinMat)
+            arm.position.set(s * 0.95, 2.1, 0)
+            arm.rotation.z = s * 0.4
+            group.add(arm)
+            twitch.push(arm)
+            const af = new THREE.Group()
+            af.position.set(s * 1.55, 1.25, 0)
+            const fistFace = new THREE.Mesh(
+              new THREE.SphereGeometry(0.2, 6, 6),
+              new THREE.MeshLambertMaterial({ color: 0xc0a090 }),
+            )
+            af.add(fistFace)
+            group.add(af)
+            armFaces.push(af)
+          }
+          // Legs ×2.
+          for (const s of [-1, 1]) {
+            const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.18, 1.5, 6), skinMat)
+            leg.position.set(s * 0.32, 0.75, 0)
+            group.add(leg)
+          }
+          // Inner faces ×5 embedded in the torso / head surface, each lit by a
+          // pair of red eyes.
+          const faceSlots: [number, number, number][] = [
+            [0, 2.0, -0.66],
+            [-0.42, 1.45, -0.55],
+            [0.42, 1.65, -0.5],
+            [0, 3.0, -0.42],
+            [-0.22, 2.55, -0.58],
+          ]
+          for (let i = 0; i < 5; i++) {
+            const fm = new THREE.MeshLambertMaterial({ color: 0xc0a090, emissive: 0x1a0000 })
+            faceMats.push(fm)
+            const f = new THREE.Mesh(new THREE.SphereGeometry(0.18, 6, 6), fm)
+            const [fx, fy, fz] = faceSlots[i] ?? [0, 2, -0.5]
+            f.position.set(fx, fy, fz)
+            group.add(f)
+            for (const ex of [-0.07, 0.07]) {
+              const em = new THREE.MeshLambertMaterial({
+                color: 0xff0000,
+                emissive: 0xff0000,
+                emissiveIntensity: 1.5,
+              })
+              faceEyeMats.push(em)
+              const eye = new THREE.Mesh(new THREE.SphereGeometry(0.05, 6, 6), em)
+              eye.position.set(ex, 0.03, -0.15)
+              f.add(eye)
+            }
+          }
+          // Splits ×5 — thin glowing tears running vertically around the torso.
+          const splitMat = new THREE.MeshLambertMaterial({ color: 0x3a0000, emissive: 0x200000 })
+          for (let i = 0; i < 5; i++) {
+            const a = (i / 5) * Math.PI * 2
+            const split = new THREE.Mesh(new THREE.BoxGeometry(0.025, 2.4, 0.08), splitMat)
+            split.position.set(Math.cos(a) * 0.78, 1.9, Math.sin(a) * 0.78)
+            split.rotation.y = -a
+            group.add(split)
+          }
+          group.scale.setScalar(S)
+          bossParts = {
+            kind,
+            eyeballs: [],
+            body: torso,
+            faceMats,
+            faceEyeMats,
+            armFaces,
+            arms: [],
+            armBaseY: [],
+          }
+        } else if (kind === "amalgam_boss") {
+          // ── Lv3 boss: AMALGAM ── a heaving mass of fused flesh bristling with
+          // tendrils, half-formed heads and stumpy legs. Enters a rage at <50% HP.
+          const S = isBoss ? 2.5 : 1.0
+          const coreMat = new THREE.MeshLambertMaterial({ color: 0x8b4040 })
+          const faceEyeMats: THREE.MeshLambertMaterial[] = []
+          const arms: THREE.Object3D[] = []
+          const armBaseY: number[] = []
+          // Central lumpy core (vertices jittered for a meaty silhouette).
+          const coreGeo = new THREE.SphereGeometry(2.0, 8, 8)
+          const cpos = coreGeo.attributes.position as THREE.BufferAttribute
+          for (let i = 0; i < cpos.count; i++) {
+            cpos.setXYZ(
+              i,
+              cpos.getX(i) + (Math.random() - 0.5) * 0.6,
+              cpos.getY(i) + (Math.random() - 0.5) * 0.6,
+              cpos.getZ(i) + (Math.random() - 0.5) * 0.6,
+            )
+          }
+          coreGeo.computeVertexNormals()
+          const core = new THREE.Mesh(coreGeo, coreMat)
+          core.position.y = 2.6
+          group.add(core)
+          // Sub-cores ×4 half-buried in the main mass.
+          const subMat = new THREE.MeshLambertMaterial({ color: 0x7a3535 })
+          for (let i = 0; i < 4; i++) {
+            const a = (i / 4) * Math.PI * 2 + 0.4
+            const sub = new THREE.Mesh(
+              new THREE.SphereGeometry(0.8 + Math.random() * 0.4, 7, 7),
+              subMat,
+            )
+            sub.position.set(Math.cos(a) * 1.6, 2.6 + Math.sin(i) * 0.6, Math.sin(a) * 1.6)
+            group.add(sub)
+          }
+          // Tendril arms ×7 jutting out in random directions, bobbing in place.
+          const armMat = new THREE.MeshLambertMaterial({ color: 0x8b4040 })
+          for (let i = 0; i < 7; i++) {
+            const len = 2.5 + Math.random() * 1.5
+            const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.28, len, 5), armMat)
+            const a = Math.random() * Math.PI * 2
+            arm.position.set(Math.cos(a) * 1.8, 2.0 + Math.random() * 1.6, Math.sin(a) * 1.8)
+            arm.rotation.set(
+              (Math.random() - 0.5) * 2.2,
+              Math.random() * Math.PI * 2,
+              (Math.random() - 0.5) * 2.2,
+            )
+            group.add(arm)
+            arms.push(arm)
+            armBaseY.push(arm.position.y)
+          }
+          // Heads ×5 with red eyes, fused at odd angles.
+          const headMat = new THREE.MeshLambertMaterial({ color: 0x9a5050 })
+          for (let i = 0; i < 5; i++) {
+            const a = (i / 5) * Math.PI * 2 + 0.9
+            const hd = new THREE.Group()
+            hd.position.set(Math.cos(a) * 1.4, 3.0 + Math.sin(i * 1.3) * 0.9, Math.sin(a) * 1.4)
+            hd.rotation.y = a
+            const skull = new THREE.Mesh(
+              new THREE.SphereGeometry(0.35 + Math.random() * 0.2, 7, 7),
+              headMat,
+            )
+            hd.add(skull)
+            for (const ex of [-0.13, 0.13]) {
+              const em = new THREE.MeshLambertMaterial({
+                color: 0xff0000,
+                emissive: 0xff0000,
+                emissiveIntensity: 1.5,
+              })
+              faceEyeMats.push(em)
+              const eye = new THREE.Mesh(new THREE.SphereGeometry(0.08, 6, 6), em)
+              eye.position.set(ex, 0.05, -0.3)
+              hd.add(eye)
+            }
+            group.add(hd)
+            heads.push(hd)
+          }
+          // Legs ×4 — squat trunks holding the mass up.
+          const legMat = new THREE.MeshLambertMaterial({ color: 0x6a2a2a })
+          for (let i = 0; i < 4; i++) {
+            const a = (i / 4) * Math.PI * 2 + 0.78
+            const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.4, 3.0, 6), legMat)
+            leg.position.set(Math.cos(a) * 1.2, 1.0, Math.sin(a) * 1.2)
+            group.add(leg)
+          }
+          group.scale.setScalar(S)
+          bossParts = {
+            kind,
+            eyeballs: [],
+            faceMats: [],
+            faceEyeMats,
+            armFaces: [],
+            core,
+            coreMat,
+            arms,
+            armBaseY,
+          }
         } else {
           // A four-legged beast with three independent heads on long necks.
           const trunk = new THREE.Mesh(huntBlobGeo, bodyMat)
@@ -10328,7 +10614,7 @@ export default function ThreeWorld({
             addEye(headG, 0.06, 0.05, -0.18, 0.04)
           }
         }
-        return { group, eyeMats, twitch, heads }
+        return { group, eyeMats, twitch, heads, boss: bossParts }
       }
       // Build one themed minion / boss, push it into `enemies`, return it.
       function huntMakeEnemy(
@@ -10377,6 +10663,7 @@ export default function ThreeWorld({
           heads: cr.heads,
           phase: Math.random() * Math.PI * 2,
           nextJerk: Date.now() + 1000 + Math.random() * 3000,
+          ...(cr.boss ? { boss: cr.boss } : {}),
         }
         enemies.push(e)
         return e
@@ -10400,12 +10687,77 @@ export default function ThreeWorld({
             t.rotation.z = Math.sin(now * 0.004 + cr.phase + i) * 0.06 + j
           }
           if (now > cr.nextJerk + 220) cr.nextJerk = now + 1200 + Math.random() * 3000
+          if (cr.boss) {
+            updateHuntBoss(cr, e, now)
+            continue
+          }
           for (let i = 0; i < cr.heads.length; i++) {
             const h = cr.heads[i]
             if (!h) continue
             h.rotation.y = Math.sin(now * 0.0018 + cr.phase + i * 2.1) * 0.5
             h.rotation.x = Math.sin(now * 0.0026 + cr.phase + i) * 0.25
           }
+        }
+      }
+      // PR boss-designs: per-frame motion for the three dedicated HUNT bosses
+      // (driven from updateHuntCreatures). Each boss kind animates the handles
+      // captured at build time; AMALGAM also flips into a rage state below 50% HP.
+      function updateHuntBoss(
+        cr: NonNullable<CombatEnemy["huntCreature"]>,
+        e: CombatEnemy,
+        now: number,
+      ) {
+        const b = cr.boss
+        if (!b) return
+        const t = now * 0.001
+        const rage = e.hp < e.maxHp * 0.5
+        if (b.kind === "multihead_boss") {
+          // Three skulls sway on independent periods.
+          for (let i = 0; i < cr.heads.length; i++) {
+            const h = cr.heads[i]
+            if (!h) continue
+            h.rotation.y = Math.sin(t * (0.7 + i * 0.45) + cr.phase) * 0.6
+            h.rotation.x = Math.sin(t * (0.5 + i * 0.3)) * 0.18
+          }
+          // Eyeballs pulse between 0.9 and 1.1.
+          for (let i = 0; i < b.eyeballs.length; i++) {
+            const eb = b.eyeballs[i]
+            if (!eb) continue
+            eb.scale.setScalar(1 + Math.sin(t * 3 + i * 1.7) * 0.1)
+          }
+        } else if (b.kind === "splitskin_boss") {
+          // Torso breathing (scale.y 0.97–1.03).
+          if (b.body) b.body.scale.y = 1 + Math.sin(t * 1.6 + cr.phase) * 0.03
+          // Inner faces flicker on staggered timing.
+          for (let i = 0; i < b.faceMats.length; i++) {
+            const fm = b.faceMats[i]
+            if (!fm) continue
+            fm.emissiveIntensity = 0.6 + Math.abs(Math.sin(t * (2.3 + i * 0.9) + i)) * 0.9
+          }
+          // Fist faces turn to track the player.
+          if (b.armFaces.length) {
+            const aim =
+              Math.atan2(focalPoint.x - e.mesh.position.x, focalPoint.z - e.mesh.position.z) -
+              e.mesh.rotation.y
+            for (const af of b.armFaces) af.rotation.y += (aim - af.rotation.y) * 0.08
+          }
+        } else {
+          // AMALGAM — heaving core (period ~3.5s), bobbing tendrils, rage state.
+          const speed = rage ? 2 : 1
+          if (b.core) b.core.scale.setScalar(1 + Math.sin(t * 1.8 * speed + cr.phase) * 0.05)
+          for (let i = 0; i < b.arms.length; i++) {
+            const arm = b.arms[i]
+            if (!arm) continue
+            arm.position.y = (b.armBaseY[i] ?? arm.position.y) + Math.sin(t * 1.4 + i * 1.1) * 0.3
+          }
+          for (let i = 0; i < cr.heads.length; i++) {
+            const h = cr.heads[i]
+            if (!h) continue
+            h.rotation.x = Math.sin(t * (0.9 + i * 0.2)) * 0.2
+          }
+          const eyeI = rage ? 3.0 : 1.5
+          for (const em of b.faceEyeMats) em.emissiveIntensity = eyeI
+          if (b.coreMat) b.coreMat.color.setHex(rage ? 0xa03030 : 0x8b4040)
         }
       }
       // Remove every (live or dying) enemy mesh and empty the array.
@@ -11016,7 +11368,7 @@ export default function ThreeWorld({
           lv.boss === "aoe_fast" ? 5.5 : 3.0,
           true,
           lv.target.name,
-          th.creature,
+          lv.bossCreature,
         )
         setAliveEnemyCount(enemies.filter((e) => e.hp > 0).length)
         // Boundary + timer.
