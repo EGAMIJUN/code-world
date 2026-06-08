@@ -548,6 +548,9 @@ const HUNT_MIN_RADIUS = 80 // Lv3 fully-shrunk radius
 const HUNT_SHRINK_SEC = 600 // Lv3 shrink duration (250m → 80m over 10 min)
 const HUNT_OOB_GRACE_MS = 3000 // time outside the ring before the head pops
 const HUNT_QUOTA_MISS = 15 // quota set on the next mission after a time-out
+// A ranged_summon boss stops summoning once this many minions are alive — so
+// the field can be cleared (and the mission can end) instead of growing forever.
+const HUNT_SUMMON_CAP = 16
 // Weird greetings: stiff politeness clashing with crude threats (original).
 const HUNT_GREETINGS = [
   "ようこそおいで下さいました。てめえ達の命、私が有効に使わせて頂きます。",
@@ -11577,7 +11580,13 @@ export default function ThreeWorld({
           if (boss && lv && boss.huntNextSpecial && now >= boss.huntNextSpecial) {
             if (lv.boss === "ranged_summon") {
               const th = HUNT_THEMES[lv.theme]
-              for (let i = 0; i < 2; i++) {
+              // Cap the swarm: only top up to HUNT_SUMMON_CAP live minions so
+              // the field can actually be cleared (the bug was an unbounded
+              // spawn that grew faster than the player could cull it, so the
+              // "all enemies dead" clear check never fired).
+              const aliveMinions = enemies.filter((e) => e.hp > 0 && !e.isHuntBoss).length
+              const room = Math.min(2, HUNT_SUMMON_CAP - aliveMinions)
+              for (let i = 0; i < room; i++) {
                 const a = Math.random() * Math.PI * 2
                 const safe = findSafeSpawnNear(
                   boss.mesh.position.x + Math.cos(a) * 4,
