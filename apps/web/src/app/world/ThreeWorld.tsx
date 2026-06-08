@@ -472,6 +472,13 @@ const SOUNDS = {
     })
     _tone(98, 0.5, 0.18, "square")
   },
+  // HUNT — sharp mechanical "bang" the instant the orb shells split open
+  // (a hard low thunk + a metallic noise crack).
+  huntOrbOpen() {
+    _tone(70, 0.18, 0.5, "square", 40)
+    _noise(0.14, 0.5, "highpass", 2600)
+    _tone(220, 0.1, 0.22, "sawtooth", 90)
+  },
   // HUNT — tense out-of-bounds warning beep.
   huntWarn() {
     _tone(880, 0.16, 0.26, "square", 660)
@@ -2111,10 +2118,12 @@ export default function ThreeWorld({
     rightHalf: THREE.Object3D
     suitcase: THREE.Object3D
     door: THREE.Object3D
+    person: THREE.Object3D // seated silhouette revealed inside the open orb
     open: number // 0..1 orb/rack open progress
     page: number // current orb text page
     pageAt: number // ms timestamp to flip the page
     jingled: boolean
+    banged: boolean // the dramatic "bang" open SFX/shake fired once
   } | null>(null)
 
   // ── HUNT equipment (PR-Z2) ──────────────────────────────────────────────────
@@ -10025,45 +10034,62 @@ export default function ThreeWorld({
       // Room fill ambient (global light): on while in the room, off during a
       // mission so the night arena stays dark. Toggled in updateHunt.
       let huntRoomAmbient: THREE.AmbientLight | null = null
+      // Warm "sunrise through the window" key light — on in the room, off during
+      // a mission (toggled in updateHunt) so it doesn't tint the night arena.
+      let huntRoomSun: THREE.DirectionalLight | null = null
       function buildHuntRoom() {
         const cx = HUNT_ROOM.x
         const cz = HUNT_ROOM.z
         const W = HUNT_ROOM_HALF + 1.5 // wall half-extent (interior is a bit smaller)
-        // Surfaces lifted out of near-black so the room's outline reads under the
-        // moody lighting (still dark enough to keep the claustrophobic feel).
+        // ── Apartment surfaces: a bright, ordinary room (white walls, wood
+        // floor, off-white ceiling) so the dawn light reads naturally. ──
         const wallMat = new THREE.MeshStandardMaterial({
-          color: 0x222233,
-          roughness: 0.95,
-          metalness: 0.05,
+          color: 0xece7dc,
+          roughness: 0.92,
+          metalness: 0,
         })
         const floorMat = new THREE.MeshStandardMaterial({
-          color: 0x1a1b26,
-          roughness: 1,
+          color: 0x7c5230,
+          roughness: 0.7,
+          metalness: 0.05,
+        })
+        const ceilMat = new THREE.MeshStandardMaterial({
+          color: 0xf3efe6,
+          roughness: 0.95,
           metalness: 0,
+        })
+        const frameMat = new THREE.MeshStandardMaterial({
+          color: 0x3a2a1c,
+          roughness: 0.7,
+          metalness: 0.1,
         })
         const group = new THREE.Group()
         group.position.set(cx, 0, cz)
-        // ── Transfer-room lighting ──────────────────────────────────────────────
-        // A white fill ambient so the interior is actually legible. AmbientLight
-        // is global, so it's toggled OFF during a mission (updateHunt) to keep the
-        // night arena dark — the player is only ever in one place at a time.
+        // ── Lighting: a bright white fill + warm sunrise key from the window. ──
         huntRoomAmbient = new THREE.AmbientLight(0xffffff, 1.2)
         group.add(huntRoomAmbient)
-        // One bright green point light near the ceiling for the eerie room tint.
-        // Its 30m range never reaches the distant arena, so it stays on always.
-        const roomLight = new THREE.PointLight(0x00ff44, 3.0, 30)
-        roomLight.position.set(0, 4, 0)
-        group.add(roomLight)
+        // Warm directional "morning sun" angled in through the north window.
+        // Added to the scene (not the group) so its world target is controllable;
+        // toggled off during a mission in updateHunt.
+        huntRoomSun = new THREE.DirectionalLight(0xfff0dd, 1.5)
+        huntRoomSun.position.set(cx, 8, cz - W - 6)
+        huntRoomSun.target.position.set(cx, 1, cz + 1)
+        scene.add(huntRoomSun)
+        scene.add(huntRoomSun.target)
+        // A soft warm glow right at the window for a local bloom (range-limited
+        // so it never reaches the distant arena).
+        const winGlow = new THREE.PointLight(0xffd9a8, 1.4, 18)
+        winGlow.position.set(0, 2.4, -W + 0.5)
+        group.add(winGlow)
         const floor = new THREE.Mesh(new THREE.BoxGeometry(W * 2, 0.2, W * 2), floorMat)
         floor.position.y = -0.1
         floor.receiveShadow = true
         group.add(floor)
-        const ceil = new THREE.Mesh(new THREE.BoxGeometry(W * 2, 0.2, W * 2), wallMat)
+        const ceil = new THREE.Mesh(new THREE.BoxGeometry(W * 2, 0.2, W * 2), ceilMat)
         ceil.position.y = 4.0
         group.add(ceil)
-        // Four walls (a doorway gap is faked with a separate sliding door panel).
+        // Three solid walls (E / W / S). The N wall holds the big window.
         for (const [dx, dz, sx, sz] of [
-          [0, -W, W * 2, 0.3],
           [0, W, W * 2, 0.3],
           [-W, 0, 0.3, W * 2],
           [W, 0, 0.3, W * 2],
@@ -10072,29 +10098,150 @@ export default function ThreeWorld({
           wall.position.set(dx, 2.0, dz)
           group.add(wall)
         }
-        // Inert door on the +z wall (opens only as post-mission flavour).
-        const door = new THREE.Mesh(
-          new THREE.BoxGeometry(1.6, 3.2, 0.16),
-          new THREE.MeshStandardMaterial({ color: 0x202530, roughness: 0.8, metalness: 0.3 }),
+        // North wall with a large central window opening (side piers + lintel +
+        // sill), plus a cross-mullion frame.
+        const winHalf = 2.6 // window half-width
+        const sillY = 0.9
+        const headY = 3.2
+        for (const [px, pw] of [
+          [-(W + winHalf) / 2 - 0.4, W - winHalf],
+          [(W + winHalf) / 2 + 0.4, W - winHalf],
+        ] as const) {
+          const pier = new THREE.Mesh(new THREE.BoxGeometry(Math.max(0.2, pw), 4.2, 0.3), wallMat)
+          pier.position.set(px, 2.0, -W)
+          group.add(pier)
+        }
+        const lintel = new THREE.Mesh(new THREE.BoxGeometry(winHalf * 2, 4.2 - headY, 0.3), wallMat)
+        lintel.position.set(0, headY + (4.2 - headY) / 2 - 0.0, -W)
+        group.add(lintel)
+        const sill = new THREE.Mesh(new THREE.BoxGeometry(winHalf * 2, sillY, 0.34), frameMat)
+        sill.position.set(0, sillY / 2, -W)
+        group.add(sill)
+        for (const mx of [-winHalf, 0, winHalf]) {
+          const mull = new THREE.Mesh(new THREE.BoxGeometry(0.1, headY - sillY, 0.12), frameMat)
+          mull.position.set(mx, (sillY + headY) / 2, -W)
+          group.add(mull)
+        }
+        const crossMull = new THREE.Mesh(new THREE.BoxGeometry(winHalf * 2, 0.1, 0.12), frameMat)
+        crossMull.position.set(0, (sillY + headY) / 2, -W)
+        group.add(crossMull)
+        // ── Dawn skyline beyond the window: a gradient sky + building
+        // silhouettes + an original red/white radio tower. ──
+        const skyCanvas = document.createElement("canvas")
+        skyCanvas.width = 16
+        skyCanvas.height = 256
+        const skyCtx = skyCanvas.getContext("2d")
+        if (skyCtx) {
+          const grad = skyCtx.createLinearGradient(0, 0, 0, 256)
+          grad.addColorStop(0, "#241a40") // indigo zenith
+          grad.addColorStop(0.55, "#8a4a7a") // violet
+          grad.addColorStop(0.8, "#e08a4a") // amber
+          grad.addColorStop(1, "#ffd28a") // pale horizon glow
+          skyCtx.fillStyle = grad
+          skyCtx.fillRect(0, 0, 16, 256)
+        }
+        const skyTex = new THREE.CanvasTexture(skyCanvas)
+        const sky = new THREE.Mesh(
+          new THREE.PlaneGeometry(70, 34),
+          new THREE.MeshBasicMaterial({ map: skyTex, depthWrite: false }),
         )
-        door.position.set(1.0, 1.6, W - 0.05)
-        group.add(door)
-        // Pedestal under the orb.
+        sky.position.set(0, 8, -W - 22)
+        group.add(sky)
+        // Distant building silhouettes (shared dark material).
+        const cityMat = new THREE.MeshBasicMaterial({ color: 0x14101f })
+        for (let i = 0; i < 14; i++) {
+          const bw = 1.6 + Math.random() * 3.2
+          const bh = 3 + Math.random() * 9
+          const b = new THREE.Mesh(new THREE.BoxGeometry(bw, bh, 1), cityMat)
+          b.position.set(
+            -26 + i * 4 + Math.random() * 1.5,
+            bh / 2 - 0.5,
+            -W - 16 - Math.random() * 4,
+          )
+          group.add(b)
+        }
+        // Original radio tower — a tapered four-leg truss pyramid with red/white
+        // bands and a blinking-style beacon, off to one side.
+        const tower = new THREE.Group()
+        const towerRed = new THREE.MeshBasicMaterial({ color: 0xd83a2a })
+        const towerWhite = new THREE.MeshBasicMaterial({ color: 0xe8e4dc })
+        const TH = 18
+        for (const [lx, lz] of [
+          [-1.4, -1.4],
+          [1.4, -1.4],
+          [-1.4, 1.4],
+          [1.4, 1.4],
+        ] as const) {
+          const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.16, TH, 5), towerWhite)
+          leg.position.set(lx * 0.35, TH / 2, lz * 0.35)
+          leg.rotation.set((lz * 0.06) / 1.4, 0, (-lx * 0.06) / 1.4)
+          tower.add(leg)
+        }
+        for (let i = 0; i < 7; i++) {
+          const t = i / 7
+          const ringR = 1.4 * (1 - t * 0.8)
+          const ring = new THREE.Mesh(
+            new THREE.BoxGeometry(ringR * 2, 0.5, 0.12),
+            i % 2 === 0 ? towerRed : towerWhite,
+          )
+          ring.position.set(0, 1.5 + i * (TH / 8), 0)
+          tower.add(ring)
+        }
+        const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 5, 5), towerWhite)
+        mast.position.set(0, TH + 2.5, 0)
+        tower.add(mast)
+        const beacon = new THREE.Mesh(
+          new THREE.SphereGeometry(0.35, sseg(8), sseg(6)),
+          new THREE.MeshBasicMaterial({ color: 0xff3322 }),
+        )
+        beacon.position.set(0, TH + 5, 0)
+        tower.add(beacon)
+        tower.position.set(20, 0, -W - 20)
+        group.add(tower)
+        // ── The orb on its pedestal (centre of the room). ──
         const pedestal = new THREE.Mesh(
           new THREE.CylinderGeometry(0.7, 0.9, 0.8, 16),
-          new THREE.MeshStandardMaterial({ color: 0x191b22, roughness: 0.7, metalness: 0.4 }),
+          new THREE.MeshStandardMaterial({ color: 0x14110e, roughness: 0.6, metalness: 0.4 }),
         )
         pedestal.position.set(0, 0.4, 0)
         group.add(pedestal)
-        // The black orb (glossy). Diameter 2m.
         const orb = new THREE.Mesh(
           new THREE.SphereGeometry(1.0, sseg(32), sseg(24)),
-          new THREE.MeshStandardMaterial({ color: 0x040406, roughness: 0.12, metalness: 0.85 }),
+          new THREE.MeshStandardMaterial({ color: 0x040406, roughness: 0.1, metalness: 0.9 }),
         )
         orb.position.set(0, 1.7, 0)
         group.add(orb)
-        // Green-text readout the orb projects toward the spawn (+z). Carries the
-        // CanvasTexture so the brief literally reads off the orb's face.
+        // Seated faceless silhouette inside the orb (revealed when it opens).
+        const personMat = new THREE.MeshStandardMaterial({
+          color: 0x0a0a0e,
+          roughness: 0.9,
+          metalness: 0,
+        })
+        const person = new THREE.Group()
+        const pHead = new THREE.Mesh(new THREE.SphereGeometry(0.2, sseg(10), sseg(8)), personMat)
+        pHead.position.set(0, 0.62, 0)
+        person.add(pHead)
+        const pTorso = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.5, 0.22), personMat)
+        pTorso.position.set(0, 0.25, 0)
+        pTorso.rotation.x = 0.18
+        person.add(pTorso)
+        for (const s of [-1, 1]) {
+          const thigh = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.32, 0.16), personMat)
+          thigh.position.set(s * 0.11, -0.02, 0.12)
+          thigh.rotation.x = 1.3
+          person.add(thigh)
+          const shin = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.3, 0.14), personMat)
+          shin.position.set(s * 0.11, -0.12, 0.26)
+          person.add(shin)
+          const arm = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.34, 0.1), personMat)
+          arm.position.set(s * 0.22, 0.24, 0.06)
+          arm.rotation.x = 0.5
+          person.add(arm)
+        }
+        person.position.set(0, 1.35, 0)
+        person.visible = false
+        group.add(person)
+        // Green-text briefing the orb projects toward the spawn (+z).
         const canvas = document.createElement("canvas")
         canvas.width = 1024
         canvas.height = 512
@@ -10110,8 +10257,8 @@ export default function ThreeWorld({
         // Split shells (hidden until the orb "opens").
         const shellMat = new THREE.MeshStandardMaterial({
           color: 0x050507,
-          roughness: 0.15,
-          metalness: 0.85,
+          roughness: 0.12,
+          metalness: 0.9,
           side: THREE.DoubleSide,
         })
         const leftHalf = new THREE.Mesh(
@@ -10128,7 +10275,6 @@ export default function ThreeWorld({
         rightHalf.visible = false
         group.add(leftHalf)
         group.add(rightHalf)
-        // Weapon rack revealed on open (cosmetic — equipment lands in PR-Z2).
         const rackMat = new THREE.MeshStandardMaterial({
           color: 0x2a2f38,
           roughness: 0.5,
@@ -10144,7 +10290,6 @@ export default function ThreeWorld({
         }
         weaponRack.visible = false
         group.add(weaponRack)
-        // Suitcase that rises from behind the orb on open.
         const suitcase = new THREE.Mesh(
           new THREE.BoxGeometry(0.9, 0.6, 0.25),
           new THREE.MeshStandardMaterial({
@@ -10158,6 +10303,13 @@ export default function ThreeWorld({
         suitcase.position.set(0, 1.7, -0.9)
         suitcase.visible = false
         group.add(suitcase)
+        // Inert door on the +z (south) wall — opens as post-mission flavour.
+        const door = new THREE.Mesh(
+          new THREE.BoxGeometry(1.6, 3.2, 0.16),
+          new THREE.MeshStandardMaterial({ color: 0x6a4a2c, roughness: 0.8, metalness: 0.1 }),
+        )
+        door.position.set(2.4, 1.6, W - 0.05)
+        group.add(door)
         scene.add(group)
         huntRoomRef.current = {
           orb,
@@ -10168,10 +10320,12 @@ export default function ThreeWorld({
           rightHalf,
           suitcase,
           door,
+          person,
           open: 0,
           page: 0,
           pageAt: 0,
           jingled: false,
+          banged: false,
         }
         // `weaponRack` is parked on the orb so the open anim can find it.
         orb.userData.weaponRack = weaponRack
@@ -10264,6 +10418,9 @@ export default function ThreeWorld({
         room.rightHalf.position.x = open * 0.9
         room.leftHalf.rotation.y = -open * 0.6
         room.rightHalf.rotation.y = open * 0.6
+        // The seated figure inside is revealed as the shells split apart.
+        room.person.visible = opening
+        room.person.scale.setScalar(0.6 + open * 0.4)
         const rack = room.orb.userData.weaponRack as THREE.Object3D | undefined
         if (rack) {
           rack.visible = opening
@@ -10911,6 +11068,7 @@ export default function ThreeWorld({
         // Room fill ambient is global → keep it off during the mission so the
         // night arena stays dark; on whenever the player is back in the room.
         if (huntRoomAmbient) huntRoomAmbient.visible = phase !== "mission"
+        if (huntRoomSun) huntRoomSun.visible = phase !== "mission"
         // Keep the player boxed in the room during briefing/countdown.
         if (phase === "room" || phase === "countdown" || phase === "scoring") {
           focalPoint.x = Math.max(
@@ -10960,7 +11118,14 @@ export default function ThreeWorld({
             }
           }
         } else if (phase === "countdown" && room) {
-          room.open = Math.min(1, room.open + dt * 0.7)
+          // The orb cracks open fast — a sharp "bang" (≈0.4s) with a sound +
+          // small camera shake the instant the shells part.
+          if (!room.banged) {
+            room.banged = true
+            SOUNDS.huntOrbOpen()
+            cameraShakeRef.current.intensity = 4
+          }
+          room.open = Math.min(1, room.open + dt * 2.5)
           huntApplyOrbOpen(room.open)
           const sec = Math.max(0, Math.ceil((huntCountdownRef.current - now) / 1000))
           setHuntCountdown(sec)
