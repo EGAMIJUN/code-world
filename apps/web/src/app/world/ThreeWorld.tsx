@@ -2549,6 +2549,14 @@ export default function ThreeWorld({
       // bright sky over the existing world (which reads as the distant terrain).
       const isSky = mapId === "sky"
       const isHunt = modeRef.current === "hunt"
+      // Phones/tablets: trim GPU + CPU cost aggressively (pixel ratio, no AA,
+      // shorter draw distance, lighter fog, half-rate secondary AI, fewer
+      // enemies/particles). UA-based so it's available synchronously at scene
+      // setup (the `isMobile` React state isn't set until after mount). Distinct
+      // from `isTouch` (maxTouchPoints) which still drives the existing particle
+      // counts; this one gates the new mobile-perf paths.
+      const isMobileDevice =
+        typeof navigator !== "undefined" && /iPhone|iPad|iPod|Android/i.test(navigator.userAgent)
       const theme = isHunt
         ? // HUNT: a dark night version of the urban map (also lights the room).
           { sky: 0x05060a, fog: 0x070810, ambient: 0x2a3550, sun: 0x3a4a78 }
@@ -2568,13 +2576,18 @@ export default function ThreeWorld({
       // Fog distances stretched for the 6× larger open world so distant
       // areas (HARBOR / INDUSTRIAL) still fade out gracefully instead of
       // popping into view, while keeping the near band hazy on snow.
-      scene.fog = isSky
-        ? // Push the haze far out so looking down from altitude doesn't wash the
-          // ground into white — the terrain should stay legible from up high.
-          new THREE.Fog(theme.fog, 900, 3000)
-        : mapId === "snow"
-          ? new THREE.Fog(theme.fog, 80, 420)
-          : new THREE.Fog(theme.fog, 140, 680)
+      // HUNT runs at night and the fog was crushing the (already dim) arena to
+      // black — disable it entirely so visibility wins. Mobile pulls the fog
+      // bands in by half so distant geometry fades sooner (fewer far draws).
+      scene.fog = isHunt
+        ? null
+        : isSky
+          ? // Push the haze far out so looking down from altitude doesn't wash
+            // the ground into white — terrain should stay legible from up high.
+            new THREE.Fog(theme.fog, isMobileDevice ? 450 : 900, isMobileDevice ? 1500 : 3000)
+          : mapId === "snow"
+            ? new THREE.Fog(theme.fog, isMobileDevice ? 40 : 80, isMobileDevice ? 210 : 420)
+            : new THREE.Fog(theme.fog, isMobileDevice ? 70 : 140, isMobileDevice ? 340 : 680)
 
       // ── Per-map material palette ───────────────────────────────────────────
       // The collision footprints (ALL_AABBS / floors / climb zones) are shared
@@ -2648,13 +2661,23 @@ export default function ThreeWorld({
         80,
         container.clientWidth / container.clientHeight,
         0.1,
-        isSky ? 2400 : mapId === "snow" ? 500 : 800,
+        // Mobile caps the far plane at 800 (never increases it) to shrink the
+        // draw distance; desktop keeps the per-map values.
+        isMobileDevice
+          ? Math.min(800, isSky ? 2400 : mapId === "snow" ? 500 : 800)
+          : isSky
+            ? 2400
+            : mapId === "snow"
+              ? 500
+              : 800,
       )
       camera.rotation.order = "YXZ"
 
       // ── Renderer ───────────────────────────────────────────────────────────
       const renderer = new THREE.WebGLRenderer({
-        antialias: true,
+        // Antialiasing is one of the biggest mobile GPU costs — drop it on
+        // phones/tablets (the pixel-ratio cap already softens edges enough).
+        antialias: !isMobileDevice,
         powerPreference: "high-performance",
         // SKY views the ground from hundreds of metres up with a far clip of
         // 2400 vs near 0.1 — that ratio crushes depth precision and makes
@@ -2669,14 +2692,20 @@ export default function ThreeWorld({
       // Mobile gets a tighter pixel-ratio cap — retina phones rendered at
       // ~2.5× pixel count of desktop while having a fraction of the GPU.
       const isTouch = typeof navigator !== "undefined" && navigator.maxTouchPoints > 0
-      renderer.setPixelRatio(Math.min(window.devicePixelRatio, isTouch ? 1.25 : 1.75))
+      renderer.setPixelRatio(
+        // isTouch first: a phone is both touch + mobile, and the stricter 1.25
+        // cap should win over 1.5 (performance priority).
+        Math.min(window.devicePixelRatio, isTouch ? 1.25 : isMobileDevice ? 1.5 : 1.75),
+      )
       renderer.shadowMap.enabled = true
       renderer.shadowMap.type = THREE.PCFSoftShadowMap
       // ACESFilmic + linear→sRGB output gives the "cinematic" desaturated
       // highlight rolloff that COD/Battlefield use; exposure < 1 keeps the
       // bright sky from blowing out against PBR-lit concrete.
       renderer.toneMapping = THREE.ACESFilmicToneMapping
-      renderer.toneMappingExposure = 0.95
+      // HUNT was rendering near-black — restore full exposure so its boosted
+      // lights actually read; other modes keep the slightly-toned 0.95.
+      renderer.toneMappingExposure = isHunt ? 1.0 : 0.95
       renderer.outputColorSpace = THREE.SRGBColorSpace
       container.appendChild(renderer.domElement)
       rendererDomRef.current = renderer.domElement
@@ -2693,7 +2722,9 @@ export default function ThreeWorld({
       // night mood (the transfer-room interior reads off the glowing orb too).
       scene.add(
         isHunt
-          ? new THREE.AmbientLight(0x8899bb, 0.35)
+          ? // HUNT: full-white ambient so the night arena stays clearly legible
+            // (visibility is prioritised over mood — it was rendering black).
+            new THREE.AmbientLight(0xffffff, 1.0)
           : new THREE.AmbientLight(theme.ambient, 0.45),
       )
       const hemi = new THREE.HemisphereLight(
@@ -2703,9 +2734,9 @@ export default function ThreeWorld({
       )
       hemi.position.set(0, 50, 0)
       scene.add(hemi)
-      // HUNT: the directional is a cool moonlight key (0xaabbcc) from high up.
-      const sun = new THREE.DirectionalLight(isHunt ? 0xaabbcc : theme.sun, isHunt ? 0.4 : 2.8)
-      sun.position.set(isHunt ? 50 : 60, isHunt ? 100 : 80, isHunt ? 30 : 40)
+      // HUNT: a strong white key from high up so the arena is fully visible.
+      const sun = new THREE.DirectionalLight(isHunt ? 0xffffff : theme.sun, isHunt ? 1.5 : 2.8)
+      sun.position.set(isHunt ? 100 : 60, isHunt ? 200 : 80, isHunt ? 100 : 40)
       sun.castShadow = true
       // Shadow map 1024 (was 2048) — quarter the memory + sampling cost.
       // Soft PCF blur covers the precision loss on most viewing angles.
@@ -7379,11 +7410,13 @@ export default function ThreeWorld({
       let skyPlayerJetRespawnAt = 0
       // Spawn `count` red jets at altitude (150–300m), scattered over the arena.
       function skySpawnSquadron(count: number) {
+        // Mobile: half the squadron to keep the framerate up.
+        const n = isMobileDevice && count > 0 ? Math.ceil(count / 2) : count
         // Keep spawns inside the playable box (with margin) — a jet generated
         // outside WORLD_MIN…WORLD_MAX is killed instantly by the bounds check.
         const lo = WORLD_MIN + 50
         const hi = WORLD_MAX - 50
-        for (let i = 0; i < count; i++) {
+        for (let i = 0; i < n; i++) {
           const ang = Math.random() * Math.PI * 2
           const rad = 130 + Math.random() * 220
           const x = Math.max(lo, Math.min(hi, 35 + Math.cos(ang) * rad))
@@ -8833,6 +8866,8 @@ export default function ThreeWorld({
           ...Array<EnemyType>(def.sniper).fill("sniper"),
           ...Array<EnemyType>(def.heavy).fill("heavy"),
         ]
+        // Mobile: cap the wave at half the enemies to keep the framerate up.
+        if (isMobileDevice) types.length = Math.ceil(types.length / 2)
         const shuffled = [...SPAWN_POINTS].sort(() => Math.random() - 0.5)
         let commandersSpawned = 0
         for (let i = 0; i < types.length; i++) {
@@ -8955,11 +8990,14 @@ export default function ThreeWorld({
 
       // ── Bot spawner (FFA / TDM only) ──────────────────────────────────────
       function spawnBots(count: number, diff: BotDifficulty, gameMode: "ffa" | "tdm") {
-        if (count <= 0) return
+        // Mobile: half the bots to keep the framerate up. Guard count>0 so a
+        // zero request stays zero (Math.max(1,…) would otherwise spawn one).
+        const n = isMobileDevice && count > 0 ? Math.max(1, Math.ceil(count / 2)) : count
+        if (n <= 0) return
         const tuning = BOT_DIFFICULTY_CONFIGS[diff]
         const shuffled = [...SPAWN_POINTS].sort(() => Math.random() - 0.5)
         const myTeam = myTeamRef.current
-        for (let i = 0; i < count; i++) {
+        for (let i = 0; i < n; i++) {
           const sp = shuffled[i % shuffled.length] ?? shuffled[0]
           if (!sp) continue
           // 70% grunt, 20% sniper, 10% heavy
@@ -9155,7 +9193,8 @@ export default function ThreeWorld({
       // (cloned so the shared ENEMY_CONFIGS isn't mutated). Spawns ring the
       // map perimeter and the zombie starts already homing on the player.
       function spawnZombieWave(waveNum: number) {
-        const count = 5 + (waveNum - 1) * 3
+        const fullCount = 5 + (waveNum - 1) * 3
+        const count = isMobileDevice ? Math.ceil(fullCount / 2) : fullCount
         // Player sprint is MOVE_SPEED·SPRINT_MULTIPLIER (=9). Base chase speed
         // ≈1.3× that, +0.5 m/s per wave so later waves outrun you harder.
         const chaseSpeed = MOVE_SPEED * SPRINT_MULTIPLIER * 1.3 + (waveNum - 1) * 0.5
@@ -9286,7 +9325,8 @@ export default function ThreeWorld({
       }
 
       function spawnTerraformerWave(waveNum: number, cx: number, cz: number) {
-        const count = 3 + (waveNum - 1) * 2
+        const fullCount = 3 + (waveNum - 1) * 2
+        const count = isMobileDevice ? Math.ceil(fullCount / 2) : fullCount
         const chaseSpeed = ENEMY_CONFIGS.terraformer.speed + (waveNum - 1) * 0.35
         for (let i = 0; i < count; i++) {
           const a = (i / count) * Math.PI * 2 + Math.random() * 0.5
@@ -9377,7 +9417,7 @@ export default function ThreeWorld({
       // Lazy-growing object pool: meshes are created on demand the first time
       // they're needed (so non-boss modes allocate nothing), then reused via the
       // `active` flag — never create/dispose per spawn. Capped.
-      const BOSS_DUST_CAP = 48
+      const BOSS_DUST_CAP = isMobileDevice ? 24 : 48 // half the dust pool on mobile
       const bossDust: { mesh: THREE.Mesh; life: number; active: boolean }[] = []
       const bossDustGeo = new THREE.SphereGeometry(1, 6, 5)
       function spawnBossDust(x: number, z: number, scale: number) {
@@ -9419,7 +9459,7 @@ export default function ThreeWorld({
       }
       // Poison pools left by the beam: green ground discs that hurt on contact.
       // Same lazy-growing pool pattern (cap 12).
-      const BOSS_POOL_CAP = 12
+      const BOSS_POOL_CAP = isMobileDevice ? 6 : 12 // half the poison-pool count on mobile
       const bossPools: { mesh: THREE.Mesh; x: number; z: number; life: number; active: boolean }[] =
         []
       const bossPoolGeo = new THREE.CircleGeometry(BOSS_POOL_RADIUS, 20)
@@ -9998,11 +10038,11 @@ export default function ThreeWorld({
         // A white fill ambient so the interior is actually legible. AmbientLight
         // is global, so it's toggled OFF during a mission (updateHunt) to keep the
         // night arena dark — the player is only ever in one place at a time.
-        huntRoomAmbient = new THREE.AmbientLight(0xffffff, 0.6)
+        huntRoomAmbient = new THREE.AmbientLight(0xffffff, 1.2)
         group.add(huntRoomAmbient)
-        // One greenish point light near the ceiling for the eerie room tint. Its
-        // 20m range never reaches the distant arena, so it can stay on always.
-        const roomLight = new THREE.PointLight(0x004400, 2.0, 20)
+        // One bright green point light near the ceiling for the eerie room tint.
+        // Its 30m range never reaches the distant arena, so it stays on always.
+        const roomLight = new THREE.PointLight(0x00ff44, 3.0, 30)
         roomLight.position.set(0, 4, 0)
         group.add(roomLight)
         const floor = new THREE.Mesh(new THREE.BoxGeometry(W * 2, 0.2, W * 2), floorMat)
@@ -12577,17 +12617,22 @@ export default function ThreeWorld({
         }
         if (drivingRef.current) updateVehicle(dt)
         if (aaMountedRef.current) updateMountedAA(dt) // PR-G1 manned AA turret
-        updateRPGPickups(dt) // PR-G1 handheld launcher pickups
-        updateBikeRiders(dt) // motorcycle: drive terraformer-ridden bikes
         if (bikeSlots.length > 0) updateBikeRespawns(Date.now()) // refill taken bikes
         if (modeRef.current === "hunt") updateHunt(dt) // HUNT transfer-mission FSM
-        // PR-F2 air war: AA guns (sleep unless the player is flying), their
-        // shells, enemy jets, and any ownerless crashing jet.
-        updateAAGuns(dt)
+        // Projectiles run every frame (skipping risks tunnelling through targets).
         updateAAShells(dt)
-        updateEnemyJets(dt)
         updateCrashJets(dt)
         if (isSky && gamePhaseRef.current === "playing") updateSkyArena()
+        // Mobile: run the secondary AI / effect systems every OTHER frame with a
+        // doubled timestep — halves their per-frame cost while keeping motion
+        // speed and time-gated cadences (firing, ramming) about the same.
+        if (!isMobileDevice || (frameCount & 1) === 0) {
+          const sdt = isMobileDevice ? dt * 2 : dt
+          updateRPGPickups(sdt) // PR-G1 handheld launcher pickups
+          updateBikeRiders(sdt) // motorcycle: drive terraformer-ridden bikes
+          updateAAGuns(sdt)
+          updateEnemyJets(sdt)
+        }
 
         // ── Enemy-driven vehicles: spawn manager + per-frame AI ──────────────
         // Only in Wave Defense / missions (FFA/TDM have no vehicles; Zombie has
@@ -14250,8 +14295,13 @@ export default function ThreeWorld({
         // ── Invasion mode control: rocket strikes + terraformer waves ──────
         if (modeRef.current === "invasion" && gamePhaseRef.current === "playing") {
           updateRocketStrikes(dt)
-          updateBossDust(dt)
-          updateBossPools(dt)
+          // Boss dust + poison pools are pure VFX → half-rate on mobile (the
+          // boss AI itself, updateBigBoss, still runs every frame below).
+          if (!isMobileDevice || (frameCount & 1) === 0) {
+            const fdt = isMobileDevice ? dt * 2 : dt
+            updateBossDust(fdt)
+            updateBossPools(fdt)
+          }
           if (bigBossRef.current) {
             // Boss is the whole encounter — normal waves are suspended.
             updateBigBoss(dt)
