@@ -568,10 +568,12 @@ interface HuntLevel {
 }
 // Per-theme minion spec — reuse an existing enemy model with a colour/scale
 // tweak. base = model, tint = body recolour, eyes = eye-glow colour.
+type HuntCreatureKind = "fleshball" | "tall" | "multihead"
 const HUNT_THEMES: Record<
   HuntTheme,
   {
     base: "grunt" | "terraformer"
+    creature: HuntCreatureKind
     tint: number
     eyes: number
     scale: number
@@ -580,19 +582,40 @@ const HUNT_THEMES: Record<
     speed: number
   }
 > = {
-  // A: black humanoid, glowing red eyes (slow). B: small grey quadruped (fast,
-  // swarms). C: oversized stone-grey humanoid (tanky).
-  A: { base: "grunt", tint: 0x0a0a0c, eyes: 0xff2020, scale: 1.0, points: 2, hp: 70, speed: 2.4 },
+  // PR-Z3: every HUNT enemy is now an original monster creature (the `base`
+  // model is still built underneath to drive the AI/animation skeleton, but is
+  // hidden — the creature rides the root). A: fleshball (eyed meat, medium).
+  // B: tall blank-faced creeper (fast). C: multi-headed beast (big, tanky).
+  A: {
+    base: "grunt",
+    creature: "fleshball",
+    tint: 0xb88a86,
+    eyes: 0xff2020,
+    scale: 1.0,
+    points: 2,
+    hp: 70,
+    speed: 2.4,
+  },
   B: {
     base: "terraformer",
-    tint: 0x6b6b73,
-    eyes: 0xff3030,
-    scale: 0.55,
+    creature: "tall",
+    tint: 0xc9c2b4,
+    eyes: 0xff4a2a,
+    scale: 0.62,
     points: 3,
     hp: 60,
     speed: 7.0,
   },
-  C: { base: "grunt", tint: 0x8a8a90, eyes: 0xfff0a0, scale: 2.0, points: 5, hp: 260, speed: 1.4 },
+  C: {
+    base: "grunt",
+    creature: "multihead",
+    tint: 0x3a2a3e,
+    eyes: 0xffcf50,
+    scale: 2.0,
+    points: 5,
+    hp: 260,
+    speed: 1.4,
+  },
 }
 const HUNT_LEVELS: HuntLevel[] = [
   {
@@ -1634,6 +1657,15 @@ interface CombatEnemy {
   huntName?: string
   isHuntBoss?: boolean
   huntNextSpecial?: number // ms timestamp for boss summon / AOE cadence
+  // PR-Z3: when set, the humanoid mesh is hidden and a monster creature rides
+  // the root instead. Handles used by updateHuntCreatures for the eerie idle.
+  huntCreature?: {
+    eyeMats: THREE.MeshStandardMaterial[]
+    twitch: THREE.Object3D[]
+    heads: THREE.Object3D[]
+    phase: number
+    nextJerk: number
+  }
 
   // ── Aggressive-AI fields ────────────────────────────────────────────────
   // Until-when this enemy reacts to *external* stimulus (heard a shot or
@@ -9988,6 +10020,175 @@ export default function ThreeWorld({
           eg.emissiveIntensity = intensity
         }
       }
+      // ── Monster creatures (shared low-poly geometry; per-instance mats) ──────
+      const huntEyeGeo = new THREE.SphereGeometry(1, sseg(6), sseg(5))
+      const huntBlobGeo = new THREE.SphereGeometry(1, sseg(8), sseg(6))
+      const huntBoxGeo = new THREE.BoxGeometry(1, 1, 1)
+      const huntConeGeo = new THREE.ConeGeometry(1, 1, sseg(6))
+      // Build one of three original creature bodies, sized ~1.5–2.2 units tall
+      // (the enemy root scale resizes it). Returns the group + animation handles.
+      function makeHuntCreature(kind: HuntCreatureKind, bodyColor: number, eyeColor: number) {
+        const group = new THREE.Group()
+        const bodyMat = new THREE.MeshStandardMaterial({
+          color: bodyColor,
+          roughness: 0.85,
+          metalness: 0.05,
+        })
+        const darkMat = new THREE.MeshStandardMaterial({
+          color: new THREE.Color(bodyColor).multiplyScalar(0.45),
+          roughness: 0.95,
+          metalness: 0,
+        })
+        const eyeMat = new THREE.MeshStandardMaterial({
+          color: eyeColor,
+          emissive: eyeColor,
+          emissiveIntensity: 3,
+          roughness: 0.4,
+        })
+        const eyeMats = [eyeMat]
+        const twitch: THREE.Object3D[] = []
+        const heads: THREE.Object3D[] = []
+        const addEye = (parent: THREE.Object3D, x: number, y: number, z: number, r: number) => {
+          const m = new THREE.Mesh(huntEyeGeo, eyeMat)
+          m.position.set(x, y, z)
+          m.scale.setScalar(r)
+          parent.add(m)
+        }
+        if (kind === "fleshball") {
+          // A lump of pale meat covered in eyes + maws, crawling on stubby tentacles.
+          const core = new THREE.Mesh(huntBlobGeo, bodyMat)
+          core.position.y = 0.95
+          core.scale.set(0.8, 0.66, 0.8)
+          group.add(core)
+          twitch.push(core)
+          for (let i = 0; i < 6; i++) {
+            const a = (i / 6) * Math.PI * 2
+            const lump = new THREE.Mesh(huntBlobGeo, bodyMat)
+            lump.position.set(Math.cos(a) * 0.55, 0.9 + Math.sin(i) * 0.28, Math.sin(a) * 0.55)
+            lump.scale.setScalar(0.2 + Math.random() * 0.12)
+            group.add(lump)
+          }
+          for (let i = 0; i < 10; i++) {
+            const a = Math.random() * Math.PI * 2
+            const yy = 0.6 + Math.random() * 0.7
+            addEye(
+              group,
+              Math.cos(a) * 0.6,
+              yy,
+              Math.sin(a) * 0.6 - 0.1,
+              0.07 + Math.random() * 0.05,
+            )
+          }
+          for (let i = 0; i < 3; i++) {
+            const a = Math.random() * Math.PI * 2
+            const maw = new THREE.Mesh(huntConeGeo, darkMat)
+            maw.position.set(
+              Math.cos(a) * 0.52,
+              0.7 + Math.random() * 0.5,
+              Math.sin(a) * 0.52 - 0.3,
+            )
+            maw.scale.set(0.13, 0.2, 0.13)
+            maw.rotation.x = Math.PI
+            group.add(maw)
+          }
+          for (let i = 0; i < 6; i++) {
+            const a = (i / 6) * Math.PI * 2
+            const tent = new THREE.Mesh(huntBoxGeo, bodyMat)
+            tent.position.set(Math.cos(a) * 0.5, 0.3, Math.sin(a) * 0.5)
+            tent.scale.set(0.1, 0.62, 0.1)
+            tent.rotation.set(Math.sin(a) * 0.5, 0, Math.cos(a) * 0.5)
+            group.add(tent)
+            twitch.push(tent)
+          }
+        } else if (kind === "tall") {
+          // An abnormally tall, thin figure: blank oval face, kinked long limbs.
+          const torso = new THREE.Mesh(huntBoxGeo, bodyMat)
+          torso.position.y = 1.5
+          torso.scale.set(0.34, 1.0, 0.24)
+          group.add(torso)
+          twitch.push(torso)
+          const hips = new THREE.Mesh(huntBoxGeo, bodyMat)
+          hips.position.y = 0.95
+          hips.scale.set(0.3, 0.3, 0.22)
+          group.add(hips)
+          for (const s of [-1, 1]) {
+            const thigh = new THREE.Mesh(huntBoxGeo, bodyMat)
+            thigh.position.set(s * 0.12, 0.55, 0)
+            thigh.scale.set(0.1, 0.72, 0.1)
+            thigh.rotation.x = s * 0.1
+            group.add(thigh)
+            const shin = new THREE.Mesh(huntBoxGeo, bodyMat)
+            shin.position.set(s * 0.12, 0.0, 0.02)
+            shin.scale.set(0.09, 0.6, 0.09)
+            group.add(shin)
+            const upper = new THREE.Mesh(huntBoxGeo, bodyMat)
+            upper.position.set(s * 0.28, 1.55, 0)
+            upper.scale.set(0.09, 0.82, 0.09)
+            upper.rotation.z = s * 0.3
+            group.add(upper)
+            twitch.push(upper)
+            const fore = new THREE.Mesh(huntBoxGeo, bodyMat)
+            fore.position.set(s * 0.44, 0.95, 0.1)
+            fore.scale.set(0.08, 0.82, 0.08)
+            fore.rotation.set(-0.6, 0, s * 0.2)
+            group.add(fore)
+            twitch.push(fore)
+          }
+          const head = new THREE.Group()
+          head.position.y = 2.18
+          group.add(head)
+          heads.push(head)
+          const mask = new THREE.Mesh(huntBlobGeo, bodyMat)
+          mask.scale.set(0.2, 0.28, 0.16)
+          head.add(mask)
+          addEye(head, -0.07, 0.02, -0.15, 0.04)
+          addEye(head, 0.07, 0.02, -0.15, 0.04)
+        } else {
+          // A four-legged beast with three independent heads on long necks.
+          const trunk = new THREE.Mesh(huntBlobGeo, bodyMat)
+          trunk.position.set(0, 1.0, 0.2)
+          trunk.scale.set(0.6, 0.5, 0.95)
+          group.add(trunk)
+          twitch.push(trunk)
+          for (const [lx, lz] of [
+            [-0.4, -0.5],
+            [0.4, -0.5],
+            [-0.4, 0.7],
+            [0.4, 0.7],
+          ] as const) {
+            const leg = new THREE.Mesh(huntBoxGeo, darkMat)
+            leg.position.set(lx, 0.45, lz)
+            leg.scale.set(0.16, 0.9, 0.16)
+            group.add(leg)
+          }
+          for (let i = 0; i < 3; i++) {
+            const off = (i - 1) * 0.32
+            const neck = new THREE.Group()
+            neck.position.set(off, 1.3, -0.5)
+            group.add(neck)
+            heads.push(neck)
+            const nb = new THREE.Mesh(huntBoxGeo, bodyMat)
+            nb.position.set(0, 0.3, -0.1)
+            nb.scale.set(0.12, 0.7, 0.12)
+            nb.rotation.x = -0.5
+            neck.add(nb)
+            const headG = new THREE.Group()
+            headG.position.set(0, 0.6, -0.35)
+            neck.add(headG)
+            const skull = new THREE.Mesh(huntBlobGeo, bodyMat)
+            skull.scale.set(0.16, 0.16, 0.24)
+            headG.add(skull)
+            const jaw = new THREE.Mesh(huntConeGeo, darkMat)
+            jaw.position.set(0, -0.05, -0.2)
+            jaw.scale.set(0.1, 0.18, 0.1)
+            jaw.rotation.x = -Math.PI / 2
+            headG.add(jaw)
+            addEye(headG, -0.06, 0.05, -0.18, 0.04)
+            addEye(headG, 0.06, 0.05, -0.18, 0.04)
+          }
+        }
+        return { group, eyeMats, twitch, heads }
+      }
       // Build one themed minion / boss, push it into `enemies`, return it.
       function huntMakeEnemy(
         base: EnemyType,
@@ -10001,6 +10202,7 @@ export default function ThreeWorld({
         speed: number,
         isBoss: boolean,
         name: string,
+        creatureKind: HuntCreatureKind,
       ): CombatEnemy {
         const e = makeEnemy(base, x, z, false, scale)
         // Stealth (PR-Z2): HUNT enemies only notice the player up close, so the
@@ -10021,8 +10223,49 @@ export default function ThreeWorld({
         e.huntName = name
         e.isHuntBoss = isBoss
         if (isBoss) e.huntNextSpecial = Date.now() + 10000
+        // Swap the humanoid skin for a monster creature: hide the built body
+        // (the skeleton still drives AI + death), then ride a creature on the
+        // root. The eyes glow strongly for night visibility (boss brighter).
+        for (const c of e.mesh.children) c.visible = false
+        const cr = makeHuntCreature(creatureKind, tint, eyes)
+        for (const m of cr.eyeMats) m.emissiveIntensity = isBoss ? 5.0 : 3.0
+        e.mesh.add(cr.group)
+        e.huntCreature = {
+          eyeMats: cr.eyeMats,
+          twitch: cr.twitch,
+          heads: cr.heads,
+          phase: Math.random() * Math.PI * 2,
+          nextJerk: Date.now() + 1000 + Math.random() * 3000,
+        }
         enemies.push(e)
         return e
+      }
+      // Per-frame creepy idle for the monster creatures: uneasy eye glow,
+      // irregular twitches with sudden jerks, and independently-swaying heads.
+      function updateHuntCreatures(dt: number) {
+        if (modeRef.current !== "hunt") return
+        const now = Date.now()
+        for (const e of enemies) {
+          const cr = e.huntCreature
+          if (!cr || e.hp <= 0) continue
+          cr.phase += dt
+          const pulse = 2.6 + Math.sin(now * 0.006 + cr.phase) * 1.4
+          for (const m of cr.eyeMats) m.emissiveIntensity = (e.isHuntBoss ? 1.7 : 1) * pulse
+          const jerking = now > cr.nextJerk && now < cr.nextJerk + 220
+          for (let i = 0; i < cr.twitch.length; i++) {
+            const t = cr.twitch[i]
+            if (!t) continue
+            const j = jerking ? Math.sin(now * 0.05 + i) * 0.13 : 0
+            t.rotation.z = Math.sin(now * 0.004 + cr.phase + i) * 0.06 + j
+          }
+          if (now > cr.nextJerk + 220) cr.nextJerk = now + 1200 + Math.random() * 3000
+          for (let i = 0; i < cr.heads.length; i++) {
+            const h = cr.heads[i]
+            if (!h) continue
+            h.rotation.y = Math.sin(now * 0.0018 + cr.phase + i * 2.1) * 0.5
+            h.rotation.x = Math.sin(now * 0.0026 + cr.phase + i) * 0.25
+          }
+        }
       }
       // Remove every (live or dying) enemy mesh and empty the array.
       function huntClearEnemies() {
@@ -10509,9 +10752,11 @@ export default function ThreeWorld({
             th.speed,
             false,
             "minion",
+            th.creature,
           )
         }
         // Boss: charge/aoe → terraformer (melee), ranged_summon → grunt (shoots).
+        // It's a giant version of the level's creature (its eyes tinted red).
         const bossBase: EnemyType = lv.boss === "ranged_summon" ? "grunt" : "terraformer"
         const bsafe = findSafeSpawnNear(HUNT_ARENA.x, HUNT_ARENA.z - 60, ENEMY_RADIUS)
         huntMakeEnemy(
@@ -10519,13 +10764,14 @@ export default function ThreeWorld({
           bsafe.x,
           bsafe.z,
           lv.bossScale,
-          0x101014,
+          th.tint,
           0xff2200,
           lv.bossScore,
           Math.round(lv.bossHp * hpScale),
           lv.boss === "aoe_fast" ? 5.5 : 3.0,
           true,
           lv.target.name,
+          th.creature,
         )
         setAliveEnemyCount(enemies.filter((e) => e.hp > 0).length)
         // Boundary + timer.
@@ -11199,6 +11445,7 @@ export default function ThreeWorld({
                   th.speed,
                   false,
                   "minion",
+                  th.creature,
                 )
               }
               boss.huntNextSpecial = now + 12000
@@ -12794,6 +13041,7 @@ export default function ThreeWorld({
         if (aaMountedRef.current) updateMountedAA(dt) // PR-G1 manned AA turret
         if (bikeSlots.length > 0) updateBikeRespawns(Date.now()) // refill taken bikes
         if (modeRef.current === "hunt") updateHunt(dt) // HUNT transfer-mission FSM
+        if (modeRef.current === "hunt") updateHuntCreatures(dt) // monster idle/twitch
         // HUNT room compass: rotate the on-screen arrow toward the orb (which
         // sits at the room centre) in the player's local frame. Room phase only.
         if (modeRef.current === "hunt" && huntCompassRef.current) {
