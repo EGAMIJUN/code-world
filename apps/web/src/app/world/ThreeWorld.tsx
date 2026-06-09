@@ -1817,6 +1817,23 @@ interface ExplosionParticle {
   maxLife: number
   isSpark: boolean
 }
+// Explosive barrel: shot to detonate (AOE damage + fire/smoke + chain reaction).
+type ExplosiveBarrel = {
+  mesh: THREE.Group
+  position: THREE.Vector3
+  hp: number // initial 30
+  exploded: boolean
+  chainRadius: number // chain-detonation radius, 5.0
+}
+// Per-shot barrel fire/smoke particle (each owns its geometry+material so it
+// can be disposed individually when it expires — no shared pools).
+interface BarrelParticle {
+  mesh: THREE.Mesh
+  velocity: THREE.Vector3
+  life: number
+  maxLife: number
+  kind: "fire" | "smoke"
+}
 
 // ── Vertical-world geometry ────────────────────────────────────────────────────
 // A horizontal walkable surface at altitude y. The ground is implicit
@@ -2121,6 +2138,9 @@ export default function ThreeWorld({
   const muzzleFlashTimerRef = useRef(0)
   const mouseDownRef = useRef(false)
   const lastFireTimeRef = useRef(0)
+  // Explosive barrels live for the lifetime of the current map (disposed on
+  // teardown). Populated by spawnExplosiveBarrels during scene init.
+  const explosiveBarrelsRef = useRef<ExplosiveBarrel[]>([])
   // Weapon refs
   const currentWeaponIdxRef = useRef(0)
   // 4-slot: pistol(∞) / shotgun(8) / sniper(5) / knife(∞). -1 = infinite.
@@ -11903,6 +11923,10 @@ export default function ThreeWorld({
       function fireHuntWeapon() {
         const id = huntWeaponRef.current
         if (!id || huntReloadingRef.current) return
+        // HUNT: a shot aimed straight at an explosive barrel detonates it.
+        pointer.set(0, 0)
+        raycaster.setFromCamera(pointer, camera)
+        tryHitBarrel(100)
         const now = Date.now()
         if (id === "pulsegun") {
           if (now - lastFireTimeRef.current < 250) return
@@ -12395,6 +12419,8 @@ export default function ThreeWorld({
       const bullets: Bullet[] = []
       const bloodParticles: BloodParticle[] = []
       const explosionParticles: ExplosionParticle[] = []
+      const barrelParticles: BarrelParticle[] = []
+      spawnExplosiveBarrels() // city + outskirts (or HUNT arena) explosive barrels
 
       sceneRef.current = {
         scene,
@@ -12543,6 +12569,204 @@ export default function ThreeWorld({
             isSpark,
           })
         }
+      }
+
+      // ── Explosive barrels (PR: barrel-explosion) ───────────────────────────
+      // Build a rusty red barrel: body + top/bottom caps + two hoop bands.
+      function createBarrel(): THREE.Group {
+        const group = new THREE.Group()
+        const bodyMat = new THREE.MeshStandardMaterial({ color: 0xcc4400, roughness: 0.9 })
+        const body = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.4, 0.9, 10), bodyMat)
+        body.position.y = 0.45
+        group.add(body)
+        const capMat = new THREE.MeshStandardMaterial({ color: 0x884400, roughness: 0.9 })
+        for (const y of [0.02, 0.88]) {
+          const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.38, 0.38, 0.05, 10), capMat)
+          cap.position.y = y + 0.05
+          group.add(cap)
+        }
+        const bandMat = new THREE.MeshStandardMaterial({ color: 0x442200, roughness: 0.9 })
+        for (const y of [0.25, 0.65]) {
+          const band = new THREE.Mesh(new THREE.TorusGeometry(0.38, 0.04, 6, 10), bandMat)
+          band.rotation.x = Math.PI / 2
+          band.position.y = y
+          group.add(band)
+        }
+        return group
+      }
+      // Place one barrel at (x,z), nudged clear of buildings, registered for
+      // bullet hits + chain reactions.
+      function placeBarrel(x: number, z: number) {
+        const safe = findSafeSpawnNear(x, z, 0.5)
+        const group = createBarrel()
+        group.position.set(safe.x, 0, safe.z)
+        scene.add(group)
+        explosiveBarrelsRef.current.push({
+          mesh: group,
+          position: new THREE.Vector3(safe.x, 0.45, safe.z),
+          hp: 30,
+          exploded: false,
+          chainRadius: 5.0,
+        })
+      }
+      // Scatter barrels across the active map (city + outskirts, or HUNT arena).
+      function spawnExplosiveBarrels() {
+        if (isSky) return // no ground arena in the sky map
+        if (isHunt) {
+          // 6 barrels evenly ringed around the HUNT arena, near the wall line.
+          for (let i = 0; i < 6; i++) {
+            const a = (i / 6) * Math.PI * 2
+            placeBarrel(HUNT_ARENA.x + Math.cos(a) * 22, HUNT_ARENA.z + Math.sin(a) * 22)
+          }
+          return
+        }
+        // City core (8) — corners + alley-ish spots inside the 0–100 grid.
+        for (const [x, z] of [
+          [18, 14],
+          [82, 22],
+          [40, 8],
+          [12, 70],
+          [88, 78],
+          [56, 92],
+          [30, 48],
+          [72, 54],
+        ] as const) {
+          placeBarrel(x, z)
+        }
+        // Outskirts (6) — along the main roads beyond the city grid.
+        for (const [x, z] of [
+          [WORLD_CENTER, -90],
+          [WORLD_CENTER, 200],
+          [-110, WORLD_CENTER],
+          [210, WORLD_CENTER],
+          [-110, -120],
+          [210, 200],
+        ] as const) {
+          placeBarrel(x, z)
+        }
+      }
+      // Spawn one barrel particle (own geometry+material; disposed on expiry).
+      function spawnBarrelParticle(origin: THREE.Vector3, kind: "fire" | "smoke") {
+        const geo = new THREE.SphereGeometry(kind === "fire" ? 0.15 : 0.3, 4, 4)
+        const mat =
+          kind === "fire"
+            ? new THREE.MeshStandardMaterial({
+                color: 0xff4400,
+                emissive: 0xff2200,
+                emissiveIntensity: 2,
+              })
+            : new THREE.MeshStandardMaterial({ color: 0x333333, transparent: true, opacity: 0.7 })
+        const mesh = new THREE.Mesh(geo, mat)
+        mesh.position.copy(origin)
+        scene.add(mesh)
+        const vel =
+          kind === "fire"
+            ? new THREE.Vector3(
+                (Math.random() - 0.5) * 6,
+                4 + Math.random() * 4,
+                (Math.random() - 0.5) * 6,
+              )
+            : new THREE.Vector3(
+                (Math.random() - 0.5) * 2,
+                1 + Math.random() * 2,
+                (Math.random() - 0.5) * 2,
+              )
+        const maxLife = kind === "fire" ? 1.2 : 2.0
+        barrelParticles.push({ mesh, velocity: vel, life: maxLife, maxLife, kind })
+      }
+      // Detonate a barrel: AOE damage + fire/smoke + flash, remove the mesh, then
+      // chain to nearby barrels after a short delay. The exploded flag is set
+      // FIRST so the recursive chain can never re-detonate the same barrel.
+      function explodeBarrel(barrel: ExplosiveBarrel) {
+        if (barrel.exploded) return
+        barrel.exploded = true
+        const pos = barrel.position
+        // Damage: 80 to enemies within 5.0, 50 to the player within 3.0.
+        for (const enemy of enemies) {
+          if (enemy.hp <= 0 || enemy.aiDriving) continue
+          if (enemy.mesh.position.distanceTo(pos) <= 5.0) {
+            enemy.hp = Math.max(0, enemy.hp - 80)
+            if (enemy.hp <= 0) applyEnemyKill(enemy, "explosive")
+          }
+        }
+        const playerPos = new THREE.Vector3(focalPoint.x, EYE_HEIGHT, focalPoint.z)
+        if (playerPos.distanceTo(pos) <= 3.0) applyPlayerDamage(50)
+        // Visual: 20 fire + 10 smoke particles, plus a brief orange flash light.
+        for (let i = 0; i < 20; i++) spawnBarrelParticle(pos, "fire")
+        for (let i = 0; i < 10; i++) spawnBarrelParticle(pos, "smoke")
+        const flash = new THREE.PointLight(0xff6600, 8, 12)
+        flash.position.copy(pos)
+        scene.add(flash)
+        window.setTimeout(() => scene.remove(flash), 300)
+        SOUNDS.collapse() // deep boom
+        // Remove + dispose the barrel mesh.
+        scene.remove(barrel.mesh)
+        barrel.mesh.traverse((o) => {
+          if (o instanceof THREE.Mesh) {
+            o.geometry.dispose()
+            const m = o.material
+            if (Array.isArray(m)) for (const mm of m) mm.dispose()
+            else m.dispose()
+          }
+        })
+        // Chain reaction: detonate unexploded neighbours within chainRadius after
+        // 0.15s so they don't all blow up on the same frame.
+        for (const other of explosiveBarrelsRef.current) {
+          if (other === barrel || other.exploded) continue
+          if (other.position.distanceTo(pos) <= barrel.chainRadius) {
+            window.setTimeout(() => explodeBarrel(other), 150)
+          }
+        }
+      }
+      // Hitscan a barrel along the current camera ray (the raycaster must already
+      // be set from the camera). Applies `damage`; returns true if a barrel was
+      // hit (so the caller can consume the shot). Respects wall occlusion, and an
+      // optional `blockDist` (a nearer enemy/target) that takes the shot instead.
+      function tryHitBarrel(damage: number, blockDist?: number): boolean {
+        const barrels = explosiveBarrelsRef.current.filter((b) => !b.exploded)
+        if (barrels.length === 0) return false
+        const hit = raycaster.intersectObjects(
+          barrels.map((b) => b.mesh),
+          true,
+        )[0]
+        if (!hit) return false
+        if (blockDist !== undefined && blockDist < hit.distance) return false
+        const wallHit = raycaster.intersectObjects(wallMeshes, false)[0]
+        if (wallHit && wallHit.distance < hit.distance) return false
+        // Map the hit child back to its owning barrel.
+        let node: THREE.Object3D | null = hit.object
+        let barrel: ExplosiveBarrel | undefined
+        while (node && !barrel) {
+          barrel = barrels.find((b) => b.mesh === node)
+          node = node.parent
+        }
+        if (!barrel) return false
+        barrel.hp -= damage
+        spawnExplosion(hit.point.clone(), true)
+        if (barrel.hp <= 0 && !barrel.exploded) explodeBarrel(barrel)
+        return true
+      }
+      // Dispose every barrel + live particle (map teardown / mode switch).
+      function disposeAllBarrels() {
+        for (const barrel of explosiveBarrelsRef.current) {
+          if (barrel.exploded) continue
+          scene.remove(barrel.mesh)
+          barrel.mesh.traverse((o) => {
+            if (o instanceof THREE.Mesh) {
+              o.geometry.dispose()
+              const m = o.material
+              if (Array.isArray(m)) for (const mm of m) mm.dispose()
+              else m.dispose()
+            }
+          })
+        }
+        explosiveBarrelsRef.current = []
+        for (const p of barrelParticles) {
+          scene.remove(p.mesh)
+          p.mesh.geometry.dispose()
+          ;(p.mesh.material as THREE.Material).dispose()
+        }
+        barrelParticles.length = 0
       }
 
       // ── Register an enemy kill ─────────────────────────────────────────────
@@ -13432,6 +13656,13 @@ export default function ThreeWorld({
         // skipped — otherwise one bullet would pass through and multi-hit.
         let shotConsumed = false
 
+        // Explosive barrel: a shot reaching a barrel before any enemy/wall
+        // detonates it (tryHitBarrel handles occlusion + the chain reaction).
+        if (tryHitBarrel(weapon.hitDamage, enemyHits[0]?.distance)) {
+          enemyHits = []
+          shotConsumed = true
+        }
+
         // Hard (non-humanoid) targets — enemy-driven vehicles, enemy AA guns and
         // enemy jets — share one hitscan helper. Jets are small, fast and fly at
         // 150–300m, so a pixel-perfect centre ray almost never connects; the
@@ -13439,7 +13670,7 @@ export default function ThreeWorld({
         // out to JET_GROUND_RANGE so ground fire can actually down a bandit. We
         // take the nearest such candidate, provided no wall or infantry sits in
         // front of it (a single shot only damages one thing).
-        {
+        if (!shotConsumed) {
           const assistR =
             JET_AIM_ASSIST_RADIUS * (weapon.id === "sniper" ? JET_AIM_ASSIST_SNIPER_MULT : 1)
           const hard = collectHardTargets(raycaster, weapon.hitDamage, {
@@ -14556,6 +14787,26 @@ export default function ThreeWorld({
             refs.scene.remove(p.mesh)
             p.mesh.geometry.dispose()
             refs.explosionParticles.splice(i, 1)
+          }
+        }
+
+        // ── Explosive-barrel particles (fire shrinks, smoke fades) ───────────
+        for (let i = barrelParticles.length - 1; i >= 0; i--) {
+          const p = barrelParticles[i]
+          if (!p) continue
+          if (p.kind === "fire") p.velocity.y -= 6 * dt // arc back down
+          p.mesh.position.addScaledVector(p.velocity, dt)
+          p.life -= dt
+          const t = Math.max(0, p.life / p.maxLife)
+          const mat = p.mesh.material as THREE.MeshStandardMaterial
+          if (p.kind === "fire")
+            p.mesh.scale.setScalar(t) // 1.0 → 0
+          else mat.opacity = 0.7 * t // 0.7 → 0
+          if (p.life <= 0) {
+            refs.scene.remove(p.mesh)
+            p.mesh.geometry.dispose()
+            mat.dispose()
+            barrelParticles.splice(i, 1)
           }
         }
 
@@ -15999,6 +16250,7 @@ export default function ThreeWorld({
       animate()
 
       return () => {
+        disposeAllBarrels() // dispose any unexploded barrels + live particles
         document.removeEventListener("mousemove", onDocMouseMove)
         document.removeEventListener("mouseup", onMouseUp)
         document.removeEventListener("pointerlockchange", onPointerLockChange)
