@@ -2271,6 +2271,9 @@ export default function ThreeWorld({
   // they belong to a stale encounter and bail instead of resurrecting the boss.
   const osakaBossRef = useRef<OsakaBoss | null>(null)
   const osakaGenRef = useRef(0)
+  // Set by the O key (component scope); consumed in the animate loop where
+  // spawnOsakaBoss is in scope.
+  const osakaSpawnReqRef = useRef(false)
 
   // ── HUNT equipment (PR-Z2) ──────────────────────────────────────────────────
   // Equipment menu (opened at the rack in the room).
@@ -10871,6 +10874,7 @@ export default function ThreeWorld({
       // Roughen a sphere into a lumpy meat silhouette (same trick as amalgam_boss).
       function osakaJitter(geo: THREE.BufferGeometry, amt: number) {
         const pos = geo.attributes.position
+        if (!pos) return
         for (let i = 0; i < pos.count; i++) {
           pos.setXYZ(
             i,
@@ -11177,7 +11181,11 @@ export default function ThreeWorld({
             c
               .clone()
               .add(
-                new THREE.Vector3((Math.random() - 0.5) * 4, 1 + Math.random() * 4, (Math.random() - 0.5) * 4),
+                new THREE.Vector3(
+                  (Math.random() - 0.5) * 4,
+                  1 + Math.random() * 4,
+                  (Math.random() - 0.5) * 4,
+                ),
               ),
             false,
             false,
@@ -12885,8 +12893,10 @@ export default function ThreeWorld({
               return
             }
           }
-          // Clear: every enemy dead.
-          if (enemies.filter((e) => e.hp > 0).length === 0) {
+          // Clear: every enemy dead. The OSAKA boss lives outside the `enemies`
+          // array, so while it is active its escorts/fodder dying must NOT end the
+          // mission — its own defeat path calls huntReturnToRoom instead.
+          if (!osakaBossRef.current && enemies.filter((e) => e.hp > 0).length === 0) {
             huntReturnToRoom("clear")
           }
         }
@@ -14235,6 +14245,36 @@ export default function ThreeWorld({
           }
         }
 
+        // OSAKA boss weak-point: the glowing core takes ×3, the bulk body ×0.2 —
+        // you must hit the core to make a dent. Runs between the hard-target and
+        // PvP passes, respecting wall/enemy occlusion so one shot hits one thing.
+        const osakaB = osakaBossRef.current
+        if (!shotConsumed && osakaB && !osakaB.transitioning) {
+          const obParts: THREE.Object3D[] = []
+          osakaB.group.traverse((c) => {
+            if (
+              c instanceof THREE.Mesh &&
+              c.visible &&
+              (c.userData.osakaCore || c.userData.osakaBody)
+            ) {
+              obParts.push(c)
+            }
+          })
+          const obHit = raycaster.intersectObjects(obParts, false)[0]
+          if (obHit) {
+            const blockedByWall = !!(nearestWall && nearestWall.distance < obHit.distance)
+            const blockedByEnemy = !!(enemyHits[0] && enemyHits[0].distance < obHit.distance)
+            if (!blockedByWall && !blockedByEnemy) {
+              const isCore = obHit.object.userData.osakaCore === true
+              SOUNDS.hit()
+              spawnBlood(obHit.point)
+              osakaDamage(weapon.hitDamage * (isCore ? OSAKA_CORE_MULT : OSAKA_BODY_MULT))
+              enemyHits = []
+              shotConsumed = true
+            }
+          }
+        }
+
         // PvP hit: check remote players
         const sceneRefsLocal = sceneRef.current
         if (
@@ -14669,6 +14709,14 @@ export default function ThreeWorld({
         if (bikeSlots.length > 0) updateBikeRespawns(Date.now()) // refill taken bikes
         if (modeRef.current === "hunt") updateHunt(dt) // HUNT transfer-mission FSM
         if (modeRef.current === "hunt") updateHuntCreatures(dt) // monster idle/twitch
+        if (modeRef.current === "hunt") {
+          // O-key summon request (consumed here so spawnOsakaBoss is in scope).
+          if (osakaSpawnReqRef.current) {
+            osakaSpawnReqRef.current = false
+            if (huntPhaseRef.current === "mission" && !osakaBossRef.current) spawnOsakaBoss()
+          }
+          updateOsakaBoss(dt) // OSAKA 五変化 boss
+        }
         // HUNT room compass: rotate the on-screen arrow toward the orb (which
         // sits at the room centre) in the player's local frame. Room phase only.
         if (modeRef.current === "hunt" && huntCompassRef.current) {
@@ -16965,6 +17013,11 @@ export default function ThreeWorld({
           showNotification(next ? "CRT SCANLINES ON" : "CRT SCANLINES OFF")
           return next
         })
+      }
+      // OSAKA 五変化: summon the immortal boss into the live HUNT arena. Phase-1
+      // test entry — proper mission-select integration ships with the dedicated map.
+      if ((e.key === "o" || e.key === "O") && modeRef.current === "hunt") {
+        osakaSpawnReqRef.current = true
       }
       if (e.key === "g" || e.key === "G") {
         const now = Date.now()
