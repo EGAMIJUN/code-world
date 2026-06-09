@@ -702,6 +702,41 @@ const HUNT_LEVELS: HuntLevel[] = [
   },
 ]
 
+// ══ OSAKA boss "五変化" (gohenge) — 5-phase immortal boss ══════════════════════
+// A completely original yokai design (no existing IP). The boss morphs through
+// five forms; each form is a fresh THREE.Group with a glowing weak-point core.
+// Damage only really lands on the core (×3); the bulk body shrugs off 80% of it,
+// which is what produces the "you must aim the core" dread. When a form's HP hits
+// zero the parts are blown apart and the next form is built. Surviving the fifth
+// form clears the mission. Runs on the existing HUNT arena (map is a later phase).
+type OsakaBossPhase = 1 | 2 | 3 | 4 | 5
+type OsakaBoss = {
+  group: THREE.Group
+  phase: OsakaBossPhase
+  phaseHp: number // current form HP
+  phaseMaxHp: number
+  core: THREE.Mesh // primary glowing weak-point core (cores[0])
+  cores: THREE.Mesh[] // all live weak-point cores (phase 5 has 3)
+  coreExposed: boolean // is the core currently hittable
+  transitioning: boolean // mid form-change animation (no attacks, no hits)
+  attackTimer: number // counts down to the next special attack
+  parts: THREE.Object3D[] // current form's body parts (swapped wholesale on change)
+  nextZakoAt: number // timestamp for the next infinite-zako top-up
+}
+const OSAKA_PHASE_HP: Record<OsakaBossPhase, number> = {
+  1: 1500,
+  2: 3000,
+  3: 3500,
+  4: 4500,
+  5: 6000,
+}
+const OSAKA_CORE_MULT = 3.0 // core hits hurt triple
+const OSAKA_BODY_MULT = 0.2 // body hits are 80% reduced
+const OSAKA_ZAKO_NAME = "下級妖怪" // tag distinguishing infinite-spawn fodder
+const OSAKA_ESCORT_NAME = "鬼火衆" // the two flanking escorts
+const OSAKA_ZAKO_CAP = 12 // hard cap on simultaneous fodder
+const OSAKA_ZAKO_INTERVAL = 5000 // ms between fodder top-ups
+
 // ══ HUNT mode equipment (PR-Z2) ══════════════════════════════════════════════
 // Suit + four dedicated weapons + the rewards bought at the 100-pt menu. All of
 // this only exists while modeRef === "hunt"; the normal weapon system is left
@@ -2231,6 +2266,11 @@ export default function ThreeWorld({
     difficulty: 1,
   })
   const huntHasDeployedRef = useRef(false) // difficulty seeds level only on run start
+  // OSAKA boss "五変化": the active boss (null when not summoned). osakaGenRef is
+  // bumped on every teardown so deferred (setTimeout) form-change callbacks know
+  // they belong to a stale encounter and bail instead of resurrecting the boss.
+  const osakaBossRef = useRef<OsakaBoss | null>(null)
+  const osakaGenRef = useRef(0)
 
   // ── HUNT equipment (PR-Z2) ──────────────────────────────────────────────────
   // Equipment menu (opened at the rack in the room).
