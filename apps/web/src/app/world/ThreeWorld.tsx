@@ -579,6 +579,13 @@ interface HuntLevel {
   shrink: boolean
   target: HuntTarget
 }
+// Player-chosen mission settings (set on the transfer-room MISSION SELECT panel).
+// stage = arena dressing (outdoor day vs. indoor green-lit hall);
+// difficulty = which HUNT_LEVELS entry a fresh run starts at (1/2/3).
+type HuntMissionConfig = {
+  stage: "outdoor" | "indoor"
+  difficulty: 1 | 2 | 3
+}
 // Per-theme minion spec — reuse an existing enemy model with a colour/scale
 // tweak. base = model, tint = body recolour, eyes = eye-glow colour.
 type HuntCreatureKind =
@@ -2197,6 +2204,13 @@ export default function ThreeWorld({
     jingled: boolean
     banged: boolean // the dramatic "bang" open SFX/shake fired once
   } | null>(null)
+  // MISSION SELECT panel state. stage drives the indoor/outdoor dressing each
+  // warp; difficulty seeds the start level (applied once, on the first deploy).
+  const huntMissionConfigRef = useRef<HuntMissionConfig>({
+    stage: "outdoor",
+    difficulty: 1,
+  })
+  const huntHasDeployedRef = useRef(false) // difficulty seeds level only on run start
 
   // ── HUNT equipment (PR-Z2) ──────────────────────────────────────────────────
   // Equipment menu (opened at the rack in the room).
@@ -2815,13 +2829,13 @@ export default function ThreeWorld({
       // HUNT runs at night but must stay legible: a brighter blue-white ambient
       // + a cool moonlight key keep enemies/terrain visible while preserving the
       // night mood (the transfer-room interior reads off the glowing orb too).
-      scene.add(
-        isHunt
-          ? // HUNT: full-white ambient so the night arena stays clearly legible
-            // (visibility is prioritised over mood — it was rendering black).
-            new THREE.AmbientLight(0xffffff, 1.0)
-          : new THREE.AmbientLight(theme.ambient, 0.45),
-      )
+      // Captured so the HUNT indoor stage can dim it during a mission.
+      const worldAmbient = isHunt
+        ? // HUNT: full-white ambient so the night arena stays clearly legible
+          // (visibility is prioritised over mood — it was rendering black).
+          new THREE.AmbientLight(0xffffff, 1.0)
+        : new THREE.AmbientLight(theme.ambient, 0.45)
+      scene.add(worldAmbient)
       const hemi = new THREE.HemisphereLight(
         isHunt ? 0x556688 : theme.sky,
         0x4a4030,
@@ -10773,6 +10787,41 @@ export default function ThreeWorld({
       // Warm "sunrise through the window" key light — on in the room, off during
       // a mission (toggled in updateHunt) so it doesn't tint the night arena.
       let huntRoomSun: THREE.DirectionalLight | null = null
+      // ── MISSION SELECT panel (built once with the room) ──────────────────────
+      // A CanvasTexture-painted plane on the room's east wall. Selecting an item
+      // updates huntMissionConfigRef + redraws; DEPLOY confirms and warps in.
+      let huntPanel: {
+        mesh: THREE.Mesh
+        canvas: HTMLCanvasElement
+        ctx: CanvasRenderingContext2D
+        texture: THREE.CanvasTexture
+      } | null = null
+      let huntPanelClickAt = 0 // throttle held-fire so one tap = one selection
+      // Clickable regions in normalised canvas space (top-left origin).
+      type HuntPanelHit =
+        | { kind: "stage"; value: "outdoor" | "indoor" }
+        | { kind: "difficulty"; value: 1 | 2 | 3 }
+        | { kind: "deploy" }
+      const HUNT_PANEL_REGIONS: {
+        x0: number
+        y0: number
+        x1: number
+        y1: number
+        hit: HuntPanelHit
+      }[] = [
+        { x0: 0.05, y0: 0.26, x1: 0.46, y1: 0.42, hit: { kind: "stage", value: "outdoor" } },
+        { x0: 0.05, y0: 0.45, x1: 0.46, y1: 0.61, hit: { kind: "stage", value: "indoor" } },
+        { x0: 0.54, y0: 0.24, x1: 0.95, y1: 0.37, hit: { kind: "difficulty", value: 1 } },
+        { x0: 0.54, y0: 0.4, x1: 0.95, y1: 0.53, hit: { kind: "difficulty", value: 2 } },
+        { x0: 0.54, y0: 0.56, x1: 0.95, y1: 0.69, hit: { kind: "difficulty", value: 3 } },
+        { x0: 0.22, y0: 0.78, x1: 0.78, y1: 0.94, hit: { kind: "deploy" } },
+      ]
+      // ── HUNT indoor stage overlay (built per mission, disposed on return) ─────
+      let huntIndoorGroup: THREE.Group | null = null
+      const huntFlickerLights: THREE.PointLight[] = []
+      // Original values captured on apply so the outdoor look is restored exactly.
+      const huntStageLightSaved: { light: THREE.Light; intensity: number }[] = []
+      const huntStageColorSaved: { mat: THREE.MeshStandardMaterial; color: number }[] = []
       function buildHuntRoom() {
         const cx = HUNT_ROOM.x
         const cz = HUNT_ROOM.z
@@ -11046,6 +11095,22 @@ export default function ThreeWorld({
         )
         door.position.set(2.4, 1.6, W - 0.05)
         group.add(door)
+        // ── MISSION SELECT panel on the east wall (faces into the room). ──
+        const panelCanvas = document.createElement("canvas")
+        panelCanvas.width = 512
+        panelCanvas.height = 384
+        const panelCtx = panelCanvas.getContext("2d")
+        if (panelCtx) {
+          const panelTex = new THREE.CanvasTexture(panelCanvas)
+          const panelMesh = new THREE.Mesh(
+            new THREE.PlaneGeometry(3.6, 2.7),
+            new THREE.MeshBasicMaterial({ map: panelTex, transparent: true }),
+          )
+          panelMesh.position.set(W - 0.12, 1.9, 0)
+          panelMesh.rotation.y = -Math.PI / 2 // normal points -x, into the room
+          group.add(panelMesh)
+          huntPanel = { mesh: panelMesh, canvas: panelCanvas, ctx: panelCtx, texture: panelTex }
+        }
         scene.add(group)
         huntRoomRef.current = {
           orb,
@@ -11065,6 +11130,170 @@ export default function ThreeWorld({
         }
         // `weaponRack` is parked on the orb so the open anim can find it.
         orb.userData.weaponRack = weaponRack
+        huntDrawPanel()
+      }
+      // Repaint the MISSION SELECT panel from the current config selection.
+      function huntDrawPanel() {
+        if (!huntPanel) return
+        const { ctx, canvas, texture } = huntPanel
+        const W = canvas.width
+        const H = canvas.height
+        const cfg = huntMissionConfigRef.current
+        ctx.fillStyle = "#0a0a0a"
+        ctx.fillRect(0, 0, W, H)
+        ctx.strokeStyle = "#00ff88"
+        ctx.lineWidth = 3
+        ctx.strokeRect(6, 6, W - 12, H - 12)
+        ctx.textAlign = "center"
+        ctx.textBaseline = "middle"
+        ctx.fillStyle = "#ffffff"
+        ctx.font = "bold 38px monospace"
+        ctx.fillText("MISSION SELECT", W / 2, H * 0.12)
+        // Column headers.
+        ctx.fillStyle = "#88ffcc"
+        ctx.font = "bold 22px monospace"
+        ctx.fillText("STAGE", W * 0.255, H * 0.2)
+        ctx.fillText("DIFFICULTY", W * 0.745, H * 0.18)
+        // Each clickable region: highlight when it is the current selection.
+        for (const r of HUNT_PANEL_REGIONS) {
+          const selected =
+            (r.hit.kind === "stage" && cfg.stage === r.hit.value) ||
+            (r.hit.kind === "difficulty" && cfg.difficulty === r.hit.value)
+          const deploy = r.hit.kind === "deploy"
+          const x = r.x0 * W
+          const y = r.y0 * H
+          const w = (r.x1 - r.x0) * W
+          const h = (r.y1 - r.y0) * H
+          ctx.fillStyle = selected ? "#00ff88" : deploy ? "#103a26" : "#181818"
+          ctx.fillRect(x, y, w, h)
+          ctx.strokeStyle = "#00ff88"
+          ctx.lineWidth = deploy ? 3 : 2
+          ctx.strokeRect(x, y, w, h)
+          ctx.fillStyle = selected ? "#0a0a0a" : "#e6e6e6"
+          ctx.font = deploy ? "bold 30px monospace" : "bold 26px monospace"
+          const label =
+            r.hit.kind === "stage"
+              ? r.hit.value.toUpperCase()
+              : r.hit.kind === "difficulty"
+                ? `LV${r.hit.value}`
+                : "[ DEPLOY ]"
+          ctx.fillText(label, x + w / 2, y + h / 2)
+        }
+        texture.needsUpdate = true
+      }
+      // Hit-test a normalised plane UV (0..1, bottom-left origin) against the
+      // panel regions. Returns the action, or null on a miss.
+      function huntPanelHitAt(u: number, v: number): HuntPanelHit | null {
+        const cx = u
+        const cy = 1 - v // canvas rows run top→bottom
+        for (const r of HUNT_PANEL_REGIONS) {
+          if (cx >= r.x0 && cx <= r.x1 && cy >= r.y0 && cy <= r.y1) return r.hit
+        }
+        return null
+      }
+      // Center-screen raycast against the panel during the room/countdown phase.
+      // Returns true if the click was consumed (so fire() should not shoot).
+      function huntTryPanelClick(): boolean {
+        if (!huntPanel) return false
+        const phase = huntPhaseRef.current
+        if (phase !== "room" && phase !== "countdown") return false
+        pointer.set(0, 0)
+        raycaster.setFromCamera(pointer, camera)
+        const hit = raycaster.intersectObject(huntPanel.mesh, false)[0]
+        if (!hit?.uv) return false
+        const now = Date.now()
+        if (now - huntPanelClickAt < 300) return true // consume, but don't re-act
+        huntPanelClickAt = now
+        const action = huntPanelHitAt(hit.uv.x, hit.uv.y)
+        if (!action) return true // looking at the panel but a dead zone — still consume
+        if (action.kind === "stage") {
+          huntMissionConfigRef.current.stage = action.value
+          SOUNDS.huntTally()
+          huntDrawPanel()
+        } else if (action.kind === "difficulty") {
+          huntMissionConfigRef.current.difficulty = action.value
+          SOUNDS.huntTally()
+          huntDrawPanel()
+        } else {
+          huntDeployMission()
+        }
+        return true
+      }
+      // DEPLOY: lock in the selection and kick off the warp countdown. The
+      // chosen difficulty is applied as the start level in huntBeginMission (so
+      // both DEPLOY and the auto-start path honour the selection).
+      function huntDeployMission() {
+        if (huntPhaseRef.current !== "room") return
+        const room = huntRoomRef.current
+        SOUNDS.huntJingle()
+        if (room) room.jingled = true
+        huntCountdownRef.current = Date.now() + 3000
+        huntPhaseRef.current = "countdown"
+        setHuntPhase("countdown")
+      }
+      // ── HUNT indoor stage: dim the world, drop a ceiling + green point lights,
+      // and recolour the floor/walls. Reversed by huntClearStage on return. ──
+      function huntApplyStage(stage: "outdoor" | "indoor") {
+        huntClearStage() // idempotent — never stack overlays
+        if (stage !== "indoor") return
+        const group = new THREE.Group()
+        // Ceiling over the arena (the open battlefield gets a low dark roof).
+        const ceil = new THREE.Mesh(
+          new THREE.BoxGeometry(200, 0.5, 200),
+          new THREE.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.95, metalness: 0 }),
+        )
+        ceil.position.set(HUNT_ARENA.x, 12, HUNT_ARENA.z)
+        group.add(ceil)
+        // Six ceiling-mounted green point lights, evenly spread over the arena.
+        for (let i = 0; i < 6; i++) {
+          const col = i % 3
+          const row = (i / 3) | 0
+          const pl = new THREE.PointLight(0x00ff88, 1.5, 20)
+          pl.position.set(HUNT_ARENA.x + (col - 1) * 55, 11, HUNT_ARENA.z + (row === 0 ? -28 : 28))
+          group.add(pl)
+          huntFlickerLights.push(pl)
+        }
+        scene.add(group)
+        huntIndoorGroup = group
+        // Dim the daytime lights right down (stored so they restore exactly).
+        for (const light of [worldAmbient, hemi, sun, fillLight]) {
+          huntStageLightSaved.push({ light, intensity: light.intensity })
+          light.intensity = 0.15
+        }
+        // Recolour the floor + every collidable wall to a dark interior palette.
+        const floorMat = baseGround.material
+        if (floorMat instanceof THREE.MeshStandardMaterial) {
+          huntStageColorSaved.push({ mat: floorMat, color: floorMat.color.getHex() })
+          floorMat.color.setHex(0x1c1c1c)
+        }
+        const seen = new Set<THREE.MeshStandardMaterial>()
+        for (const wm of wallMeshes) {
+          const mat = wm.material
+          if (mat instanceof THREE.MeshStandardMaterial && !seen.has(mat)) {
+            seen.add(mat)
+            huntStageColorSaved.push({ mat, color: mat.color.getHex() })
+            mat.color.setHex(0x2a2a2a)
+          }
+        }
+      }
+      function huntClearStage() {
+        if (huntIndoorGroup) {
+          scene.remove(huntIndoorGroup)
+          huntIndoorGroup.traverse((o) => {
+            if (o instanceof THREE.Mesh) {
+              o.geometry.dispose()
+              const m = o.material
+              if (Array.isArray(m)) for (const mm of m) mm.dispose()
+              else m.dispose()
+            }
+          })
+          huntIndoorGroup = null
+        }
+        huntFlickerLights.length = 0
+        for (const s of huntStageLightSaved) s.light.intensity = s.intensity
+        huntStageLightSaved.length = 0
+        for (const s of huntStageColorSaved) s.mat.color.setHex(s.color)
+        huntStageColorSaved.length = 0
       }
       // Draw the orb readout for the given page (0 greeting / 1 target / 2 time).
       function huntDrawOrb(page: number) {
@@ -11320,8 +11549,15 @@ export default function ThreeWorld({
       }
       // Warp into the mission: spawn themed minions + boss, set limits.
       function huntBeginMission() {
+        // First warp of a run: the panel's chosen difficulty seeds the start
+        // level. Subsequent missions keep the Lv1→2→3 progression untouched.
+        if (!huntHasDeployedRef.current) {
+          huntHasDeployedRef.current = true
+          huntLevelIdxRef.current = huntMissionConfigRef.current.difficulty - 1
+        }
         const lv = HUNT_LEVELS[huntLevelIdxRef.current]
         if (!lv) return
+        huntApplyStage(huntMissionConfigRef.current.stage)
         huntClearEnemies()
         huntKillLogRef.current = new Map()
         huntScoreRef.current = 0
@@ -11397,6 +11633,7 @@ export default function ThreeWorld({
         spawnExplosion(head, false, true)
         cameraShakeRef.current.intensity = 8
         SOUNDS.gameover()
+        huntClearStage() // restore the outdoor lighting/colours on death
         huntMissionReadyRef.current = false
         huntPhaseRef.current = "dead"
         setHuntPhase("dead")
@@ -11413,6 +11650,7 @@ export default function ThreeWorld({
       }
       // Return to the room after a mission (outcome: clear or timeout).
       function huntReturnToRoom(outcome: "clear" | "timeout") {
+        huntClearStage() // tear down any indoor overlay → back to the outdoor look
         // Quota set by a prior time-out: this mission had to clear the bar.
         if (huntQuotaRef.current > 0 && huntScoreRef.current < huntQuotaRef.current) {
           focalPoint.set(HUNT_ROOM.x, 0, HUNT_ROOM.z + 3)
@@ -11912,6 +12150,14 @@ export default function ThreeWorld({
         // night arena stays dark; on whenever the player is back in the room.
         if (huntRoomAmbient) huntRoomAmbient.visible = phase !== "mission"
         if (huntRoomSun) huntRoomSun.visible = phase !== "mission"
+        // MISSION SELECT panel: only reachable while in the room/countdown.
+        if (huntPanel) huntPanel.mesh.visible = phase === "room" || phase === "countdown"
+        // Indoor stage: occasionally dip a ceiling light for a flicker effect.
+        if (phase === "mission") {
+          for (const fl of huntFlickerLights) {
+            fl.intensity = Math.random() < 0.003 ? Math.random() * 0.5 : 1.5
+          }
+        }
         // Keep the player boxed in the room during briefing/countdown.
         if (phase === "room" || phase === "countdown" || phase === "scoring") {
           focalPoint.x = Math.max(
@@ -12140,6 +12386,7 @@ export default function ThreeWorld({
         }
         huntLevelIdxRef.current = 0
         huntRepeatRef.current = 0
+        huntHasDeployedRef.current = false
         buildHuntRoom()
         huntStartRoom()
         showNotification("HUNT — 標的の情報を待て・ラックで装備せよ [E]")
@@ -13075,6 +13322,8 @@ export default function ThreeWorld({
 
       function fire() {
         if (gamePhaseRef.current !== "playing") return
+        // HUNT: a shot aimed at the MISSION SELECT panel selects/deploys instead.
+        if (modeRef.current === "hunt" && huntTryPanelClick()) return
         // In a tank with the cannon selected, FIRE shoots the main gun.
         if (drivingRef.current && cannonModeRef.current && activeVehicle?.kind === "tank") {
           fireCannon()
