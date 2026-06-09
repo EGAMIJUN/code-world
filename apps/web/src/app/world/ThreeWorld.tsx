@@ -721,6 +721,8 @@ type OsakaBoss = {
   transitioning: boolean // mid form-change animation (no attacks, no hits)
   attackTimer: number // counts down to the next special attack
   parts: THREE.Object3D[] // current form's body parts (swapped wholesale on change)
+  eyes: THREE.Mesh[] // iris meshes that flicker (addClusterEye)
+  mouths: THREE.Object3D[] // toothed maws that gape open/closed (scale.y sin)
   nextZakoAt: number // timestamp for the next infinite-zako top-up
 }
 const OSAKA_PHASE_HP: Record<OsakaBossPhase, number> = {
@@ -10886,15 +10888,116 @@ export default function ThreeWorld({
         pos.needsUpdate = true
         geo.computeVertexNormals()
       }
+      // A fresh sphere geometry whose every vertex is shoved ±amp — lumpy flesh.
+      function jitterSphere(r: number, seg: number, amp: number): THREE.SphereGeometry {
+        const g = new THREE.SphereGeometry(r, seg, seg)
+        osakaJitter(g, amp)
+        return g
+      }
+      // Stamp a 3-layer eye (white sclera + emissive red iris + black pupil) onto a
+      // group at (x,y,z). The iris is pushed to `sink` so the animator can flicker
+      // its emissiveIntensity. Decoration only — NOT tagged osakaBody, so it never
+      // enters the weak-point raycast and can't bury a core.
+      function addClusterEye(
+        group: THREE.Group,
+        sink: THREE.Mesh[],
+        x: number,
+        y: number,
+        z: number,
+        s: number,
+      ) {
+        const white = new THREE.Mesh(
+          new THREE.SphereGeometry(s, 8, 8),
+          new THREE.MeshLambertMaterial({ color: 0xf2ece0 }),
+        )
+        white.position.set(x, y, z)
+        group.add(white)
+        const iris = new THREE.Mesh(
+          new THREE.SphereGeometry(s * 0.6, 8, 8),
+          new THREE.MeshLambertMaterial({
+            color: 0xff2200,
+            emissive: 0xff1800,
+            emissiveIntensity: 1.8,
+          }),
+        )
+        iris.position.set(x, y, z + s * 0.5)
+        group.add(iris)
+        const pupil = new THREE.Mesh(
+          new THREE.SphereGeometry(s * 0.28, 6, 6),
+          new THREE.MeshBasicMaterial({ color: 0x050505 }),
+        )
+        pupil.position.set(x, y, z + s * 0.78)
+        group.add(pupil)
+        sink.push(iris)
+      }
+      // A gaping toothed maw: a dark mouth box ringed with white fang cones. The
+      // returned group is pushed to `sink` so the animator can gape it open/closed
+      // via scale.y. Decoration only (not raycast body).
+      function addMouth(
+        group: THREE.Group,
+        sink: THREE.Object3D[],
+        x: number,
+        y: number,
+        z: number,
+        s: number,
+      ) {
+        const maw = new THREE.Group()
+        const gum = new THREE.Mesh(
+          new THREE.SphereGeometry(s, 8, 6),
+          new THREE.MeshLambertMaterial({ color: 0x1a0808 }),
+        )
+        gum.scale.set(1, 0.6, 0.6)
+        maw.add(gum)
+        const fangN = 7
+        for (let i = 0; i < fangN; i++) {
+          const a = (i / (fangN - 1) - 0.5) * Math.PI * 0.9
+          for (const yy of [s * 0.42, -s * 0.42]) {
+            const fang = new THREE.Mesh(
+              new THREE.ConeGeometry(s * 0.1, s * 0.5, 5),
+              new THREE.MeshLambertMaterial({ color: 0xf0e8d8 }),
+            )
+            fang.position.set(Math.sin(a) * s * 0.8, yy, s * 0.45)
+            fang.rotation.x = yy > 0 ? Math.PI : 0
+            maw.add(fang)
+          }
+        }
+        maw.position.set(x, y, z)
+        group.add(maw)
+        sink.push(maw)
+      }
+      // A dripping clawed hand: palm sphere + four splayed finger cones. Sways with
+      // the limbs (userData.osakaWave). Returns the hand group (tagged osakaBody on
+      // the palm so a stray shot still registers as a glancing body hit).
+      function osakaHand(): THREE.Group {
+        const hand = new THREE.Group()
+        const palm = osakaPart(new THREE.SphereGeometry(0.3, 6, 6), 0x9a4a4a)
+        palm.scale.set(1, 0.5, 1)
+        hand.add(palm)
+        for (let f = 0; f < 4; f++) {
+          const finger = osakaPart(new THREE.CylinderGeometry(0.05, 0.09, 0.6, 5), 0x8a4242)
+          const a = (f / 3 - 0.5) * 1.2
+          finger.position.set(Math.sin(a) * 0.25, -0.35, Math.cos(a) * 0.1 + 0.1)
+          finger.rotation.x = 0.3
+          hand.add(finger)
+        }
+        return hand
+      }
       function buildOsakaBossPhase(phase: OsakaBossPhase): {
         group: THREE.Group
         cores: THREE.Mesh[]
         parts: THREE.Object3D[]
+        eyes: THREE.Mesh[]
+        mouths: THREE.Object3D[]
       } {
         const group = new THREE.Group()
         const parts: THREE.Object3D[] = []
         const cores: THREE.Mesh[] = []
-        // body/eye parts go through add(); cores are tracked separately.
+        const eyes: THREE.Mesh[] = []
+        const mouths: THREE.Object3D[] = []
+        // Mobile halves the part counts so the denser forms stay performant.
+        const dense = isMobileDevice ? 0.5 : 1.0
+        const dn = (n: number) => Math.max(1, Math.floor(n * dense))
+        // body/limb parts go through add(); cores/eyes/mouths are tracked apart.
         const add = (o: THREE.Object3D) => {
           group.add(o)
           parts.push(o)
@@ -10918,86 +11021,140 @@ export default function ThreeWorld({
           cores.push(core)
           group.add(core)
         } else if (phase === 2) {
-          // 多腕影鬼: towering black giant with eight radiating arms.
-          const torso = osakaPart(new THREE.CylinderGeometry(1.0, 1.2, 4.0, 8), 0x1a1a2a)
+          // 多腕影鬼: a towering jittered-flesh giant bristling with two dozen
+          // arms of random length, its hide crawling with red eyes.
+          const torso = osakaPart(jitterSphere(1.3, 10, 0.35), 0x1a1a2a)
+          torso.scale.set(1, 2.4, 1)
           torso.position.y = 3.0
           add(torso)
-          for (let i = 0; i < 8; i++) {
-            const arm = osakaPart(new THREE.CylinderGeometry(0.2, 0.3, 3.0, 6), 0x14141f)
-            const a = (i / 8) * Math.PI * 2
-            arm.position.set(Math.cos(a) * 1.6, 4.0, Math.sin(a) * 1.6)
-            arm.rotation.z = Math.cos(a) * 1.1
-            arm.rotation.x = -Math.sin(a) * 1.1
-            arm.userData.osakaWave = i
+          const armN = dn(24)
+          for (let i = 0; i < armN; i++) {
+            const a = (i / armN) * Math.PI * 2
+            const len = 2.2 + Math.random() * 2.4
+            const thick = 0.14 + Math.random() * 0.16
+            const arm = osakaPart(new THREE.CylinderGeometry(thick * 0.7, thick, len, 6), 0x14141f)
+            const rr = 1.2 + Math.random() * 0.8
+            arm.position.set(Math.cos(a) * rr, 2.4 + Math.random() * 3.4, Math.sin(a) * rr)
+            arm.rotation.z = Math.cos(a) * (0.8 + Math.random() * 0.8)
+            arm.rotation.x = -Math.sin(a) * (0.8 + Math.random() * 0.8)
+            arm.userData.osakaWave = Math.random() * Math.PI * 2
             add(arm)
           }
-          const head = osakaPart(new THREE.SphereGeometry(0.8, 8, 8), 0x2a2a3a)
-          head.position.y = 5.5
+          const head = osakaPart(jitterSphere(0.85, 8, 0.18), 0x2a2a3a)
+          head.position.y = 5.6
           add(head)
-          const eyeL = osakaEye(0.12)
-          eyeL.position.set(-0.3, 5.6, 0.6)
-          add(eyeL)
-          const eyeR = osakaEye(0.12)
-          eyeR.position.set(0.3, 5.6, 0.6)
-          add(eyeR)
+          const eyeN = dn(16)
+          for (let i = 0; i < eyeN; i++) {
+            const a = Math.random() * Math.PI * 2
+            const yy = 2.0 + Math.random() * 4.0
+            const rr = (yy > 5.0 ? 0.85 : 1.25) + Math.random() * 0.2
+            addClusterEye(group, eyes, Math.cos(a) * rr, yy, Math.sin(a) * rr + 0.2, 0.13)
+          }
           const core = osakaCore()
           core.scale.setScalar(1.4)
           core.position.set(0, 2.5, 1.0) // belly
           cores.push(core)
           group.add(core)
         } else if (phase === 3) {
-          // 骨触手: inverted bovine skull crowned with horns over writhing tendrils.
-          const skull = osakaPart(new THREE.ConeGeometry(0.8, 1.5, 6), 0xe8e0d0)
+          // 骨触手: an inverted horned skull over a forest of writhing bone
+          // tendrils, ringed with little eyes above a gnashing fanged maw.
+          const skull = osakaPart(new THREE.ConeGeometry(0.85, 1.6, 6), 0xe8e0d0)
           skull.rotation.x = Math.PI // point the snout down
           skull.position.y = 5.2
           add(skull)
           for (let s = -1; s <= 1; s += 2) {
-            const horn = osakaPart(new THREE.ConeGeometry(0.12, 1.2, 6), 0xe8e0d0)
+            const horn = osakaPart(new THREE.ConeGeometry(0.12, 1.3, 6), 0xe8e0d0)
             horn.position.set(s * 0.5, 6.0, 0)
             horn.rotation.z = s * -0.6
             add(horn)
           }
-          for (let i = 0; i < 6; i++) {
-            const t = osakaPart(new THREE.CylinderGeometry(0.15, 0.2, 4.0, 6), 0x4a2a3a)
-            const a = (i / 6) * Math.PI * 2
-            t.position.set(Math.cos(a) * 0.8, 2.0, Math.sin(a) * 0.8)
-            t.userData.osakaWave = i
+          const tentN = dn(18)
+          for (let i = 0; i < tentN; i++) {
+            const a = (i / tentN) * Math.PI * 2 + Math.random() * 0.3
+            const len = 3.2 + Math.random() * 2.0
+            const t = osakaPart(new THREE.CylinderGeometry(0.1, 0.22, len, 6), 0x4a2a3a)
+            const rr = 0.6 + Math.random() * 0.7
+            t.position.set(Math.cos(a) * rr, 1.4 + Math.random() * 1.6, Math.sin(a) * rr)
+            t.rotation.z = (Math.random() - 0.5) * 0.8
+            t.rotation.x = (Math.random() - 0.5) * 0.8
+            t.userData.osakaWave = Math.random() * Math.PI * 2
             add(t)
           }
+          const eyeN = dn(10)
+          for (let i = 0; i < eyeN; i++) {
+            const a = Math.random() * Math.PI * 2
+            addClusterEye(
+              group,
+              eyes,
+              Math.cos(a) * 0.7,
+              4.6 + (Math.random() - 0.5) * 1.4,
+              Math.sin(a) * 0.7 + 0.3,
+              0.1,
+            )
+          }
+          addMouth(group, mouths, 0, 4.3, 0.6, 0.5)
           const core = osakaCore()
           core.position.set(0, 4.6, 0.2) // the skull's "mouth"
           cores.push(core)
           group.add(core)
         } else if (phase === 4) {
-          // 肉塊融合: a heaving fused-flesh mass with a single exposed top core.
-          const blobGeo = new THREE.SphereGeometry(2.5, 8, 8)
-          osakaJitter(blobGeo, 0.6)
-          const blob = osakaPart(blobGeo, 0x8b4040)
+          // 肉塊融合: a heaving fused-flesh mass — thirty arms, eight sub-cores,
+          // twenty eyes, ground-crawling tendrils and dripping clawed hands.
+          const blob = osakaPart(jitterSphere(2.5, 10, 0.6), 0x8b4040)
           blob.position.y = 4.0
           add(blob)
-          for (let i = 0; i < 4; i++) {
-            const sub = osakaPart(new THREE.SphereGeometry(1.0, 6, 6), 0x6b3030)
-            const a = (i / 4) * Math.PI * 2
-            sub.position.set(Math.cos(a) * 2.4, 4.0, Math.sin(a) * 2.4)
+          const subN = dn(8)
+          for (let i = 0; i < subN; i++) {
+            const a = (i / subN) * Math.PI * 2
+            const sub = osakaPart(jitterSphere(0.9 + Math.random() * 0.4, 6, 0.3), 0x6b3030)
+            sub.position.set(Math.cos(a) * 2.4, 3.4 + Math.random() * 1.6, Math.sin(a) * 2.4)
             add(sub)
           }
-          for (let i = 0; i < 8; i++) {
-            const arm = osakaPart(new THREE.CylinderGeometry(0.18, 0.28, 2.6, 6), 0x7a3838)
-            const a = (i / 8) * Math.PI * 2 + 0.3
-            arm.position.set(Math.cos(a) * 2.0, 4.0 + (i % 2) * 1.5, Math.sin(a) * 2.0)
-            arm.rotation.z = Math.cos(a) * 1.2
-            arm.rotation.x = -Math.sin(a) * 1.2
-            arm.userData.osakaWave = i
+          const armN = dn(30)
+          for (let i = 0; i < armN; i++) {
+            const a = (i / armN) * Math.PI * 2 + 0.3
+            const len = 2.0 + Math.random() * 1.6
+            const arm = osakaPart(new THREE.CylinderGeometry(0.14, 0.26, len, 6), 0x7a3838)
+            arm.position.set(Math.cos(a) * 1.9, 3.4 + Math.random() * 2.6, Math.sin(a) * 1.9)
+            arm.rotation.z = Math.cos(a) * (0.9 + Math.random() * 0.6)
+            arm.rotation.x = -Math.sin(a) * (0.9 + Math.random() * 0.6)
+            arm.userData.osakaWave = Math.random() * Math.PI * 2
             add(arm)
           }
-          for (let i = 0; i < 6; i++) {
-            const h = osakaPart(new THREE.SphereGeometry(0.6, 6, 6), 0x9a4a4a)
-            const a = (i / 6) * Math.PI * 2
-            h.position.set(Math.cos(a) * 1.6, 5.6 + Math.sin(a * 2) * 0.8, Math.sin(a) * 1.6)
-            add(h)
-            const eye = osakaEye(0.1)
-            eye.position.set(h.position.x, h.position.y, h.position.z + 0.55)
-            add(eye)
+          const eyeN = dn(20)
+          for (let i = 0; i < eyeN; i++) {
+            const a = Math.random() * Math.PI * 2
+            addClusterEye(
+              group,
+              eyes,
+              Math.cos(a) * 2.5,
+              2.6 + Math.random() * 3.4,
+              Math.sin(a) * 2.5 + 0.2,
+              0.12,
+            )
+          }
+          // tendrils rooted around the base, crawling along the ground
+          const crawlN = dn(10)
+          for (let i = 0; i < crawlN; i++) {
+            const a = (i / crawlN) * Math.PI * 2
+            const len = 3.0 + Math.random() * 2.0
+            const t = osakaPart(new THREE.CylinderGeometry(0.1, 0.24, len, 6), 0x6b3030)
+            const rr = 2.2 + Math.random() * 1.0
+            t.position.set(Math.cos(a) * rr, 0.4, Math.sin(a) * rr)
+            t.rotation.z = Math.PI / 2 - 0.2
+            t.rotation.y = a
+            t.userData.osakaWave = Math.random() * Math.PI * 2
+            add(t)
+          }
+          // dripping four-fingered hands hanging off the mass
+          const handN = dn(6)
+          for (let i = 0; i < handN; i++) {
+            const a = (i / handN) * Math.PI * 2 + 0.5
+            const hand = osakaHand()
+            hand.position.set(Math.cos(a) * 2.8, 5.4 + Math.random() * 1.4, Math.sin(a) * 2.8)
+            hand.rotation.z = Math.cos(a) * 0.5
+            hand.userData.osakaWave = Math.random() * Math.PI * 2
+            add(hand)
           }
           const core = osakaCore()
           core.scale.setScalar(1.6)
@@ -11005,43 +11162,93 @@ export default function ThreeWorld({
           cores.push(core)
           group.add(core)
         } else {
-          // 五変化: all four forms fused into one 15m horror — three weak cores.
-          const blobGeo = new THREE.SphereGeometry(3.0, 8, 8)
-          osakaJitter(blobGeo, 0.8)
-          const blob = osakaPart(blobGeo, 0x6b3038)
+          // 五重混体: every prior form fused into one 15 m horror — ~56 limbs,
+          // 28 eyes, six maws, the old-man head + bone skull embedded in the hide,
+          // three weak cores each haloed by light, a slow body pulse + red underglow.
+          const blob = osakaPart(jitterSphere(3.0, 12, 0.8), 0x6b3038)
           blob.position.y = 5.0
+          blob.userData.osakaPulse = true
           add(blob)
-          const oldHead = osakaPart(new THREE.SphereGeometry(1.0, 8, 8), 0xc8c0b0)
-          oldHead.position.y = 11.0
+          // embedded past-form heads: 老翁 head (phase 1) + 骨 skull (phase 3)
+          const oldHead = osakaPart(jitterSphere(1.0, 8, 0.15), 0xc8c0b0)
+          oldHead.position.set(0, 11.0, 0)
           add(oldHead)
+          addClusterEye(group, eyes, -0.3, 11.1, 0.85, 0.13)
+          addClusterEye(group, eyes, 0.3, 11.1, 0.85, 0.13)
+          const boneSkull = osakaPart(new THREE.ConeGeometry(0.9, 1.7, 6), 0xe8e0d0)
+          boneSkull.rotation.x = Math.PI
+          boneSkull.rotation.z = 0.4
+          boneSkull.position.set(-2.6, 7.2, 1.8)
+          add(boneSkull)
           for (let s = -1; s <= 1; s += 2) {
             const horn = osakaPart(new THREE.ConeGeometry(0.2, 2.2, 6), 0xe8e0d0)
             horn.position.set(s * 0.7, 12.3, 0)
             horn.rotation.z = s * -0.5
             add(horn)
           }
-          for (let i = 0; i < 10; i++) {
-            const arm = osakaPart(new THREE.CylinderGeometry(0.22, 0.34, 3.4, 6), 0x3a2030)
-            const a = (i / 10) * Math.PI * 2
-            arm.position.set(Math.cos(a) * 2.8, 5.0 + (i % 3) * 1.6, Math.sin(a) * 2.8)
-            arm.rotation.z = Math.cos(a) * 1.2
-            arm.rotation.x = -Math.sin(a) * 1.2
-            arm.userData.osakaWave = i
+          // ~56 limbs split between radiating arms, mid tentacles and ground crawl
+          const armN = dn(28)
+          for (let i = 0; i < armN; i++) {
+            const a = (i / armN) * Math.PI * 2
+            const len = 3.0 + Math.random() * 2.2
+            const arm = osakaPart(new THREE.CylinderGeometry(0.18, 0.32, len, 6), 0x3a2030)
+            arm.position.set(Math.cos(a) * 2.8, 5.0 + Math.random() * 4.0, Math.sin(a) * 2.8)
+            arm.rotation.z = Math.cos(a) * (0.9 + Math.random() * 0.6)
+            arm.rotation.x = -Math.sin(a) * (0.9 + Math.random() * 0.6)
+            arm.userData.osakaWave = Math.random() * Math.PI * 2
             add(arm)
           }
-          for (let i = 0; i < 6; i++) {
-            const t = osakaPart(new THREE.CylinderGeometry(0.16, 0.24, 4.5, 6), 0x4a2a3a)
-            const a = (i / 6) * Math.PI * 2 + 0.4
-            t.position.set(Math.cos(a) * 2.2, 2.4, Math.sin(a) * 2.2)
-            t.userData.osakaWave = i + 10
+          const tentN = dn(18)
+          for (let i = 0; i < tentN; i++) {
+            const a = (i / tentN) * Math.PI * 2 + 0.4
+            const len = 3.8 + Math.random() * 2.0
+            const t = osakaPart(new THREE.CylinderGeometry(0.12, 0.22, len, 6), 0x4a2a3a)
+            t.position.set(Math.cos(a) * 2.2, 2.2 + Math.random() * 1.6, Math.sin(a) * 2.2)
+            t.rotation.z = (Math.random() - 0.5) * 0.7
+            t.userData.osakaWave = Math.random() * Math.PI * 2
             add(t)
           }
-          for (let i = 0; i < 12; i++) {
-            const a = (i / 12) * Math.PI * 2
-            const eye = osakaEye(0.14, i % 2 ? 0xff2200 : 0xffaa00)
-            eye.position.set(Math.cos(a) * 3.05, 4.0 + (i % 4) * 1.8, Math.sin(a) * 3.05)
-            add(eye)
+          const crawlN = dn(10)
+          for (let i = 0; i < crawlN; i++) {
+            const a = (i / crawlN) * Math.PI * 2
+            const len = 3.4 + Math.random() * 2.2
+            const t = osakaPart(new THREE.CylinderGeometry(0.12, 0.26, len, 6), 0x3a2030)
+            const rr = 2.6 + Math.random() * 1.2
+            t.position.set(Math.cos(a) * rr, 0.4, Math.sin(a) * rr)
+            t.rotation.z = Math.PI / 2 - 0.2
+            t.rotation.y = a
+            t.userData.osakaWave = Math.random() * Math.PI * 2
+            add(t)
           }
+          const eyeN = dn(28)
+          for (let i = 0; i < eyeN; i++) {
+            const a = Math.random() * Math.PI * 2
+            const rr = 3.05 + Math.random() * 0.2
+            addClusterEye(
+              group,
+              eyes,
+              Math.cos(a) * rr,
+              3.0 + Math.random() * 6.0,
+              Math.sin(a) * rr + 0.2,
+              0.14,
+            )
+          }
+          const mouthN = dn(6)
+          for (let i = 0; i < mouthN; i++) {
+            const a = (i / mouthN) * Math.PI * 2 + 0.7
+            addMouth(
+              group,
+              mouths,
+              Math.cos(a) * 2.9,
+              4.0 + Math.random() * 4.0,
+              Math.sin(a) * 2.9 + 0.2,
+              0.5,
+            )
+          }
+          // red underglow lighting the whole horror from below
+          const under = new THREE.PointLight(0xff0000, 2.0, 24)
+          under.position.set(0, 0.5, 0)
+          group.add(under)
           const corePos: Array<[number, number, number]> = [
             [0, 11.0, 1.0], // forehead of the old head
             [-2.2, 6.0, 1.6],
@@ -11051,11 +11258,13 @@ export default function ThreeWorld({
             const c = osakaCore()
             c.scale.setScalar(1.3)
             c.position.set(p[0], p[1], p[2])
+            // each weak core haloed by its own warm point light
+            c.add(new THREE.PointLight(0xffdd00, 1.5, 8))
             cores.push(c)
             group.add(c)
           }
         }
-        return { group, cores, parts }
+        return { group, cores, parts, eyes, mouths }
       }
       // ── OSAKA boss lifecycle + combat ─────────────────────────────────────────
       function disposeOsakaGroup(g: THREE.Group) {
@@ -11144,6 +11353,8 @@ export default function ThreeWorld({
           transitioning: false,
           attackTimer: 2.0,
           parts: built.parts,
+          eyes: built.eyes,
+          mouths: built.mouths,
           nextZakoAt: Date.now() + OSAKA_ZAKO_INTERVAL,
         }
         spawnOsakaEscort(HUNT_ARENA.x - 6, HUNT_ARENA.z)
@@ -11222,6 +11433,8 @@ export default function ThreeWorld({
             transitioning: false,
             attackTimer: 2.0,
             parts: built.parts,
+            eyes: built.eyes,
+            mouths: built.mouths,
             nextZakoAt: Date.now() + OSAKA_ZAKO_INTERVAL,
           }
           SOUNDS.bossRoar()
@@ -11275,6 +11488,19 @@ export default function ThreeWorld({
         for (const p of ob.parts) {
           const w = p.userData.osakaWave
           if (typeof w === "number") p.rotation.z += Math.sin(t * 1.6 + w) * 0.004
+          // form-5 fused-flesh mass breathes with a slow whole-body pulse
+          if (p.userData.osakaPulse) p.scale.setScalar(1.0 + Math.sin(t * 0.8) * 0.05)
+        }
+        // eyes flicker their iris glow between 1.0 and 2.2, each on its own phase
+        for (const e of ob.eyes) {
+          const m = e.material
+          if (m instanceof THREE.MeshLambertMaterial) {
+            m.emissiveIntensity = 1.0 + (Math.sin(t * 6 + e.id) * 0.5 + 0.5) * 1.2
+          }
+        }
+        // maws gape open and shut on scale.y
+        for (const mo of ob.mouths) {
+          mo.scale.y = 0.35 + (Math.sin(t * 3 + mo.id) * 0.5 + 0.5) * 0.65
         }
         const px = focalPoint.x
         const pz = focalPoint.z
@@ -14250,22 +14476,26 @@ export default function ThreeWorld({
         // PvP passes, respecting wall/enemy occlusion so one shot hits one thing.
         const osakaB = osakaBossRef.current
         if (!shotConsumed && osakaB && !osakaB.transitioning) {
-          const obParts: THREE.Object3D[] = []
+          // Cores and bulk body are raycast separately so a core ALWAYS wins over a
+          // body hit when both are in line — the dense decoration limbs can never
+          // bury the weak point. Decorative eyes/maws aren't tagged, so they're
+          // transparent to the ray entirely.
+          const obCores: THREE.Object3D[] = []
+          const obBody: THREE.Object3D[] = []
           osakaB.group.traverse((c) => {
-            if (
-              c instanceof THREE.Mesh &&
-              c.visible &&
-              (c.userData.osakaCore || c.userData.osakaBody)
-            ) {
-              obParts.push(c)
+            if (c instanceof THREE.Mesh && c.visible) {
+              if (c.userData.osakaCore) obCores.push(c)
+              else if (c.userData.osakaBody) obBody.push(c)
             }
           })
-          const obHit = raycaster.intersectObjects(obParts, false)[0]
+          const coreHit = raycaster.intersectObjects(obCores, false)[0]
+          const bodyHit = raycaster.intersectObjects(obBody, false)[0]
+          const obHit = coreHit ?? bodyHit
           if (obHit) {
             const blockedByWall = !!(nearestWall && nearestWall.distance < obHit.distance)
             const blockedByEnemy = !!(enemyHits[0] && enemyHits[0].distance < obHit.distance)
             if (!blockedByWall && !blockedByEnemy) {
-              const isCore = obHit.object.userData.osakaCore === true
+              const isCore = obHit === coreHit
               SOUNDS.hit()
               spawnBlood(obHit.point)
               osakaDamage(weapon.hitDamage * (isCore ? OSAKA_CORE_MULT : OSAKA_BODY_MULT))
