@@ -702,6 +702,41 @@ const HUNT_LEVELS: HuntLevel[] = [
   },
 ]
 
+// ══ OSAKA boss "五変化" (gohenge) — 5-phase immortal boss ══════════════════════
+// A completely original yokai design (no existing IP). The boss morphs through
+// five forms; each form is a fresh THREE.Group with a glowing weak-point core.
+// Damage only really lands on the core (×3); the bulk body shrugs off 80% of it,
+// which is what produces the "you must aim the core" dread. When a form's HP hits
+// zero the parts are blown apart and the next form is built. Surviving the fifth
+// form clears the mission. Runs on the existing HUNT arena (map is a later phase).
+type OsakaBossPhase = 1 | 2 | 3 | 4 | 5
+type OsakaBoss = {
+  group: THREE.Group
+  phase: OsakaBossPhase
+  phaseHp: number // current form HP
+  phaseMaxHp: number
+  core: THREE.Mesh // primary glowing weak-point core (cores[0])
+  cores: THREE.Mesh[] // all live weak-point cores (phase 5 has 3)
+  coreExposed: boolean // is the core currently hittable
+  transitioning: boolean // mid form-change animation (no attacks, no hits)
+  attackTimer: number // counts down to the next special attack
+  parts: THREE.Object3D[] // current form's body parts (swapped wholesale on change)
+  nextZakoAt: number // timestamp for the next infinite-zako top-up
+}
+const OSAKA_PHASE_HP: Record<OsakaBossPhase, number> = {
+  1: 1500,
+  2: 3000,
+  3: 3500,
+  4: 4500,
+  5: 6000,
+}
+const OSAKA_CORE_MULT = 3.0 // core hits hurt triple
+const OSAKA_BODY_MULT = 0.2 // body hits are 80% reduced
+const OSAKA_ZAKO_NAME = "下級妖怪" // tag distinguishing infinite-spawn fodder
+const OSAKA_ESCORT_NAME = "鬼火衆" // the two flanking escorts
+const OSAKA_ZAKO_CAP = 12 // hard cap on simultaneous fodder
+const OSAKA_ZAKO_INTERVAL = 5000 // ms between fodder top-ups
+
 // ══ HUNT mode equipment (PR-Z2) ══════════════════════════════════════════════
 // Suit + four dedicated weapons + the rewards bought at the 100-pt menu. All of
 // this only exists while modeRef === "hunt"; the normal weapon system is left
@@ -2231,6 +2266,14 @@ export default function ThreeWorld({
     difficulty: 1,
   })
   const huntHasDeployedRef = useRef(false) // difficulty seeds level only on run start
+  // OSAKA boss "五変化": the active boss (null when not summoned). osakaGenRef is
+  // bumped on every teardown so deferred (setTimeout) form-change callbacks know
+  // they belong to a stale encounter and bail instead of resurrecting the boss.
+  const osakaBossRef = useRef<OsakaBoss | null>(null)
+  const osakaGenRef = useRef(0)
+  // Set by the O key (component scope); consumed in the animate loop where
+  // spawnOsakaBoss is in scope.
+  const osakaSpawnReqRef = useRef(false)
 
   // ── HUNT equipment (PR-Z2) ──────────────────────────────────────────────────
   // Equipment menu (opened at the rack in the room).
@@ -10799,6 +10842,515 @@ export default function ThreeWorld({
         for (const e of enemies) scene.remove(e.mesh)
         enemies.length = 0
         setAliveEnemyCount(0)
+        disposeOsakaBoss() // any active OSAKA boss is torn down with the wave
+      }
+      // ══ OSAKA boss "五変化" form builders ════════════════════════════════════
+      // Each form is a fresh Group; meshes are tagged so the shot raycast can tell
+      // a weak-point core (userData.osakaCore → ×3 damage) from the bulk body
+      // (userData.osakaBody → ×0.2). Limbs flagged userData.osakaWave idle-sway.
+      function osakaCore(): THREE.Mesh {
+        const m = new THREE.Mesh(
+          new THREE.SphereGeometry(0.3, 8, 8),
+          new THREE.MeshLambertMaterial({
+            color: 0xffff00,
+            emissive: 0xffff00,
+            emissiveIntensity: 2.5,
+          }),
+        )
+        m.userData.osakaCore = true
+        return m
+      }
+      function osakaPart(geo: THREE.BufferGeometry, color: number): THREE.Mesh {
+        const m = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ color }))
+        m.userData.osakaBody = true
+        return m
+      }
+      function osakaEye(r: number, color = 0xff2200): THREE.Mesh {
+        return new THREE.Mesh(
+          new THREE.SphereGeometry(r, 6, 6),
+          new THREE.MeshLambertMaterial({ color, emissive: color, emissiveIntensity: 2.0 }),
+        )
+      }
+      // Roughen a sphere into a lumpy meat silhouette (same trick as amalgam_boss).
+      function osakaJitter(geo: THREE.BufferGeometry, amt: number) {
+        const pos = geo.attributes.position
+        if (!pos) return
+        for (let i = 0; i < pos.count; i++) {
+          pos.setXYZ(
+            i,
+            pos.getX(i) + (Math.random() - 0.5) * amt,
+            pos.getY(i) + (Math.random() - 0.5) * amt,
+            pos.getZ(i) + (Math.random() - 0.5) * amt,
+          )
+        }
+        pos.needsUpdate = true
+        geo.computeVertexNormals()
+      }
+      function buildOsakaBossPhase(phase: OsakaBossPhase): {
+        group: THREE.Group
+        cores: THREE.Mesh[]
+        parts: THREE.Object3D[]
+      } {
+        const group = new THREE.Group()
+        const parts: THREE.Object3D[] = []
+        const cores: THREE.Mesh[] = []
+        // body/eye parts go through add(); cores are tracked separately.
+        const add = (o: THREE.Object3D) => {
+          group.add(o)
+          parts.push(o)
+        }
+        if (phase === 1) {
+          // 老翁: small, head-heavy old-man yokai that baits the player in close.
+          const torso = osakaPart(new THREE.CylinderGeometry(0.3, 0.4, 1.0, 8), 0x5a5a6a)
+          torso.position.y = 1.0
+          add(torso)
+          const head = osakaPart(new THREE.SphereGeometry(0.5, 8, 8), 0xc8c0b0)
+          head.position.y = 1.8
+          add(head)
+          const eyeL = osakaEye(0.06)
+          eyeL.position.set(-0.18, 1.85, 0.42)
+          add(eyeL)
+          const eyeR = osakaEye(0.06)
+          eyeR.position.set(0.18, 1.85, 0.42)
+          add(eyeR)
+          const core = osakaCore()
+          core.position.set(0, 1.2, 0.35) // chest
+          cores.push(core)
+          group.add(core)
+        } else if (phase === 2) {
+          // 多腕影鬼: towering black giant with eight radiating arms.
+          const torso = osakaPart(new THREE.CylinderGeometry(1.0, 1.2, 4.0, 8), 0x1a1a2a)
+          torso.position.y = 3.0
+          add(torso)
+          for (let i = 0; i < 8; i++) {
+            const arm = osakaPart(new THREE.CylinderGeometry(0.2, 0.3, 3.0, 6), 0x14141f)
+            const a = (i / 8) * Math.PI * 2
+            arm.position.set(Math.cos(a) * 1.6, 4.0, Math.sin(a) * 1.6)
+            arm.rotation.z = Math.cos(a) * 1.1
+            arm.rotation.x = -Math.sin(a) * 1.1
+            arm.userData.osakaWave = i
+            add(arm)
+          }
+          const head = osakaPart(new THREE.SphereGeometry(0.8, 8, 8), 0x2a2a3a)
+          head.position.y = 5.5
+          add(head)
+          const eyeL = osakaEye(0.12)
+          eyeL.position.set(-0.3, 5.6, 0.6)
+          add(eyeL)
+          const eyeR = osakaEye(0.12)
+          eyeR.position.set(0.3, 5.6, 0.6)
+          add(eyeR)
+          const core = osakaCore()
+          core.scale.setScalar(1.4)
+          core.position.set(0, 2.5, 1.0) // belly
+          cores.push(core)
+          group.add(core)
+        } else if (phase === 3) {
+          // 骨触手: inverted bovine skull crowned with horns over writhing tendrils.
+          const skull = osakaPart(new THREE.ConeGeometry(0.8, 1.5, 6), 0xe8e0d0)
+          skull.rotation.x = Math.PI // point the snout down
+          skull.position.y = 5.2
+          add(skull)
+          for (let s = -1; s <= 1; s += 2) {
+            const horn = osakaPart(new THREE.ConeGeometry(0.12, 1.2, 6), 0xe8e0d0)
+            horn.position.set(s * 0.5, 6.0, 0)
+            horn.rotation.z = s * -0.6
+            add(horn)
+          }
+          for (let i = 0; i < 6; i++) {
+            const t = osakaPart(new THREE.CylinderGeometry(0.15, 0.2, 4.0, 6), 0x4a2a3a)
+            const a = (i / 6) * Math.PI * 2
+            t.position.set(Math.cos(a) * 0.8, 2.0, Math.sin(a) * 0.8)
+            t.userData.osakaWave = i
+            add(t)
+          }
+          const core = osakaCore()
+          core.position.set(0, 4.6, 0.2) // the skull's "mouth"
+          cores.push(core)
+          group.add(core)
+        } else if (phase === 4) {
+          // 肉塊融合: a heaving fused-flesh mass with a single exposed top core.
+          const blobGeo = new THREE.SphereGeometry(2.5, 8, 8)
+          osakaJitter(blobGeo, 0.6)
+          const blob = osakaPart(blobGeo, 0x8b4040)
+          blob.position.y = 4.0
+          add(blob)
+          for (let i = 0; i < 4; i++) {
+            const sub = osakaPart(new THREE.SphereGeometry(1.0, 6, 6), 0x6b3030)
+            const a = (i / 4) * Math.PI * 2
+            sub.position.set(Math.cos(a) * 2.4, 4.0, Math.sin(a) * 2.4)
+            add(sub)
+          }
+          for (let i = 0; i < 8; i++) {
+            const arm = osakaPart(new THREE.CylinderGeometry(0.18, 0.28, 2.6, 6), 0x7a3838)
+            const a = (i / 8) * Math.PI * 2 + 0.3
+            arm.position.set(Math.cos(a) * 2.0, 4.0 + (i % 2) * 1.5, Math.sin(a) * 2.0)
+            arm.rotation.z = Math.cos(a) * 1.2
+            arm.rotation.x = -Math.sin(a) * 1.2
+            arm.userData.osakaWave = i
+            add(arm)
+          }
+          for (let i = 0; i < 6; i++) {
+            const h = osakaPart(new THREE.SphereGeometry(0.6, 6, 6), 0x9a4a4a)
+            const a = (i / 6) * Math.PI * 2
+            h.position.set(Math.cos(a) * 1.6, 5.6 + Math.sin(a * 2) * 0.8, Math.sin(a) * 1.6)
+            add(h)
+            const eye = osakaEye(0.1)
+            eye.position.set(h.position.x, h.position.y, h.position.z + 0.55)
+            add(eye)
+          }
+          const core = osakaCore()
+          core.scale.setScalar(1.6)
+          core.position.set(0, 7.0, 0) // exposed centre-top
+          cores.push(core)
+          group.add(core)
+        } else {
+          // 五変化: all four forms fused into one 15m horror — three weak cores.
+          const blobGeo = new THREE.SphereGeometry(3.0, 8, 8)
+          osakaJitter(blobGeo, 0.8)
+          const blob = osakaPart(blobGeo, 0x6b3038)
+          blob.position.y = 5.0
+          add(blob)
+          const oldHead = osakaPart(new THREE.SphereGeometry(1.0, 8, 8), 0xc8c0b0)
+          oldHead.position.y = 11.0
+          add(oldHead)
+          for (let s = -1; s <= 1; s += 2) {
+            const horn = osakaPart(new THREE.ConeGeometry(0.2, 2.2, 6), 0xe8e0d0)
+            horn.position.set(s * 0.7, 12.3, 0)
+            horn.rotation.z = s * -0.5
+            add(horn)
+          }
+          for (let i = 0; i < 10; i++) {
+            const arm = osakaPart(new THREE.CylinderGeometry(0.22, 0.34, 3.4, 6), 0x3a2030)
+            const a = (i / 10) * Math.PI * 2
+            arm.position.set(Math.cos(a) * 2.8, 5.0 + (i % 3) * 1.6, Math.sin(a) * 2.8)
+            arm.rotation.z = Math.cos(a) * 1.2
+            arm.rotation.x = -Math.sin(a) * 1.2
+            arm.userData.osakaWave = i
+            add(arm)
+          }
+          for (let i = 0; i < 6; i++) {
+            const t = osakaPart(new THREE.CylinderGeometry(0.16, 0.24, 4.5, 6), 0x4a2a3a)
+            const a = (i / 6) * Math.PI * 2 + 0.4
+            t.position.set(Math.cos(a) * 2.2, 2.4, Math.sin(a) * 2.2)
+            t.userData.osakaWave = i + 10
+            add(t)
+          }
+          for (let i = 0; i < 12; i++) {
+            const a = (i / 12) * Math.PI * 2
+            const eye = osakaEye(0.14, i % 2 ? 0xff2200 : 0xffaa00)
+            eye.position.set(Math.cos(a) * 3.05, 4.0 + (i % 4) * 1.8, Math.sin(a) * 3.05)
+            add(eye)
+          }
+          const corePos: Array<[number, number, number]> = [
+            [0, 11.0, 1.0], // forehead of the old head
+            [-2.2, 6.0, 1.6],
+            [2.2, 6.0, 1.6],
+          ]
+          for (const p of corePos) {
+            const c = osakaCore()
+            c.scale.setScalar(1.3)
+            c.position.set(p[0], p[1], p[2])
+            cores.push(c)
+            group.add(c)
+          }
+        }
+        return { group, cores, parts }
+      }
+      // ── OSAKA boss lifecycle + combat ─────────────────────────────────────────
+      function disposeOsakaGroup(g: THREE.Group) {
+        scene.remove(g)
+        g.traverse((o) => {
+          if (o instanceof THREE.Mesh) {
+            o.geometry.dispose()
+            const m = o.material
+            if (Array.isArray(m)) for (const mm of m) mm.dispose()
+            else m.dispose()
+          }
+        })
+      }
+      // Tear down the active boss and invalidate any pending form-change callback.
+      function disposeOsakaBoss() {
+        const ob = osakaBossRef.current
+        if (!ob) return
+        osakaGenRef.current++
+        disposeOsakaGroup(ob.group)
+        osakaBossRef.current = null
+      }
+      // Mid-size escort yokai: a re-tinted, scaled "tall" creature on the normal
+      // enemy AI, killable on its own (HP 800), flanking the boss.
+      function spawnOsakaEscort(x: number, z: number) {
+        huntMakeEnemy(
+          "terraformer",
+          x,
+          z,
+          2.0,
+          0x6a3a3a,
+          0xff8844,
+          20,
+          800,
+          4.0,
+          false,
+          OSAKA_ESCORT_NAME,
+          "tall",
+        )
+      }
+      // Infinite fodder: top up to OSAKA_ZAKO_CAP live zako, reusing leek/multihead
+      // creatures recoloured wa-style.
+      function osakaSpawnZako(n: number) {
+        const live = enemies.filter((e) => e.hp > 0 && e.huntName === OSAKA_ZAKO_NAME).length
+        const room = Math.min(n, OSAKA_ZAKO_CAP - live)
+        for (let i = 0; i < room; i++) {
+          const a = Math.random() * Math.PI * 2
+          const r = 14 + Math.random() * 16
+          const safe = findSafeSpawnNear(
+            HUNT_ARENA.x + Math.cos(a) * r,
+            HUNT_ARENA.z + Math.sin(a) * r,
+            ENEMY_RADIUS,
+          )
+          const leek = i % 2 === 0
+          huntMakeEnemy(
+            "grunt",
+            safe.x,
+            safe.z,
+            leek ? 1.0 : 1.6,
+            leek ? 0xb03030 : 0x402038,
+            leek ? 0xffcc33 : 0xff5522,
+            3,
+            120,
+            leek ? 2.6 : 1.8,
+            false,
+            OSAKA_ZAKO_NAME,
+            leek ? "leek" : "multihead",
+          )
+        }
+      }
+      // Summon the boss at arena centre in form 1, flanked by two escorts.
+      function spawnOsakaBoss() {
+        huntClearEnemies() // clear the field (also disposes any prior osaka boss)
+        const built = buildOsakaBossPhase(1)
+        const primary = built.cores[0]
+        if (!primary) return
+        built.group.position.set(HUNT_ARENA.x, 0, HUNT_ARENA.z)
+        scene.add(built.group)
+        osakaBossRef.current = {
+          group: built.group,
+          phase: 1,
+          phaseHp: OSAKA_PHASE_HP[1],
+          phaseMaxHp: OSAKA_PHASE_HP[1],
+          core: primary,
+          cores: built.cores,
+          coreExposed: true,
+          transitioning: false,
+          attackTimer: 2.0,
+          parts: built.parts,
+          nextZakoAt: Date.now() + OSAKA_ZAKO_INTERVAL,
+        }
+        spawnOsakaEscort(HUNT_ARENA.x - 6, HUNT_ARENA.z)
+        spawnOsakaEscort(HUNT_ARENA.x + 6, HUNT_ARENA.z)
+        SOUNDS.bossRoar()
+        showNotification("五変化 — 不死身のボス出現")
+      }
+      // A shot landed: core hits hurt ×3, body hits are ×0.2. Draining a form's HP
+      // triggers the change to the next form.
+      function osakaDamage(dmg: number) {
+        const ob = osakaBossRef.current
+        if (!ob || ob.transitioning) return
+        ob.phaseHp -= dmg
+        if (ob.phaseHp <= 0) {
+          ob.phaseHp = 0
+          transitionOsakaBoss()
+        }
+      }
+      // Final defeat (survived form 5): tear everything down and clear the mission.
+      function osakaBossDefeat() {
+        disposeOsakaBoss()
+        SOUNDS.clear()
+        showNotification("五変化 撃破 — 不死身を討ち取った")
+        huntReturnToRoom("clear")
+      }
+      // Blow the current form apart, flash red for 0.8s, then build the next form
+      // (or trigger the final defeat past form 5).
+      function transitionOsakaBoss() {
+        const ob = osakaBossRef.current
+        if (!ob || ob.transitioning) return
+        ob.transitioning = true
+        const c = ob.group.position.clone()
+        for (let i = 0; i < 3; i++) {
+          spawnExplosion(
+            c
+              .clone()
+              .add(
+                new THREE.Vector3(
+                  (Math.random() - 0.5) * 4,
+                  1 + Math.random() * 4,
+                  (Math.random() - 0.5) * 4,
+                ),
+              ),
+            false,
+            false,
+          )
+        }
+        const flash = new THREE.PointLight(0xff0000, 10, 30)
+        flash.position.set(c.x, c.y + 5, c.z)
+        scene.add(flash)
+        SOUNDS.collapse()
+        disposeOsakaGroup(ob.group) // dramatic dark gap while morphing
+        const nextNum = ob.phase + 1
+        const gen = osakaGenRef.current
+        window.setTimeout(() => {
+          scene.remove(flash)
+          if (osakaGenRef.current !== gen || !osakaBossRef.current) return // encounter ended
+          if (nextNum > 5) {
+            osakaBossDefeat()
+            return
+          }
+          const np = nextNum as OsakaBossPhase
+          const built = buildOsakaBossPhase(np)
+          const primary = built.cores[0]
+          if (!primary) return
+          built.group.position.copy(c)
+          scene.add(built.group)
+          osakaBossRef.current = {
+            group: built.group,
+            phase: np,
+            phaseHp: OSAKA_PHASE_HP[np],
+            phaseMaxHp: OSAKA_PHASE_HP[np],
+            core: primary,
+            cores: built.cores,
+            coreExposed: true,
+            transitioning: false,
+            attackTimer: 2.0,
+            parts: built.parts,
+            nextZakoAt: Date.now() + OSAKA_ZAKO_INTERVAL,
+          }
+          SOUNDS.bossRoar()
+          showNotification(`第${np}形態 へ変化`)
+        }, 800)
+      }
+      // Fire one enemy projectile from the boss (reuses the shared enemy bullet
+      // pool, so it collides with the player like any other enemy shot).
+      function osakaFireBolt(
+        from: THREE.Vector3,
+        dir: THREE.Vector3,
+        speed: number,
+        damage: number,
+        color = 0xaa66ff,
+      ) {
+        const mesh = new THREE.Mesh(
+          new THREE.SphereGeometry(0.25, 8, 8),
+          new THREE.MeshBasicMaterial({ color }),
+        )
+        mesh.position.copy(from)
+        scene.add(mesh)
+        bullets.push({
+          mesh,
+          velocity: dir.clone().normalize().multiplyScalar(speed),
+          life: 3.5,
+          isEnemy: true,
+          damage,
+        })
+      }
+      // Per-frame boss driver: core pulse/reveal, limb sway, stalk, fodder top-up
+      // and the form-specific attack on the attackTimer (1.5× cadence while raging).
+      function updateOsakaBoss(dt: number) {
+        const ob = osakaBossRef.current
+        if (!ob || ob.transitioning) return
+        const now = Date.now()
+        const t = now / 1000
+        // Form 5: reveal cores by HP thirds — popping all three is the kill.
+        if (ob.phase === 5) {
+          const ratio = ob.phaseHp / ob.phaseMaxHp
+          const liveWanted = ratio > 0.66 ? 3 : ratio > 0.33 ? 2 : 1
+          ob.cores.forEach((co, i) => {
+            co.visible = i < liveWanted
+          })
+        }
+        const pulse = 0.85 + (Math.sin(t * 4) * 0.5 + 0.5) * 0.3 // 0.85..1.15
+        const coreBase = ob.phase === 2 ? 1.4 : ob.phase === 4 ? 1.6 : ob.phase === 5 ? 1.3 : 1.0
+        for (const co of ob.cores) {
+          if (co.visible) co.scale.setScalar(coreBase * pulse)
+        }
+        ob.coreExposed = ob.cores.some((co) => co.visible)
+        for (const p of ob.parts) {
+          const w = p.userData.osakaWave
+          if (typeof w === "number") p.rotation.z += Math.sin(t * 1.6 + w) * 0.004
+        }
+        const px = focalPoint.x
+        const pz = focalPoint.z
+        const toX = px - ob.group.position.x
+        const toZ = pz - ob.group.position.z
+        const dist = Math.hypot(toX, toZ) || 1
+        ob.group.rotation.y = Math.atan2(toX, toZ)
+        if (now >= ob.nextZakoAt) {
+          osakaSpawnZako(2)
+          ob.nextZakoAt = now + OSAKA_ZAKO_INTERVAL
+        }
+        const rage = ob.phaseHp <= ob.phaseMaxHp * 0.5
+        const moveSpeed = ob.phase === 1 ? 3.5 : ob.phase === 2 ? 2.0 : ob.phase === 4 ? 1.5 : 0.8
+        if (dist > 3) {
+          ob.group.position.x += (toX / dist) * moveSpeed * dt
+          ob.group.position.z += (toZ / dist) * moveSpeed * dt
+        }
+        ob.attackTimer -= dt
+        if (ob.attackTimer > 0) return
+        const safeToHit = now > spawnInvulnUntilRef.current
+        const bossPos = new THREE.Vector3(ob.group.position.x, 2, ob.group.position.z)
+        const aim = new THREE.Vector3(toX, 0, toZ)
+        let cooldown = 2.0
+        if (ob.phase === 1) {
+          // melee lunge + occasional blink-teleport beside the player
+          if (Math.random() < 0.3) {
+            const a = Math.random() * Math.PI * 2
+            ob.group.position.set(px + Math.cos(a) * 5, 0, pz + Math.sin(a) * 5)
+            spawnExplosion(ob.group.position.clone().setY(1), true, false)
+          } else if (dist < 3.5 && safeToHit) {
+            applyPlayerDamage(18, 4)
+          }
+          cooldown = 1.8
+        } else if (ob.phase === 2) {
+          // sweeping arms: AOE within radius 8
+          if (dist < 8 && safeToHit) applyPlayerDamage(28, 6)
+          spawnExplosion(bossPos.clone(), false, false)
+          cooldown = 2.6
+        } else if (ob.phase === 3) {
+          // three psychic bolts fanned at the player
+          for (let i = -1; i <= 1; i++) {
+            const d = aim.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), i * 0.18)
+            osakaFireBolt(new THREE.Vector3(bossPos.x, 4.6, bossPos.z), d, 22, 16)
+          }
+          cooldown = 2.2
+        } else if (ob.phase === 4) {
+          // summon two fodder + a charge
+          osakaSpawnZako(2)
+          if (dist < 4 && safeToHit) applyPlayerDamage(30, 6)
+          cooldown = 4.0
+        } else {
+          // form 5: random pick of the above + an 8-way iron-ball barrage
+          const roll = Math.random()
+          if (roll < 0.4) {
+            for (let i = 0; i < 8; i++) {
+              const a = (i / 8) * Math.PI * 2
+              osakaFireBolt(
+                new THREE.Vector3(bossPos.x, 6, bossPos.z),
+                new THREE.Vector3(Math.cos(a), 0, Math.sin(a)),
+                18,
+                20,
+                0xffaa00,
+              )
+            }
+          } else if (roll < 0.7) {
+            for (let i = -1; i <= 1; i++) {
+              const d = aim.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), i * 0.18)
+              osakaFireBolt(new THREE.Vector3(bossPos.x, 8, bossPos.z), d, 24, 18)
+            }
+          } else {
+            osakaSpawnZako(2)
+            if (dist < 6 && safeToHit) applyPlayerDamage(34, 7)
+          }
+          cooldown = 1.5
+        }
+        ob.attackTimer = cooldown * (rage ? 0.667 : 1)
       }
       // ── Transfer room (built once on init) ──────────────────────────────────
       // Room fill ambient (global light): on while in the room, off during a
@@ -12341,8 +12893,10 @@ export default function ThreeWorld({
               return
             }
           }
-          // Clear: every enemy dead.
-          if (enemies.filter((e) => e.hp > 0).length === 0) {
+          // Clear: every enemy dead. The OSAKA boss lives outside the `enemies`
+          // array, so while it is active its escorts/fodder dying must NOT end the
+          // mission — its own defeat path calls huntReturnToRoom instead.
+          if (!osakaBossRef.current && enemies.filter((e) => e.hp > 0).length === 0) {
             huntReturnToRoom("clear")
           }
         }
@@ -13691,6 +14245,36 @@ export default function ThreeWorld({
           }
         }
 
+        // OSAKA boss weak-point: the glowing core takes ×3, the bulk body ×0.2 —
+        // you must hit the core to make a dent. Runs between the hard-target and
+        // PvP passes, respecting wall/enemy occlusion so one shot hits one thing.
+        const osakaB = osakaBossRef.current
+        if (!shotConsumed && osakaB && !osakaB.transitioning) {
+          const obParts: THREE.Object3D[] = []
+          osakaB.group.traverse((c) => {
+            if (
+              c instanceof THREE.Mesh &&
+              c.visible &&
+              (c.userData.osakaCore || c.userData.osakaBody)
+            ) {
+              obParts.push(c)
+            }
+          })
+          const obHit = raycaster.intersectObjects(obParts, false)[0]
+          if (obHit) {
+            const blockedByWall = !!(nearestWall && nearestWall.distance < obHit.distance)
+            const blockedByEnemy = !!(enemyHits[0] && enemyHits[0].distance < obHit.distance)
+            if (!blockedByWall && !blockedByEnemy) {
+              const isCore = obHit.object.userData.osakaCore === true
+              SOUNDS.hit()
+              spawnBlood(obHit.point)
+              osakaDamage(weapon.hitDamage * (isCore ? OSAKA_CORE_MULT : OSAKA_BODY_MULT))
+              enemyHits = []
+              shotConsumed = true
+            }
+          }
+        }
+
         // PvP hit: check remote players
         const sceneRefsLocal = sceneRef.current
         if (
@@ -14125,6 +14709,14 @@ export default function ThreeWorld({
         if (bikeSlots.length > 0) updateBikeRespawns(Date.now()) // refill taken bikes
         if (modeRef.current === "hunt") updateHunt(dt) // HUNT transfer-mission FSM
         if (modeRef.current === "hunt") updateHuntCreatures(dt) // monster idle/twitch
+        if (modeRef.current === "hunt") {
+          // O-key summon request (consumed here so spawnOsakaBoss is in scope).
+          if (osakaSpawnReqRef.current) {
+            osakaSpawnReqRef.current = false
+            if (huntPhaseRef.current === "mission" && !osakaBossRef.current) spawnOsakaBoss()
+          }
+          updateOsakaBoss(dt) // OSAKA 五変化 boss
+        }
         // HUNT room compass: rotate the on-screen arrow toward the orb (which
         // sits at the room centre) in the player's local frame. Room phase only.
         if (modeRef.current === "hunt" && huntCompassRef.current) {
@@ -16421,6 +17013,11 @@ export default function ThreeWorld({
           showNotification(next ? "CRT SCANLINES ON" : "CRT SCANLINES OFF")
           return next
         })
+      }
+      // OSAKA 五変化: summon the immortal boss into the live HUNT arena. Phase-1
+      // test entry — proper mission-select integration ships with the dedicated map.
+      if ((e.key === "o" || e.key === "O") && modeRef.current === "hunt") {
+        osakaSpawnReqRef.current = true
       }
       if (e.key === "g" || e.key === "G") {
         const now = Date.now()
