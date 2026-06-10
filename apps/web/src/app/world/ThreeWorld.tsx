@@ -755,6 +755,23 @@ type OsakaAnim = {
     flick: boolean
   }[]
   sway: { obj: THREE.Object3D; amp: number; spd: number; phase: number; base: number }[]
+  // Instanced hanging decor (lanterns/fugu): each pendulum swings via setMatrixAt
+  // instead of an individual pivot Object3D, so the whole set is one draw call.
+  swayInst: {
+    mesh: THREE.InstancedMesh
+    items: {
+      px: number
+      py: number
+      pz: number
+      oy: number // local hang offset below the pivot
+      sx: number
+      sy: number
+      sz: number
+      amp: number
+      spd: number
+      phase: number
+    }[]
+  }[]
   blink: { mesh: THREE.Mesh; spd: number; phase: number }[]
   water: {
     obj: THREE.Object3D
@@ -11751,9 +11768,14 @@ export default function ThreeWorld({
         baseY: number
       }[] = []
       const osakaRainDummy = new THREE.Object3D()
-      // Build the rain field (InstancedMesh streaks; PC 400 / mobile 150).
+      const osakaSwayDummy = new THREE.Object3D()
+      // Frame counter so updateOsakaMap can throttle the purely-cosmetic oscillators
+      // (neon flicker, sway, water shimmer) to every other frame and the distance
+      // cull to a coarse cadence.
+      let osakaMapFrame = 0
+      // Build the rain field (InstancedMesh streaks; PC 400 / mobile 80).
       function buildOsakaRain() {
-        const count = isMobileDevice ? 150 : 400
+        const count = isMobileDevice ? 80 : 400
         const geo = new THREE.BoxGeometry(0.025, 1.3, 0.025)
         const mat = new THREE.MeshBasicMaterial({
           color: 0x9fc4ff,
@@ -12013,7 +12035,7 @@ export default function ThreeWorld({
           // melee lunge + occasional blink-teleport, now leaving 3 afterimages
           // that each keep a brief lunge hitbox where the boss used to be.
           if (Math.random() < 0.3) {
-            for (let i = 0; i < 3; i++) {
+            for (let i = 0; i < (isMobileDevice ? 1 : 3); i++) {
               osakaAfterimage(
                 ob.group.position.x + (Math.random() - 0.5) * 6,
                 ob.group.position.z + (Math.random() - 0.5) * 6,
@@ -12058,8 +12080,9 @@ export default function ThreeWorld({
           // summon two fodder + a charge …
           osakaSpawnZako(2)
           if (dist < 4 && safeToHit) applyPlayerDamage(30, 6)
-          // … plus releasing 4 splitter bodies that charge in and self-detonate.
-          for (let i = 0; i < 4; i++) {
+          // … plus releasing splitter bodies that charge in and self-detonate
+          // (mobile halves the count).
+          for (let i = 0; i < (isMobileDevice ? 2 : 4); i++) {
             const a = (i / 4) * Math.PI * 2
             osakaSplitter(
               ob.group.position.x + Math.cos(a) * 3,
@@ -12112,8 +12135,8 @@ export default function ThreeWorld({
               )
             }
           } else if (roll < 0.76) {
-            // P4 splitter release
-            for (let i = 0; i < 4; i++) {
+            // P4 splitter release (mobile halves the count)
+            for (let i = 0; i < (isMobileDevice ? 2 : 4); i++) {
               const a = (i / 4) * Math.PI * 2
               osakaSplitter(
                 ob.group.position.x + Math.cos(a) * 3,
@@ -13060,6 +13083,9 @@ export default function ThreeWorld({
       let osakaAnim: OsakaAnim | null = null
       // The distant-skyline InstancedMesh, hidden on mobile / far distance culling.
       let osakaSkylineInst: THREE.InstancedMesh | null = null
+      // Fine decorations that hide when the player is far from their area (the big
+      // landmarks stay visible). cx/cz are group-local centres; r the keep-shown radius.
+      const osakaCull: { obj: THREE.Object3D; cx: number; cz: number; r: number }[] = []
       // A scrolling-marquee CanvasTexture for the BANG runner board (256×32).
       function makeOsakaMarquee(): {
         canvas: HTMLCanvasElement
@@ -13122,6 +13148,9 @@ export default function ThreeWorld({
           const im = new THREE.InstancedMesh(geo, mat, xforms.length)
           im.castShadow = false
           im.receiveShadow = false
+          // Instances spread across the arena; the default origin-based bounding
+          // sphere would mis-cull them, so disable per-object frustum culling.
+          im.frustumCulled = false
           xforms.forEach((xf, i) => {
             idummy.position.set(xf.pos[0], xf.pos[1], xf.pos[2])
             idummy.rotation.set(xf.rotX ?? 0, xf.rotY ?? 0, xf.rotZ ?? 0)
@@ -13135,10 +13164,49 @@ export default function ThreeWorld({
           add(im)
           return im
         }
+        // Like instAdd, but the instances swing as pendulums (driven per-frame by
+        // updateOsakaMap via A.swayInst). Optional cull center hides the set when
+        // the player is far from its area.
+        type SwayItem = {
+          px: number
+          py: number
+          pz: number
+          oy: number
+          sx: number
+          sy: number
+          sz: number
+          amp: number
+          spd: number
+          phase: number
+        }
+        const instSway = (
+          geo: THREE.BufferGeometry,
+          mat: THREE.Material,
+          items: SwayItem[],
+          cull?: { cx: number; cz: number; r: number },
+        ) => {
+          if (items.length === 0) return
+          const im = new THREE.InstancedMesh(geo, mat, items.length)
+          im.castShadow = false
+          im.receiveShadow = false
+          im.frustumCulled = false
+          items.forEach((it, i) => {
+            idummy.position.set(it.px, it.py + it.oy, it.pz)
+            idummy.rotation.set(0, 0, 0)
+            idummy.scale.set(it.sx, it.sy, it.sz)
+            idummy.updateMatrix()
+            im.setMatrixAt(i, idummy.matrix)
+          })
+          im.instanceMatrix.needsUpdate = true
+          add(im)
+          A.swayInst.push({ mesh: im, items })
+          if (cull) osakaCull.push({ obj: im, cx: cull.cx, cz: cull.cz, r: cull.r })
+        }
         const A: OsakaAnim = {
           t: 0,
           neon: [],
           sway: [],
+          swayInst: [],
           blink: [],
           water: [],
           towerOrbMat: null,
@@ -13146,6 +13214,7 @@ export default function ThreeWorld({
           marquee: null,
         }
         osakaAnim = A
+        osakaCull.length = 0 // reset the per-area distance-cull list
         // A neon material + registration for the flicker/pulse animator. flick =
         // a hard, occasional dropout; otherwise a soft sine pulse.
         const neonMat = (col: number, base = 1.2, flick = false, spd?: number) => {
@@ -13420,36 +13489,52 @@ export default function ThreeWorld({
           pl.position.set(-70 + (i / Math.max(1, neonCount - 1)) * 140, 6, 70 + (i % 2) * 10)
           add(pl)
         }
-        // Hanging red paper lanterns (20, dense-scaled) that sway gently.
-        const lanternGeo = new THREE.SphereGeometry(0.5, 10, 8)
+        // Hanging red paper lanterns (20, dense-scaled) that sway gently. Both the
+        // lantern bulbs and their cords are instanced (2 draw calls), swinging as
+        // pendulums via setMatrixAt; the set hides when far from Dotonbori.
+        const lanternGeo = new THREE.SphereGeometry(0.5, 8, 6)
         const lanternMat = new THREE.MeshStandardMaterial({
           color: 0xcc2222,
           emissive: 0xdd2218,
           emissiveIntensity: 1.8, // glow clearly in the brighter night
         })
-        const cordMat = new THREE.MeshStandardMaterial({ color: 0x111111 })
-        const cordGeo = new THREE.CylinderGeometry(0.03, 0.03, 1.6)
+        const cordMat = new THREE.MeshBasicMaterial({ color: 0x111111 })
+        const cordGeo = new THREE.CylinderGeometry(0.03, 0.03, 1.6, 4)
+        const lanternCord: SwayItem[] = []
+        const lanternBulb: SwayItem[] = []
         for (let i = 0; i < dn(20); i++) {
-          const pivot = new THREE.Group()
           const lx = -80 + rnd() * 160
           const lz = i % 2 === 0 ? 60 + rnd() * 4 : 88 + rnd() * 4
-          pivot.position.set(lx, 6.5, lz)
-          const cord = new THREE.Mesh(cordGeo, cordMat)
-          cord.position.y = -0.8
-          pivot.add(cord)
-          const lantern = new THREE.Mesh(lanternGeo, lanternMat)
-          lantern.scale.set(1, 1.3, 1)
-          lantern.position.y = -1.9
-          pivot.add(lantern)
-          add(pivot)
-          A.sway.push({
-            obj: pivot,
-            amp: 0.12 + rnd() * 0.1,
-            spd: 0.8 + rnd() * 0.6,
-            phase: rnd() * 6.28,
-            base: 0,
+          const amp = 0.12 + rnd() * 0.1
+          const spd = 0.8 + rnd() * 0.6
+          const phase = rnd() * 6.28
+          lanternCord.push({
+            px: lx,
+            py: 6.5,
+            pz: lz,
+            oy: -0.8,
+            sx: 1,
+            sy: 1,
+            sz: 1,
+            amp,
+            spd,
+            phase,
+          })
+          lanternBulb.push({
+            px: lx,
+            py: 6.5,
+            pz: lz,
+            oy: -1.9,
+            sx: 1,
+            sy: 1.3,
+            sz: 1,
+            amp,
+            spd,
+            phase,
           })
         }
+        instSway(cordGeo, cordMat, lanternCord, { cx: 0, cz: 74, r: 80 })
+        instSway(lanternGeo, lanternMat, lanternBulb, { cx: 0, cz: 74, r: 80 })
         // Giant BANG runner board (fictional brand) — blue, strongly lit, with a
         // scrolling LED marquee strip beneath it.
         const runnerCv = document.createElement("canvas")
@@ -13657,36 +13742,40 @@ export default function ThreeWorld({
         }
         instAdd(shopGeo, shopMat, shopXf)
         // Pufferfish (fugu) decoration lanterns hung at storefronts (×6, dense).
-        const fuguGeo = new THREE.SphereGeometry(0.9, 10, 8)
+        // Bodies sway as one instanced set; the small tails are instanced static
+        // (their swing is imperceptible behind the bobbing bodies). Hidden when far
+        // from Shinsekai.
+        const fuguGeo = new THREE.SphereGeometry(0.9, 8, 6)
         const fuguMat = new THREE.MeshStandardMaterial({
           color: 0xf4f0e6,
           emissive: 0xaa8855,
           emissiveIntensity: 1.2,
         })
-        for (let i = 0; i < dn(6); i++) {
-          const ang = (i / dn(6)) * Math.PI * 2
-          const pivot = new THREE.Group()
-          pivot.position.set(Math.cos(ang) * 22, 5.5, Math.sin(ang) * 16)
-          const fugu = new THREE.Mesh(fuguGeo, fuguMat)
-          fugu.scale.set(1.4, 0.9, 0.9)
-          fugu.position.y = -1.2
-          pivot.add(fugu)
-          const tail = new THREE.Mesh(
-            new THREE.ConeGeometry(0.4, 0.8, 6),
-            new THREE.MeshStandardMaterial({ color: 0xcc3333 }),
-          )
-          tail.rotation.z = Math.PI / 2
-          tail.position.set(-1.3, -1.2, 0)
-          pivot.add(tail)
-          add(pivot)
-          A.sway.push({
-            obj: pivot,
+        const fuguTailGeo = new THREE.ConeGeometry(0.4, 0.8, 6)
+        const fuguTailMat = new THREE.MeshLambertMaterial({ color: 0xcc3333 })
+        const fuguBody: SwayItem[] = []
+        const fuguTailXf: Xf[] = []
+        const fuguN = dn(6)
+        for (let i = 0; i < fuguN; i++) {
+          const ang = (i / fuguN) * Math.PI * 2
+          const px = Math.cos(ang) * 22
+          const pz = Math.sin(ang) * 16
+          fuguBody.push({
+            px,
+            py: 5.5,
+            pz,
+            oy: -1.2,
+            sx: 1.4,
+            sy: 0.9,
+            sz: 0.9,
             amp: 0.1,
             spd: 0.7 + rnd() * 0.5,
             phase: rnd() * 6.28,
-            base: 0,
           })
+          fuguTailXf.push({ pos: [px - 1.3, 4.3, pz], rotZ: Math.PI / 2 })
         }
+        instSway(fuguGeo, fuguMat, fuguBody, { cx: 0, cz: 0, r: 80 })
+        instAdd(fuguTailGeo, fuguTailMat, fuguTailXf)
         // Covered arcade along the central street through Shinsekai.
         const arcadeMat = new THREE.MeshLambertMaterial({ color: 0x3a3530 })
         const arcRoofMat = new THREE.MeshStandardMaterial({
@@ -13814,7 +13903,8 @@ export default function ThreeWorld({
           else if (side === 2) seamXf.push({ pos: [15.1, yy, cz + along], rotY: Math.PI / 2 })
           else seamXf.push({ pos: [-15.1, yy, cz + along], rotY: Math.PI / 2 })
         }
-        instAdd(seamGeo, stoneDk, seamXf)
+        const seamInst = instAdd(seamGeo, stoneDk, seamXf)
+        if (seamInst) osakaCull.push({ obj: seamInst, cx: 0, cz, r: 80 })
         // White plaster parapet wall with crenellations atop the stone base.
         const plasterMat = new THREE.MeshLambertMaterial({ color: 0xece8dc })
         for (const [px, pz, pw, pd] of [
@@ -13998,7 +14088,8 @@ export default function ThreeWorld({
           }
         }
         instAdd(trunkGeo, trunkMat, trunkXf)
-        instAdd(blossomGeo, sakuraMat, blossomXf)
+        const blossomInst = instAdd(blossomGeo, sakuraMat, blossomXf)
+        if (blossomInst) osakaCull.push({ obj: blossomInst, cx: 0, cz: cz + 50, r: 80 })
         // ── Field-wide lighting + fog — a BRIGHT night-city look (OSAKA only) ──
         // The daytime HUNT key/fill are dimmed to ~nothing (restored on return via
         // huntStageLightSaved); the scene is lit entirely by the OSAKA-only lights
@@ -14055,6 +14146,8 @@ export default function ThreeWorld({
         }
         osakaMapMeshesRef.current = []
         osakaAnim = null // scenery handles die with the disposed meshes
+        osakaSkylineInst = null
+        osakaCull.length = 0 // drop references to the now-disposed detail instances
         // Environment teardown: rain handle (mesh disposed above via the ref),
         // any live ripples, and the bridge-collapse list.
         osakaRain = null
@@ -14074,33 +14167,72 @@ export default function ThreeWorld({
         if (!a) return
         a.t += dt
         const t = a.t
-        for (const n of a.neon) {
-          if (n.flick) {
-            // hard, irregular dropouts (a failing tube)
-            n.mat.emissiveIntensity = Math.sin(t * n.spd + n.phase) > 0.82 ? n.base * 0.15 : n.base
-          } else {
-            n.mat.emissiveIntensity = n.base * (0.8 + 0.2 * Math.sin(t * n.spd + n.phase))
+        osakaMapFrame++
+        // Coarse distance cull: hide each area's fine detail when the player is well
+        // outside it (landmarks stay visible — they're not in this list). Runs ~3×/s.
+        if (osakaMapFrame % 20 === 0 && osakaCull.length > 0) {
+          const lx = focalPoint.x - HUNT_ARENA.x
+          const lz = focalPoint.z - HUNT_ARENA.z
+          for (const c of osakaCull) {
+            c.obj.visible = Math.hypot(lx - c.cx, lz - c.cz) < c.r
           }
         }
-        // Lanterns/noren sway; during a quake they jolt much harder.
-        const quaking = Date.now() < osakaQuakeUntil
-        for (const s of a.sway) {
-          const jolt = quaking ? Math.sin(t * 40 + s.phase) * 0.25 : 0
-          s.obj.rotation.z = s.base + Math.sin(t * s.spd + s.phase) * s.amp + jolt
-        }
-        for (const b of a.blink) b.mesh.visible = Math.sin(t * b.spd + b.phase) > 0.4
-        for (const w of a.water) {
-          w.obj.position.x = w.baseX + Math.sin(t * w.spd + w.phase) * 0.6
-          w.mat.emissiveIntensity = 0.6 + 0.4 * Math.sin(t * w.spd * 1.3 + w.phase)
+        // The cosmetic oscillators (flicker/sway/shimmer + instanced pendulums) cost
+        // the most and read fine at half rate, so update them every other frame. Time
+        // (a.t) still advances every frame, so motion stays continuous.
+        if (osakaMapFrame % 2 === 0) {
+          for (const n of a.neon) {
+            if (n.flick) {
+              // hard, irregular dropouts (a failing tube)
+              n.mat.emissiveIntensity =
+                Math.sin(t * n.spd + n.phase) > 0.82 ? n.base * 0.15 : n.base
+            } else {
+              n.mat.emissiveIntensity = n.base * (0.8 + 0.2 * Math.sin(t * n.spd + n.phase))
+            }
+          }
+          // Lanterns/noren sway; during a quake they jolt much harder.
+          const quaking = Date.now() < osakaQuakeUntil
+          for (const s of a.sway) {
+            const jolt = quaking ? Math.sin(t * 40 + s.phase) * 0.25 : 0
+            s.obj.rotation.z = s.base + Math.sin(t * s.spd + s.phase) * s.amp + jolt
+          }
+          // Instanced hanging decor: swing each pendulum about its pivot.
+          for (const si of a.swayInst) {
+            if (!si.mesh.visible) continue
+            const items = si.items
+            for (let i = 0; i < items.length; i++) {
+              const it = items[i]
+              if (!it) continue
+              const th = Math.sin(t * it.spd + it.phase) * it.amp
+              const s = Math.sin(th)
+              const c = Math.cos(th)
+              osakaSwayDummy.position.set(it.px - it.oy * s, it.py + it.oy * c, it.pz)
+              osakaSwayDummy.rotation.set(0, 0, th)
+              osakaSwayDummy.scale.set(it.sx, it.sy, it.sz)
+              osakaSwayDummy.updateMatrix()
+              si.mesh.setMatrixAt(i, osakaSwayDummy.matrix)
+            }
+            si.mesh.instanceMatrix.needsUpdate = true
+          }
+          for (const b of a.blink) b.mesh.visible = Math.sin(t * b.spd + b.phase) > 0.4
+          for (const w of a.water) {
+            w.obj.position.x = w.baseX + Math.sin(t * w.spd + w.phase) * 0.6
+            w.mat.emissiveIntensity = 0.6 + 0.4 * Math.sin(t * w.spd * 1.3 + w.phase)
+          }
         }
         if (a.towerOrbMat && a.towerLight) {
           const hue = (t * 0.04) % 1
           a.towerOrbMat.emissive.setHSL(hue, 1, 0.5)
           a.towerLight.color.setHSL(hue, 1, 0.6)
         }
+        // Scrolling LED marquee: the offset advances every frame (smooth scroll),
+        // but the canvas redraw + texture upload — the costly part — only fires every
+        // third frame.
         if (a.marquee) {
-          const { ctx, canvas, tex } = a.marquee
           a.marquee.offset = (a.marquee.offset + dt * 60) % 1000
+        }
+        if (a.marquee && osakaMapFrame % 3 === 0) {
+          const { ctx, canvas, tex } = a.marquee
           ctx.fillStyle = "#001033"
           ctx.fillRect(0, 0, canvas.width, canvas.height)
           ctx.fillStyle = "#ffcc33"
