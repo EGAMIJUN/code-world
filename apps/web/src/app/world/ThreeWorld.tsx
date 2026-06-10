@@ -13058,6 +13058,8 @@ export default function ThreeWorld({
       // every sign uses fictional text. Disposed by huntClearStage on return.
       // Animated scenery handles (driven by updateOsakaMap); reset every build.
       let osakaAnim: OsakaAnim | null = null
+      // The distant-skyline InstancedMesh, hidden on mobile / far distance culling.
+      let osakaSkylineInst: THREE.InstancedMesh | null = null
       // A scrolling-marquee CanvasTexture for the BANG runner board (256×32).
       function makeOsakaMarquee(): {
         canvas: HTMLCanvasElement
@@ -13103,6 +13105,36 @@ export default function ThreeWorld({
         const group = new THREE.Group()
         group.position.set(HUNT_ARENA.x, 0, HUNT_ARENA.z)
         const add = (m: THREE.Object3D) => group.add(m)
+        // Draw-call killer: collapse a list of transforms sharing one geo+material
+        // into a single InstancedMesh (one draw call instead of N). Shadows off —
+        // the OSAKA stage never casts/receives them. clearOsakaMap disposes it like
+        // any other mesh (InstancedMesh extends Mesh).
+        type Xf = {
+          pos: [number, number, number]
+          scl?: [number, number, number] | number
+          rotX?: number
+          rotY?: number
+          rotZ?: number
+        }
+        const idummy = new THREE.Object3D()
+        const instAdd = (geo: THREE.BufferGeometry, mat: THREE.Material, xforms: Xf[]) => {
+          if (xforms.length === 0) return null
+          const im = new THREE.InstancedMesh(geo, mat, xforms.length)
+          im.castShadow = false
+          im.receiveShadow = false
+          xforms.forEach((xf, i) => {
+            idummy.position.set(xf.pos[0], xf.pos[1], xf.pos[2])
+            idummy.rotation.set(xf.rotX ?? 0, xf.rotY ?? 0, xf.rotZ ?? 0)
+            if (typeof xf.scl === "number") idummy.scale.setScalar(xf.scl)
+            else if (xf.scl) idummy.scale.set(xf.scl[0], xf.scl[1], xf.scl[2])
+            else idummy.scale.setScalar(1)
+            idummy.updateMatrix()
+            im.setMatrixAt(i, idummy.matrix)
+          })
+          im.instanceMatrix.needsUpdate = true
+          add(im)
+          return im
+        }
         const A: OsakaAnim = {
           t: 0,
           neon: [],
@@ -13145,17 +13177,19 @@ export default function ThreeWorld({
         // ── Whole-field asphalt floor + perimeter walls ──
         const floor = new THREE.Mesh(
           new THREE.PlaneGeometry(180, 180),
-          new THREE.MeshStandardMaterial({
+          // Lambert (cheap) keeps main's faint neon-reflection emissive so the
+          // asphalt never goes pure black.
+          new THREE.MeshLambertMaterial({
             color: 0x1c1c20,
-            emissive: 0x1a1520, // faint neon-reflection glow so asphalt never goes black
+            emissive: 0x1a1520,
             emissiveIntensity: 1,
-            roughness: 0.95,
           }),
         )
         floor.rotation.x = -Math.PI / 2
         floor.position.y = 0.01
+        floor.receiveShadow = false
         add(floor)
-        const wallMat = new THREE.MeshStandardMaterial({ color: 0x2a2a2a, roughness: 0.9 })
+        const wallMat = new THREE.MeshLambertMaterial({ color: 0x2a2a2a })
         for (const [x, z, w, d] of [
           [0, 90, 180, 2],
           [0, -90, 180, 2],
@@ -13169,26 +13203,26 @@ export default function ThreeWorld({
         // Main street linking the three areas (a touch lighter than the asphalt).
         const street = new THREE.Mesh(
           new THREE.PlaneGeometry(14, 170),
-          new THREE.MeshStandardMaterial({ color: 0x26262c, roughness: 0.9 }),
+          new THREE.MeshLambertMaterial({ color: 0x26262c }),
         )
         street.rotation.x = -Math.PI / 2
         street.position.set(0, 0.02, 0)
         add(street)
-        // Rain puddles — small reflective patches that catch the neon.
-        const puddleGeo = new THREE.CircleGeometry(1, 12)
-        const puddleMat = new THREE.MeshStandardMaterial({
-          color: 0x10141c,
-          roughness: 0.12,
-          metalness: 0.7,
-        })
+        // Rain puddles — small dark patches (a flat basic colour reads as wet
+        // asphalt at night without the cost of a reflective standard material).
+        const puddleGeo = new THREE.CircleGeometry(1, 10)
+        const puddleMat = new THREE.MeshBasicMaterial({ color: 0x12161e })
+        const puddleXf: Xf[] = []
         for (let i = 0; i < dn(24); i++) {
-          const p = new THREE.Mesh(puddleGeo, puddleMat)
-          p.rotation.x = -Math.PI / 2
-          p.position.set(-80 + rnd() * 160, 0.03, -80 + rnd() * 160)
-          p.scale.setScalar(0.6 + rnd() * 1.8)
-          add(p)
+          puddleXf.push({
+            pos: [-80 + rnd() * 160, 0.03, -80 + rnd() * 160],
+            rotX: -Math.PI / 2,
+            scl: 0.6 + rnd() * 1.8,
+          })
         }
+        instAdd(puddleGeo, puddleMat, puddleXf)
         // Distant skyline beyond the walls — dark towers with faint lit windows.
+        // One instanced unit-box scaled per tower (40 towers → 1 draw call).
         const skyMat = new THREE.MeshStandardMaterial({
           color: 0x0a0a12,
           emissive: 0x334466,
@@ -13196,28 +13230,33 @@ export default function ThreeWorld({
           emissiveIntensity: 0.45,
           roughness: 1,
         })
+        const skyGeo = new THREE.BoxGeometry(1, 1, 1)
+        const skyXf: Xf[] = []
+        osakaSkylineInst = null
         for (let i = 0; i < dn(40); i++) {
           const side = i % 4
           const along = -110 + rnd() * 220
           const out = 98 + rnd() * 26
           const bh = 12 + rnd() * 26
           const bw = 6 + rnd() * 7
-          const b = new THREE.Mesh(new THREE.BoxGeometry(bw, bh, bw), skyMat)
-          if (side === 0) b.position.set(along, bh / 2, out)
-          else if (side === 1) b.position.set(along, bh / 2, -out)
-          else if (side === 2) b.position.set(out, bh / 2, along)
-          else b.position.set(-out, bh / 2, along)
-          add(b)
+          let pos: [number, number, number]
+          if (side === 0) pos = [along, bh / 2, out]
+          else if (side === 1) pos = [along, bh / 2, -out]
+          else if (side === 2) pos = [out, bh / 2, along]
+          else pos = [-out, bh / 2, along]
+          skyXf.push({ pos, scl: [bw, bh, bw] })
         }
+        osakaSkylineInst = instAdd(skyGeo, skyMat, skyXf)
+        // Mobile drops the distant silhouette entirely (it's pure backdrop).
+        if (isMobileDevice && osakaSkylineInst) osakaSkylineInst.visible = false
         // ════ AREA 1 — DOTONBORI (south, z 60..90) ════
         // Reflective canal water.
+        // Dark basic colour reads as still night water without the reflective
+        // metalness/roughness PBR cost of the original standard material. Uses
+        // main's lighter water colour so the canal reads as water, not a black void.
         const river = new THREE.Mesh(
           new THREE.PlaneGeometry(180, 24),
-          new THREE.MeshStandardMaterial({
-            color: 0x1a4560, // lighter so the canal reads as water, not a black void
-            roughness: 0.2,
-            metalness: 0.6,
-          }),
+          new THREE.MeshBasicMaterial({ color: 0x1a4560 }),
         )
         river.rotation.x = -Math.PI / 2
         river.position.set(0, -0.3, 75)
@@ -13247,9 +13286,12 @@ export default function ThreeWorld({
             phase: rnd() * 6.28,
           })
         }
-        // Two Ebisu-bashi-style bridges with railings + lamps.
-        const bridgeMat = new THREE.MeshStandardMaterial({ color: 0x4a4a4a, roughness: 0.85 })
+        // Two Ebisu-bashi-style bridges with railings + lamps. All rail posts across
+        // both bridges collapse into one InstancedMesh.
+        const bridgeMat = new THREE.MeshLambertMaterial({ color: 0x4a4a4a })
         const railGeo = new THREE.BoxGeometry(0.18, 1.1, 0.18)
+        const postXf: Xf[] = []
+        const lampPoleMat = new THREE.MeshLambertMaterial({ color: 0x222222 })
         for (const bx of [-40, 40]) {
           const deck = new THREE.Mesh(new THREE.BoxGeometry(10, 0.6, 24), bridgeMat)
           deck.position.set(bx, 0.3, 75)
@@ -13267,22 +13309,18 @@ export default function ThreeWorld({
           })
           for (const side of [-1, 1]) {
             for (let r = 0; r < dn(9); r++) {
-              const post = new THREE.Mesh(railGeo, bridgeMat)
-              post.position.set(bx + side * 4.6, 1.0, 64 + r * (22 / 8))
-              add(post)
+              postXf.push({ pos: [bx + side * 4.6, 1.0, 64 + r * (22 / 8)] })
             }
             const rail = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.18, 24), bridgeMat)
             rail.position.set(bx + side * 4.6, 1.5, 75)
             add(rail)
           }
-          // Two street lamps per bridge (mobile keeps at least one).
+          // Two street lamps per bridge — emissive bulbs only (the PointLights that
+          // used to back these are dropped; the bulb glow alone reads at night).
           for (let l = 0; l < dn(2); l++) {
             const lx = bx + (l === 0 ? -3.5 : 3.5)
             const lz = 75
-            const pole = new THREE.Mesh(
-              new THREE.CylinderGeometry(0.12, 0.12, 4),
-              new THREE.MeshStandardMaterial({ color: 0x222222 }),
-            )
+            const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 4, 6), lampPoleMat)
             pole.position.set(lx, 2.3, lz)
             add(pole)
             const bulb = new THREE.Mesh(
@@ -13291,13 +13329,9 @@ export default function ThreeWorld({
             )
             bulb.position.set(lx, 4.5, lz)
             add(bulb)
-            if (fullLights) {
-              const pl = new THREE.PointLight(0xffeeaa, 0.8, 14)
-              pl.position.set(lx, 4.6, lz)
-              add(pl)
-            }
           }
         }
+        instAdd(railGeo, bridgeMat, postXf)
         // Neon sign-board buildings lining both banks (14, dense-scaled).
         const SIGNS: { lines: string[]; col: number }[] = [
           { lines: ["酒場"], col: 0xff3366 },
@@ -13316,6 +13350,15 @@ export default function ThreeWorld({
           { lines: ["甘味"], col: 0xffcc00 },
         ]
         const bldgGeoCache = new THREE.BoxGeometry(1, 1, 1) // scaled per building
+        // Shared, reused across all 14 sign buildings (one draw call) + one shared
+        // blinker material (the blink meshes stay individual for per-mesh blinking).
+        const bldgMat = new THREE.MeshLambertMaterial({ color: 0x1a1a22 })
+        const bldgXf: Xf[] = []
+        const blinkMat = new THREE.MeshStandardMaterial({
+          color: 0xff2222,
+          emissive: 0xff0000,
+          emissiveIntensity: 2,
+        })
         for (let i = 0; i < dn(14); i++) {
           const sign = SIGNS[i % SIGNS.length]
           if (!sign) continue
@@ -13326,13 +13369,7 @@ export default function ThreeWorld({
           const x = -78 + (i / 14) * 156 + (rnd() - 0.5) * 6
           const z = northBank ? 62 : 88
           const facing = northBank ? 1 : -1 // sign faces the canal
-          const building = new THREE.Mesh(
-            bldgGeoCache,
-            new THREE.MeshStandardMaterial({ color: 0x1a1a22, roughness: 0.9 }),
-          )
-          building.scale.set(bw, bh, bd)
-          building.position.set(x, bh / 2, z)
-          add(building)
+          bldgXf.push({ pos: [x, bh / 2, z], scl: [bw, bh, bd] })
           // Big emissive sign panel.
           const tex = makeOsakaSign(
             sign.lines,
@@ -13366,21 +13403,20 @@ export default function ThreeWorld({
             tube.position.set(x + fx, bh * 0.6 + fy, pz + facing * 0.05)
             add(tube)
           }
-          // Rooftop red aviation blinker.
-          const blinkMat = new THREE.MeshStandardMaterial({
-            color: 0xff2222,
-            emissive: 0xff0000,
-            emissiveIntensity: 2,
-          })
+          // Rooftop red aviation blinker (shared material; blinks per-mesh).
           const blink = new THREE.Mesh(new THREE.SphereGeometry(0.35, 6, 6), blinkMat)
           blink.position.set(x, bh + 0.5, z)
           add(blink)
           A.blink.push({ mesh: blink, spd: 2 + rnd() * 2, phase: rnd() * 6.28 })
         }
-        // Neon point lights along the canal (mobile: 6 → 3).
-        const neonCount = fullLights ? 6 : 3
+        instAdd(bldgGeoCache, bldgMat, bldgXf)
+        // Neon point lights along the canal — the single biggest light sink, so
+        // capped hard: PC 3, mobile 1. The neon sign emissive carries the rest.
+        const neonCount = fullLights ? 3 : 1
         for (let i = 0; i < neonCount; i++) {
+          // Fewer lights (perf) but main's brighter intensity/range + wide spread.
           const pl = new THREE.PointLight(i % 2 === 0 ? 0xff3366 : 0x33ddff, 3.0, 38)
+          pl.castShadow = false
           pl.position.set(-70 + (i / Math.max(1, neonCount - 1)) * 140, 6, 70 + (i % 2) * 10)
           add(pl)
         }
@@ -13505,24 +13541,21 @@ export default function ThreeWorld({
         deck1.position.set(0, 17, 0)
         add(deck1)
         // Mid trusswork — a lattice of thin members (dense-scaled 30).
-        const trussMat = new THREE.MeshStandardMaterial({
-          color: 0xb8901a,
-          roughness: 0.6,
-          metalness: 0.5,
-        })
+        const trussMat = new THREE.MeshLambertMaterial({ color: 0xb8901a })
         const trussV = new THREE.BoxGeometry(0.15, 8, 0.15)
         const trussD = new THREE.BoxGeometry(0.12, 5.6, 0.12)
-        for (let i = 0; i < dn(30); i++) {
-          const ang = (i / dn(30)) * Math.PI * 2
+        const trussN = dn(30)
+        const trussVXf: Xf[] = []
+        const trussDXf: Xf[] = []
+        for (let i = 0; i < trussN; i++) {
+          const ang = (i / trussN) * Math.PI * 2
           const r = 3.6
-          const v = new THREE.Mesh(trussV, trussMat)
-          v.position.set(Math.cos(ang) * r, 22, Math.sin(ang) * r)
-          add(v)
-          const d = new THREE.Mesh(trussD, trussMat)
-          d.position.set(Math.cos(ang) * r, 22, Math.sin(ang) * r)
-          d.rotation.z = i % 2 === 0 ? 0.6 : -0.6
-          add(d)
+          const pos: [number, number, number] = [Math.cos(ang) * r, 22, Math.sin(ang) * r]
+          trussVXf.push({ pos })
+          trussDXf.push({ pos, rotZ: i % 2 === 0 ? 0.6 : -0.6 })
         }
+        instAdd(trussV, trussMat, trussVXf)
+        instAdd(trussD, trussMat, trussDXf)
         // Second deck + upper tower + crowning beacon.
         const deck2 = new THREE.Mesh(new THREE.CylinderGeometry(5, 5, 2, 8), towerMat)
         deck2.position.set(0, 27, 0)
@@ -13539,6 +13572,7 @@ export default function ThreeWorld({
         orbTop.position.set(0, 47, 0)
         add(orbTop)
         const towerLight = new THREE.PointLight(0xffcc00, 5, 60)
+        towerLight.castShadow = false
         towerLight.position.set(0, 47, 0)
         add(towerLight)
         A.towerOrbMat = orbMat // hue-cycled in updateOsakaMap
@@ -13578,19 +13612,22 @@ export default function ThreeWorld({
           add(panel)
         }
         // ── Shinsekai downtown: low bars/shops ringing the tower (dense 16) ──
-        const shopMat = new THREE.MeshStandardMaterial({ color: 0x2a2520, roughness: 0.9 })
+        // Shop boxes share a Lambert material + one unit-box InstancedMesh; the
+        // swaying noren curtains stay individual (animated + unique textures).
+        const shopMat = new THREE.MeshLambertMaterial({ color: 0x2a2520 })
+        const shopGeo = new THREE.BoxGeometry(1, 1, 1)
+        const shopXf: Xf[] = []
         const norenCol = [0xcc3333, 0x2244aa]
-        for (let i = 0; i < dn(16); i++) {
-          const ang = (i / dn(16)) * Math.PI * 2
+        const shopN = dn(16)
+        for (let i = 0; i < shopN; i++) {
+          const ang = (i / shopN) * Math.PI * 2
           const rad = 26 + rnd() * 12
           const bw = 5 + rnd() * 3
           const bh = 6 + rnd() * 6
           const bd = 5 + rnd() * 3
           const bx = Math.cos(ang) * rad
           const bz = Math.sin(ang) * rad * 0.7
-          const shop = new THREE.Mesh(new THREE.BoxGeometry(bw, bh, bd), shopMat)
-          shop.position.set(bx, bh / 2, bz)
-          add(shop)
+          shopXf.push({ pos: [bx, bh / 2, bz], scl: [bw, bh, bd] })
           // Storefront noren curtain facing the tower, gently swaying.
           const ncol = norenCol[i % 2] ?? 0xcc3333
           const ntex = makeOsakaSign(["のれん"], ncol, "#ffffff")
@@ -13618,6 +13655,7 @@ export default function ThreeWorld({
             base: noren.rotation.z,
           })
         }
+        instAdd(shopGeo, shopMat, shopXf)
         // Pufferfish (fugu) decoration lanterns hung at storefronts (×6, dense).
         const fuguGeo = new THREE.SphereGeometry(0.9, 10, 8)
         const fuguMat = new THREE.MeshStandardMaterial({
@@ -13650,7 +13688,7 @@ export default function ThreeWorld({
           })
         }
         // Covered arcade along the central street through Shinsekai.
-        const arcadeMat = new THREE.MeshStandardMaterial({ color: 0x3a3530, roughness: 0.85 })
+        const arcadeMat = new THREE.MeshLambertMaterial({ color: 0x3a3530 })
         const arcRoofMat = new THREE.MeshStandardMaterial({
           color: 0x223044,
           transparent: true,
@@ -13689,45 +13727,40 @@ export default function ThreeWorld({
         cobTex.repeat.set(6, 18)
         const cobble = new THREE.Mesh(
           new THREE.PlaneGeometry(14, 44),
-          new THREE.MeshStandardMaterial({
+          // Lambert (cheap) + main's faint emissive so the cobbles read at night.
+          new THREE.MeshLambertMaterial({
             color: 0x4a4a45,
             map: cobTex,
             emissive: 0x1a1520,
             emissiveIntensity: 1,
-            roughness: 0.95,
           }),
         )
         cobble.rotation.x = -Math.PI / 2
         cobble.position.set(0, 0.04, 0)
         add(cobble)
-        // Retro street lamps (dense 10) + slung electric wires.
+        // Retro street lamps (dense 10) + slung electric wires. Poles instance into
+        // one draw call; bulbs share one flickering neon material; the PointLights
+        // that used to back every other lamp are dropped (emissive glow suffices).
         const lampCount = dn(10)
         const lampPositions: [number, number][] = []
+        const lampPoleGeo = new THREE.CylinderGeometry(0.12, 0.16, 6, 6)
+        const lampPoleMat2 = new THREE.MeshLambertMaterial({ color: 0x1a1a1a })
+        const lampPoleXf: Xf[] = []
+        const lampBulbGeo = new THREE.SphereGeometry(0.35, 8, 8)
+        const lampBulbMat = neonMat(0xffeeaa, 1.2, false)
         for (let i = 0; i < lampCount; i++) {
           const ang = (i / lampCount) * Math.PI * 2
           const lx = Math.cos(ang) * 30
           const lz = Math.sin(ang) * 18
           lampPositions.push([lx, lz])
-          const pole = new THREE.Mesh(
-            new THREE.CylinderGeometry(0.12, 0.16, 6),
-            new THREE.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.7 }),
-          )
-          pole.position.set(lx, 3, lz)
-          add(pole)
-          const bulb = new THREE.Mesh(
-            new THREE.SphereGeometry(0.35, 8, 8),
-            neonMat(0xffeeaa, 1.2, false),
-          )
+          lampPoleXf.push({ pos: [lx, 3, lz] })
+          const bulb = new THREE.Mesh(lampBulbGeo, lampBulbMat)
           bulb.position.set(lx, 6.2, lz)
           add(bulb)
-          if (fullLights && i % 2 === 0) {
-            const lamp = new THREE.PointLight(0xffeeaa, 1.0, 15)
-            lamp.position.set(lx, 6, lz)
-            add(lamp)
-          }
         }
+        instAdd(lampPoleGeo, lampPoleMat2, lampPoleXf)
         // Electric wires drooping between consecutive lamps (downtown feel).
-        const wireMat = new THREE.MeshStandardMaterial({ color: 0x0a0a0a })
+        const wireMat = new THREE.MeshLambertMaterial({ color: 0x0a0a0a })
         for (let i = 0; i < lampPositions.length; i++) {
           const a2 = lampPositions[i]
           const b2 = lampPositions[(i + 1) % lampPositions.length]
@@ -13745,6 +13778,8 @@ export default function ThreeWorld({
         // ════ AREA 3 — OSAKA CASTLE (north, z -90..-60) — white 5-tier keep ════
         const cz = -78 // keep centre Z
         // Ring moat around the keep (annulus), faintly reflective + shimmering.
+        // Just one mesh, so it keeps main's brighter reflective water (cost is
+        // negligible) and shimmers via the animated emissive (updateOsakaMap).
         const moatMat = new THREE.MeshStandardMaterial({
           color: 0x16314a, // lighter water so the moat doesn't sink to black
           emissive: 0x14283c,
@@ -13758,8 +13793,8 @@ export default function ThreeWorld({
         add(moat)
         A.water.push({ obj: moat, mat: moatMat, baseX: 0, spd: 0.4, phase: 0 })
         // Stepped stone base (8m) under the keep + scattered seam detail.
-        const stoneMat = new THREE.MeshStandardMaterial({ color: 0x6a6a5a, roughness: 0.95 })
-        const stoneDk = new THREE.MeshStandardMaterial({ color: 0x5a5a4d, roughness: 0.95 })
+        const stoneMat = new THREE.MeshLambertMaterial({ color: 0x6a6a5a })
+        const stoneDk = new THREE.MeshLambertMaterial({ color: 0x5a5a4d })
         for (const [s, yb, h] of [
           [30, 0, 5],
           [26, 5, 3],
@@ -13769,26 +13804,19 @@ export default function ThreeWorld({
           add(base)
         }
         const seamGeo = new THREE.BoxGeometry(2.4, 1.6, 0.3)
+        const seamXf: Xf[] = []
         for (let i = 0; i < dn(40); i++) {
           const side = i % 4
           const along = -14 + rnd() * 28
-          const seam = new THREE.Mesh(seamGeo, stoneDk)
           const yy = 0.8 + rnd() * 6
-          if (side === 0) seam.position.set(along, yy, cz + 15.1)
-          else if (side === 1) {
-            seam.position.set(along, yy, cz - 15.1)
-            seam.rotation.y = Math.PI
-          } else if (side === 2) {
-            seam.position.set(15.1, yy, cz + along)
-            seam.rotation.y = Math.PI / 2
-          } else {
-            seam.position.set(-15.1, yy, cz + along)
-            seam.rotation.y = Math.PI / 2
-          }
-          add(seam)
+          if (side === 0) seamXf.push({ pos: [along, yy, cz + 15.1] })
+          else if (side === 1) seamXf.push({ pos: [along, yy, cz - 15.1], rotY: Math.PI })
+          else if (side === 2) seamXf.push({ pos: [15.1, yy, cz + along], rotY: Math.PI / 2 })
+          else seamXf.push({ pos: [-15.1, yy, cz + along], rotY: Math.PI / 2 })
         }
+        instAdd(seamGeo, stoneDk, seamXf)
         // White plaster parapet wall with crenellations atop the stone base.
-        const plasterMat = new THREE.MeshStandardMaterial({ color: 0xece8dc, roughness: 0.85 })
+        const plasterMat = new THREE.MeshLambertMaterial({ color: 0xece8dc })
         for (const [px, pz, pw, pd] of [
           [0, cz + 15, 30, 1],
           [0, cz - 15, 30, 1],
@@ -13814,13 +13842,13 @@ export default function ThreeWorld({
           [12, 3.5, 14],
           [9, 3.5, 11],
         ]
-        const roofMat = new THREE.MeshStandardMaterial({ color: 0x2a5a3a, roughness: 0.7 })
+        const roofMat = new THREE.MeshLambertMaterial({ color: 0x2a5a3a })
         const goldMat = new THREE.MeshStandardMaterial({
           color: 0xd4af37,
           emissive: 0xd4af37,
           emissiveIntensity: 0.35,
         })
-        const gridMat = new THREE.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.8 })
+        const gridMat = new THREE.MeshLambertMaterial({ color: 0x1a1a1a })
         let ty = 8 // tiers begin atop the stone base
         let topRoofY = ty
         let topRoofW = 11
@@ -13874,20 +13902,23 @@ export default function ThreeWorld({
           fish.position.set(sx * (topRoofW / 2 - 1.2), topRoofY, cz)
           add(fish)
         }
-        // Four ground floodlights washing the keep from the corners.
-        for (const [lx, lz] of [
-          [12, cz + 12],
-          [-12, cz + 12],
-          [12, cz - 12],
-          [-12, cz - 12],
-        ] as const) {
-          if (!fullLights && lz < cz) continue // mobile: front pair only
+        // Front-facing floodlights washing the keep (the back pair are dropped —
+        // unseen on approach): PC keeps the front pair, mobile a single centre wash.
+        // Fewer lights (perf), but main's brighter intensity 5.
+        const castleLights: [number, number][] = fullLights
+          ? [
+              [12, cz + 12],
+              [-12, cz + 12],
+            ]
+          : [[0, cz + 12]]
+        for (const [lx, lz] of castleLights) {
           const cl = new THREE.PointLight(0xffeedd, 5, 50)
+          cl.castShadow = false
           cl.position.set(lx, 6, lz)
           add(cl)
         }
         // Ote-mon gate + bridge crossing the moat on the south approach.
-        const woodMat = new THREE.MeshStandardMaterial({ color: 0x3a2a1a, roughness: 0.85 })
+        const woodMat = new THREE.MeshLambertMaterial({ color: 0x3a2a1a })
         const gate = new THREE.Group()
         for (const gx of [-3, 3]) {
           const pillar = new THREE.Mesh(new THREE.BoxGeometry(1.2, 7, 1.2), woodMat)
@@ -13909,36 +13940,40 @@ export default function ThreeWorld({
         // Stone-tiled decisive-battle plaza in front of the gate.
         const plaza = new THREE.Mesh(
           new THREE.PlaneGeometry(46, 28),
-          new THREE.MeshStandardMaterial({
+          // Lambert (cheap) + main's faint emissive so the plaza reads at night.
+          new THREE.MeshLambertMaterial({
             color: 0x4a4a45,
             emissive: 0x1a1520,
             emissiveIntensity: 1,
-            roughness: 0.95,
           }),
         )
         plaza.rotation.x = -Math.PI / 2
         plaza.position.set(0, 0.03, cz + 50)
         add(plaza)
-        // Stone lanterns (×8, dense) ringing the plaza.
-        const lanternStoneMat = new THREE.MeshStandardMaterial({ color: 0x6a6a60, roughness: 0.95 })
+        // Stone lanterns (×8, dense) ringing the plaza. Pedestals + caps instance
+        // into one draw call each; the fire boxes share one flickering neon mat.
+        const lanternStoneMat = new THREE.MeshLambertMaterial({ color: 0x6a6a60 })
+        const pedGeo = new THREE.CylinderGeometry(0.45, 0.6, 1.4, 6)
+        const capGeo = new THREE.ConeGeometry(0.8, 0.6, 6)
+        const fireGeo = new THREE.BoxGeometry(0.7, 0.8, 0.7)
+        const fireMat = neonMat(0xffaa33, 2.2, false)
+        const pedXf: Xf[] = []
+        const capXf: Xf[] = []
         for (let i = 0; i < dn(8); i++) {
           const lx = -20 + (i % 4) * 13
           const lz = cz + 40 + (i < 4 ? 0 : 20)
-          const ped = new THREE.Mesh(new THREE.CylinderGeometry(0.45, 0.6, 1.4, 6), lanternStoneMat)
-          ped.position.set(lx, 0.7, lz)
-          add(ped)
-          const fire = new THREE.Mesh(
-            new THREE.BoxGeometry(0.7, 0.8, 0.7),
-            neonMat(0xffaa33, 2.2, false),
-          )
+          pedXf.push({ pos: [lx, 0.7, lz] })
+          capXf.push({ pos: [lx, 2.6, lz] })
+          const fire = new THREE.Mesh(fireGeo, fireMat)
           fire.position.set(lx, 1.9, lz)
           add(fire)
-          const cap = new THREE.Mesh(new THREE.ConeGeometry(0.8, 0.6, 6), lanternStoneMat)
-          cap.position.set(lx, 2.6, lz)
-          add(cap)
         }
-        // Night-lit sakura trees (×6, dense) around the plaza.
-        const trunkMat = new THREE.MeshStandardMaterial({ color: 0x3a2a22, roughness: 0.9 })
+        instAdd(pedGeo, lanternStoneMat, pedXf)
+        instAdd(capGeo, lanternStoneMat, capXf)
+        // Night-lit sakura trees (×6, dense) around the plaza. Trunks + blossoms
+        // each collapse to one InstancedMesh; the pink uplights are dropped (the
+        // emissive blossom material keeps them glowing).
+        const trunkMat = new THREE.MeshLambertMaterial({ color: 0x3a2a22 })
         const sakuraMat = new THREE.MeshStandardMaterial({
           color: 0xffb7c5,
           emissive: 0x4a2230,
@@ -13946,35 +13981,31 @@ export default function ThreeWorld({
           roughness: 0.9,
         })
         const blossomGeo = new THREE.SphereGeometry(2, 8, 8)
-        for (let i = 0; i < dn(6); i++) {
-          const ang = (i / dn(6)) * Math.PI * 2
+        const trunkGeo = new THREE.CylinderGeometry(0.4, 0.6, 4, 6)
+        const trunkXf: Xf[] = []
+        const blossomXf: Xf[] = []
+        const sakuraN = dn(6)
+        for (let i = 0; i < sakuraN; i++) {
+          const ang = (i / sakuraN) * Math.PI * 2
           const tx = Math.cos(ang) * 22
           const tz = cz + 50 + Math.sin(ang) * 11
-          const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.4, 0.6, 4, 6), trunkMat)
-          trunk.position.set(tx, 2, tz)
-          add(trunk)
+          trunkXf.push({ pos: [tx, 2, tz] })
           for (let b = 0; b < dn(3); b++) {
-            const blossom = new THREE.Mesh(blossomGeo, sakuraMat)
-            blossom.position.set(
-              tx + (rnd() - 0.5) * 2.5,
-              4.5 + rnd() * 1.5,
-              tz + (rnd() - 0.5) * 2.5,
-            )
-            blossom.scale.setScalar(0.7 + rnd() * 0.6)
-            add(blossom)
-          }
-          if (fullLights && i % 2 === 0) {
-            const up = new THREE.PointLight(0xff99bb, 0.8, 12)
-            up.position.set(tx, 1, tz)
-            add(up)
+            blossomXf.push({
+              pos: [tx + (rnd() - 0.5) * 2.5, 4.5 + rnd() * 1.5, tz + (rnd() - 0.5) * 2.5],
+              scl: 0.7 + rnd() * 0.6,
+            })
           }
         }
+        instAdd(trunkGeo, trunkMat, trunkXf)
+        instAdd(blossomGeo, sakuraMat, blossomXf)
         // ── Field-wide lighting + fog — a BRIGHT night-city look (OSAKA only) ──
         // The daytime HUNT key/fill are dimmed to ~nothing (restored on return via
         // huntStageLightSaved); the scene is lit entirely by the OSAKA-only lights
-        // added below + the boosted neon/landmark emissives. All four lights live
+        // added below + the boosted neon/landmark emissives. All these lights live
         // under `group`, so clearOsakaMap removes them with the map. If the neon
-        // ever white-clips, drop osakaAmbient intensity 3.5 → 3.0.
+        // ever white-clips, drop osakaAmbient intensity 3.5 → 3.0. Shadows stay off
+        // throughout (perf).
         for (const light of [worldAmbient, hemi, sun, fillLight]) {
           huntStageLightSaved.push({ light, intensity: light.intensity })
           light.intensity = 0.05
@@ -13987,9 +14018,11 @@ export default function ThreeWorld({
         osakaHemi.position.set(0, 60, 0)
         add(osakaHemi)
         const moonlight = new THREE.DirectionalLight(0xccddff, 1.5)
+        moonlight.castShadow = false
         moonlight.position.set(20, 50, 20)
         add(moonlight)
         const osakaFill = new THREE.DirectionalLight(0xaabbff, 0.8)
+        osakaFill.castShadow = false
         osakaFill.position.set(-30, 40, -20)
         add(osakaFill)
         huntStageFogSaved = scene.fog
