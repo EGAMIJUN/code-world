@@ -738,6 +738,40 @@ const OSAKA_ZAKO_NAME = "下級妖怪" // tag distinguishing infinite-spawn fodd
 const OSAKA_ESCORT_NAME = "鬼火衆" // the two flanking escorts
 const OSAKA_ZAKO_CAP = 12 // hard cap on simultaneous fodder
 const OSAKA_ZAKO_INTERVAL = 5000 // ms between fodder top-ups
+// ── OSAKA area progression (Phase 2b) ────────────────────────────────────────
+// Dotonbori → Tsutenkaku → Castle → five-change boss. Each area: clear the
+// fodder wave, drop the mid-boss, then advance. enemyCount is the live fodder.
+type OsakaArea = "dotonbori" | "tsutenkaku" | "castle" | "boss" | "clear"
+type OsakaProgressState = {
+  area: OsakaArea
+  enemyCount: number
+  midBossSpawned: boolean
+  midBossDefeated: boolean
+  areaCleared: boolean
+}
+// Mid-boss (Tengu / Yamaya) — a bespoke group + HP, outside the CombatEnemy pool
+// (like the five-change boss), so it's damaged on the pistol hitscan path.
+type OsakaMidBoss = {
+  kind: "tengu" | "yamaya"
+  group: THREE.Group
+  hp: number
+  maxHp: number
+  baseY: number
+  hover: number // hover phase accumulator
+  diveCd: number // tengu: seconds to next dive
+  gustCd: number // tengu: seconds to next gust
+  diving: number // tengu: remaining dive time (0 = hovering)
+  diveHit: boolean // tengu: melee already landed this dive
+  rockCd: number // yamaya: seconds to next rock volley
+  quakeCd: number // yamaya: seconds to next quake
+  flash: THREE.PointLight[] // yamaya quake flash lights
+  iris: THREE.Mesh[] // glowing eyes
+}
+// Per-area fodder counts (mobile halved-ish) + mid-boss HP.
+const OSAKA_AREA_ZAKO = { dotonbori: 15, tsutenkaku: 20, castle: 25 } as const
+const OSAKA_AREA_ZAKO_MOBILE = { dotonbori: 8, tsutenkaku: 12, castle: 15 } as const
+const OSAKA_TENGU_HP = 2500
+const OSAKA_YAMAYA_HP = 4000
 
 // ══ HUNT mode equipment (PR-Z2) ══════════════════════════════════════════════
 // Suit + four dedicated weapons + the rewards bought at the 100-pt menu. All of
@@ -2276,6 +2310,15 @@ export default function ThreeWorld({
   // OSAKA stage map (Dotonbori / Tsutenkaku / Osaka Castle). Top-level objects
   // built by buildOsakaMap, disposed on mission return.
   const osakaMapMeshesRef = useRef<THREE.Object3D[]>([])
+  // OSAKA area-progression state + the active mid-boss (Tengu / Yamaya).
+  const osakaProgressRef = useRef<OsakaProgressState>({
+    area: "dotonbori",
+    enemyCount: 0,
+    midBossSpawned: false,
+    midBossDefeated: false,
+    areaCleared: false,
+  })
+  const osakaMidBossRef = useRef<OsakaMidBoss | null>(null)
   // Set by the O key (component scope); consumed in the animate loop where
   // spawnOsakaBoss is in scope.
   const osakaSpawnReqRef = useRef(false)
@@ -11381,6 +11424,10 @@ export default function ThreeWorld({
         disposeOsakaBoss()
         SOUNDS.clear()
         showNotification("五変化 撃破 — 不死身を討ち取った")
+        if (huntMissionConfigRef.current.stage === "osaka") {
+          osakaProgressRef.current.area = "clear"
+          osakaBanner("大阪編クリア") // big red centre banner (3s)
+        }
         huntReturnToRoom("clear")
       }
       // Blow the current form apart, flash red for 0.8s, then build the next form
@@ -11580,6 +11627,424 @@ export default function ThreeWorld({
           cooldown = 1.5
         }
         ob.attackTimer = cooldown * (rage ? 0.667 : 1)
+      }
+      // ══ OSAKA area progression (Phase 2b) ════════════════════════════════════
+      // Dotonbori → Tsutenkaku → Castle, each: clear the fodder wave → mid-boss →
+      // advance. The Castle wave hands straight to the five-change boss.
+      const osakaAreaCenter = (area: "dotonbori" | "tsutenkaku" | "castle") => {
+        if (area === "dotonbori") return { x: HUNT_ARENA.x, z: HUNT_ARENA.z + 68 }
+        if (area === "castle") return { x: HUNT_ARENA.x, z: HUNT_ARENA.z - 68 }
+        return { x: HUNT_ARENA.x, z: HUNT_ARENA.z }
+      }
+      // Center-screen banner (reuses the existing wave-message overlay), auto-
+      // cleared after 3s unless a newer banner has replaced it.
+      function osakaBanner(text: string) {
+        setWaveMessage(text)
+        window.setTimeout(() => {
+          setWaveMessage((prev) => (prev === text ? null : prev))
+        }, 3000)
+      }
+      // Spawn a fixed fodder wave for an area (mobile counts are roughly halved).
+      function osakaSpawnAreaZako(area: "dotonbori" | "tsutenkaku" | "castle") {
+        const counts = isMobileDevice ? OSAKA_AREA_ZAKO_MOBILE : OSAKA_AREA_ZAKO
+        const n = counts[area]
+        const c = osakaAreaCenter(area)
+        for (let i = 0; i < n; i++) {
+          const a = Math.random() * Math.PI * 2
+          const r = 5 + Math.random() * 16
+          const safe = findSafeSpawnNear(c.x + Math.cos(a) * r, c.z + Math.sin(a) * r, ENEMY_RADIUS)
+          const leek = i % 2 === 0
+          huntMakeEnemy(
+            "grunt",
+            safe.x,
+            safe.z,
+            leek ? 1.0 : 1.6,
+            leek ? 0xb03030 : 0x402038,
+            leek ? 0xffcc33 : 0xff5522,
+            3,
+            120,
+            leek ? 2.6 : 1.8,
+            false,
+            OSAKA_ZAKO_NAME,
+            leek ? "leek" : "multihead",
+          )
+        }
+      }
+      // Reset the run + drop the player into Dotonbori with its opening wave.
+      function osakaInitProgression() {
+        osakaProgressRef.current = {
+          area: "dotonbori",
+          enemyCount: 0,
+          midBossSpawned: false,
+          midBossDefeated: false,
+          areaCleared: false,
+        }
+        const c = osakaAreaCenter("dotonbori")
+        const psafe = findSafeSpawnNear(c.x, c.z - 12, PLAYER_RADIUS)
+        focalPoint.set(psafe.x, 0, psafe.z)
+        camState.yaw = Math.PI // face north, toward Tsutenkaku/Castle
+        osakaSpawnAreaZako("dotonbori")
+        osakaBanner("道頓堀 — 妖怪を討て")
+      }
+      // ── Mid-boss 1: 天狗 (Tengu) — a flying long-nosed yokai (Dotonbori) ──
+      function buildTengu(): THREE.Group {
+        const g = new THREE.Group()
+        const robe = new THREE.MeshLambertMaterial({ color: 0x1a1a3a })
+        const face = new THREE.MeshLambertMaterial({ color: 0xcc4422 })
+        const black = new THREE.MeshLambertMaterial({ color: 0x1a1a2a })
+        const body = new THREE.Mesh(new THREE.CylinderGeometry(0.8, 1.0, 3.5, 8), robe)
+        body.position.y = 1.75
+        g.add(body)
+        const head = new THREE.Mesh(new THREE.SphereGeometry(0.9, 10, 10), face)
+        head.position.y = 3.9
+        g.add(head)
+        const nose = new THREE.Mesh(new THREE.ConeGeometry(0.2, 2.5, 6), face)
+        nose.rotation.x = Math.PI / 2 // jut forward (+z)
+        nose.position.set(0, 3.9, 1.5)
+        g.add(nose)
+        for (const s of [-1, 1]) {
+          const wing = new THREE.Mesh(new THREE.BoxGeometry(6, 0.2, 2.5), black)
+          wing.position.set(s * 3.4, 2.6, -0.3)
+          wing.rotation.z = s * 0.2 // slight upward sweep
+          g.add(wing)
+          const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.2, 2.0, 6), robe)
+          arm.position.set(s * 1.1, 1.9, 0.2)
+          arm.rotation.z = s * 0.5
+          g.add(arm)
+          const geta = new THREE.Mesh(
+            new THREE.BoxGeometry(0.5, 0.3, 1.0),
+            new THREE.MeshLambertMaterial({ color: 0x3a2a1a }),
+          )
+          geta.position.set(s * 0.4, 0.15, 0.1)
+          g.add(geta)
+          const eye = new THREE.Mesh(
+            new THREE.SphereGeometry(0.15, 6, 6),
+            new THREE.MeshLambertMaterial({
+              color: 0xffff00,
+              emissive: 0xffff00,
+              emissiveIntensity: 2,
+            }),
+          )
+          eye.position.set(s * 0.3, 4.0, 0.78)
+          g.add(eye)
+        }
+        // Sizes above read ~6m; lift to a commanding ~8m flying boss (the height
+        // takes priority over the literal 3.0 scale, which would be a 16m giant).
+        g.scale.setScalar(1.35)
+        return g
+      }
+      function spawnTengu() {
+        const c = osakaAreaCenter("dotonbori")
+        const g = buildTengu()
+        g.position.set(c.x, 5.5, c.z - 8)
+        scene.add(g)
+        const iris: THREE.Mesh[] = []
+        g.traverse((o) => {
+          if (o instanceof THREE.Mesh) {
+            const m = o.material
+            if (m instanceof THREE.MeshLambertMaterial && m.emissive.getHex() === 0xffff00)
+              iris.push(o)
+          }
+        })
+        osakaMidBossRef.current = {
+          kind: "tengu",
+          group: g,
+          hp: OSAKA_TENGU_HP,
+          maxHp: OSAKA_TENGU_HP,
+          baseY: 5.5,
+          hover: 0,
+          diveCd: 5,
+          gustCd: 3,
+          diving: 0,
+          diveHit: false,
+          rockCd: 0,
+          quakeCd: 0,
+          flash: [],
+          iris,
+        }
+        SOUNDS.bossRoar()
+        osakaBanner("中ボス 天狗 出現")
+      }
+      // ── Mid-boss 2: 山谷 (Yamaya) — a mountainous earth yokai (Tsutenkaku) ──
+      function buildYamaya(): THREE.Group {
+        const g = new THREE.Group()
+        const earth = new THREE.MeshLambertMaterial({ color: 0x4a4a3a })
+        const rock = new THREE.MeshLambertMaterial({ color: 0x5a5a4a })
+        const body = new THREE.Mesh(jitterSphere(3.5, 12, 1.5), earth)
+        body.position.y = 3.5
+        g.add(body)
+        const lumpMat = new THREE.MeshLambertMaterial({ color: 0x3a3a2a })
+        for (let i = 0; i < 5; i++) {
+          const a = (i / 5) * Math.PI * 2
+          const lump = new THREE.Mesh(new THREE.SphereGeometry(1.2 + (i % 3) * 0.4, 8, 8), lumpMat)
+          lump.position.set(Math.cos(a) * 2.6, 3.0 + (i % 2) * 1.5, Math.sin(a) * 2.6)
+          g.add(lump)
+        }
+        for (let i = 0; i < 4; i++) {
+          const a = (i / 4) * Math.PI * 2 + 0.4
+          const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.8, 1.2, 4.0, 6), rock)
+          arm.position.set(Math.cos(a) * 3.4, 2.6, Math.sin(a) * 3.4)
+          arm.rotation.z = Math.cos(a) * 0.7
+          arm.rotation.x = Math.sin(a) * 0.7
+          g.add(arm)
+        }
+        const eyes: THREE.Mesh[] = []
+        for (let i = 0; i < 6; i++) {
+          const a = (i / 6) * Math.PI * 2
+          const eye = new THREE.Mesh(
+            new THREE.SphereGeometry(0.25, 6, 6),
+            new THREE.MeshLambertMaterial({
+              color: 0xff8800,
+              emissive: 0xff8800,
+              emissiveIntensity: 2,
+            }),
+          )
+          eye.position.set(Math.cos(a) * 3.1, 3.6 + Math.sin(a * 2) * 1.2, Math.sin(a) * 3.1)
+          g.add(eye)
+          eyes.push(eye)
+        }
+        const mouth = new THREE.Mesh(
+          new THREE.SphereGeometry(0.8, 8, 8),
+          new THREE.MeshLambertMaterial({ color: 0x1a0a0a }),
+        )
+        mouth.scale.set(1.6, 0.6, 0.5)
+        mouth.position.set(0, 2.4, 3.0)
+        g.add(mouth)
+        for (let i = 0; i < 6; i++) {
+          const fang = new THREE.Mesh(
+            new THREE.ConeGeometry(0.15, 0.8, 4),
+            new THREE.MeshLambertMaterial({ color: 0xe8e0c0 }),
+          )
+          fang.position.set(-0.9 + i * 0.36, 2.4, 3.3)
+          fang.rotation.x = Math.PI
+          g.add(fang)
+        }
+        g.scale.setScalar(1.3) // body radius ~3.5 → a ~12m hulking mass
+        return g
+      }
+      function spawnYamaya() {
+        const c = osakaAreaCenter("tsutenkaku")
+        const g = buildYamaya()
+        g.position.set(c.x, 0, c.z - 14)
+        scene.add(g)
+        const flash: THREE.PointLight[] = []
+        const f = new THREE.PointLight(0xff6600, 0, 24)
+        f.position.set(0, 6, 0)
+        g.add(f)
+        flash.push(f)
+        const iris: THREE.Mesh[] = []
+        g.traverse((o) => {
+          if (o instanceof THREE.Mesh) {
+            const m = o.material
+            if (m instanceof THREE.MeshLambertMaterial && m.emissive.getHex() === 0xff8800)
+              iris.push(o)
+          }
+        })
+        osakaMidBossRef.current = {
+          kind: "yamaya",
+          group: g,
+          hp: OSAKA_YAMAYA_HP,
+          maxHp: OSAKA_YAMAYA_HP,
+          baseY: 0,
+          hover: 0,
+          diveCd: 0,
+          gustCd: 0,
+          diving: 0,
+          diveHit: false,
+          rockCd: 4,
+          quakeCd: 8,
+          flash,
+          iris,
+        }
+        SOUNDS.bossStomp()
+        osakaBanner("中ボス 山谷 出現")
+      }
+      // Fire one rock projectile (reuses the shared enemy-bullet pool → hits the
+      // player like any other enemy shot).
+      function osakaFireRock(from: THREE.Vector3, dir: THREE.Vector3, damage: number) {
+        const mesh = new THREE.Mesh(
+          new THREE.SphereGeometry(0.4, 8, 8),
+          new THREE.MeshLambertMaterial({ color: 0x6a6a5a }),
+        )
+        mesh.position.copy(from)
+        scene.add(mesh)
+        bullets.push({
+          mesh,
+          velocity: dir.clone().normalize().multiplyScalar(18),
+          life: 3.0,
+          isEnemy: true,
+          damage,
+        })
+      }
+      function disposeOsakaMidBoss() {
+        const mb = osakaMidBossRef.current
+        if (!mb) return
+        disposeOsakaGroup(mb.group)
+        osakaMidBossRef.current = null
+      }
+      // Mid-boss killed → blast, dispose, advance to the next area + its wave.
+      function defeatOsakaMidBoss() {
+        const mb = osakaMidBossRef.current
+        if (!mb) return
+        const pos = mb.group.position.clone()
+        for (let i = 0; i < 3; i++) {
+          spawnExplosion(
+            pos
+              .clone()
+              .add(
+                new THREE.Vector3(
+                  (Math.random() - 0.5) * 5,
+                  2 + Math.random() * 4,
+                  (Math.random() - 0.5) * 5,
+                ),
+              ),
+            false,
+            false,
+          )
+        }
+        SOUNDS.collapse()
+        disposeOsakaMidBoss()
+        const p = osakaProgressRef.current
+        p.midBossSpawned = false
+        if (mb.kind === "tengu") {
+          p.area = "tsutenkaku"
+          osakaBanner("通天閣へ進め")
+          osakaSpawnAreaZako("tsutenkaku")
+        } else {
+          p.area = "castle"
+          osakaBanner("大阪城へ進め")
+          osakaSpawnAreaZako("castle")
+        }
+      }
+      // Per-frame mid-boss driver (called from the animate loop during a mission).
+      function updateOsakaMidBoss(dt: number) {
+        const mb = osakaMidBossRef.current
+        if (!mb) return
+        if (mb.hp <= 0) {
+          defeatOsakaMidBoss()
+          return
+        }
+        const now = Date.now()
+        const safeToHit = now > spawnInvulnUntilRef.current
+        const px = focalPoint.x
+        const pz = focalPoint.z
+        const toX = px - mb.group.position.x
+        const toZ = pz - mb.group.position.z
+        const dist = Math.hypot(toX, toZ) || 1
+        mb.group.rotation.y = Math.atan2(toX, toZ)
+        // eyes pulse
+        for (const e of mb.iris) {
+          const m = e.material
+          if (m instanceof THREE.MeshLambertMaterial)
+            m.emissiveIntensity = 1.5 + (Math.sin(now * 0.006 + e.id) * 0.5 + 0.5)
+        }
+        if (mb.kind === "tengu") {
+          mb.hover += dt
+          mb.diveCd -= dt
+          mb.gustCd -= dt
+          if (mb.diving > 0) {
+            // Plunge toward the player, dip low, deal one melee hit, then climb.
+            mb.diving -= dt
+            const step = 14 * dt
+            mb.group.position.x += (toX / dist) * step
+            mb.group.position.z += (toZ / dist) * step
+            mb.group.position.y = Math.max(2.0, mb.group.position.y - 9 * dt)
+            if (dist < 4 && !mb.diveHit && safeToHit) {
+              applyPlayerDamage(60, 7)
+              mb.diveHit = true
+            }
+          } else {
+            // Hover 3–8m, drift toward the player when far.
+            mb.group.position.y = mb.baseY + Math.sin(mb.hover * 1.4) * 2.0
+            if (dist > 8) {
+              mb.group.position.x += (toX / dist) * 2.0 * dt
+              mb.group.position.z += (toZ / dist) * 2.0 * dt
+            }
+            if (mb.diveCd <= 0) {
+              mb.diving = 0.9
+              mb.diveHit = false
+              mb.diveCd = 5
+            }
+          }
+          // Front gust cone (the boss faces the player, so a near player is in it).
+          if (mb.gustCd <= 0) {
+            mb.gustCd = 3
+            spawnExplosion(
+              new THREE.Vector3(mb.group.position.x, 2, mb.group.position.z),
+              true,
+              false,
+            )
+            if (dist < 12 && safeToHit) applyPlayerDamage(40, 5)
+          }
+        } else {
+          // Yamaya: slow ground stalk + rock volleys + quakes; enraged below 50%.
+          const rage = mb.hp <= mb.maxHp * 0.5
+          const speed = (rage ? 1.5 : 1.0) * 0.8
+          if (dist > 4) {
+            mb.group.position.x += (toX / dist) * speed * dt
+            mb.group.position.z += (toZ / dist) * speed * dt
+          }
+          mb.rockCd -= dt
+          mb.quakeCd -= dt
+          if (mb.rockCd <= 0) {
+            mb.rockCd = rage ? 2 : 4
+            const from = new THREE.Vector3(mb.group.position.x, 4, mb.group.position.z)
+            const aim = new THREE.Vector3(toX, 0, toZ)
+            for (let i = -1; i <= 1; i++) {
+              const d = aim.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), i * 0.2)
+              osakaFireRock(from, d, 45)
+            }
+          }
+          if (mb.quakeCd <= 0) {
+            mb.quakeCd = 8
+            cameraShakeRef.current.intensity = 6
+            for (const fl of mb.flash) fl.intensity = 6
+            if (dist < 15 && safeToHit) applyPlayerDamage(30, 8)
+          }
+          for (const fl of mb.flash) fl.intensity = Math.max(0, fl.intensity - dt * 12)
+        }
+      }
+      // Per-frame area-progression check: clear the wave → drop the area's boss.
+      function updateOsakaProgress() {
+        const p = osakaProgressRef.current
+        if (p.area === "boss" || p.area === "clear") return
+        const zako = enemies.filter((e) => e.hp > 0 && e.huntName === OSAKA_ZAKO_NAME).length
+        p.enemyCount = zako
+        if (p.midBossSpawned || zako > 0) return
+        if (p.area === "castle") {
+          // No mid-boss in the Castle — the wave hands straight to 五変化.
+          p.area = "boss"
+          p.midBossSpawned = true
+          osakaBanner("五変化 妖怪 出現")
+          spawnOsakaBoss()
+        } else {
+          p.midBossSpawned = true
+          if (p.area === "dotonbori") spawnTengu()
+          else spawnYamaya()
+        }
+      }
+      // Tear down the OSAKA mid-boss + its in-flight projectiles, reset progress
+      // (called from huntClearStage so it covers mission-begin, return and death).
+      function osakaTeardownMid() {
+        disposeOsakaMidBoss()
+        for (let i = bullets.length - 1; i >= 0; i--) {
+          const b = bullets[i]
+          if (b?.isEnemy) {
+            scene.remove(b.mesh)
+            b.mesh.geometry.dispose()
+            const m = b.mesh.material
+            if (Array.isArray(m)) for (const mm of m) mm.dispose()
+            else m.dispose()
+            bullets.splice(i, 1)
+          }
+        }
+        osakaProgressRef.current = {
+          area: "dotonbori",
+          enemyCount: 0,
+          midBossSpawned: false,
+          midBossDefeated: false,
+          areaCleared: false,
+        }
       }
       // ── Transfer room (built once on init) ──────────────────────────────────
       // Room fill ambient (global light): on while in the room, off during a
@@ -12389,6 +12854,7 @@ export default function ThreeWorld({
           huntIndoorGroup = null
         }
         clearOsakaMap() // dispose the OSAKA field + restore the prior fog
+        osakaTeardownMid() // dispose the OSAKA mid-boss + projectiles, reset progress
         huntFlickerLights.length = 0
         for (const s of huntStageLightSaved) s.light.intensity = s.intensity
         huntStageLightSaved.length = 0
@@ -12670,48 +13136,55 @@ export default function ThreeWorld({
         setHuntScore(0)
         const hpScale = lv.level === 3 ? 1 + 0.2 * huntRepeatRef.current : 1
         const th = HUNT_THEMES[lv.theme]
-        // Minions ring the arena centre.
-        for (let i = 0; i < lv.zakoCount; i++) {
-          const ang = Math.random() * Math.PI * 2
-          const r = 28 + Math.random() * 150
-          const safe = findSafeSpawnNear(
-            HUNT_ARENA.x + Math.cos(ang) * r,
-            HUNT_ARENA.z + Math.sin(ang) * r,
-            ENEMY_RADIUS,
-          )
+        const isOsaka = huntMissionConfigRef.current.stage === "osaka"
+        if (isOsaka) {
+          // OSAKA drives its own area progression (Dotonbori → … → 五変化 boss)
+          // instead of the generic minion ring + single HUNT boss.
+          osakaInitProgression()
+        } else {
+          // Minions ring the arena centre.
+          for (let i = 0; i < lv.zakoCount; i++) {
+            const ang = Math.random() * Math.PI * 2
+            const r = 28 + Math.random() * 150
+            const safe = findSafeSpawnNear(
+              HUNT_ARENA.x + Math.cos(ang) * r,
+              HUNT_ARENA.z + Math.sin(ang) * r,
+              ENEMY_RADIUS,
+            )
+            huntMakeEnemy(
+              th.base,
+              safe.x,
+              safe.z,
+              th.scale,
+              th.tint,
+              th.eyes,
+              th.points,
+              Math.round(th.hp * hpScale),
+              th.speed,
+              false,
+              "minion",
+              th.creature,
+            )
+          }
+          // Boss: charge/aoe → terraformer (melee), ranged_summon → grunt (shoots).
+          // It's a giant version of the level's creature (its eyes tinted red).
+          const bossBase: EnemyType = lv.boss === "ranged_summon" ? "grunt" : "terraformer"
+          const bsafe = findSafeSpawnNear(HUNT_ARENA.x, HUNT_ARENA.z - 60, ENEMY_RADIUS)
           huntMakeEnemy(
-            th.base,
-            safe.x,
-            safe.z,
-            th.scale,
+            bossBase,
+            bsafe.x,
+            bsafe.z,
+            lv.bossScale,
             th.tint,
-            th.eyes,
-            th.points,
-            Math.round(th.hp * hpScale),
-            th.speed,
-            false,
-            "minion",
-            th.creature,
+            0xff2200,
+            lv.bossScore,
+            Math.round(lv.bossHp * hpScale),
+            lv.boss === "aoe_fast" ? 5.5 : 3.0,
+            true,
+            lv.target.name,
+            lv.bossCreature,
           )
         }
-        // Boss: charge/aoe → terraformer (melee), ranged_summon → grunt (shoots).
-        // It's a giant version of the level's creature (its eyes tinted red).
-        const bossBase: EnemyType = lv.boss === "ranged_summon" ? "grunt" : "terraformer"
-        const bsafe = findSafeSpawnNear(HUNT_ARENA.x, HUNT_ARENA.z - 60, ENEMY_RADIUS)
-        huntMakeEnemy(
-          bossBase,
-          bsafe.x,
-          bsafe.z,
-          lv.bossScale,
-          th.tint,
-          0xff2200,
-          lv.bossScore,
-          Math.round(lv.bossHp * hpScale),
-          lv.boss === "aoe_fast" ? 5.5 : 3.0,
-          true,
-          lv.target.name,
-          lv.bossCreature,
-        )
         setAliveEnemyCount(enemies.filter((e) => e.hp > 0).length)
         // Boundary + timer.
         huntRadiusRef.current = HUNT_BASE_RADIUS
@@ -12720,9 +13193,11 @@ export default function ThreeWorld({
         huntDeadlineRef.current = lv.timeLimitSec ? Date.now() + lv.timeLimitSec * 1000 : 0
         huntOobSinceRef.current = 0
         setHuntOob(false)
-        // Drop the player into the arena centre (nudged clear of any building).
-        const psafe = findSafeSpawnNear(HUNT_ARENA.x, HUNT_ARENA.z, PLAYER_RADIUS)
-        focalPoint.set(psafe.x, 0, psafe.z)
+        // Drop the player into the arena centre (OSAKA placed them in Dotonbori).
+        if (!isOsaka) {
+          const psafe = findSafeSpawnNear(HUNT_ARENA.x, HUNT_ARENA.z, PLAYER_RADIUS)
+          focalPoint.set(psafe.x, 0, psafe.z)
+        }
         playerVelRef.current.x = 0
         playerVelRef.current.z = 0
         spawnInvulnUntilRef.current = Date.now() + 2500
@@ -12730,7 +13205,9 @@ export default function ThreeWorld({
         huntMissionReadyRef.current = true
         huntPhaseRef.current = "mission"
         setHuntPhase("mission")
-        showNotification(`Lv.${lv.level} — ${lv.target.name} を狩れ`)
+        showNotification(
+          isOsaka ? "大阪編 — 道頓堀へ" : `Lv.${lv.level} — ${lv.target.name} を狩れ`,
+        )
       }
       // Head-pop death (boundary breach / quota miss): red burst + game over.
       function huntHeadExplode(reason: string) {
@@ -13351,28 +13828,34 @@ export default function ThreeWorld({
             huntStartRoom()
         } else if (phase === "mission" && huntMissionReadyRef.current) {
           huntUpdateEquip(dt)
-          // Arena boundary: shrink on Lv3, else fixed.
+          // OSAKA: drive the area progression (wave clear → mid-boss → next area).
+          if (huntMissionConfigRef.current.stage === "osaka") updateOsakaProgress()
+          // Arena boundary: shrink on Lv3, else fixed. OSAKA is a linear march
+          // across a 180m field, not a shrinking-ring survival, so its boundary +
+          // head-pop are disabled (the player must be free to cross the map).
           const lv = HUNT_LEVELS[huntLevelIdxRef.current]
-          if (lv?.shrink) {
-            const tt = Math.min(1, (now - huntShrinkStartRef.current) / (HUNT_SHRINK_SEC * 1000))
-            huntRadiusRef.current = HUNT_BASE_RADIUS - (HUNT_BASE_RADIUS - HUNT_MIN_RADIUS) * tt
-          }
-          setHuntRadius(Math.round(huntRadiusRef.current))
-          // Out-of-bounds → warn, then head-pop after the grace period.
-          const dist = Math.hypot(focalPoint.x - HUNT_ARENA.x, focalPoint.z - HUNT_ARENA.z)
-          if (dist > huntRadiusRef.current) {
-            if (huntOobSinceRef.current === 0) {
-              huntOobSinceRef.current = now
-              setHuntOob(true)
+          if (huntMissionConfigRef.current.stage !== "osaka") {
+            if (lv?.shrink) {
+              const tt = Math.min(1, (now - huntShrinkStartRef.current) / (HUNT_SHRINK_SEC * 1000))
+              huntRadiusRef.current = HUNT_BASE_RADIUS - (HUNT_BASE_RADIUS - HUNT_MIN_RADIUS) * tt
             }
-            if (Math.floor(now / 600) % 2 === 0) SOUNDS.huntWarn()
-            if (now - huntOobSinceRef.current > HUNT_OOB_GRACE_MS) {
-              huntHeadExplode("境界侵犯 — 頭部爆散")
-              return
+            setHuntRadius(Math.round(huntRadiusRef.current))
+            // Out-of-bounds → warn, then head-pop after the grace period.
+            const dist = Math.hypot(focalPoint.x - HUNT_ARENA.x, focalPoint.z - HUNT_ARENA.z)
+            if (dist > huntRadiusRef.current) {
+              if (huntOobSinceRef.current === 0) {
+                huntOobSinceRef.current = now
+                setHuntOob(true)
+              }
+              if (Math.floor(now / 600) % 2 === 0) SOUNDS.huntWarn()
+              if (now - huntOobSinceRef.current > HUNT_OOB_GRACE_MS) {
+                huntHeadExplode("境界侵犯 — 頭部爆散")
+                return
+              }
+            } else if (huntOobSinceRef.current !== 0) {
+              huntOobSinceRef.current = 0
+              setHuntOob(false)
             }
-          } else if (huntOobSinceRef.current !== 0) {
-            huntOobSinceRef.current = 0
-            setHuntOob(false)
           }
           // Boss special behaviours (light PR-Z1 versions).
           const boss = enemies.find((e) => e.isHuntBoss && e.hp > 0)
@@ -13429,8 +13912,14 @@ export default function ThreeWorld({
           }
           // Clear: every enemy dead. The OSAKA boss lives outside the `enemies`
           // array, so while it is active its escorts/fodder dying must NOT end the
-          // mission — its own defeat path calls huntReturnToRoom instead.
-          if (!osakaBossRef.current && enemies.filter((e) => e.hp > 0).length === 0) {
+          // mission — its own defeat path calls huntReturnToRoom instead. OSAKA
+          // stage is fully driven by updateOsakaProgress (its empty waves between
+          // areas must never trip this generic clear).
+          if (
+            huntMissionConfigRef.current.stage !== "osaka" &&
+            !osakaBossRef.current &&
+            enemies.filter((e) => e.hp > 0).length === 0
+          ) {
             huntReturnToRoom("clear")
           }
         }
@@ -14813,6 +15302,25 @@ export default function ThreeWorld({
           }
         }
 
+        // OSAKA mid-boss (Tengu / Yamaya): a whole-body hit takes flat weapon
+        // damage. Like the five-change boss it sits outside the enemy pool, so it
+        // is damaged here on the pistol hitscan path (occlusion-checked).
+        const osakaMB = osakaMidBossRef.current
+        if (!shotConsumed && osakaMB) {
+          const mbHit = raycaster.intersectObject(osakaMB.group, true)[0]
+          if (mbHit) {
+            const blockedByWall = !!(nearestWall && nearestWall.distance < mbHit.distance)
+            const blockedByEnemy = !!(enemyHits[0] && enemyHits[0].distance < mbHit.distance)
+            if (!blockedByWall && !blockedByEnemy) {
+              SOUNDS.hit()
+              spawnBlood(mbHit.point)
+              osakaMB.hp -= weapon.hitDamage
+              enemyHits = []
+              shotConsumed = true
+            }
+          }
+        }
+
         // PvP hit: check remote players
         const sceneRefsLocal = sceneRef.current
         if (
@@ -15254,6 +15762,7 @@ export default function ThreeWorld({
             if (huntPhaseRef.current === "mission" && !osakaBossRef.current) spawnOsakaBoss()
           }
           updateOsakaBoss(dt) // OSAKA 五変化 boss
+          updateOsakaMidBoss(dt) // OSAKA mid-boss (Tengu / Yamaya)
         }
         // HUNT room compass: rotate the on-screen arrow toward the orb (which
         // sits at the room centre) in the player's local frame. Room phase only.
