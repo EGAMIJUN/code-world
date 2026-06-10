@@ -12426,7 +12426,7 @@ export default function ThreeWorld({
         ctx.fillText("STAGE", W * 0.255, H * 0.18)
         // OSAKA is a fixed max-difficulty stage → the difficulty column is hidden.
         if (osaka) {
-          ctx.fillStyle = "#ff8844"
+          ctx.fillStyle = "#ff4444"
           ctx.fillText("OSAKA — 固定 / 最高難度", W * 0.745, H * 0.42)
         } else {
           ctx.fillText("DIFFICULTY", W * 0.745, H * 0.18)
@@ -12438,16 +12438,26 @@ export default function ThreeWorld({
             (r.hit.kind === "stage" && cfg.stage === r.hit.value) ||
             (r.hit.kind === "difficulty" && cfg.difficulty === r.hit.value)
           const deploy = r.hit.kind === "deploy"
+          // OSAKA is the fixed max-difficulty stage → render it in red so it reads
+          // as the dangerous endgame option (green stays the normal accent).
+          const isOsakaRow = r.hit.kind === "stage" && r.hit.value === "osaka"
+          const accent = isOsakaRow ? "#ff4444" : "#00ff88"
           const x = r.x0 * W
           const y = r.y0 * H
           const w = (r.x1 - r.x0) * W
           const h = (r.y1 - r.y0) * H
-          ctx.fillStyle = selected ? "#00ff88" : deploy ? "#103a26" : "#181818"
+          ctx.fillStyle = selected
+            ? accent
+            : deploy
+              ? "#103a26"
+              : isOsakaRow
+                ? "#2a0e0e"
+                : "#181818"
           ctx.fillRect(x, y, w, h)
-          ctx.strokeStyle = "#00ff88"
+          ctx.strokeStyle = accent
           ctx.lineWidth = deploy ? 3 : 2
           ctx.strokeRect(x, y, w, h)
-          ctx.fillStyle = selected ? "#0a0a0a" : "#e6e6e6"
+          ctx.fillStyle = selected ? "#0a0a0a" : isOsakaRow ? "#ff4444" : "#e6e6e6"
           ctx.font = deploy ? "bold 30px monospace" : "bold 26px monospace"
           const label =
             r.hit.kind === "stage"
