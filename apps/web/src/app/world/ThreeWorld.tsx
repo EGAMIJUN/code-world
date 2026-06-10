@@ -12964,69 +12964,265 @@ export default function ThreeWorld({
           strip.rotation.y = Math.PI
           add(strip)
         }
-        // ════ AREA 2 — TSUTENKAKU (centre, z -30..30) ════
+        // ════ AREA 2 — TSUTENKAKU (centre, z -30..30) — ~45m landmark tower ════
         const towerMat = new THREE.MeshStandardMaterial({
-          color: 0xcc8800,
-          roughness: 0.6,
-          metalness: 0.4,
+          color: 0xd4a017,
+          roughness: 0.5,
+          metalness: 0.5,
         })
+        const towerMat2 = new THREE.MeshStandardMaterial({
+          color: 0xe0b020,
+          roughness: 0.5,
+          metalness: 0.5,
+        })
+        // Four splayed legs.
         for (const [lx, lz] of [
-          [-4, -4],
-          [4, -4],
-          [-4, 4],
-          [4, 4],
+          [-5, -5],
+          [5, -5],
+          [-5, 5],
+          [5, 5],
         ] as const) {
-          const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.8, 12, 8), towerMat)
-          leg.position.set(lx, 6, lz)
+          const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.6, 1.0, 16, 8), towerMat)
+          leg.position.set(lx, 8, lz)
+          leg.rotation.x = (lz / 5) * 0.12
+          leg.rotation.z = (-lx / 5) * 0.12
           add(leg)
         }
-        const platform = new THREE.Mesh(new THREE.CylinderGeometry(6, 6, 2, 8), towerMat)
-        platform.position.set(0, 13, 0)
-        add(platform)
-        const upper = new THREE.Mesh(new THREE.CylinderGeometry(1.5, 2, 15, 8), towerMat)
-        upper.position.set(0, 21.5, 0)
-        add(upper)
-        const orbTop = new THREE.Mesh(
-          new THREE.SphereGeometry(2, sseg(8), sseg(8)),
-          new THREE.MeshStandardMaterial({
-            color: 0xffaa00,
-            emissive: 0xff8800,
-            emissiveIntensity: 1.0,
-          }),
-        )
-        orbTop.position.set(0, 30, 0)
-        add(orbTop)
-        const towerLight = new THREE.PointLight(0xffaa00, 3, 40)
-        towerLight.position.set(0, 30, 0)
-        add(towerLight)
-        // Downtown blocks around the tower (deterministic scatter; shares the
-        // buildOsakaMap-scoped rnd()).
-        const downtownMat = new THREE.MeshStandardMaterial({ color: 0x2a2a35, roughness: 0.9 })
-        for (let i = 0; i < 10; i++) {
-          const bw = 5 + rnd() * 3
-          const bh = 8 + rnd() * 7
-          const bd = 5 + rnd() * 3
-          const ang = (i / 10) * Math.PI * 2
-          const rad = 22 + rnd() * 14
-          const b = new THREE.Mesh(new THREE.BoxGeometry(bw, bh, bd), downtownMat)
-          b.position.set(Math.cos(ang) * rad, bh / 2, Math.sin(ang) * rad * 0.6)
-          add(b)
+        // First observation deck.
+        const deck1 = new THREE.Mesh(new THREE.CylinderGeometry(7, 7, 2.5, 8), towerMat)
+        deck1.position.set(0, 17, 0)
+        add(deck1)
+        // Mid trusswork — a lattice of thin members (dense-scaled 30).
+        const trussMat = new THREE.MeshStandardMaterial({
+          color: 0xb8901a,
+          roughness: 0.6,
+          metalness: 0.5,
+        })
+        const trussV = new THREE.BoxGeometry(0.15, 8, 0.15)
+        const trussD = new THREE.BoxGeometry(0.12, 5.6, 0.12)
+        for (let i = 0; i < dn(30); i++) {
+          const ang = (i / dn(30)) * Math.PI * 2
+          const r = 3.6
+          const v = new THREE.Mesh(trussV, trussMat)
+          v.position.set(Math.cos(ang) * r, 22, Math.sin(ang) * r)
+          add(v)
+          const d = new THREE.Mesh(trussD, trussMat)
+          d.position.set(Math.cos(ang) * r, 22, Math.sin(ang) * r)
+          d.rotation.z = i % 2 === 0 ? 0.6 : -0.6
+          add(d)
         }
-        // Alley street lamps (mobile: 8 → 4).
-        const lampCount = fullLights ? 8 : 4
+        // Second deck + upper tower + crowning beacon.
+        const deck2 = new THREE.Mesh(new THREE.CylinderGeometry(5, 5, 2, 8), towerMat)
+        deck2.position.set(0, 27, 0)
+        add(deck2)
+        const upper = new THREE.Mesh(new THREE.CylinderGeometry(1.5, 2.5, 18, 8), towerMat2)
+        upper.position.set(0, 37, 0)
+        add(upper)
+        const orbMat = new THREE.MeshStandardMaterial({
+          color: 0xffcc00,
+          emissive: 0xffaa00,
+          emissiveIntensity: 1.5,
+        })
+        const orbTop = new THREE.Mesh(new THREE.SphereGeometry(2.5, sseg(12), sseg(12)), orbMat)
+        orbTop.position.set(0, 47, 0)
+        add(orbTop)
+        const towerLight = new THREE.PointLight(0xffcc00, 4, 60)
+        towerLight.position.set(0, 47, 0)
+        add(towerLight)
+        A.towerOrbMat = orbMat // hue-cycled in updateOsakaMap
+        A.towerLight = towerLight
+        // Neon lines edging the upper tower (vertical glow strips, pulsing).
+        for (let i = 0; i < dn(4); i++) {
+          const ang = (i / 4) * Math.PI * 2
+          const strip = new THREE.Mesh(
+            new THREE.BoxGeometry(0.16, 20, 0.16),
+            neonMat(0x33ddff, 1.3, false, 1.5 + i * 0.3),
+          )
+          strip.position.set(Math.cos(ang) * 2.2, 37, Math.sin(ang) * 2.2)
+          add(strip)
+        }
+        // Three ad panels on the tower's upper sides (fictional).
+        const ADS: { lines: string[]; col: number }[] = [
+          { lines: ["天空"], col: 0xff3366 },
+          { lines: ["夜想"], col: 0x33ddff },
+          { lines: ["電気湯"], col: 0xffcc00 },
+        ]
+        for (let i = 0; i < dn(3); i++) {
+          const ad = ADS[i % ADS.length]
+          if (!ad) continue
+          const ang = (i / 3) * Math.PI * 2
+          const tex = makeOsakaSign(ad.lines, 0x0a0a12, `#${ad.col.toString(16).padStart(6, "0")}`)
+          const panel = new THREE.Mesh(
+            new THREE.PlaneGeometry(3, 3),
+            new THREE.MeshStandardMaterial({
+              map: tex,
+              emissive: ad.col,
+              emissiveMap: tex,
+              emissiveIntensity: 1.2,
+            }),
+          )
+          panel.position.set(Math.cos(ang) * 2.7, 32, Math.sin(ang) * 2.7)
+          panel.rotation.y = -ang + Math.PI / 2
+          add(panel)
+        }
+        // ── Shinsekai downtown: low bars/shops ringing the tower (dense 16) ──
+        const shopMat = new THREE.MeshStandardMaterial({ color: 0x2a2520, roughness: 0.9 })
+        const norenCol = [0xcc3333, 0x2244aa]
+        for (let i = 0; i < dn(16); i++) {
+          const ang = (i / dn(16)) * Math.PI * 2
+          const rad = 26 + rnd() * 12
+          const bw = 5 + rnd() * 3
+          const bh = 6 + rnd() * 6
+          const bd = 5 + rnd() * 3
+          const bx = Math.cos(ang) * rad
+          const bz = Math.sin(ang) * rad * 0.7
+          const shop = new THREE.Mesh(new THREE.BoxGeometry(bw, bh, bd), shopMat)
+          shop.position.set(bx, bh / 2, bz)
+          add(shop)
+          // Storefront noren curtain facing the tower, gently swaying.
+          const ncol = norenCol[i % 2] ?? 0xcc3333
+          const ntex = makeOsakaSign(["のれん"], ncol, "#ffffff")
+          const noren = new THREE.Mesh(
+            new THREE.PlaneGeometry(bw * 0.7, 1.4),
+            new THREE.MeshStandardMaterial({
+              map: ntex,
+              transparent: true,
+              side: THREE.DoubleSide,
+            }),
+          )
+          const inward = Math.atan2(-bz, -bx)
+          noren.position.set(
+            bx + Math.cos(inward) * (bd / 2 + 0.1),
+            bh - 1.0,
+            bz + Math.sin(inward) * (bd / 2 + 0.1),
+          )
+          noren.rotation.y = inward + Math.PI / 2
+          add(noren)
+          A.sway.push({
+            obj: noren,
+            amp: 0.06,
+            spd: 1.2 + rnd() * 0.6,
+            phase: rnd() * 6.28,
+            base: noren.rotation.z,
+          })
+        }
+        // Pufferfish (fugu) decoration lanterns hung at storefronts (×6, dense).
+        const fuguGeo = new THREE.SphereGeometry(0.9, 10, 8)
+        const fuguMat = new THREE.MeshStandardMaterial({
+          color: 0xf4f0e6,
+          emissive: 0x553322,
+          emissiveIntensity: 0.5,
+        })
+        for (let i = 0; i < dn(6); i++) {
+          const ang = (i / dn(6)) * Math.PI * 2
+          const pivot = new THREE.Group()
+          pivot.position.set(Math.cos(ang) * 22, 5.5, Math.sin(ang) * 16)
+          const fugu = new THREE.Mesh(fuguGeo, fuguMat)
+          fugu.scale.set(1.4, 0.9, 0.9)
+          fugu.position.y = -1.2
+          pivot.add(fugu)
+          const tail = new THREE.Mesh(
+            new THREE.ConeGeometry(0.4, 0.8, 6),
+            new THREE.MeshStandardMaterial({ color: 0xcc3333 }),
+          )
+          tail.rotation.z = Math.PI / 2
+          tail.position.set(-1.3, -1.2, 0)
+          pivot.add(tail)
+          add(pivot)
+          A.sway.push({
+            obj: pivot,
+            amp: 0.1,
+            spd: 0.7 + rnd() * 0.5,
+            phase: rnd() * 6.28,
+            base: 0,
+          })
+        }
+        // Covered arcade along the central street through Shinsekai.
+        const arcadeMat = new THREE.MeshStandardMaterial({ color: 0x3a3530, roughness: 0.85 })
+        const arcRoofMat = new THREE.MeshStandardMaterial({
+          color: 0x223044,
+          transparent: true,
+          opacity: 0.35,
+          side: THREE.DoubleSide,
+        })
+        const archGeo = new THREE.TorusGeometry(7, 0.25, 6, 12, Math.PI)
+        for (let i = 0; i < dn(7); i++) {
+          const az = -18 + i * 6
+          const arch = new THREE.Mesh(archGeo, arcadeMat)
+          arch.position.set(0, 0, az)
+          add(arch)
+          if (i < dn(7) - 1) {
+            const roof = new THREE.Mesh(new THREE.PlaneGeometry(14, 6.2), arcRoofMat)
+            roof.rotation.x = -Math.PI / 2
+            roof.position.set(0, 6.6, az + 3)
+            add(roof)
+          }
+        }
+        // Cobblestone strip under the arcade.
+        const cobCv = document.createElement("canvas")
+        cobCv.width = 64
+        cobCv.height = 64
+        const cobC = cobCv.getContext("2d")
+        if (cobC) {
+          cobC.fillStyle = "#3a3a35"
+          cobC.fillRect(0, 0, 64, 64)
+          cobC.strokeStyle = "#2a2a26"
+          cobC.lineWidth = 2
+          for (let y = 0; y < 8; y++)
+            for (let x = 0; x < 8; x++) cobC.strokeRect(x * 8, y * 8, 8, 8)
+        }
+        const cobTex = new THREE.CanvasTexture(cobCv)
+        cobTex.wrapS = THREE.RepeatWrapping
+        cobTex.wrapT = THREE.RepeatWrapping
+        cobTex.repeat.set(6, 18)
+        const cobble = new THREE.Mesh(
+          new THREE.PlaneGeometry(14, 44),
+          new THREE.MeshStandardMaterial({ color: 0x4a4a45, map: cobTex, roughness: 0.95 }),
+        )
+        cobble.rotation.x = -Math.PI / 2
+        cobble.position.set(0, 0.04, 0)
+        add(cobble)
+        // Retro street lamps (dense 10) + slung electric wires.
+        const lampCount = dn(10)
+        const lampPositions: [number, number][] = []
         for (let i = 0; i < lampCount; i++) {
           const ang = (i / lampCount) * Math.PI * 2
           const lx = Math.cos(ang) * 30
           const lz = Math.sin(ang) * 18
+          lampPositions.push([lx, lz])
           const pole = new THREE.Mesh(
-            new THREE.CylinderGeometry(0.1, 0.1, 6),
-            new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.8 }),
+            new THREE.CylinderGeometry(0.12, 0.16, 6),
+            new THREE.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.7 }),
           )
           pole.position.set(lx, 3, lz)
           add(pole)
-          const lamp = new THREE.PointLight(0xffeeaa, 1.0, 15)
-          lamp.position.set(lx, 6, lz)
-          add(lamp)
+          const bulb = new THREE.Mesh(
+            new THREE.SphereGeometry(0.35, 8, 8),
+            neonMat(0xffeeaa, 1.2, false),
+          )
+          bulb.position.set(lx, 6.2, lz)
+          add(bulb)
+          if (fullLights && i % 2 === 0) {
+            const lamp = new THREE.PointLight(0xffeeaa, 1.0, 15)
+            lamp.position.set(lx, 6, lz)
+            add(lamp)
+          }
+        }
+        // Electric wires drooping between consecutive lamps (downtown feel).
+        const wireMat = new THREE.MeshStandardMaterial({ color: 0x0a0a0a })
+        for (let i = 0; i < lampPositions.length; i++) {
+          const a2 = lampPositions[i]
+          const b2 = lampPositions[(i + 1) % lampPositions.length]
+          if (!a2 || !b2) continue
+          const dx = b2[0] - a2[0]
+          const dz = b2[1] - a2[1]
+          const len = Math.hypot(dx, dz)
+          if (len > 30) continue // skip the long wrap-around span
+          const wire = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, len, 4), wireMat)
+          wire.position.set((a2[0] + b2[0]) / 2, 5.6, (a2[1] + b2[1]) / 2)
+          wire.rotation.z = Math.PI / 2
+          wire.rotation.y = -Math.atan2(dz, dx)
+          add(wire)
         }
         // ════ AREA 3 — OSAKA CASTLE (north, z -90..-60) ════
         const moat = new THREE.Mesh(
