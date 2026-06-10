@@ -2983,6 +2983,29 @@ export default function ThreeWorld({
       renderer.outputColorSpace = THREE.SRGBColorSpace
       container.appendChild(renderer.domElement)
       rendererDomRef.current = renderer.domElement
+      // ── Performance debug HUD (only with ?debug=1) ─────────────────────────────
+      // A fixed top-left DOM overlay showing FPS + renderer.info counters, for
+      // reading real-device perf on screen (no USB/devtools needed). Costs nothing
+      // when the query flag is absent — the element is never created.
+      const perfDebug =
+        typeof window !== "undefined" &&
+        new URLSearchParams(window.location.search).get("debug") === "1"
+      let perfHud: HTMLDivElement | null = null
+      if (perfDebug) {
+        perfHud = document.createElement("div")
+        perfHud.style.cssText =
+          "position:fixed;top:8px;left:8px;z-index:99999;pointer-events:none;" +
+          "background:rgba(0,0,0,0.6);color:#33ff66;font:14px/1.45 monospace;" +
+          "padding:6px 9px;border-radius:4px;white-space:pre;text-shadow:0 0 2px #000;"
+        document.body.appendChild(perfHud)
+      }
+      let perfFrames = 0 // frames counted in the current 1s window
+      let perfFps = 0 // last computed average FPS
+      let perfLastT = typeof performance !== "undefined" ? performance.now() : 0
+      let perfHudFrame = 0 // throttles the text refresh to 1/4 frames
+      // Current stage label: hunt missions set this via huntApplyStage; otherwise
+      // fall back to the mode/map.
+      let perfStageApplied = isHunt ? "room" : `${modeRef.current}/${mapId}`
       // Max anisotropy is read once and reused for every procedural texture
       // below — saves repeated capability lookups.
       const maxAniso = renderer.capabilities.getMaxAnisotropy()
@@ -14251,6 +14274,7 @@ export default function ThreeWorld({
       // ── HUNT indoor stage: dim the world, drop a ceiling + green point lights,
       // and recolour the floor/walls. Reversed by huntClearStage on return. ──
       function huntApplyStage(stage: "outdoor" | "indoor" | "osaka") {
+        perfStageApplied = stage // surfaced by the ?debug=1 perf HUD
         huntClearStage() // idempotent — never stack overlays
         if (stage === "osaka") {
           buildOsakaMap()
@@ -19361,6 +19385,39 @@ export default function ThreeWorld({
         }
 
         renderer.render(scene, camera)
+
+        // Perf HUD: renderer.info is accurate right after the draw (it auto-resets
+        // each frame). FPS is counted every frame; the text is rewritten ~1/4 frames
+        // so the overlay itself stays cheap.
+        if (perfHud) {
+          perfFrames++
+          const nowT = performance.now()
+          if (nowT - perfLastT >= 1000) {
+            perfFps = Math.round((perfFrames * 1000) / (nowT - perfLastT))
+            perfFrames = 0
+            perfLastT = nowT
+          }
+          if (perfHudFrame++ % 4 === 0) {
+            const info = renderer.info
+            const mem = (performance as Performance & { memory?: { usedJSHeapSize: number } })
+              .memory
+            const heap = mem ? `${(mem.usedJSHeapSize / 1048576).toFixed(0)} MB` : "n/a"
+            const stageName =
+              modeRef.current === "hunt"
+                ? huntPhaseRef.current === "mission"
+                  ? perfStageApplied
+                  : huntPhaseRef.current
+                : `${modeRef.current}/${mapId}`
+            perfHud.textContent =
+              `FPS        ${perfFps}\n` +
+              `draw calls ${info.render.calls}\n` +
+              `triangles  ${info.render.triangles.toLocaleString()}\n` +
+              `geometries ${info.memory.geometries}\n` +
+              `textures   ${info.memory.textures}\n` +
+              `JS heap    ${heap}\n` +
+              `stage      ${stageName}`
+          }
+        }
       }
       animate()
 
@@ -19376,6 +19433,7 @@ export default function ThreeWorld({
         renderer.domElement.removeEventListener("touchmove", noopTouch)
         window.removeEventListener("resize", onResize)
         if (areaHideTimerRef.current) clearTimeout(areaHideTimerRef.current)
+        perfHud?.remove() // tear down the ?debug=1 HUD overlay
       }
     }
 
