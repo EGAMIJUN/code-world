@@ -742,6 +742,36 @@ const OSAKA_ZAKO_INTERVAL = 5000 // ms between fodder top-ups
 // Dotonbori → Tsutenkaku → Castle → five-change boss. Each area: clear the
 // fodder wave, drop the mid-boss, then advance. enemyCount is the live fodder.
 type OsakaArea = "dotonbori" | "tsutenkaku" | "castle" | "boss" | "clear"
+// Animated handles for the OSAKA scenery (neon flicker, lantern sway, blinkers,
+// water shimmer, tower beacon hue cycle, scrolling marquee). Populated by
+// buildOsakaMap, driven by updateOsakaMap, released by clearOsakaMap.
+type OsakaAnim = {
+  t: number
+  neon: {
+    mat: THREE.MeshStandardMaterial
+    base: number
+    spd: number
+    phase: number
+    flick: boolean
+  }[]
+  sway: { obj: THREE.Object3D; amp: number; spd: number; phase: number; base: number }[]
+  blink: { mesh: THREE.Mesh; spd: number; phase: number }[]
+  water: {
+    obj: THREE.Object3D
+    mat: THREE.MeshStandardMaterial
+    baseX: number
+    spd: number
+    phase: number
+  }[]
+  towerOrbMat: THREE.MeshStandardMaterial | null
+  towerLight: THREE.PointLight | null
+  marquee: {
+    canvas: HTMLCanvasElement
+    ctx: CanvasRenderingContext2D
+    tex: THREE.CanvasTexture
+    offset: number
+  } | null
+}
 type OsakaProgressState = {
   area: OsakaArea
   enemyCount: number
@@ -12526,10 +12556,26 @@ export default function ThreeWorld({
         huntPhaseRef.current = "countdown"
         setHuntPhase("countdown")
       }
-      // ── OSAKA stage map (Phase 2a): Dotonbori / Tsutenkaku / Osaka Castle ────
+      // ── OSAKA stage map: Dotonbori / Tsutenkaku / Osaka Castle ───────────────
       // A single 180×180 night field built under one group centred on the arena.
       // All geometry is original (the landmarks are stylised, not scanned) and
       // every sign uses fictional text. Disposed by huntClearStage on return.
+      // Animated scenery handles (driven by updateOsakaMap); reset every build.
+      let osakaAnim: OsakaAnim | null = null
+      // A scrolling-marquee CanvasTexture for the BANG runner board (256×32).
+      function makeOsakaMarquee(): {
+        canvas: HTMLCanvasElement
+        ctx: CanvasRenderingContext2D
+        tex: THREE.CanvasTexture
+        offset: number
+      } | null {
+        const canvas = document.createElement("canvas")
+        canvas.width = 256
+        canvas.height = 32
+        const ctx = canvas.getContext("2d")
+        if (!ctx) return null
+        return { canvas, ctx, tex: new THREE.CanvasTexture(canvas), offset: 0 }
+      }
       function makeOsakaSign(lines: string[], bg: number, fg: string): THREE.CanvasTexture {
         const cv = document.createElement("canvas")
         cv.width = 256
@@ -12551,13 +12597,59 @@ export default function ThreeWorld({
       }
       function buildOsakaMap() {
         const fullLights = !isMobileDevice // mobile halves the decorative lights
+        const dense = isMobileDevice ? 0.5 : 1.0 // scales every decoration loop
+        const dn = (n: number) => Math.max(1, Math.round(n * dense))
+        let seed = 90210
+        const rnd = () => {
+          seed = (seed * 1103515245 + 12345) & 0x7fffffff
+          return seed / 0x7fffffff
+        }
         const group = new THREE.Group()
         group.position.set(HUNT_ARENA.x, 0, HUNT_ARENA.z)
         const add = (m: THREE.Object3D) => group.add(m)
-        // ── Whole-field floor + perimeter walls ──
+        const A: OsakaAnim = {
+          t: 0,
+          neon: [],
+          sway: [],
+          blink: [],
+          water: [],
+          towerOrbMat: null,
+          towerLight: null,
+          marquee: null,
+        }
+        osakaAnim = A
+        // A neon material + registration for the flicker/pulse animator. flick =
+        // a hard, occasional dropout; otherwise a soft sine pulse.
+        const neonMat = (col: number, base = 1.2, flick = false, spd?: number) => {
+          const m = new THREE.MeshStandardMaterial({
+            color: col,
+            emissive: col,
+            emissiveIntensity: base,
+          })
+          A.neon.push({ mat: m, base, spd: spd ?? 2 + rnd() * 3, phase: rnd() * 6.28, flick })
+          return m
+        }
+        // Shared lit-window texture for the distant skyline (one canvas, reused).
+        const winCv = document.createElement("canvas")
+        winCv.width = 64
+        winCv.height = 64
+        const winC = winCv.getContext("2d")
+        if (winC) {
+          winC.fillStyle = "#05060a"
+          winC.fillRect(0, 0, 64, 64)
+          for (let y = 0; y < 8; y++)
+            for (let x = 0; x < 8; x++) {
+              if (rnd() < 0.5) {
+                winC.fillStyle = rnd() < 0.5 ? "#ffcc66" : "#446699"
+                winC.fillRect(x * 8 + 1, y * 8 + 1, 5, 6)
+              }
+            }
+        }
+        const winTex = new THREE.CanvasTexture(winCv)
+        // ── Whole-field asphalt floor + perimeter walls ──
         const floor = new THREE.Mesh(
           new THREE.PlaneGeometry(180, 180),
-          new THREE.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.95 }),
+          new THREE.MeshStandardMaterial({ color: 0x1c1c20, roughness: 0.95 }),
         )
         floor.rotation.x = -Math.PI / 2
         floor.position.y = 0.01
@@ -12573,81 +12665,305 @@ export default function ThreeWorld({
           wall.position.set(x, 4, z)
           add(wall)
         }
+        // Main street linking the three areas (a touch lighter than the asphalt).
+        const street = new THREE.Mesh(
+          new THREE.PlaneGeometry(14, 170),
+          new THREE.MeshStandardMaterial({ color: 0x26262c, roughness: 0.9 }),
+        )
+        street.rotation.x = -Math.PI / 2
+        street.position.set(0, 0.02, 0)
+        add(street)
+        // Rain puddles — small reflective patches that catch the neon.
+        const puddleGeo = new THREE.CircleGeometry(1, 12)
+        const puddleMat = new THREE.MeshStandardMaterial({
+          color: 0x10141c,
+          roughness: 0.12,
+          metalness: 0.7,
+        })
+        for (let i = 0; i < dn(24); i++) {
+          const p = new THREE.Mesh(puddleGeo, puddleMat)
+          p.rotation.x = -Math.PI / 2
+          p.position.set(-80 + rnd() * 160, 0.03, -80 + rnd() * 160)
+          p.scale.setScalar(0.6 + rnd() * 1.8)
+          add(p)
+        }
+        // Distant skyline beyond the walls — dark towers with faint lit windows.
+        const skyMat = new THREE.MeshStandardMaterial({
+          color: 0x0a0a12,
+          emissive: 0x334466,
+          emissiveMap: winTex,
+          emissiveIntensity: 0.45,
+          roughness: 1,
+        })
+        for (let i = 0; i < dn(40); i++) {
+          const side = i % 4
+          const along = -110 + rnd() * 220
+          const out = 98 + rnd() * 26
+          const bh = 12 + rnd() * 26
+          const bw = 6 + rnd() * 7
+          const b = new THREE.Mesh(new THREE.BoxGeometry(bw, bh, bw), skyMat)
+          if (side === 0) b.position.set(along, bh / 2, out)
+          else if (side === 1) b.position.set(along, bh / 2, -out)
+          else if (side === 2) b.position.set(out, bh / 2, along)
+          else b.position.set(-out, bh / 2, along)
+          add(b)
+        }
         // ════ AREA 1 — DOTONBORI (south, z 60..90) ════
+        // Reflective canal water.
         const river = new THREE.Mesh(
-          new THREE.PlaneGeometry(180, 20),
-          new THREE.MeshStandardMaterial({ color: 0x0a1a2a, roughness: 0.4, metalness: 0.3 }),
+          new THREE.PlaneGeometry(180, 24),
+          new THREE.MeshStandardMaterial({
+            color: 0x0a2535,
+            roughness: 0.2,
+            metalness: 0.6,
+          }),
         )
         river.rotation.x = -Math.PI / 2
         river.position.set(0, -0.3, 75)
         add(river)
-        for (const bx of [-55, 0, 55]) {
-          const bridge = new THREE.Mesh(
-            new THREE.BoxGeometry(8, 0.5, 20),
-            new THREE.MeshStandardMaterial({ color: 0x3a3a3a, roughness: 0.85 }),
-          )
-          bridge.position.set(bx, 0.25, 75)
-          add(bridge)
+        // Neon reflections shimmering on the water surface.
+        const reflGeo = new THREE.PlaneGeometry(2.4, 9)
+        for (let i = 0; i < dn(8); i++) {
+          const col = [0xff3366, 0x33ddff, 0xffcc00, 0x66ff66][i % 4] ?? 0xff3366
+          const m = new THREE.MeshStandardMaterial({
+            color: col,
+            emissive: col,
+            emissiveIntensity: 0.8,
+            transparent: true,
+            opacity: 0.28,
+            depthWrite: false,
+          })
+          const refl = new THREE.Mesh(reflGeo, m)
+          refl.rotation.x = -Math.PI / 2
+          const bx = -78 + rnd() * 156
+          refl.position.set(bx, -0.26, 70 + rnd() * 10)
+          add(refl)
+          A.water.push({
+            obj: refl,
+            mat: m,
+            baseX: bx,
+            spd: 0.6 + rnd() * 1.2,
+            phase: rnd() * 6.28,
+          })
         }
-        const neonText: { lines: string[]; col: number }[] = [
-          { lines: ["スナック", "あや"], col: 0xff4444 },
-          { lines: ["居酒屋", "なにわ"], col: 0xffcc00 },
-          { lines: ["パチンコ", "王者"], col: 0x44ff88 },
-          { lines: ["ラーメン", "横丁"], col: 0xff4444 },
-          { lines: ["カラオケ", "宴"], col: 0x44ff88 },
-          { lines: ["焼肉", "大門"], col: 0xffcc00 },
-          { lines: ["喫茶", "昭和"], col: 0xff4444 },
-          { lines: ["酒場", "とら"], col: 0x44ff88 },
+        // Two Ebisu-bashi-style bridges with railings + lamps.
+        const bridgeMat = new THREE.MeshStandardMaterial({ color: 0x4a4a4a, roughness: 0.85 })
+        const railGeo = new THREE.BoxGeometry(0.18, 1.1, 0.18)
+        for (const bx of [-40, 40]) {
+          const deck = new THREE.Mesh(new THREE.BoxGeometry(10, 0.6, 24), bridgeMat)
+          deck.position.set(bx, 0.3, 75)
+          add(deck)
+          for (const side of [-1, 1]) {
+            for (let r = 0; r < dn(9); r++) {
+              const post = new THREE.Mesh(railGeo, bridgeMat)
+              post.position.set(bx + side * 4.6, 1.0, 64 + r * (22 / 8))
+              add(post)
+            }
+            const rail = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.18, 24), bridgeMat)
+            rail.position.set(bx + side * 4.6, 1.5, 75)
+            add(rail)
+          }
+          // Two street lamps per bridge (mobile keeps at least one).
+          for (let l = 0; l < dn(2); l++) {
+            const lx = bx + (l === 0 ? -3.5 : 3.5)
+            const lz = 75
+            const pole = new THREE.Mesh(
+              new THREE.CylinderGeometry(0.12, 0.12, 4),
+              new THREE.MeshStandardMaterial({ color: 0x222222 }),
+            )
+            pole.position.set(lx, 2.3, lz)
+            add(pole)
+            const bulb = new THREE.Mesh(
+              new THREE.SphereGeometry(0.3, 8, 8),
+              neonMat(0xffeeaa, 1.3, false),
+            )
+            bulb.position.set(lx, 4.5, lz)
+            add(bulb)
+            if (fullLights) {
+              const pl = new THREE.PointLight(0xffeeaa, 0.8, 14)
+              pl.position.set(lx, 4.6, lz)
+              add(pl)
+            }
+          }
+        }
+        // Neon sign-board buildings lining both banks (14, dense-scaled).
+        const SIGNS: { lines: string[]; col: number }[] = [
+          { lines: ["酒場"], col: 0xff3366 },
+          { lines: ["らーめん"], col: 0xffcc00 },
+          { lines: ["カラオケ"], col: 0x33ddff },
+          { lines: ["ゲーム"], col: 0x66ff66 },
+          { lines: ["やきとり"], col: 0xff3366 },
+          { lines: ["喫茶"], col: 0xffcc00 },
+          { lines: ["寿司"], col: 0x33ddff },
+          { lines: ["居酒屋"], col: 0x66ff66 },
+          { lines: ["バー"], col: 0xff3366 },
+          { lines: ["たこ焼"], col: 0xffcc00 },
+          { lines: ["スナック"], col: 0x33ddff },
+          { lines: ["麻雀"], col: 0x66ff66 },
+          { lines: ["焼肉"], col: 0xff3366 },
+          { lines: ["甘味"], col: 0xffcc00 },
         ]
-        for (let i = 0; i < 8; i++) {
-          const sign = neonText[i]
+        const bldgGeoCache = new THREE.BoxGeometry(1, 1, 1) // scaled per building
+        for (let i = 0; i < dn(14); i++) {
+          const sign = SIGNS[i % SIGNS.length]
           if (!sign) continue
-          const bw = 6 + (i % 3) * 2 // 6..10
-          const bh = 15 + (i % 4) * 3 // 15..24
-          const onNorthBank = i % 2 === 0
-          const x = -75 + (i % 4) * 22 + (onNorthBank ? 6 : -6)
-          const z = onNorthBank ? 63 : 87
+          const bw = 6 + rnd() * 6 // 6..12
+          const bh = 14 + rnd() * 14 // 14..28
+          const bd = 5 + rnd() * 3 // 5..8
+          const northBank = i % 2 === 0
+          const x = -78 + (i / 14) * 156 + (rnd() - 0.5) * 6
+          const z = northBank ? 62 : 88
+          const facing = northBank ? 1 : -1 // sign faces the canal
           const building = new THREE.Mesh(
-            new THREE.BoxGeometry(bw, bh, 4),
-            new THREE.MeshStandardMaterial({ color: 0x14141c, roughness: 0.9 }),
+            bldgGeoCache,
+            new THREE.MeshStandardMaterial({ color: 0x1a1a22, roughness: 0.9 }),
           )
+          building.scale.set(bw, bh, bd)
           building.position.set(x, bh / 2, z)
           add(building)
-          const tex = makeOsakaSign(sign.lines, 0x101018, `#${sign.col.toString(16)}`)
+          // Big emissive sign panel.
+          const tex = makeOsakaSign(
+            sign.lines,
+            0x0a0a12,
+            `#${sign.col.toString(16).padStart(6, "0")}`,
+          )
+          const sw = bw * 0.82
+          const sh = Math.min(bh * 0.45, 7)
           const panel = new THREE.Mesh(
-            new THREE.PlaneGeometry(bw * 0.8, Math.min(bh * 0.5, 5)),
+            new THREE.PlaneGeometry(sw, sh),
             new THREE.MeshStandardMaterial({
               map: tex,
               emissive: sign.col,
               emissiveMap: tex,
-              emissiveIntensity: 1.0,
+              emissiveIntensity: 1.2,
             }),
           )
-          panel.position.set(x, bh * 0.55, z + (onNorthBank ? 2.1 : -2.1))
-          panel.rotation.y = onNorthBank ? 0 : Math.PI
+          const pz = z + facing * (bd / 2 + 0.15)
+          panel.position.set(x, bh * 0.6, pz)
+          panel.rotation.y = northBank ? 0 : Math.PI
           add(panel)
+          // Neon tube frame around the sign (flickers independently).
+          const frameMat = neonMat(sign.col, 1.4, i % 3 === 0)
+          for (const [fx, fy, fw, fh] of [
+            [0, sh / 2 + 0.1, sw + 0.4, 0.18],
+            [0, -sh / 2 - 0.1, sw + 0.4, 0.18],
+            [-sw / 2 - 0.2, 0, 0.18, sh + 0.4],
+            [sw / 2 + 0.2, 0, 0.18, sh + 0.4],
+          ] as const) {
+            const tube = new THREE.Mesh(new THREE.BoxGeometry(fw, fh, 0.12), frameMat)
+            tube.position.set(x + fx, bh * 0.6 + fy, pz + facing * 0.05)
+            add(tube)
+          }
+          // Rooftop red aviation blinker.
+          const blinkMat = new THREE.MeshStandardMaterial({
+            color: 0xff2222,
+            emissive: 0xff0000,
+            emissiveIntensity: 2,
+          })
+          const blink = new THREE.Mesh(new THREE.SphereGeometry(0.35, 6, 6), blinkMat)
+          blink.position.set(x, bh + 0.5, z)
+          add(blink)
+          A.blink.push({ mesh: blink, spd: 2 + rnd() * 2, phase: rnd() * 6.28 })
         }
         // Neon point lights along the canal (mobile: 6 → 3).
         const neonCount = fullLights ? 6 : 3
         for (let i = 0; i < neonCount; i++) {
-          const pl = new THREE.PointLight(i % 2 === 0 ? 0xff4444 : 0x44ff88, 1.5, 25)
+          const pl = new THREE.PointLight(i % 2 === 0 ? 0xff3366 : 0x33ddff, 1.5, 25)
           pl.position.set(-70 + (i / Math.max(1, neonCount - 1)) * 140, 6, 70 + (i % 2) * 10)
           add(pl)
         }
-        // Big "GLICO-style" runner sign (fictional brand "ナニワ RUNNER").
-        const glicoTex = makeOsakaSign(["ナニワ", "RUNNER"], 0x102018, "#ffee88")
-        const glico = new THREE.Mesh(
-          new THREE.BoxGeometry(12, 8, 1),
+        // Hanging red paper lanterns (20, dense-scaled) that sway gently.
+        const lanternGeo = new THREE.SphereGeometry(0.5, 10, 8)
+        const lanternMat = new THREE.MeshStandardMaterial({
+          color: 0xcc2222,
+          emissive: 0x881111,
+          emissiveIntensity: 0.9,
+        })
+        const cordMat = new THREE.MeshStandardMaterial({ color: 0x111111 })
+        const cordGeo = new THREE.CylinderGeometry(0.03, 0.03, 1.6)
+        for (let i = 0; i < dn(20); i++) {
+          const pivot = new THREE.Group()
+          const lx = -80 + rnd() * 160
+          const lz = i % 2 === 0 ? 60 + rnd() * 4 : 88 + rnd() * 4
+          pivot.position.set(lx, 6.5, lz)
+          const cord = new THREE.Mesh(cordGeo, cordMat)
+          cord.position.y = -0.8
+          pivot.add(cord)
+          const lantern = new THREE.Mesh(lanternGeo, lanternMat)
+          lantern.scale.set(1, 1.3, 1)
+          lantern.position.y = -1.9
+          pivot.add(lantern)
+          add(pivot)
+          A.sway.push({
+            obj: pivot,
+            amp: 0.12 + rnd() * 0.1,
+            spd: 0.8 + rnd() * 0.6,
+            phase: rnd() * 6.28,
+            base: 0,
+          })
+        }
+        // Giant BANG runner board (fictional brand) — blue, strongly lit, with a
+        // scrolling LED marquee strip beneath it.
+        const runnerCv = document.createElement("canvas")
+        runnerCv.width = 256
+        runnerCv.height = 180
+        const rc = runnerCv.getContext("2d")
+        if (rc) {
+          rc.fillStyle = "#0044cc"
+          rc.fillRect(0, 0, 256, 180)
+          // running stick figure (circle head + limb lines)
+          rc.strokeStyle = "#ffffff"
+          rc.fillStyle = "#ffffff"
+          rc.lineWidth = 7
+          rc.beginPath()
+          rc.arc(80, 60, 14, 0, Math.PI * 2)
+          rc.fill()
+          rc.beginPath()
+          rc.moveTo(80, 74)
+          rc.lineTo(96, 110) // torso
+          rc.moveTo(96, 110)
+          rc.lineTo(70, 130) // back leg
+          rc.moveTo(96, 110)
+          rc.lineTo(124, 124) // front leg
+          rc.moveTo(86, 88)
+          rc.lineTo(60, 96) // back arm
+          rc.moveTo(86, 88)
+          rc.lineTo(112, 80) // front arm
+          rc.stroke()
+          rc.font = "bold 64px sans-serif"
+          rc.textAlign = "center"
+          rc.fillText("BANG", 165, 150)
+        }
+        const runnerTex = new THREE.CanvasTexture(runnerCv)
+        const runner = new THREE.Mesh(
+          new THREE.BoxGeometry(14, 10, 1),
           new THREE.MeshStandardMaterial({
-            color: 0xff6600,
-            map: glicoTex,
-            emissive: 0xff4400,
-            emissiveMap: glicoTex,
-            emissiveIntensity: 1.2,
+            color: 0x0044cc,
+            map: runnerTex,
+            emissive: 0x0044cc,
+            emissiveMap: runnerTex,
+            emissiveIntensity: 1.4,
           }),
         )
-        glico.position.set(0, 12, 88)
-        add(glico)
+        runner.position.set(-22, 13, 86)
+        runner.rotation.y = Math.PI
+        add(runner)
+        const marquee = makeOsakaMarquee()
+        if (marquee) {
+          A.marquee = marquee
+          const strip = new THREE.Mesh(
+            new THREE.PlaneGeometry(14, 1.6),
+            new THREE.MeshStandardMaterial({
+              map: marquee.tex,
+              emissive: 0xffffff,
+              emissiveMap: marquee.tex,
+              emissiveIntensity: 1.1,
+            }),
+          )
+          strip.position.set(-22, 7.2, 85.4)
+          strip.rotation.y = Math.PI
+          add(strip)
+        }
         // ════ AREA 2 — TSUTENKAKU (centre, z -30..30) ════
         const towerMat = new THREE.MeshStandardMaterial({
           color: 0xcc8800,
@@ -12683,12 +12999,8 @@ export default function ThreeWorld({
         const towerLight = new THREE.PointLight(0xffaa00, 3, 40)
         towerLight.position.set(0, 30, 0)
         add(towerLight)
-        // Downtown blocks around the tower (deterministic scatter).
-        let seed = 1337
-        const rnd = () => {
-          seed = (seed * 1103515245 + 12345) & 0x7fffffff
-          return seed / 0x7fffffff
-        }
+        // Downtown blocks around the tower (deterministic scatter; shares the
+        // buildOsakaMap-scoped rnd()).
         const downtownMat = new THREE.MeshStandardMaterial({ color: 0x2a2a35, roughness: 0.9 })
         for (let i = 0; i < 10; i++) {
           const bw = 5 + rnd() * 3
@@ -12800,10 +13112,55 @@ export default function ThreeWorld({
           })
         }
         osakaMapMeshesRef.current = []
+        osakaAnim = null // scenery handles die with the disposed meshes
         if (huntStageFogWasSaved) {
           scene.fog = huntStageFogSaved
           huntStageFogSaved = null
           huntStageFogWasSaved = false
+        }
+      }
+      // Per-frame OSAKA scenery animation: neon flicker/pulse, lantern sway,
+      // rooftop blinkers, water shimmer, tower beacon hue, scrolling marquee.
+      function updateOsakaMap(dt: number) {
+        const a = osakaAnim
+        if (!a) return
+        a.t += dt
+        const t = a.t
+        for (const n of a.neon) {
+          if (n.flick) {
+            // hard, irregular dropouts (a failing tube)
+            n.mat.emissiveIntensity = Math.sin(t * n.spd + n.phase) > 0.82 ? n.base * 0.15 : n.base
+          } else {
+            n.mat.emissiveIntensity = n.base * (0.8 + 0.2 * Math.sin(t * n.spd + n.phase))
+          }
+        }
+        for (const s of a.sway) s.obj.rotation.z = s.base + Math.sin(t * s.spd + s.phase) * s.amp
+        for (const b of a.blink) b.mesh.visible = Math.sin(t * b.spd + b.phase) > 0.4
+        for (const w of a.water) {
+          w.obj.position.x = w.baseX + Math.sin(t * w.spd + w.phase) * 0.6
+          w.mat.emissiveIntensity = 0.6 + 0.4 * Math.sin(t * w.spd * 1.3 + w.phase)
+        }
+        if (a.towerOrbMat && a.towerLight) {
+          const hue = (t * 0.04) % 1
+          a.towerOrbMat.emissive.setHSL(hue, 1, 0.5)
+          a.towerLight.color.setHSL(hue, 1, 0.6)
+        }
+        if (a.marquee) {
+          const { ctx, canvas, tex } = a.marquee
+          a.marquee.offset = (a.marquee.offset + dt * 60) % 1000
+          ctx.fillStyle = "#001033"
+          ctx.fillRect(0, 0, canvas.width, canvas.height)
+          ctx.fillStyle = "#ffcc33"
+          ctx.font = "bold 22px monospace"
+          ctx.textBaseline = "middle"
+          ctx.textAlign = "left"
+          const msg = "BANG CITY OSAKA ★ 道頓堀ナイト ★ "
+          const step = 320
+          const base = -(a.marquee.offset % step)
+          for (let i = 0; i < canvas.width / step + 2; i++) {
+            ctx.fillText(msg, base + i * step, canvas.height / 2)
+          }
+          tex.needsUpdate = true
         }
       }
       // ── HUNT indoor stage: dim the world, drop a ceiling + green point lights,
@@ -15778,6 +16135,7 @@ export default function ThreeWorld({
           }
           updateOsakaBoss(dt) // OSAKA 五変化 boss
           updateOsakaMidBoss(dt) // OSAKA mid-boss (Tengu / Yamaya)
+          updateOsakaMap(dt) // OSAKA scenery animation (neon, lanterns, marquee…)
         }
         // HUNT room compass: rotate the on-screen arrow toward the orb (which
         // sits at the room centre) in the player's local frame. Room phase only.
