@@ -746,8 +746,6 @@ type OsakaProgressState = {
   area: OsakaArea
   enemyCount: number
   midBossSpawned: boolean
-  midBossDefeated: boolean
-  areaCleared: boolean
 }
 // Mid-boss (Tengu / Yamaya) — a bespoke group + HP, outside the CombatEnemy pool
 // (like the five-change boss), so it's damaged on the pistol hitscan path.
@@ -2315,8 +2313,6 @@ export default function ThreeWorld({
     area: "dotonbori",
     enemyCount: 0,
     midBossSpawned: false,
-    midBossDefeated: false,
-    areaCleared: false,
   })
   const osakaMidBossRef = useRef<OsakaMidBoss | null>(null)
   // Set by the O key (component scope); consumed in the animate loop where
@@ -11637,10 +11633,14 @@ export default function ThreeWorld({
         return { x: HUNT_ARENA.x, z: HUNT_ARENA.z }
       }
       // Center-screen banner (reuses the existing wave-message overlay), auto-
-      // cleared after 3s unless a newer banner has replaced it.
+      // cleared after 3s. The pending timer is tracked so a newer banner cancels
+      // the older one's clear (and so it can be cleared on teardown).
+      let osakaBannerTimerId: ReturnType<typeof setTimeout> | null = null
       function osakaBanner(text: string) {
         setWaveMessage(text)
-        window.setTimeout(() => {
+        if (osakaBannerTimerId !== null) clearTimeout(osakaBannerTimerId)
+        osakaBannerTimerId = setTimeout(() => {
+          osakaBannerTimerId = null
           setWaveMessage((prev) => (prev === text ? null : prev))
         }, 3000)
       }
@@ -11676,8 +11676,6 @@ export default function ThreeWorld({
           area: "dotonbori",
           enemyCount: 0,
           midBossSpawned: false,
-          midBossDefeated: false,
-          areaCleared: false,
         }
         const c = osakaAreaCenter("dotonbori")
         const psafe = findSafeSpawnNear(c.x, c.z - 12, PLAYER_RADIUS)
@@ -12042,8 +12040,6 @@ export default function ThreeWorld({
           area: "dotonbori",
           enemyCount: 0,
           midBossSpawned: false,
-          midBossDefeated: false,
-          areaCleared: false,
         }
       }
       // ── Transfer room (built once on init) ──────────────────────────────────
@@ -17900,6 +17896,7 @@ export default function ThreeWorld({
         renderer.domElement.removeEventListener("touchmove", noopTouch)
         window.removeEventListener("resize", onResize)
         if (areaHideTimerRef.current) clearTimeout(areaHideTimerRef.current)
+        if (osakaBannerTimerId !== null) clearTimeout(osakaBannerTimerId)
       }
     }
 
