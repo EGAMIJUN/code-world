@@ -1886,6 +1886,10 @@ interface Bullet {
   homingTarget?: HomingTarget | null
   // Smoke-trail bookkeeping for the rocket (seconds until next puff).
   trailT?: number
+  // OSAKA Phase-1 curse bolt: slowly steers toward the player each frame at
+  // `homeTurn` rad/s (a lazy, dodgeable homing).
+  homePlayer?: boolean
+  homeTurn?: number
 }
 
 // A locked homing target for the RPG rocket. `pos()` returns the entity's
@@ -2337,6 +2341,9 @@ export default function ThreeWorld({
   // they belong to a stale encounter and bail instead of resurrecting the boss.
   const osakaBossRef = useRef<OsakaBoss | null>(null)
   const osakaGenRef = useRef(0)
+  // Final-madness (Phase 5, HP ≤20%): drives a persistent red screen flash.
+  const [osakaFrenzy, setOsakaFrenzy] = useState(false)
+  const osakaFrenzyRef = useRef(false)
   // OSAKA stage map (Dotonbori / Tsutenkaku / Osaka Castle). Top-level objects
   // built by buildOsakaMap, disposed on mission return.
   const osakaMapMeshesRef = useRef<THREE.Object3D[]>([])
@@ -11361,6 +11368,11 @@ export default function ThreeWorld({
         osakaGenRef.current++
         disposeOsakaGroup(ob.group)
         osakaBossRef.current = null
+        clearOsakaFx() // tear down any in-flight telegraphs / pools / splitters
+        if (osakaFrenzyRef.current) {
+          osakaFrenzyRef.current = false
+          setOsakaFrenzy(false)
+        }
       }
       // Mid-size escort yokai: a re-tinted, scaled "tall" creature on the normal
       // enemy AI, killable on its own (HP 800), flanking the boss.
@@ -11544,6 +11556,330 @@ export default function ThreeWorld({
           damage,
         })
       }
+      // ══ OSAKA boss FX — telegraphed hazards, poison pools, blink afterimages,
+      // splitter bodies. All meshes own their material and are disposed here or by
+      // clearOsakaFx; nothing leaks past the encounter. ══════════════════════════
+      const osakaFx = {
+        tele: [] as {
+          mesh: THREE.Mesh
+          mat: THREE.MeshBasicMaterial
+          x: number
+          z: number
+          r: number
+          at: number
+          dmg: number
+        }[],
+        pool: [] as {
+          mesh: THREE.Mesh
+          mat: THREE.MeshBasicMaterial
+          x: number
+          z: number
+          r: number
+          until: number
+          nextTick: number
+        }[],
+        ghost: [] as { obj: THREE.Mesh; until: number; born: number; hit: boolean }[],
+        split: [] as { mesh: THREE.Mesh; mat: THREE.Material; until: number }[],
+      }
+      const osakaRingGeo = new THREE.RingGeometry(0.84, 1, 24)
+      const osakaDiscGeo = new THREE.CircleGeometry(1, 20)
+      let osakaQuakeUntil = 0 // ground-jitter window for lanterns/signs
+      // A short screen/ground quake (reuses the rotational camera-shake system so
+      // amplitude stays mobile-safe).
+      function osakaQuake(amp: number, ms = 500) {
+        cameraShakeRef.current.intensity = Math.max(cameraShakeRef.current.intensity, amp)
+        osakaQuakeUntil = Date.now() + ms
+      }
+      // Ground telegraph: a warning ring that, after `delayMs`, bursts and deals
+      // `dmg` to the player if still inside radius `r`. Dodgeable by design.
+      function osakaTelegraph(
+        x: number,
+        z: number,
+        r: number,
+        delayMs: number,
+        dmg: number,
+        color = 0xff3322,
+      ) {
+        const mat = new THREE.MeshBasicMaterial({
+          color,
+          transparent: true,
+          opacity: 0.5,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+        })
+        const m = new THREE.Mesh(osakaRingGeo, mat)
+        m.rotation.x = -Math.PI / 2
+        m.position.set(x, 0.06, z)
+        m.scale.set(r, r, r)
+        scene.add(m)
+        osakaFx.tele.push({ mesh: m, mat, x, z, r, at: Date.now() + delayMs, dmg })
+      }
+      // Lingering poison/acid pool: ticks damage while the player stands in it.
+      function osakaPool(x: number, z: number, r: number, durationMs: number) {
+        const mat = new THREE.MeshBasicMaterial({
+          color: 0x55ff33,
+          transparent: true,
+          opacity: 0.35,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+        })
+        const m = new THREE.Mesh(osakaDiscGeo, mat)
+        m.rotation.x = -Math.PI / 2
+        m.position.set(x, 0.05, z)
+        m.scale.set(r, r, r)
+        scene.add(m)
+        osakaFx.pool.push({ mesh: m, mat, x, z, r, until: Date.now() + durationMs, nextTick: 0 })
+      }
+      // Blink afterimage: a translucent ghost that lunges-in-place with a brief
+      // contact hitbox (Phase-1 teleport echoes).
+      function osakaAfterimage(x: number, z: number) {
+        const mat = new THREE.MeshBasicMaterial({
+          color: 0x9966ff,
+          transparent: true,
+          opacity: 0.45,
+          depthWrite: false,
+        })
+        const m = new THREE.Mesh(new THREE.SphereGeometry(1.4, 8, 8), mat)
+        m.scale.set(1, 2.4, 1)
+        m.position.set(x, 2.4, z)
+        scene.add(m)
+        const now = Date.now()
+        osakaFx.ghost.push({ obj: m, born: now, until: now + 500, hit: false })
+      }
+      // Splitter body: a small meat blob that charges the player and self-detonates.
+      function osakaSplitter(x: number, z: number) {
+        const mat = new THREE.MeshStandardMaterial({
+          color: 0x7a2030,
+          emissive: 0x3a0010,
+          emissiveIntensity: 0.6,
+        })
+        const m = new THREE.Mesh(new THREE.SphereGeometry(0.7, 8, 8), mat)
+        m.position.set(x, 0.8, z)
+        scene.add(m)
+        osakaFx.split.push({ mesh: m, mat, until: Date.now() + 6000 })
+      }
+      function disposeFxMesh(m: THREE.Mesh) {
+        scene.remove(m)
+        m.geometry.dispose()
+        const mm = m.material
+        if (Array.isArray(mm)) for (const x of mm) x.dispose()
+        else mm.dispose()
+      }
+      function clearOsakaFx() {
+        for (const t of osakaFx.tele) disposeFxMesh(t.mesh)
+        for (const p of osakaFx.pool) disposeFxMesh(p.mesh)
+        for (const g of osakaFx.ghost) disposeFxMesh(g.obj)
+        for (const s of osakaFx.split) disposeFxMesh(s.mesh)
+        osakaFx.tele.length = 0
+        osakaFx.pool.length = 0
+        osakaFx.ghost.length = 0
+        osakaFx.split.length = 0
+      }
+      // Per-frame FX driver: telegraph bursts, pool ticks, ghost contact, splitter
+      // homing + self-detonation. Damage respects the spawn-invuln window.
+      function updateOsakaFx(dt: number) {
+        const now = Date.now()
+        const safe = now > spawnInvulnUntilRef.current && gamePhaseRef.current === "playing"
+        const px = focalPoint.x
+        const pz = focalPoint.z
+        for (let i = osakaFx.tele.length - 1; i >= 0; i--) {
+          const tg = osakaFx.tele[i]
+          if (!tg) continue
+          const left = tg.at - now
+          tg.mat.opacity = 0.3 + 0.4 * Math.abs(Math.sin(now * 0.012))
+          if (left <= 0) {
+            spawnExplosion(new THREE.Vector3(tg.x, 0.4, tg.z), false, false)
+            if (safe && Math.hypot(px - tg.x, pz - tg.z) < tg.r) applyPlayerDamage(tg.dmg, 4)
+            disposeFxMesh(tg.mesh)
+            osakaFx.tele.splice(i, 1)
+          }
+        }
+        for (let i = osakaFx.pool.length - 1; i >= 0; i--) {
+          const pl = osakaFx.pool[i]
+          if (!pl) continue
+          pl.mat.opacity = 0.25 + 0.15 * Math.sin(now * 0.006 + i)
+          if (now >= pl.nextTick && safe && Math.hypot(px - pl.x, pz - pl.z) < pl.r) {
+            applyPlayerDamage(7, 1)
+            pl.nextTick = now + 400
+          }
+          if (now >= pl.until) {
+            disposeFxMesh(pl.mesh)
+            osakaFx.pool.splice(i, 1)
+          }
+        }
+        for (let i = osakaFx.ghost.length - 1; i >= 0; i--) {
+          const g = osakaFx.ghost[i]
+          if (!g) continue
+          const m = g.obj.material as THREE.MeshBasicMaterial
+          m.opacity = 0.45 * Math.max(0, (g.until - now) / 500)
+          if (!g.hit && safe && Math.hypot(px - g.obj.position.x, pz - g.obj.position.z) < 2.4) {
+            g.hit = true
+            applyPlayerDamage(16, 3)
+          }
+          if (now >= g.until) {
+            disposeFxMesh(g.obj)
+            osakaFx.ghost.splice(i, 1)
+          }
+        }
+        for (let i = osakaFx.split.length - 1; i >= 0; i--) {
+          const s = osakaFx.split[i]
+          if (!s) continue
+          const dx = px - s.mesh.position.x
+          const dz = pz - s.mesh.position.z
+          const d = Math.hypot(dx, dz) || 1
+          s.mesh.position.x += (dx / d) * 9 * dt
+          s.mesh.position.z += (dz / d) * 9 * dt
+          if (d < 1.8 || now >= s.until) {
+            spawnExplosion(s.mesh.position.clone().setY(1), false, false)
+            if (safe && d < 3) applyPlayerDamage(22, 4)
+            disposeFxMesh(s.mesh)
+            osakaFx.split.splice(i, 1)
+          }
+        }
+      }
+      // ══ OSAKA environment: rain, ripples, collapsing bridges ════════════════
+      let osakaRain: { mesh: THREE.InstancedMesh; vy: Float32Array; count: number } | null = null
+      const osakaRipples: { mesh: THREE.Mesh; mat: THREE.MeshBasicMaterial; t: number }[] = []
+      const osakaBridges: {
+        mesh: THREE.Mesh
+        x: number
+        z: number
+        hw: number
+        hd: number
+        stand: number
+        state: "idle" | "shaking" | "falling"
+        baseY: number
+      }[] = []
+      const osakaRainDummy = new THREE.Object3D()
+      // Build the rain field (InstancedMesh streaks; PC 400 / mobile 150).
+      function buildOsakaRain() {
+        const count = isMobileDevice ? 150 : 400
+        const geo = new THREE.BoxGeometry(0.025, 1.3, 0.025)
+        const mat = new THREE.MeshBasicMaterial({
+          color: 0x9fc4ff,
+          transparent: true,
+          opacity: 0.5,
+          depthWrite: false,
+        })
+        const mesh = new THREE.InstancedMesh(geo, mat, count)
+        mesh.frustumCulled = false
+        const vy = new Float32Array(count)
+        for (let i = 0; i < count; i++) {
+          osakaRainDummy.position.set(
+            -90 + Math.random() * 180,
+            Math.random() * 40,
+            -90 + Math.random() * 180,
+          )
+          osakaRainDummy.updateMatrix()
+          mesh.setMatrixAt(i, osakaRainDummy.matrix)
+          vy[i] = 26 + Math.random() * 12
+        }
+        mesh.instanceMatrix.needsUpdate = true
+        scene.add(mesh)
+        osakaRain = { mesh, vy, count }
+        osakaMapMeshesRef.current.push(mesh) // disposed with the map
+      }
+      function osakaRipple(x: number, z: number) {
+        if (osakaRipples.length > (isMobileDevice ? 8 : 20)) return
+        const mat = new THREE.MeshBasicMaterial({
+          color: 0xaaccff,
+          transparent: true,
+          opacity: 0.5,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+        })
+        const m = new THREE.Mesh(osakaRingGeo, mat)
+        m.rotation.x = -Math.PI / 2
+        m.position.set(x, 0.04, z)
+        m.scale.setScalar(0.3)
+        scene.add(m)
+        osakaRipples.push({ mesh: m, mat, t: 0 })
+      }
+      // Per-frame rain fall + occasional ground ripples (OSAKA stage only).
+      function updateOsakaRain(dt: number) {
+        if (osakaRain) {
+          const { mesh, vy, count } = osakaRain
+          const cx = focalPoint.x
+          const cz = focalPoint.z
+          for (let i = 0; i < count; i++) {
+            mesh.getMatrixAt(i, osakaRainDummy.matrix)
+            osakaRainDummy.matrix.decompose(
+              osakaRainDummy.position,
+              osakaRainDummy.quaternion,
+              osakaRainDummy.scale,
+            )
+            osakaRainDummy.position.y -= (vy[i] ?? 30) * dt
+            if (osakaRainDummy.position.y < 0) {
+              // landed → reset to the top near the player + an occasional ripple
+              if (Math.random() < 0.04)
+                osakaRipple(osakaRainDummy.position.x, osakaRainDummy.position.z)
+              osakaRainDummy.position.set(
+                cx - 90 + Math.random() * 180,
+                35 + Math.random() * 8,
+                cz - 90 + Math.random() * 180,
+              )
+            }
+            osakaRainDummy.updateMatrix()
+            mesh.setMatrixAt(i, osakaRainDummy.matrix)
+          }
+          mesh.instanceMatrix.needsUpdate = true
+        }
+        for (let i = osakaRipples.length - 1; i >= 0; i--) {
+          const r = osakaRipples[i]
+          if (!r) continue
+          r.t += dt
+          r.mesh.scale.setScalar(0.3 + r.t * 6)
+          r.mat.opacity = Math.max(0, 0.5 * (1 - r.t / 0.5))
+          if (r.t >= 0.5) {
+            disposeFxMesh(r.mesh)
+            osakaRipples.splice(i, 1)
+          }
+        }
+      }
+      // Per-frame bridge collapse: standing too long → shake → drop → fall damage.
+      function updateOsakaEnv(dt: number) {
+        const now = Date.now()
+        const px = focalPoint.x - HUNT_ARENA.x // bridges are stored in group-local x/z
+        const pz = focalPoint.z - HUNT_ARENA.z
+        for (let i = osakaBridges.length - 1; i >= 0; i--) {
+          const b = osakaBridges[i]
+          if (!b) continue
+          const on = Math.abs(px - b.x) < b.hw && Math.abs(pz - b.z) < b.hd
+          if (b.state === "idle") {
+            b.stand = on ? b.stand + dt : Math.max(0, b.stand - dt * 2)
+            if (b.stand > 1.5) {
+              b.state = "shaking"
+              b.stand = 0
+              SOUNDS.huntWarn() // creaking-collapse warning
+            }
+          } else if (b.state === "shaking") {
+            b.stand += dt
+            b.mesh.rotation.z = Math.sin(now * 0.05) * 0.04
+            b.mesh.rotation.x = Math.cos(now * 0.043) * 0.03
+            osakaQuake(2, 120)
+            if (b.stand > 1.0) {
+              b.state = "falling"
+              if (on && gamePhaseRef.current === "playing" && now > spawnInvulnUntilRef.current) {
+                applyPlayerDamage(40, 6) // tumbled into the canal
+              }
+            }
+          } else {
+            b.mesh.position.y -= 9 * dt
+            b.mesh.rotation.z += dt * 0.6
+            if (b.mesh.position.y < -8) {
+              b.mesh.parent?.remove(b.mesh) // deck is a child of the map group
+              b.mesh.geometry.dispose()
+              ;(b.mesh.material as THREE.Material).dispose()
+              osakaBridges.splice(i, 1)
+            }
+          }
+        }
+      }
+      // Per-phase periodic sub-attacks fire on their own timers (reset on a phase
+      // change), independent of the main attackTimer.
+      let osakaPhaseSeen = 0
+      let osakaAuxA = 0
+      let osakaAuxB = 0
       // Per-frame boss driver: core pulse/reveal, limb sway, stalk, fodder top-up
       // and the form-specific attack on the attackTimer (1.5× cadence while raging).
       function updateOsakaBoss(dt: number) {
@@ -11551,13 +11887,22 @@ export default function ThreeWorld({
         if (!ob || ob.transitioning) return
         const now = Date.now()
         const t = now / 1000
-        // Form 5: reveal cores by HP thirds — popping all three is the kill.
+        // Form 5: the three cores rotate exposure (only the lit one is hittable);
+        // at ≤20% HP the boss goes berserk — every core exposed + red screen flash.
         if (ob.phase === 5) {
-          const ratio = ob.phaseHp / ob.phaseMaxHp
-          const liveWanted = ratio > 0.66 ? 3 : ratio > 0.33 ? 2 : 1
-          ob.cores.forEach((co, i) => {
-            co.visible = i < liveWanted
-          })
+          const frenzy = ob.phaseHp / ob.phaseMaxHp <= 0.2
+          if (frenzy !== osakaFrenzyRef.current) {
+            osakaFrenzyRef.current = frenzy
+            setOsakaFrenzy(frenzy)
+          }
+          if (frenzy) {
+            for (const co of ob.cores) co.visible = true
+          } else {
+            const idx = Math.floor(t / 2.5) % ob.cores.length
+            ob.cores.forEach((co, i) => {
+              co.visible = i === idx
+            })
+          }
         }
         const pulse = 0.85 + (Math.sin(t * 4) * 0.5 + 0.5) * 0.3 // 0.85..1.15
         const coreBase = ob.phase === 2 ? 1.4 : ob.phase === 4 ? 1.6 : ob.phase === 5 ? 1.3 : 1.0
@@ -11592,21 +11937,88 @@ export default function ThreeWorld({
           osakaSpawnZako(2)
           ob.nextZakoAt = now + OSAKA_ZAKO_INTERVAL
         }
-        const rage = ob.phaseHp <= ob.phaseMaxHp * 0.5
-        const moveSpeed = ob.phase === 1 ? 3.5 : ob.phase === 2 ? 2.0 : ob.phase === 4 ? 1.5 : 0.8
+        // Rage tiers: ≤50% → 1.5× cadence; ≤25% → 2× cadence + 1.3× move speed.
+        const hpFrac = ob.phaseHp / ob.phaseMaxHp
+        const rage = hpFrac <= 0.5
+        const furious = hpFrac <= 0.25
+        const moveSpeed =
+          (ob.phase === 1 ? 3.5 : ob.phase === 2 ? 2.0 : ob.phase === 4 ? 1.5 : 0.8) *
+          (furious ? 1.3 : 1)
         if (dist > 3) {
           ob.group.position.x += (toX / dist) * moveSpeed * dt
           ob.group.position.z += (toZ / dist) * moveSpeed * dt
         }
-        ob.attackTimer -= dt
-        if (ob.attackTimer > 0) return
         const safeToHit = now > spawnInvulnUntilRef.current
         const bossPos = new THREE.Vector3(ob.group.position.x, 2, ob.group.position.z)
         const aim = new THREE.Vector3(toX, 0, toZ)
+        // Reset the periodic sub-attack timers when the form changes.
+        if (ob.phase !== osakaPhaseSeen) {
+          osakaPhaseSeen = ob.phase
+          osakaAuxA = now + 1500
+          osakaAuxB = now + 2500
+        }
+        // ── Periodic, telegraphed sub-attacks (independent of attackTimer) ──
+        if (ob.phase === 1 && now >= osakaAuxA) {
+          osakaAuxA = now + (furious ? 1200 : 2000)
+          // Slow purple curse bolt that lazily homes on the player (dodgeable).
+          const mesh = new THREE.Mesh(
+            new THREE.SphereGeometry(0.45, 8, 8),
+            new THREE.MeshBasicMaterial({ color: 0xaa44ff }),
+          )
+          mesh.position.set(bossPos.x, 3, bossPos.z)
+          scene.add(mesh)
+          bullets.push({
+            mesh,
+            velocity: aim.clone().normalize().multiplyScalar(6),
+            life: 5,
+            isEnemy: true,
+            damage: 20,
+            homePlayer: true,
+            homeTurn: 1.1,
+          })
+        }
+        if (ob.phase === 2 && now >= osakaAuxB) {
+          osakaAuxB = now + (furious ? 1800 : 3000)
+          // Shadow spear: telegraph at the player's feet → erupts after 0.8s.
+          osakaTelegraph(px, pz, 2.4, 800, 30, 0x6600aa)
+        }
+        if (ob.phase === 3 && now >= osakaAuxB) {
+          osakaAuxB = now + (furious ? 2400 : 3800)
+          // Bone rain: shadows mark random spots near the player, then shards drop.
+          const n = isMobileDevice ? 5 : 10
+          for (let i = 0; i < n; i++) {
+            osakaTelegraph(
+              px + (Math.random() - 0.5) * 22,
+              pz + (Math.random() - 0.5) * 22,
+              2.2,
+              700 + Math.random() * 400,
+              18,
+              0xddeeff,
+            )
+          }
+        }
+        if (ob.phase === 4 && now >= osakaAuxA) {
+          osakaAuxA = now + (furious ? 2600 : 4000)
+          // Acid spew: a fan of lingering poison pools in front of the boss.
+          const baseAng = Math.atan2(toZ, toX)
+          for (let i = -1; i <= 1; i++) {
+            const a = baseAng + i * 0.4
+            osakaPool(bossPos.x + Math.cos(a) * 7, bossPos.z + Math.sin(a) * 7, 3.2, 3000)
+          }
+        }
+        ob.attackTimer -= dt
+        if (ob.attackTimer > 0) return
         let cooldown = 2.0
         if (ob.phase === 1) {
-          // melee lunge + occasional blink-teleport beside the player
+          // melee lunge + occasional blink-teleport, now leaving 3 afterimages
+          // that each keep a brief lunge hitbox where the boss used to be.
           if (Math.random() < 0.3) {
+            for (let i = 0; i < 3; i++) {
+              osakaAfterimage(
+                ob.group.position.x + (Math.random() - 0.5) * 6,
+                ob.group.position.z + (Math.random() - 0.5) * 6,
+              )
+            }
             const a = Math.random() * Math.PI * 2
             ob.group.position.set(px + Math.cos(a) * 5, 0, pz + Math.sin(a) * 5)
             spawnExplosion(ob.group.position.clone().setY(1), true, false)
@@ -11615,28 +12027,55 @@ export default function ThreeWorld({
           }
           cooldown = 1.8
         } else if (ob.phase === 2) {
-          // sweeping arms: AOE within radius 8
+          // sweeping arms: AOE within radius 8 …
           if (dist < 8 && safeToHit) applyPlayerDamage(28, 6)
           spawnExplosion(bossPos.clone(), false, false)
+          // … plus an 8-arm flurry: shockwave telegraphs marching outward from
+          // the boss toward the player, each bursting in sequence.
+          for (let i = 0; i < 8; i++) {
+            const a = (i / 8) * Math.PI * 2
+            const rr = 3 + (i % 4) * 2.5
+            osakaTelegraph(
+              ob.group.position.x + Math.cos(a) * rr,
+              ob.group.position.z + Math.sin(a) * rr,
+              3,
+              500 + i * 120,
+              22,
+            )
+          }
+          osakaQuake(4)
           cooldown = 2.6
         } else if (ob.phase === 3) {
-          // three psychic bolts fanned at the player
+          // three psychic bolts fanned at the player …
           for (let i = -1; i <= 1; i++) {
             const d = aim.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), i * 0.18)
             osakaFireBolt(new THREE.Vector3(bossPos.x, 4.6, bossPos.z), d, 22, 16)
           }
+          // … plus an all-directions tentacle sweep (a wide ring closing in).
+          osakaTelegraph(ob.group.position.x, ob.group.position.z, 12, 700, 26, 0xbbaa66)
           cooldown = 2.2
         } else if (ob.phase === 4) {
-          // summon two fodder + a charge
+          // summon two fodder + a charge …
           osakaSpawnZako(2)
           if (dist < 4 && safeToHit) applyPlayerDamage(30, 6)
+          // … plus releasing 4 splitter bodies that charge in and self-detonate.
+          for (let i = 0; i < 4; i++) {
+            const a = (i / 4) * Math.PI * 2
+            osakaSplitter(
+              ob.group.position.x + Math.cos(a) * 3,
+              ob.group.position.z + Math.sin(a) * 3,
+            )
+          }
+          osakaQuake(5) // the charge shakes the ground
           cooldown = 4.0
         } else {
-          // form 5: random pick of the above + an 8-way iron-ball barrage
+          // form 5 五重混体: every prior form's attack at random, plus a doubled
+          // 16-way iron-ball barrage. Frenzy (≤20% HP) rides the furious cadence.
           const roll = Math.random()
-          if (roll < 0.4) {
-            for (let i = 0; i < 8; i++) {
-              const a = (i / 8) * Math.PI * 2
+          if (roll < 0.3) {
+            // 16-way iron-ball barrage (double the old 8-way)
+            for (let i = 0; i < 16; i++) {
+              const a = (i / 16) * Math.PI * 2
               osakaFireBolt(
                 new THREE.Vector3(bossPos.x, 6, bossPos.z),
                 new THREE.Vector3(Math.cos(a), 0, Math.sin(a)),
@@ -11645,18 +12084,75 @@ export default function ThreeWorld({
                 0xffaa00,
               )
             }
-          } else if (roll < 0.7) {
+          } else if (roll < 0.48) {
+            // P2 arm flurry shockwaves
+            for (let i = 0; i < 8; i++) {
+              const a = (i / 8) * Math.PI * 2
+              const rr = 3 + (i % 4) * 2.5
+              osakaTelegraph(
+                ob.group.position.x + Math.cos(a) * rr,
+                ob.group.position.z + Math.sin(a) * rr,
+                3,
+                450 + i * 110,
+                22,
+              )
+            }
+            osakaQuake(5)
+          } else if (roll < 0.62) {
+            // P3 bone rain
+            const n = isMobileDevice ? 5 : 10
+            for (let i = 0; i < n; i++) {
+              osakaTelegraph(
+                px + (Math.random() - 0.5) * 22,
+                pz + (Math.random() - 0.5) * 22,
+                2.2,
+                700,
+                18,
+                0xddeeff,
+              )
+            }
+          } else if (roll < 0.76) {
+            // P4 splitter release
+            for (let i = 0; i < 4; i++) {
+              const a = (i / 4) * Math.PI * 2
+              osakaSplitter(
+                ob.group.position.x + Math.cos(a) * 3,
+                ob.group.position.z + Math.sin(a) * 3,
+              )
+            }
+          } else if (roll < 0.9) {
+            // P3 fanned bolts + a P1 homing curse bolt
             for (let i = -1; i <= 1; i++) {
               const d = aim.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), i * 0.18)
               osakaFireBolt(new THREE.Vector3(bossPos.x, 8, bossPos.z), d, 24, 18)
             }
+            const cm = new THREE.Mesh(
+              new THREE.SphereGeometry(0.45, 8, 8),
+              new THREE.MeshBasicMaterial({ color: 0xaa44ff }),
+            )
+            cm.position.set(bossPos.x, 3, bossPos.z)
+            scene.add(cm)
+            bullets.push({
+              mesh: cm,
+              velocity: aim.clone().normalize().multiplyScalar(6),
+              life: 5,
+              isEnemy: true,
+              damage: 20,
+              homePlayer: true,
+              homeTurn: 1.1,
+            })
           } else {
-            osakaSpawnZako(2)
+            // P4 acid pools in front + a charge
+            const baseAng = Math.atan2(toZ, toX)
+            for (let i = -1; i <= 1; i++) {
+              const a = baseAng + i * 0.4
+              osakaPool(bossPos.x + Math.cos(a) * 7, bossPos.z + Math.sin(a) * 7, 3.2, 3000)
+            }
             if (dist < 6 && safeToHit) applyPlayerDamage(34, 7)
           }
-          cooldown = 1.5
+          cooldown = 1.4
         }
-        ob.attackTimer = cooldown * (rage ? 0.667 : 1)
+        ob.attackTimer = cooldown * (furious ? 0.5 : rage ? 0.667 : 1)
       }
       // ══ OSAKA area progression (Phase 2b) ════════════════════════════════════
       // Dotonbori → Tsutenkaku → Castle, each: clear the fodder wave → mid-boss →
@@ -12753,6 +13249,17 @@ export default function ThreeWorld({
           const deck = new THREE.Mesh(new THREE.BoxGeometry(10, 0.6, 24), bridgeMat)
           deck.position.set(bx, 0.3, 75)
           add(deck)
+          // Register the deck as a collapsible gimmick (group-local x/z).
+          osakaBridges.push({
+            mesh: deck,
+            x: bx,
+            z: 75,
+            hw: 5,
+            hd: 12,
+            stand: 0,
+            state: "idle",
+            baseY: 0.3,
+          })
           for (const side of [-1, 1]) {
             for (let r = 0; r < dn(9); r++) {
               const post = new THREE.Mesh(railGeo, bridgeMat)
@@ -13462,6 +13969,7 @@ export default function ThreeWorld({
         scene.fog = new THREE.Fog(0x050510, 30, 120)
         scene.add(group)
         osakaMapMeshesRef.current.push(group)
+        buildOsakaRain() // OSAKA-only rain field (disposed with the map)
       }
       // Dispose the OSAKA map + restore the prior fog (called from huntClearStage).
       // Disposes geometry, materials AND the sign CanvasTextures (material.dispose
@@ -13486,6 +13994,12 @@ export default function ThreeWorld({
         }
         osakaMapMeshesRef.current = []
         osakaAnim = null // scenery handles die with the disposed meshes
+        // Environment teardown: rain handle (mesh disposed above via the ref),
+        // any live ripples, and the bridge-collapse list.
+        osakaRain = null
+        for (const r of osakaRipples) disposeFxMesh(r.mesh)
+        osakaRipples.length = 0
+        osakaBridges.length = 0
         if (huntStageFogWasSaved) {
           scene.fog = huntStageFogSaved
           huntStageFogSaved = null
@@ -13507,7 +14021,12 @@ export default function ThreeWorld({
             n.mat.emissiveIntensity = n.base * (0.8 + 0.2 * Math.sin(t * n.spd + n.phase))
           }
         }
-        for (const s of a.sway) s.obj.rotation.z = s.base + Math.sin(t * s.spd + s.phase) * s.amp
+        // Lanterns/noren sway; during a quake they jolt much harder.
+        const quaking = Date.now() < osakaQuakeUntil
+        for (const s of a.sway) {
+          const jolt = quaking ? Math.sin(t * 40 + s.phase) * 0.25 : 0
+          s.obj.rotation.z = s.base + Math.sin(t * s.spd + s.phase) * s.amp + jolt
+        }
         for (const b of a.blink) b.mesh.visible = Math.sin(t * b.spd + b.phase) > 0.4
         for (const w of a.water) {
           w.obj.position.x = w.baseX + Math.sin(t * w.spd + w.phase) * 0.6
@@ -16509,6 +17028,9 @@ export default function ThreeWorld({
           updateOsakaBoss(dt) // OSAKA 五変化 boss
           updateOsakaMidBoss(dt) // OSAKA mid-boss (Tengu / Yamaya)
           updateOsakaMap(dt) // OSAKA scenery animation (neon, lanterns, marquee…)
+          updateOsakaFx(dt) // OSAKA boss hazards (telegraphs, pools, splitters…)
+          updateOsakaRain(dt) // OSAKA rain streaks + ground ripples
+          updateOsakaEnv(dt) // OSAKA collapsing bridges
         }
         // HUNT room compass: rotate the on-screen arrow toward the orb (which
         // sits at the room centre) in the player's local frame. Room phase only.
@@ -17041,6 +17563,21 @@ export default function ThreeWorld({
               refs.bullets.splice(i, 1)
             }
             continue
+          }
+          // OSAKA curse bolt: lazily steer the heading toward the player.
+          if (b.homePlayer) {
+            const speed = b.velocity.length() || 1
+            const want = new THREE.Vector3(
+              refs.focalPoint.x - b.mesh.position.x,
+              EYE_HEIGHT - b.mesh.position.y,
+              refs.focalPoint.z - b.mesh.position.z,
+            ).normalize()
+            const cur = b.velocity.clone().normalize()
+            const ang = cur.angleTo(want)
+            if (ang > 1e-3) {
+              cur.lerp(want, Math.min(1, ((b.homeTurn ?? 1) * dt) / ang)).normalize()
+              b.velocity.copy(cur.multiplyScalar(speed))
+            }
           }
           // Grenades arc under gravity (plain bullets travel in straight
           // lines — flag-gated so we don't pay this cost on every shot).
@@ -19496,6 +20033,25 @@ export default function ThreeWorld({
               zIndex: 6,
             }}
           />
+        )}
+
+        {/* OSAKA five-change boss final madness — pulsing red overlay. */}
+        {osakaFrenzy && (
+          <div
+            style={{
+              position: "absolute",
+              inset: 0,
+              background:
+                "radial-gradient(ellipse at center, transparent 30%, rgba(255,0,0,0.55) 100%)",
+              pointerEvents: "none",
+              zIndex: 5,
+              animation: "osakaFrenzyPulse 0.6s ease-in-out infinite",
+            }}
+          >
+            <style>
+              {"@keyframes osakaFrenzyPulse { 0%,100% { opacity: 0.35; } 50% { opacity: 0.9; } }"}
+            </style>
+          </div>
         )}
 
         {/* ══ HUNT mode HUD (PR-Z1) ══════════════════════════════════════════ */}
