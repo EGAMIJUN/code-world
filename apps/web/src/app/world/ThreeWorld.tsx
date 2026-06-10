@@ -2341,6 +2341,9 @@ export default function ThreeWorld({
   // they belong to a stale encounter and bail instead of resurrecting the boss.
   const osakaBossRef = useRef<OsakaBoss | null>(null)
   const osakaGenRef = useRef(0)
+  // Final-madness (Phase 5, HP ≤20%): drives a persistent red screen flash.
+  const [osakaFrenzy, setOsakaFrenzy] = useState(false)
+  const osakaFrenzyRef = useRef(false)
   // OSAKA stage map (Dotonbori / Tsutenkaku / Osaka Castle). Top-level objects
   // built by buildOsakaMap, disposed on mission return.
   const osakaMapMeshesRef = useRef<THREE.Object3D[]>([])
@@ -11366,6 +11369,10 @@ export default function ThreeWorld({
         disposeOsakaGroup(ob.group)
         osakaBossRef.current = null
         clearOsakaFx() // tear down any in-flight telegraphs / pools / splitters
+        if (osakaFrenzyRef.current) {
+          osakaFrenzyRef.current = false
+          setOsakaFrenzy(false)
+        }
       }
       // Mid-size escort yokai: a re-tinted, scaled "tall" creature on the normal
       // enemy AI, killable on its own (HP 800), flanking the boss.
@@ -11742,13 +11749,22 @@ export default function ThreeWorld({
         if (!ob || ob.transitioning) return
         const now = Date.now()
         const t = now / 1000
-        // Form 5: reveal cores by HP thirds — popping all three is the kill.
+        // Form 5: the three cores rotate exposure (only the lit one is hittable);
+        // at ≤20% HP the boss goes berserk — every core exposed + red screen flash.
         if (ob.phase === 5) {
-          const ratio = ob.phaseHp / ob.phaseMaxHp
-          const liveWanted = ratio > 0.66 ? 3 : ratio > 0.33 ? 2 : 1
-          ob.cores.forEach((co, i) => {
-            co.visible = i < liveWanted
-          })
+          const frenzy = ob.phaseHp / ob.phaseMaxHp <= 0.2
+          if (frenzy !== osakaFrenzyRef.current) {
+            osakaFrenzyRef.current = frenzy
+            setOsakaFrenzy(frenzy)
+          }
+          if (frenzy) {
+            for (const co of ob.cores) co.visible = true
+          } else {
+            const idx = Math.floor(t / 2.5) % ob.cores.length
+            ob.cores.forEach((co, i) => {
+              co.visible = i === idx
+            })
+          }
         }
         const pulse = 0.85 + (Math.sin(t * 4) * 0.5 + 0.5) * 0.3 // 0.85..1.15
         const coreBase = ob.phase === 2 ? 1.4 : ob.phase === 4 ? 1.6 : ob.phase === 5 ? 1.3 : 1.0
@@ -11914,11 +11930,13 @@ export default function ThreeWorld({
           }
           cooldown = 4.0
         } else {
-          // form 5: random pick of the above + an 8-way iron-ball barrage
+          // form 5 五重混体: every prior form's attack at random, plus a doubled
+          // 16-way iron-ball barrage. Frenzy (≤20% HP) rides the furious cadence.
           const roll = Math.random()
-          if (roll < 0.4) {
-            for (let i = 0; i < 8; i++) {
-              const a = (i / 8) * Math.PI * 2
+          if (roll < 0.3) {
+            // 16-way iron-ball barrage (double the old 8-way)
+            for (let i = 0; i < 16; i++) {
+              const a = (i / 16) * Math.PI * 2
               osakaFireBolt(
                 new THREE.Vector3(bossPos.x, 6, bossPos.z),
                 new THREE.Vector3(Math.cos(a), 0, Math.sin(a)),
@@ -11927,16 +11945,73 @@ export default function ThreeWorld({
                 0xffaa00,
               )
             }
-          } else if (roll < 0.7) {
+          } else if (roll < 0.48) {
+            // P2 arm flurry shockwaves
+            for (let i = 0; i < 8; i++) {
+              const a = (i / 8) * Math.PI * 2
+              const rr = 3 + (i % 4) * 2.5
+              osakaTelegraph(
+                ob.group.position.x + Math.cos(a) * rr,
+                ob.group.position.z + Math.sin(a) * rr,
+                3,
+                450 + i * 110,
+                22,
+              )
+            }
+            osakaQuake(5)
+          } else if (roll < 0.62) {
+            // P3 bone rain
+            const n = isMobileDevice ? 5 : 10
+            for (let i = 0; i < n; i++) {
+              osakaTelegraph(
+                px + (Math.random() - 0.5) * 22,
+                pz + (Math.random() - 0.5) * 22,
+                2.2,
+                700,
+                18,
+                0xddeeff,
+              )
+            }
+          } else if (roll < 0.76) {
+            // P4 splitter release
+            for (let i = 0; i < 4; i++) {
+              const a = (i / 4) * Math.PI * 2
+              osakaSplitter(
+                ob.group.position.x + Math.cos(a) * 3,
+                ob.group.position.z + Math.sin(a) * 3,
+              )
+            }
+          } else if (roll < 0.9) {
+            // P3 fanned bolts + a P1 homing curse bolt
             for (let i = -1; i <= 1; i++) {
               const d = aim.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), i * 0.18)
               osakaFireBolt(new THREE.Vector3(bossPos.x, 8, bossPos.z), d, 24, 18)
             }
+            const cm = new THREE.Mesh(
+              new THREE.SphereGeometry(0.45, 8, 8),
+              new THREE.MeshBasicMaterial({ color: 0xaa44ff }),
+            )
+            cm.position.set(bossPos.x, 3, bossPos.z)
+            scene.add(cm)
+            bullets.push({
+              mesh: cm,
+              velocity: aim.clone().normalize().multiplyScalar(6),
+              life: 5,
+              isEnemy: true,
+              damage: 20,
+              homePlayer: true,
+              homeTurn: 1.1,
+            })
           } else {
-            osakaSpawnZako(2)
+            // P4 acid pools in front + a charge
+            const baseAng = Math.atan2(toZ, toX)
+            for (let i = -1; i <= 1; i++) {
+              const a = baseAng + i * 0.4
+              osakaPool(bossPos.x + Math.cos(a) * 7, bossPos.z + Math.sin(a) * 7, 3.2, 3000)
+            }
             if (dist < 6 && safeToHit) applyPlayerDamage(34, 7)
           }
-          cooldown = 1.5
+          cooldown = 1.4
         }
         ob.attackTimer = cooldown * (furious ? 0.5 : rage ? 0.667 : 1)
       }
@@ -19799,6 +19874,25 @@ export default function ThreeWorld({
               zIndex: 6,
             }}
           />
+        )}
+
+        {/* OSAKA five-change boss final madness — pulsing red overlay. */}
+        {osakaFrenzy && (
+          <div
+            style={{
+              position: "absolute",
+              inset: 0,
+              background:
+                "radial-gradient(ellipse at center, transparent 30%, rgba(255,0,0,0.55) 100%)",
+              pointerEvents: "none",
+              zIndex: 5,
+              animation: "osakaFrenzyPulse 0.6s ease-in-out infinite",
+            }}
+          >
+            <style>
+              {"@keyframes osakaFrenzyPulse { 0%,100% { opacity: 0.35; } 50% { opacity: 0.9; } }"}
+            </style>
+          </div>
         )}
 
         {/* ══ HUNT mode HUD (PR-Z1) ══════════════════════════════════════════ */}
