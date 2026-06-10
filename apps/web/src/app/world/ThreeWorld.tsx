@@ -583,7 +583,7 @@ interface HuntLevel {
 // stage = arena dressing (outdoor day vs. indoor green-lit hall);
 // difficulty = which HUNT_LEVELS entry a fresh run starts at (1/2/3).
 type HuntMissionConfig = {
-  stage: "outdoor" | "indoor"
+  stage: "outdoor" | "indoor" | "osaka"
   difficulty: 1 | 2 | 3
 }
 // Per-theme minion spec — reuse an existing enemy model with a colour/scale
@@ -2273,6 +2273,9 @@ export default function ThreeWorld({
   // they belong to a stale encounter and bail instead of resurrecting the boss.
   const osakaBossRef = useRef<OsakaBoss | null>(null)
   const osakaGenRef = useRef(0)
+  // OSAKA stage map (Dotonbori / Tsutenkaku / Osaka Castle). Top-level objects
+  // built by buildOsakaMap, disposed on mission return.
+  const osakaMapMeshesRef = useRef<THREE.Object3D[]>([])
   // Set by the O key (component scope); consumed in the animate loop where
   // spawnOsakaBoss is in scope.
   const osakaSpawnReqRef = useRef(false)
@@ -11597,7 +11600,7 @@ export default function ThreeWorld({
       let huntPanelClickAt = 0 // throttle held-fire so one tap = one selection
       // Clickable regions in normalised canvas space (top-left origin).
       type HuntPanelHit =
-        | { kind: "stage"; value: "outdoor" | "indoor" }
+        | { kind: "stage"; value: "outdoor" | "indoor" | "osaka" }
         | { kind: "difficulty"; value: 1 | 2 | 3 }
         | { kind: "deploy" }
       const HUNT_PANEL_REGIONS: {
@@ -11607,12 +11610,13 @@ export default function ThreeWorld({
         y1: number
         hit: HuntPanelHit
       }[] = [
-        { x0: 0.05, y0: 0.26, x1: 0.46, y1: 0.42, hit: { kind: "stage", value: "outdoor" } },
-        { x0: 0.05, y0: 0.45, x1: 0.46, y1: 0.61, hit: { kind: "stage", value: "indoor" } },
-        { x0: 0.54, y0: 0.24, x1: 0.95, y1: 0.37, hit: { kind: "difficulty", value: 1 } },
-        { x0: 0.54, y0: 0.4, x1: 0.95, y1: 0.53, hit: { kind: "difficulty", value: 2 } },
-        { x0: 0.54, y0: 0.56, x1: 0.95, y1: 0.69, hit: { kind: "difficulty", value: 3 } },
-        { x0: 0.22, y0: 0.78, x1: 0.78, y1: 0.94, hit: { kind: "deploy" } },
+        { x0: 0.05, y0: 0.24, x1: 0.46, y1: 0.36, hit: { kind: "stage", value: "outdoor" } },
+        { x0: 0.05, y0: 0.38, x1: 0.46, y1: 0.5, hit: { kind: "stage", value: "indoor" } },
+        { x0: 0.05, y0: 0.52, x1: 0.46, y1: 0.64, hit: { kind: "stage", value: "osaka" } },
+        { x0: 0.54, y0: 0.24, x1: 0.95, y1: 0.36, hit: { kind: "difficulty", value: 1 } },
+        { x0: 0.54, y0: 0.38, x1: 0.95, y1: 0.5, hit: { kind: "difficulty", value: 2 } },
+        { x0: 0.54, y0: 0.52, x1: 0.95, y1: 0.64, hit: { kind: "difficulty", value: 3 } },
+        { x0: 0.22, y0: 0.72, x1: 0.78, y1: 0.9, hit: { kind: "deploy" } },
       ]
       // ── HUNT indoor stage overlay (built per mission, disposed on return) ─────
       let huntIndoorGroup: THREE.Group | null = null
@@ -11620,6 +11624,9 @@ export default function ThreeWorld({
       // Original values captured on apply so the outdoor look is restored exactly.
       const huntStageLightSaved: { light: THREE.Light; intensity: number }[] = []
       const huntStageColorSaved: { mat: THREE.MeshStandardMaterial; color: number }[] = []
+      // Scene fog saved on entering the OSAKA stage so it restores on return.
+      let huntStageFogSaved: THREE.Scene["fog"] = null
+      let huntStageFogWasSaved = false
       function buildHuntRoom() {
         const cx = HUNT_ROOM.x
         const cz = HUNT_ROOM.z
@@ -11948,12 +11955,20 @@ export default function ThreeWorld({
         ctx.font = "bold 38px monospace"
         ctx.fillText("MISSION SELECT", W / 2, H * 0.12)
         // Column headers.
+        const osaka = cfg.stage === "osaka"
         ctx.fillStyle = "#88ffcc"
         ctx.font = "bold 22px monospace"
-        ctx.fillText("STAGE", W * 0.255, H * 0.2)
-        ctx.fillText("DIFFICULTY", W * 0.745, H * 0.18)
+        ctx.fillText("STAGE", W * 0.255, H * 0.18)
+        // OSAKA is a fixed max-difficulty stage → the difficulty column is hidden.
+        if (osaka) {
+          ctx.fillStyle = "#ff8844"
+          ctx.fillText("OSAKA — 固定 / 最高難度", W * 0.745, H * 0.42)
+        } else {
+          ctx.fillText("DIFFICULTY", W * 0.745, H * 0.18)
+        }
         // Each clickable region: highlight when it is the current selection.
         for (const r of HUNT_PANEL_REGIONS) {
+          if (osaka && r.hit.kind === "difficulty") continue // hidden in OSAKA
           const selected =
             (r.hit.kind === "stage" && cfg.stage === r.hit.value) ||
             (r.hit.kind === "difficulty" && cfg.difficulty === r.hit.value)
@@ -11984,7 +11999,9 @@ export default function ThreeWorld({
       function huntPanelHitAt(u: number, v: number): HuntPanelHit | null {
         const cx = u
         const cy = 1 - v // canvas rows run top→bottom
+        const osaka = huntMissionConfigRef.current.stage === "osaka"
         for (const r of HUNT_PANEL_REGIONS) {
+          if (osaka && r.hit.kind === "difficulty") continue // hidden in OSAKA
           if (cx >= r.x0 && cx <= r.x1 && cy >= r.y0 && cy <= r.y1) return r.hit
         }
         return null
@@ -12029,10 +12046,294 @@ export default function ThreeWorld({
         huntPhaseRef.current = "countdown"
         setHuntPhase("countdown")
       }
+      // ── OSAKA stage map (Phase 2a): Dotonbori / Tsutenkaku / Osaka Castle ────
+      // A single 180×180 night field built under one group centred on the arena.
+      // All geometry is original (the landmarks are stylised, not scanned) and
+      // every sign uses fictional text. Disposed by huntClearStage on return.
+      function makeOsakaSign(lines: string[], bg: number, fg: string): THREE.CanvasTexture {
+        const cv = document.createElement("canvas")
+        cv.width = 256
+        cv.height = 256
+        const c = cv.getContext("2d")
+        if (c) {
+          c.fillStyle = `#${bg.toString(16).padStart(6, "0")}`
+          c.fillRect(0, 0, 256, 256)
+          c.fillStyle = fg
+          c.textAlign = "center"
+          c.textBaseline = "middle"
+          const fs = Math.floor(180 / Math.max(2, lines.length))
+          c.font = `bold ${fs}px sans-serif`
+          lines.forEach((ln, i) => {
+            c.fillText(ln, 128, (256 / (lines.length + 1)) * (i + 1))
+          })
+        }
+        return new THREE.CanvasTexture(cv)
+      }
+      function buildOsakaMap() {
+        const fullLights = !isMobileDevice // mobile halves the decorative lights
+        const group = new THREE.Group()
+        group.position.set(HUNT_ARENA.x, 0, HUNT_ARENA.z)
+        const add = (m: THREE.Object3D) => group.add(m)
+        // ── Whole-field floor + perimeter walls ──
+        const floor = new THREE.Mesh(
+          new THREE.PlaneGeometry(180, 180),
+          new THREE.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.95 }),
+        )
+        floor.rotation.x = -Math.PI / 2
+        floor.position.y = 0.01
+        add(floor)
+        const wallMat = new THREE.MeshStandardMaterial({ color: 0x2a2a2a, roughness: 0.9 })
+        for (const [x, z, w, d] of [
+          [0, 90, 180, 2],
+          [0, -90, 180, 2],
+          [90, 0, 2, 180],
+          [-90, 0, 2, 180],
+        ] as const) {
+          const wall = new THREE.Mesh(new THREE.BoxGeometry(w, 8, d), wallMat)
+          wall.position.set(x, 4, z)
+          add(wall)
+        }
+        // ════ AREA 1 — DOTONBORI (south, z 60..90) ════
+        const river = new THREE.Mesh(
+          new THREE.PlaneGeometry(180, 20),
+          new THREE.MeshStandardMaterial({ color: 0x0a1a2a, roughness: 0.4, metalness: 0.3 }),
+        )
+        river.rotation.x = -Math.PI / 2
+        river.position.set(0, -0.3, 75)
+        add(river)
+        for (const bx of [-55, 0, 55]) {
+          const bridge = new THREE.Mesh(
+            new THREE.BoxGeometry(8, 0.5, 20),
+            new THREE.MeshStandardMaterial({ color: 0x3a3a3a, roughness: 0.85 }),
+          )
+          bridge.position.set(bx, 0.25, 75)
+          add(bridge)
+        }
+        const neonText: { lines: string[]; col: number }[] = [
+          { lines: ["スナック", "あや"], col: 0xff4444 },
+          { lines: ["居酒屋", "なにわ"], col: 0xffcc00 },
+          { lines: ["パチンコ", "王者"], col: 0x44ff88 },
+          { lines: ["ラーメン", "横丁"], col: 0xff4444 },
+          { lines: ["カラオケ", "宴"], col: 0x44ff88 },
+          { lines: ["焼肉", "大門"], col: 0xffcc00 },
+          { lines: ["喫茶", "昭和"], col: 0xff4444 },
+          { lines: ["酒場", "とら"], col: 0x44ff88 },
+        ]
+        for (let i = 0; i < 8; i++) {
+          const sign = neonText[i]
+          if (!sign) continue
+          const bw = 6 + (i % 3) * 2 // 6..10
+          const bh = 15 + (i % 4) * 3 // 15..24
+          const onNorthBank = i % 2 === 0
+          const x = -75 + (i % 4) * 22 + (onNorthBank ? 6 : -6)
+          const z = onNorthBank ? 63 : 87
+          const building = new THREE.Mesh(
+            new THREE.BoxGeometry(bw, bh, 4),
+            new THREE.MeshStandardMaterial({ color: 0x14141c, roughness: 0.9 }),
+          )
+          building.position.set(x, bh / 2, z)
+          add(building)
+          const tex = makeOsakaSign(sign.lines, 0x101018, `#${sign.col.toString(16)}`)
+          const panel = new THREE.Mesh(
+            new THREE.PlaneGeometry(bw * 0.8, Math.min(bh * 0.5, 5)),
+            new THREE.MeshStandardMaterial({
+              map: tex,
+              emissive: sign.col,
+              emissiveMap: tex,
+              emissiveIntensity: 1.0,
+            }),
+          )
+          panel.position.set(x, bh * 0.55, z + (onNorthBank ? 2.1 : -2.1))
+          panel.rotation.y = onNorthBank ? 0 : Math.PI
+          add(panel)
+        }
+        // Neon point lights along the canal (mobile: 6 → 3).
+        const neonCount = fullLights ? 6 : 3
+        for (let i = 0; i < neonCount; i++) {
+          const pl = new THREE.PointLight(i % 2 === 0 ? 0xff4444 : 0x44ff88, 1.5, 25)
+          pl.position.set(-70 + (i / Math.max(1, neonCount - 1)) * 140, 6, 70 + (i % 2) * 10)
+          add(pl)
+        }
+        // Big "GLICO-style" runner sign (fictional brand "ナニワ RUNNER").
+        const glicoTex = makeOsakaSign(["ナニワ", "RUNNER"], 0x102018, "#ffee88")
+        const glico = new THREE.Mesh(
+          new THREE.BoxGeometry(12, 8, 1),
+          new THREE.MeshStandardMaterial({
+            color: 0xff6600,
+            map: glicoTex,
+            emissive: 0xff4400,
+            emissiveMap: glicoTex,
+            emissiveIntensity: 1.2,
+          }),
+        )
+        glico.position.set(0, 12, 88)
+        add(glico)
+        // ════ AREA 2 — TSUTENKAKU (centre, z -30..30) ════
+        const towerMat = new THREE.MeshStandardMaterial({
+          color: 0xcc8800,
+          roughness: 0.6,
+          metalness: 0.4,
+        })
+        for (const [lx, lz] of [
+          [-4, -4],
+          [4, -4],
+          [-4, 4],
+          [4, 4],
+        ] as const) {
+          const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.8, 12, 8), towerMat)
+          leg.position.set(lx, 6, lz)
+          add(leg)
+        }
+        const platform = new THREE.Mesh(new THREE.CylinderGeometry(6, 6, 2, 8), towerMat)
+        platform.position.set(0, 13, 0)
+        add(platform)
+        const upper = new THREE.Mesh(new THREE.CylinderGeometry(1.5, 2, 15, 8), towerMat)
+        upper.position.set(0, 21.5, 0)
+        add(upper)
+        const orbTop = new THREE.Mesh(
+          new THREE.SphereGeometry(2, sseg(8), sseg(8)),
+          new THREE.MeshStandardMaterial({
+            color: 0xffaa00,
+            emissive: 0xff8800,
+            emissiveIntensity: 1.0,
+          }),
+        )
+        orbTop.position.set(0, 30, 0)
+        add(orbTop)
+        const towerLight = new THREE.PointLight(0xffaa00, 3, 40)
+        towerLight.position.set(0, 30, 0)
+        add(towerLight)
+        // Downtown blocks around the tower (deterministic scatter).
+        let seed = 1337
+        const rnd = () => {
+          seed = (seed * 1103515245 + 12345) & 0x7fffffff
+          return seed / 0x7fffffff
+        }
+        const downtownMat = new THREE.MeshStandardMaterial({ color: 0x2a2a35, roughness: 0.9 })
+        for (let i = 0; i < 10; i++) {
+          const bw = 5 + rnd() * 3
+          const bh = 8 + rnd() * 7
+          const bd = 5 + rnd() * 3
+          const ang = (i / 10) * Math.PI * 2
+          const rad = 22 + rnd() * 14
+          const b = new THREE.Mesh(new THREE.BoxGeometry(bw, bh, bd), downtownMat)
+          b.position.set(Math.cos(ang) * rad, bh / 2, Math.sin(ang) * rad * 0.6)
+          add(b)
+        }
+        // Alley street lamps (mobile: 8 → 4).
+        const lampCount = fullLights ? 8 : 4
+        for (let i = 0; i < lampCount; i++) {
+          const ang = (i / lampCount) * Math.PI * 2
+          const lx = Math.cos(ang) * 30
+          const lz = Math.sin(ang) * 18
+          const pole = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.1, 0.1, 6),
+            new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.8 }),
+          )
+          pole.position.set(lx, 3, lz)
+          add(pole)
+          const lamp = new THREE.PointLight(0xffeeaa, 1.0, 15)
+          lamp.position.set(lx, 6, lz)
+          add(lamp)
+        }
+        // ════ AREA 3 — OSAKA CASTLE (north, z -90..-60) ════
+        const moat = new THREE.Mesh(
+          new THREE.PlaneGeometry(80, 80),
+          new THREE.MeshStandardMaterial({ color: 0x0a1020, roughness: 0.4, metalness: 0.3 }),
+        )
+        moat.rotation.x = -Math.PI / 2
+        moat.position.set(0, -0.2, -75)
+        add(moat)
+        const stoneMat = new THREE.MeshStandardMaterial({ color: 0x5a5a4a, roughness: 0.95 })
+        for (const [x, z, w, d] of [
+          [0, -55, 60, 4],
+          [0, -90, 60, 4],
+          [-30, -72, 4, 38],
+          [30, -72, 4, 38],
+        ] as const) {
+          const stone = new THREE.Mesh(new THREE.BoxGeometry(w, 6, d), stoneMat)
+          stone.position.set(x, 3, z)
+          add(stone)
+        }
+        const tiers: [number, number, number][] = [
+          [20, 5, 0xf0e8c0],
+          [17, 4, 0xe8e0b8],
+          [14, 4, 0xe0d8b0],
+          [11, 3, 0xd8d0a8],
+        ]
+        let ty = 6 // base sits above the stone platform
+        for (const [side, h, col] of tiers) {
+          const tier = new THREE.Mesh(
+            new THREE.BoxGeometry(side, h, side),
+            new THREE.MeshStandardMaterial({ color: col, roughness: 0.8 }),
+          )
+          tier.position.set(0, ty + h / 2, -75)
+          add(tier)
+          ty += h
+        }
+        const roof = new THREE.Mesh(
+          new THREE.ConeGeometry(9, 5, 4),
+          new THREE.MeshStandardMaterial({ color: 0x1a3a1a, roughness: 0.7 }),
+        )
+        roof.rotation.y = Math.PI / 4
+        roof.position.set(0, ty + 2.5, -75)
+        add(roof)
+        const castleLight = new THREE.PointLight(0xffffaa, 2, 50)
+        castleLight.position.set(0, 14, -62)
+        add(castleLight)
+        // ── Field-wide lighting + fog (dim night; reuse the saved-light dimming
+        // so the bright daytime HUNT key/fill don't wash the scene out). ──
+        for (const light of [worldAmbient, hemi, sun, fillLight]) {
+          huntStageLightSaved.push({ light, intensity: light.intensity })
+          light.intensity = 0.05
+        }
+        const osakaAmbient = new THREE.AmbientLight(0x222233, 0.5)
+        add(osakaAmbient)
+        const moonlight = new THREE.DirectionalLight(0xaaaaff, 0.3)
+        moonlight.position.set(10, 30, 10)
+        add(moonlight)
+        huntStageFogSaved = scene.fog
+        huntStageFogWasSaved = true
+        scene.fog = new THREE.Fog(0x050510, 30, 120)
+        scene.add(group)
+        osakaMapMeshesRef.current.push(group)
+      }
+      // Dispose the OSAKA map + restore the prior fog (called from huntClearStage).
+      // Disposes geometry, materials AND the sign CanvasTextures (material.dispose
+      // alone leaves textures resident, so they're released explicitly here).
+      function clearOsakaMap() {
+        const disposeMat = (m: THREE.Material) => {
+          const sm = m as THREE.MeshStandardMaterial
+          sm.map?.dispose()
+          sm.emissiveMap?.dispose()
+          m.dispose()
+        }
+        for (const obj of osakaMapMeshesRef.current) {
+          scene.remove(obj)
+          obj.traverse((o) => {
+            if (o instanceof THREE.Mesh) {
+              o.geometry.dispose()
+              const m = o.material
+              if (Array.isArray(m)) for (const mm of m) disposeMat(mm)
+              else disposeMat(m)
+            }
+          })
+        }
+        osakaMapMeshesRef.current = []
+        if (huntStageFogWasSaved) {
+          scene.fog = huntStageFogSaved
+          huntStageFogSaved = null
+          huntStageFogWasSaved = false
+        }
+      }
       // ── HUNT indoor stage: dim the world, drop a ceiling + green point lights,
       // and recolour the floor/walls. Reversed by huntClearStage on return. ──
-      function huntApplyStage(stage: "outdoor" | "indoor") {
+      function huntApplyStage(stage: "outdoor" | "indoor" | "osaka") {
         huntClearStage() // idempotent — never stack overlays
+        if (stage === "osaka") {
+          buildOsakaMap()
+          return
+        }
         if (stage !== "indoor") return
         const group = new THREE.Group()
         // Ceiling over the arena (the open battlefield gets a low dark roof).
@@ -12087,6 +12388,7 @@ export default function ThreeWorld({
           })
           huntIndoorGroup = null
         }
+        clearOsakaMap() // dispose the OSAKA field + restore the prior fog
         huntFlickerLights.length = 0
         for (const s of huntStageLightSaved) s.light.intensity = s.intensity
         huntStageLightSaved.length = 0
@@ -12347,9 +12649,15 @@ export default function ThreeWorld({
       }
       // Warp into the mission: spawn themed minions + boss, set limits.
       function huntBeginMission() {
-        // First warp of a run: the panel's chosen difficulty seeds the start
-        // level. Subsequent missions keep the Lv1→2→3 progression untouched.
-        if (!huntHasDeployedRef.current) {
+        // OSAKA is a fixed, max-difficulty stage — always start at the top level.
+        // (Area progression + the 五変化 boss land in Phase 2b; for now the O key
+        // still summons the boss into the freshly built OSAKA field.)
+        if (huntMissionConfigRef.current.stage === "osaka") {
+          huntHasDeployedRef.current = true
+          huntLevelIdxRef.current = HUNT_LEVELS.length - 1
+        } else if (!huntHasDeployedRef.current) {
+          // First warp of a run: the panel's chosen difficulty seeds the start
+          // level. Subsequent missions keep the Lv1→2→3 progression untouched.
           huntHasDeployedRef.current = true
           huntLevelIdxRef.current = huntMissionConfigRef.current.difficulty - 1
         }
