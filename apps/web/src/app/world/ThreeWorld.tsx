@@ -13145,7 +13145,12 @@ export default function ThreeWorld({
         // ── Whole-field asphalt floor + perimeter walls ──
         const floor = new THREE.Mesh(
           new THREE.PlaneGeometry(180, 180),
-          new THREE.MeshStandardMaterial({ color: 0x1c1c20, roughness: 0.95 }),
+          new THREE.MeshStandardMaterial({
+            color: 0x1c1c20,
+            emissive: 0x1a1520, // faint neon-reflection glow so asphalt never goes black
+            emissiveIntensity: 1,
+            roughness: 0.95,
+          }),
         )
         floor.rotation.x = -Math.PI / 2
         floor.position.y = 0.01
@@ -13209,7 +13214,7 @@ export default function ThreeWorld({
         const river = new THREE.Mesh(
           new THREE.PlaneGeometry(180, 24),
           new THREE.MeshStandardMaterial({
-            color: 0x0a2535,
+            color: 0x1a4560, // lighter so the canal reads as water, not a black void
             roughness: 0.2,
             metalness: 0.6,
           }),
@@ -13342,7 +13347,7 @@ export default function ThreeWorld({
               map: tex,
               emissive: sign.col,
               emissiveMap: tex,
-              emissiveIntensity: 1.2,
+              emissiveIntensity: 2.5, // brighter night-city neon
             }),
           )
           const pz = z + facing * (bd / 2 + 0.15)
@@ -13350,7 +13355,7 @@ export default function ThreeWorld({
           panel.rotation.y = northBank ? 0 : Math.PI
           add(panel)
           // Neon tube frame around the sign (flickers independently).
-          const frameMat = neonMat(sign.col, 1.4, i % 3 === 0)
+          const frameMat = neonMat(sign.col, 2.5, i % 3 === 0)
           for (const [fx, fy, fw, fh] of [
             [0, sh / 2 + 0.1, sw + 0.4, 0.18],
             [0, -sh / 2 - 0.1, sw + 0.4, 0.18],
@@ -13375,7 +13380,7 @@ export default function ThreeWorld({
         // Neon point lights along the canal (mobile: 6 → 3).
         const neonCount = fullLights ? 6 : 3
         for (let i = 0; i < neonCount; i++) {
-          const pl = new THREE.PointLight(i % 2 === 0 ? 0xff3366 : 0x33ddff, 1.5, 25)
+          const pl = new THREE.PointLight(i % 2 === 0 ? 0xff3366 : 0x33ddff, 3.0, 38)
           pl.position.set(-70 + (i / Math.max(1, neonCount - 1)) * 140, 6, 70 + (i % 2) * 10)
           add(pl)
         }
@@ -13383,8 +13388,8 @@ export default function ThreeWorld({
         const lanternGeo = new THREE.SphereGeometry(0.5, 10, 8)
         const lanternMat = new THREE.MeshStandardMaterial({
           color: 0xcc2222,
-          emissive: 0x881111,
-          emissiveIntensity: 0.9,
+          emissive: 0xdd2218,
+          emissiveIntensity: 1.8, // glow clearly in the brighter night
         })
         const cordMat = new THREE.MeshStandardMaterial({ color: 0x111111 })
         const cordGeo = new THREE.CylinderGeometry(0.03, 0.03, 1.6)
@@ -13449,7 +13454,7 @@ export default function ThreeWorld({
             map: runnerTex,
             emissive: 0x0044cc,
             emissiveMap: runnerTex,
-            emissiveIntensity: 1.4,
+            emissiveIntensity: 2.5,
           }),
         )
         runner.position.set(-22, 13, 86)
@@ -13464,7 +13469,7 @@ export default function ThreeWorld({
               map: marquee.tex,
               emissive: 0xffffff,
               emissiveMap: marquee.tex,
-              emissiveIntensity: 1.1,
+              emissiveIntensity: 2.0,
             }),
           )
           strip.position.set(-22, 7.2, 85.4)
@@ -13528,12 +13533,12 @@ export default function ThreeWorld({
         const orbMat = new THREE.MeshStandardMaterial({
           color: 0xffcc00,
           emissive: 0xffaa00,
-          emissiveIntensity: 1.5,
+          emissiveIntensity: 2.5,
         })
         const orbTop = new THREE.Mesh(new THREE.SphereGeometry(2.5, sseg(12), sseg(12)), orbMat)
         orbTop.position.set(0, 47, 0)
         add(orbTop)
-        const towerLight = new THREE.PointLight(0xffcc00, 4, 60)
+        const towerLight = new THREE.PointLight(0xffcc00, 5, 60)
         towerLight.position.set(0, 47, 0)
         add(towerLight)
         A.towerOrbMat = orbMat // hue-cycled in updateOsakaMap
@@ -13543,7 +13548,7 @@ export default function ThreeWorld({
           const ang = (i / 4) * Math.PI * 2
           const strip = new THREE.Mesh(
             new THREE.BoxGeometry(0.16, 20, 0.16),
-            neonMat(0x33ddff, 1.3, false, 1.5 + i * 0.3),
+            neonMat(0x33ddff, 2.5, false, 1.5 + i * 0.3),
           )
           strip.position.set(Math.cos(ang) * 2.2, 37, Math.sin(ang) * 2.2)
           add(strip)
@@ -13565,7 +13570,7 @@ export default function ThreeWorld({
               map: tex,
               emissive: ad.col,
               emissiveMap: tex,
-              emissiveIntensity: 1.2,
+              emissiveIntensity: 2.5,
             }),
           )
           panel.position.set(Math.cos(ang) * 2.7, 32, Math.sin(ang) * 2.7)
@@ -13617,8 +13622,8 @@ export default function ThreeWorld({
         const fuguGeo = new THREE.SphereGeometry(0.9, 10, 8)
         const fuguMat = new THREE.MeshStandardMaterial({
           color: 0xf4f0e6,
-          emissive: 0x553322,
-          emissiveIntensity: 0.5,
+          emissive: 0xaa8855,
+          emissiveIntensity: 1.2,
         })
         for (let i = 0; i < dn(6); i++) {
           const ang = (i / dn(6)) * Math.PI * 2
@@ -13684,7 +13689,13 @@ export default function ThreeWorld({
         cobTex.repeat.set(6, 18)
         const cobble = new THREE.Mesh(
           new THREE.PlaneGeometry(14, 44),
-          new THREE.MeshStandardMaterial({ color: 0x4a4a45, map: cobTex, roughness: 0.95 }),
+          new THREE.MeshStandardMaterial({
+            color: 0x4a4a45,
+            map: cobTex,
+            emissive: 0x1a1520,
+            emissiveIntensity: 1,
+            roughness: 0.95,
+          }),
         )
         cobble.rotation.x = -Math.PI / 2
         cobble.position.set(0, 0.04, 0)
@@ -13735,9 +13746,9 @@ export default function ThreeWorld({
         const cz = -78 // keep centre Z
         // Ring moat around the keep (annulus), faintly reflective + shimmering.
         const moatMat = new THREE.MeshStandardMaterial({
-          color: 0x0a1525,
-          emissive: 0x0a1525,
-          emissiveIntensity: 0.5,
+          color: 0x16314a, // lighter water so the moat doesn't sink to black
+          emissive: 0x14283c,
+          emissiveIntensity: 0.7,
           roughness: 0.3,
           metalness: 0.5,
         })
@@ -13871,7 +13882,7 @@ export default function ThreeWorld({
           [-12, cz - 12],
         ] as const) {
           if (!fullLights && lz < cz) continue // mobile: front pair only
-          const cl = new THREE.PointLight(0xffeedd, 3, 50)
+          const cl = new THREE.PointLight(0xffeedd, 5, 50)
           cl.position.set(lx, 6, lz)
           add(cl)
         }
@@ -13898,7 +13909,12 @@ export default function ThreeWorld({
         // Stone-tiled decisive-battle plaza in front of the gate.
         const plaza = new THREE.Mesh(
           new THREE.PlaneGeometry(46, 28),
-          new THREE.MeshStandardMaterial({ color: 0x4a4a45, roughness: 0.95 }),
+          new THREE.MeshStandardMaterial({
+            color: 0x4a4a45,
+            emissive: 0x1a1520,
+            emissiveIntensity: 1,
+            roughness: 0.95,
+          }),
         )
         plaza.rotation.x = -Math.PI / 2
         plaza.position.set(0, 0.03, cz + 50)
@@ -13913,7 +13929,7 @@ export default function ThreeWorld({
           add(ped)
           const fire = new THREE.Mesh(
             new THREE.BoxGeometry(0.7, 0.8, 0.7),
-            neonMat(0xffaa33, 1.0, false),
+            neonMat(0xffaa33, 2.2, false),
           )
           fire.position.set(lx, 1.9, lz)
           add(fire)
@@ -13953,20 +13969,32 @@ export default function ThreeWorld({
             add(up)
           }
         }
-        // ── Field-wide lighting + fog (dim night; reuse the saved-light dimming
-        // so the bright daytime HUNT key/fill don't wash the scene out). ──
+        // ── Field-wide lighting + fog — a BRIGHT night-city look (OSAKA only) ──
+        // The daytime HUNT key/fill are dimmed to ~nothing (restored on return via
+        // huntStageLightSaved); the scene is lit entirely by the OSAKA-only lights
+        // added below + the boosted neon/landmark emissives. All four lights live
+        // under `group`, so clearOsakaMap removes them with the map. If the neon
+        // ever white-clips, drop osakaAmbient intensity 3.5 → 3.0.
         for (const light of [worldAmbient, hemi, sun, fillLight]) {
           huntStageLightSaved.push({ light, intensity: light.intensity })
           light.intensity = 0.05
         }
-        const osakaAmbient = new THREE.AmbientLight(0x222233, 0.5)
+        // Keep the bluish ambient colour; intensity 3.5 on it fills shadows
+        // strongly without clipping to white (a brighter colour would white-out).
+        const osakaAmbient = new THREE.AmbientLight(0x222233, 3.5)
         add(osakaAmbient)
-        const moonlight = new THREE.DirectionalLight(0xaaaaff, 0.3)
-        moonlight.position.set(10, 30, 10)
+        const osakaHemi = new THREE.HemisphereLight(0x5577cc, 0x443355, 2.0)
+        osakaHemi.position.set(0, 60, 0)
+        add(osakaHemi)
+        const moonlight = new THREE.DirectionalLight(0xccddff, 1.5)
+        moonlight.position.set(20, 50, 20)
         add(moonlight)
+        const osakaFill = new THREE.DirectionalLight(0xaabbff, 0.8)
+        osakaFill.position.set(-30, 40, -20)
+        add(osakaFill)
         huntStageFogSaved = scene.fog
         huntStageFogWasSaved = true
-        scene.fog = new THREE.Fog(0x050510, 30, 120)
+        scene.fog = new THREE.Fog(0x222845, 100, 320)
         scene.add(group)
         osakaMapMeshesRef.current.push(group)
         buildOsakaRain() // OSAKA-only rain field (disposed with the map)
