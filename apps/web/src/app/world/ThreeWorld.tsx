@@ -13224,51 +13224,228 @@ export default function ThreeWorld({
           wire.rotation.y = -Math.atan2(dz, dx)
           add(wire)
         }
-        // ════ AREA 3 — OSAKA CASTLE (north, z -90..-60) ════
-        const moat = new THREE.Mesh(
-          new THREE.PlaneGeometry(80, 80),
-          new THREE.MeshStandardMaterial({ color: 0x0a1020, roughness: 0.4, metalness: 0.3 }),
-        )
+        // ════ AREA 3 — OSAKA CASTLE (north, z -90..-60) — white 5-tier keep ════
+        const cz = -78 // keep centre Z
+        // Ring moat around the keep (annulus), faintly reflective + shimmering.
+        const moatMat = new THREE.MeshStandardMaterial({
+          color: 0x0a1525,
+          emissive: 0x0a1525,
+          emissiveIntensity: 0.5,
+          roughness: 0.3,
+          metalness: 0.5,
+        })
+        const moat = new THREE.Mesh(new THREE.RingGeometry(26, 48, 40), moatMat)
         moat.rotation.x = -Math.PI / 2
-        moat.position.set(0, -0.2, -75)
+        moat.position.set(0, -0.2, cz)
         add(moat)
-        const stoneMat = new THREE.MeshStandardMaterial({ color: 0x5a5a4a, roughness: 0.95 })
-        for (const [x, z, w, d] of [
-          [0, -55, 60, 4],
-          [0, -90, 60, 4],
-          [-30, -72, 4, 38],
-          [30, -72, 4, 38],
+        A.water.push({ obj: moat, mat: moatMat, baseX: 0, spd: 0.4, phase: 0 })
+        // Stepped stone base (8m) under the keep + scattered seam detail.
+        const stoneMat = new THREE.MeshStandardMaterial({ color: 0x6a6a5a, roughness: 0.95 })
+        const stoneDk = new THREE.MeshStandardMaterial({ color: 0x5a5a4d, roughness: 0.95 })
+        for (const [s, yb, h] of [
+          [30, 0, 5],
+          [26, 5, 3],
         ] as const) {
-          const stone = new THREE.Mesh(new THREE.BoxGeometry(w, 6, d), stoneMat)
-          stone.position.set(x, 3, z)
-          add(stone)
+          const base = new THREE.Mesh(new THREE.BoxGeometry(s, h, s), stoneMat)
+          base.position.set(0, yb + h / 2, cz)
+          add(base)
         }
-        const tiers: [number, number, number][] = [
-          [20, 5, 0xf0e8c0],
-          [17, 4, 0xe8e0b8],
-          [14, 4, 0xe0d8b0],
-          [11, 3, 0xd8d0a8],
+        const seamGeo = new THREE.BoxGeometry(2.4, 1.6, 0.3)
+        for (let i = 0; i < dn(40); i++) {
+          const side = i % 4
+          const along = -14 + rnd() * 28
+          const seam = new THREE.Mesh(seamGeo, stoneDk)
+          const yy = 0.8 + rnd() * 6
+          if (side === 0) seam.position.set(along, yy, cz + 15.1)
+          else if (side === 1) {
+            seam.position.set(along, yy, cz - 15.1)
+            seam.rotation.y = Math.PI
+          } else if (side === 2) {
+            seam.position.set(15.1, yy, cz + along)
+            seam.rotation.y = Math.PI / 2
+          } else {
+            seam.position.set(-15.1, yy, cz + along)
+            seam.rotation.y = Math.PI / 2
+          }
+          add(seam)
+        }
+        // White plaster parapet wall with crenellations atop the stone base.
+        const plasterMat = new THREE.MeshStandardMaterial({ color: 0xece8dc, roughness: 0.85 })
+        for (const [px, pz, pw, pd] of [
+          [0, cz + 15, 30, 1],
+          [0, cz - 15, 30, 1],
+          [15, cz, 1, 30],
+          [-15, cz, 1, 30],
+        ] as const) {
+          const para = new THREE.Mesh(new THREE.BoxGeometry(pw, 1.6, pd), plasterMat)
+          para.position.set(px, 8.8, pz)
+          add(para)
+          for (let k = 0; k < dn(8); k++) {
+            const slot = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.5, pd + 0.1), plasterMat)
+            const off = -13 + k * (26 / 7)
+            if (pw > pd) slot.position.set(px + off, 9.8, pz)
+            else slot.position.set(px, 9.8, pz + off)
+            add(slot)
+          }
+        }
+        // Five tiers: white wall + green curved roof + gold trim + windows.
+        const tierDefs: [number, number, number][] = [
+          [22, 6, 24],
+          [18, 4.5, 20],
+          [15, 4, 17],
+          [12, 3.5, 14],
+          [9, 3.5, 11],
         ]
-        let ty = 6 // base sits above the stone platform
-        for (const [side, h, col] of tiers) {
-          const tier = new THREE.Mesh(
-            new THREE.BoxGeometry(side, h, side),
-            new THREE.MeshStandardMaterial({ color: col, roughness: 0.8 }),
-          )
-          tier.position.set(0, ty + h / 2, -75)
-          add(tier)
+        const roofMat = new THREE.MeshStandardMaterial({ color: 0x2a5a3a, roughness: 0.7 })
+        const goldMat = new THREE.MeshStandardMaterial({
+          color: 0xd4af37,
+          emissive: 0xd4af37,
+          emissiveIntensity: 0.35,
+        })
+        const gridMat = new THREE.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.8 })
+        let ty = 8 // tiers begin atop the stone base
+        let topRoofY = ty
+        let topRoofW = 11
+        tierDefs.forEach((d, idx) => {
+          const [w, h, rw] = d
+          const wall = new THREE.Mesh(new THREE.BoxGeometry(w, h, w), plasterMat)
+          wall.position.set(0, ty + h / 2, cz)
+          add(wall)
+          // Gold trim band along the wall top.
+          const band = new THREE.Mesh(new THREE.BoxGeometry(w + 0.1, 0.35, w + 0.1), goldMat)
+          band.position.set(0, ty + h - 0.3, cz)
+          add(band)
+          // Window grilles on the south face.
+          for (let k = 0; k < dn(idx < 2 ? 3 : 2); k++) {
+            const win = new THREE.Mesh(new THREE.BoxGeometry(1.1, 1.6, 0.2), gridMat)
+            const span = w * 0.6
+            const off = dn(idx < 2 ? 3 : 2) > 1 ? -span / 2 + k * span : 0
+            win.position.set(off, ty + h * 0.55, cz + w / 2 + 0.05)
+            add(win)
+          }
+          // Green curved roof skirt (4-sided cone) with upturned eaves.
+          const roof = new THREE.Mesh(new THREE.ConeGeometry(rw / 2, 2.5, 4), roofMat)
+          roof.rotation.y = Math.PI / 4
+          roof.position.set(0, ty + h + 1.0, cz)
+          add(roof)
+          for (let c = 0; c < 4; c++) {
+            const ang = (c / 4) * Math.PI * 2 + Math.PI / 4
+            const eave = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.3, 0.4), roofMat)
+            eave.position.set(
+              Math.cos(ang) * (rw / 2 - 0.6),
+              ty + h + 0.3,
+              cz + Math.sin(ang) * (rw / 2 - 0.6),
+            )
+            eave.rotation.y = -ang
+            eave.rotation.z = 0.35 // tip upward
+            add(eave)
+          }
+          topRoofY = ty + h + 2.3
+          topRoofW = rw
           ty += h
+        })
+        // Two golden shachihoko (curved fish) crowning the top roof ridge.
+        for (const sx of [-1, 1]) {
+          const fish = new THREE.Group()
+          const bodyF = new THREE.Mesh(new THREE.ConeGeometry(0.5, 2.0, 6), goldMat)
+          bodyF.rotation.z = sx * 0.5
+          fish.add(bodyF)
+          const headF = new THREE.Mesh(new THREE.SphereGeometry(0.5, 8, 8), goldMat)
+          headF.position.y = -0.9
+          fish.add(headF)
+          fish.position.set(sx * (topRoofW / 2 - 1.2), topRoofY, cz)
+          add(fish)
         }
-        const roof = new THREE.Mesh(
-          new THREE.ConeGeometry(9, 5, 4),
-          new THREE.MeshStandardMaterial({ color: 0x1a3a1a, roughness: 0.7 }),
+        // Four ground floodlights washing the keep from the corners.
+        for (const [lx, lz] of [
+          [12, cz + 12],
+          [-12, cz + 12],
+          [12, cz - 12],
+          [-12, cz - 12],
+        ] as const) {
+          if (!fullLights && lz < cz) continue // mobile: front pair only
+          const cl = new THREE.PointLight(0xffeedd, 3, 50)
+          cl.position.set(lx, 6, lz)
+          add(cl)
+        }
+        // Ote-mon gate + bridge crossing the moat on the south approach.
+        const woodMat = new THREE.MeshStandardMaterial({ color: 0x3a2a1a, roughness: 0.85 })
+        const gate = new THREE.Group()
+        for (const gx of [-3, 3]) {
+          const pillar = new THREE.Mesh(new THREE.BoxGeometry(1.2, 7, 1.2), woodMat)
+          pillar.position.set(gx, 3.5, 0)
+          gate.add(pillar)
+        }
+        const beam = new THREE.Mesh(new THREE.BoxGeometry(8.4, 1, 1.4), woodMat)
+        beam.position.set(0, 7, 0)
+        gate.add(beam)
+        const gateRoof = new THREE.Mesh(new THREE.ConeGeometry(5, 2, 4), roofMat)
+        gateRoof.rotation.y = Math.PI / 4
+        gateRoof.position.set(0, 8.3, 0)
+        gate.add(gateRoof)
+        gate.position.set(0, 0, cz + 30)
+        add(gate)
+        const bridge = new THREE.Mesh(new THREE.BoxGeometry(8, 0.5, 30), woodMat)
+        bridge.position.set(0, 0.25, cz + 45)
+        add(bridge)
+        // Stone-tiled decisive-battle plaza in front of the gate.
+        const plaza = new THREE.Mesh(
+          new THREE.PlaneGeometry(46, 28),
+          new THREE.MeshStandardMaterial({ color: 0x4a4a45, roughness: 0.95 }),
         )
-        roof.rotation.y = Math.PI / 4
-        roof.position.set(0, ty + 2.5, -75)
-        add(roof)
-        const castleLight = new THREE.PointLight(0xffffaa, 2, 50)
-        castleLight.position.set(0, 14, -62)
-        add(castleLight)
+        plaza.rotation.x = -Math.PI / 2
+        plaza.position.set(0, 0.03, cz + 50)
+        add(plaza)
+        // Stone lanterns (×8, dense) ringing the plaza.
+        const lanternStoneMat = new THREE.MeshStandardMaterial({ color: 0x6a6a60, roughness: 0.95 })
+        for (let i = 0; i < dn(8); i++) {
+          const lx = -20 + (i % 4) * 13
+          const lz = cz + 40 + (i < 4 ? 0 : 20)
+          const ped = new THREE.Mesh(new THREE.CylinderGeometry(0.45, 0.6, 1.4, 6), lanternStoneMat)
+          ped.position.set(lx, 0.7, lz)
+          add(ped)
+          const fire = new THREE.Mesh(
+            new THREE.BoxGeometry(0.7, 0.8, 0.7),
+            neonMat(0xffaa33, 1.0, false),
+          )
+          fire.position.set(lx, 1.9, lz)
+          add(fire)
+          const cap = new THREE.Mesh(new THREE.ConeGeometry(0.8, 0.6, 6), lanternStoneMat)
+          cap.position.set(lx, 2.6, lz)
+          add(cap)
+        }
+        // Night-lit sakura trees (×6, dense) around the plaza.
+        const trunkMat = new THREE.MeshStandardMaterial({ color: 0x3a2a22, roughness: 0.9 })
+        const sakuraMat = new THREE.MeshStandardMaterial({
+          color: 0xffb7c5,
+          emissive: 0x4a2230,
+          emissiveIntensity: 0.4,
+          roughness: 0.9,
+        })
+        const blossomGeo = new THREE.SphereGeometry(2, 8, 8)
+        for (let i = 0; i < dn(6); i++) {
+          const ang = (i / dn(6)) * Math.PI * 2
+          const tx = Math.cos(ang) * 22
+          const tz = cz + 50 + Math.sin(ang) * 11
+          const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.4, 0.6, 4, 6), trunkMat)
+          trunk.position.set(tx, 2, tz)
+          add(trunk)
+          for (let b = 0; b < dn(3); b++) {
+            const blossom = new THREE.Mesh(blossomGeo, sakuraMat)
+            blossom.position.set(
+              tx + (rnd() - 0.5) * 2.5,
+              4.5 + rnd() * 1.5,
+              tz + (rnd() - 0.5) * 2.5,
+            )
+            blossom.scale.setScalar(0.7 + rnd() * 0.6)
+            add(blossom)
+          }
+          if (fullLights && i % 2 === 0) {
+            const up = new THREE.PointLight(0xff99bb, 0.8, 12)
+            up.position.set(tx, 1, tz)
+            add(up)
+          }
+        }
         // ── Field-wide lighting + fog (dim night; reuse the saved-light dimming
         // so the bright daytime HUNT key/fill don't wash the scene out). ──
         for (const light of [worldAmbient, hemi, sun, fillLight]) {
