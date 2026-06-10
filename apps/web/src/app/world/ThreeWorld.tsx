@@ -12365,7 +12365,12 @@ export default function ThreeWorld({
         )
         door.position.set(2.4, 1.6, W - 0.05)
         group.add(door)
-        // ── MISSION SELECT panel on the east wall (faces into the room). ──
+        // ── MISSION SELECT panel on the SOUTH wall — the wall the player faces ──
+        // The spawn yaw is π and forward = (-sin yaw, -cos yaw) = (0, +1) = +z, so
+        // the player looks toward the +z (south/door) wall on entering the room.
+        // It used to sit on the east (side) wall, 90° out of view — hence invisible.
+        // Mounted flush to the south wall's inner face, offset left to clear the
+        // door, and turned to face the player (-z normal).
         const panelCanvas = document.createElement("canvas")
         panelCanvas.width = 512
         panelCanvas.height = 384
@@ -12376,8 +12381,8 @@ export default function ThreeWorld({
             new THREE.PlaneGeometry(3.6, 2.7),
             new THREE.MeshBasicMaterial({ map: panelTex, transparent: true }),
           )
-          panelMesh.position.set(W - 0.12, 1.9, 0)
-          panelMesh.rotation.y = -Math.PI / 2 // normal points -x, into the room
+          panelMesh.position.set(-1.0, 1.9, W - 0.25)
+          panelMesh.rotation.y = Math.PI // normal points -z, into the room toward the spawn
           group.add(panelMesh)
           huntPanel = { mesh: panelMesh, canvas: panelCanvas, ctx: panelCtx, texture: panelTex }
         }
