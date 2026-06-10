@@ -11737,6 +11737,144 @@ export default function ThreeWorld({
           }
         }
       }
+      // ══ OSAKA environment: rain, ripples, collapsing bridges ════════════════
+      let osakaRain: { mesh: THREE.InstancedMesh; vy: Float32Array; count: number } | null = null
+      const osakaRipples: { mesh: THREE.Mesh; mat: THREE.MeshBasicMaterial; t: number }[] = []
+      const osakaBridges: {
+        mesh: THREE.Mesh
+        x: number
+        z: number
+        hw: number
+        hd: number
+        stand: number
+        state: "idle" | "shaking" | "falling"
+        baseY: number
+      }[] = []
+      const osakaRainDummy = new THREE.Object3D()
+      // Build the rain field (InstancedMesh streaks; PC 400 / mobile 150).
+      function buildOsakaRain() {
+        const count = isMobileDevice ? 150 : 400
+        const geo = new THREE.BoxGeometry(0.025, 1.3, 0.025)
+        const mat = new THREE.MeshBasicMaterial({
+          color: 0x9fc4ff,
+          transparent: true,
+          opacity: 0.5,
+          depthWrite: false,
+        })
+        const mesh = new THREE.InstancedMesh(geo, mat, count)
+        mesh.frustumCulled = false
+        const vy = new Float32Array(count)
+        for (let i = 0; i < count; i++) {
+          osakaRainDummy.position.set(
+            -90 + Math.random() * 180,
+            Math.random() * 40,
+            -90 + Math.random() * 180,
+          )
+          osakaRainDummy.updateMatrix()
+          mesh.setMatrixAt(i, osakaRainDummy.matrix)
+          vy[i] = 26 + Math.random() * 12
+        }
+        mesh.instanceMatrix.needsUpdate = true
+        scene.add(mesh)
+        osakaRain = { mesh, vy, count }
+        osakaMapMeshesRef.current.push(mesh) // disposed with the map
+      }
+      function osakaRipple(x: number, z: number) {
+        if (osakaRipples.length > (isMobileDevice ? 8 : 20)) return
+        const mat = new THREE.MeshBasicMaterial({
+          color: 0xaaccff,
+          transparent: true,
+          opacity: 0.5,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+        })
+        const m = new THREE.Mesh(osakaRingGeo, mat)
+        m.rotation.x = -Math.PI / 2
+        m.position.set(x, 0.04, z)
+        m.scale.setScalar(0.3)
+        scene.add(m)
+        osakaRipples.push({ mesh: m, mat, t: 0 })
+      }
+      // Per-frame rain fall + occasional ground ripples (OSAKA stage only).
+      function updateOsakaRain(dt: number) {
+        if (osakaRain) {
+          const { mesh, vy, count } = osakaRain
+          const cx = focalPoint.x
+          const cz = focalPoint.z
+          for (let i = 0; i < count; i++) {
+            mesh.getMatrixAt(i, osakaRainDummy.matrix)
+            osakaRainDummy.matrix.decompose(
+              osakaRainDummy.position,
+              osakaRainDummy.quaternion,
+              osakaRainDummy.scale,
+            )
+            osakaRainDummy.position.y -= (vy[i] ?? 30) * dt
+            if (osakaRainDummy.position.y < 0) {
+              // landed → reset to the top near the player + an occasional ripple
+              if (Math.random() < 0.04)
+                osakaRipple(osakaRainDummy.position.x, osakaRainDummy.position.z)
+              osakaRainDummy.position.set(
+                cx - 90 + Math.random() * 180,
+                35 + Math.random() * 8,
+                cz - 90 + Math.random() * 180,
+              )
+            }
+            osakaRainDummy.updateMatrix()
+            mesh.setMatrixAt(i, osakaRainDummy.matrix)
+          }
+          mesh.instanceMatrix.needsUpdate = true
+        }
+        for (let i = osakaRipples.length - 1; i >= 0; i--) {
+          const r = osakaRipples[i]
+          if (!r) continue
+          r.t += dt
+          r.mesh.scale.setScalar(0.3 + r.t * 6)
+          r.mat.opacity = Math.max(0, 0.5 * (1 - r.t / 0.5))
+          if (r.t >= 0.5) {
+            disposeFxMesh(r.mesh)
+            osakaRipples.splice(i, 1)
+          }
+        }
+      }
+      // Per-frame bridge collapse: standing too long → shake → drop → fall damage.
+      function updateOsakaEnv(dt: number) {
+        const now = Date.now()
+        const px = focalPoint.x - HUNT_ARENA.x // bridges are stored in group-local x/z
+        const pz = focalPoint.z - HUNT_ARENA.z
+        for (let i = osakaBridges.length - 1; i >= 0; i--) {
+          const b = osakaBridges[i]
+          if (!b) continue
+          const on = Math.abs(px - b.x) < b.hw && Math.abs(pz - b.z) < b.hd
+          if (b.state === "idle") {
+            b.stand = on ? b.stand + dt : Math.max(0, b.stand - dt * 2)
+            if (b.stand > 1.5) {
+              b.state = "shaking"
+              b.stand = 0
+              SOUNDS.huntWarn() // creaking-collapse warning
+            }
+          } else if (b.state === "shaking") {
+            b.stand += dt
+            b.mesh.rotation.z = Math.sin(now * 0.05) * 0.04
+            b.mesh.rotation.x = Math.cos(now * 0.043) * 0.03
+            osakaQuake(2, 120)
+            if (b.stand > 1.0) {
+              b.state = "falling"
+              if (on && gamePhaseRef.current === "playing" && now > spawnInvulnUntilRef.current) {
+                applyPlayerDamage(40, 6) // tumbled into the canal
+              }
+            }
+          } else {
+            b.mesh.position.y -= 9 * dt
+            b.mesh.rotation.z += dt * 0.6
+            if (b.mesh.position.y < -8) {
+              b.mesh.parent?.remove(b.mesh) // deck is a child of the map group
+              b.mesh.geometry.dispose()
+              ;(b.mesh.material as THREE.Material).dispose()
+              osakaBridges.splice(i, 1)
+            }
+          }
+        }
+      }
       // Per-phase periodic sub-attacks fire on their own timers (reset on a phase
       // change), independent of the main attackTimer.
       let osakaPhaseSeen = 0
@@ -11928,6 +12066,7 @@ export default function ThreeWorld({
               ob.group.position.z + Math.sin(a) * 3,
             )
           }
+          osakaQuake(5) // the charge shakes the ground
           cooldown = 4.0
         } else {
           // form 5 五重混体: every prior form's attack at random, plus a doubled
@@ -13110,6 +13249,17 @@ export default function ThreeWorld({
           const deck = new THREE.Mesh(new THREE.BoxGeometry(10, 0.6, 24), bridgeMat)
           deck.position.set(bx, 0.3, 75)
           add(deck)
+          // Register the deck as a collapsible gimmick (group-local x/z).
+          osakaBridges.push({
+            mesh: deck,
+            x: bx,
+            z: 75,
+            hw: 5,
+            hd: 12,
+            stand: 0,
+            state: "idle",
+            baseY: 0.3,
+          })
           for (const side of [-1, 1]) {
             for (let r = 0; r < dn(9); r++) {
               const post = new THREE.Mesh(railGeo, bridgeMat)
@@ -13819,6 +13969,7 @@ export default function ThreeWorld({
         scene.fog = new THREE.Fog(0x050510, 30, 120)
         scene.add(group)
         osakaMapMeshesRef.current.push(group)
+        buildOsakaRain() // OSAKA-only rain field (disposed with the map)
       }
       // Dispose the OSAKA map + restore the prior fog (called from huntClearStage).
       // Disposes geometry, materials AND the sign CanvasTextures (material.dispose
@@ -13843,6 +13994,12 @@ export default function ThreeWorld({
         }
         osakaMapMeshesRef.current = []
         osakaAnim = null // scenery handles die with the disposed meshes
+        // Environment teardown: rain handle (mesh disposed above via the ref),
+        // any live ripples, and the bridge-collapse list.
+        osakaRain = null
+        for (const r of osakaRipples) disposeFxMesh(r.mesh)
+        osakaRipples.length = 0
+        osakaBridges.length = 0
         if (huntStageFogWasSaved) {
           scene.fog = huntStageFogSaved
           huntStageFogSaved = null
@@ -16872,6 +17029,8 @@ export default function ThreeWorld({
           updateOsakaMidBoss(dt) // OSAKA mid-boss (Tengu / Yamaya)
           updateOsakaMap(dt) // OSAKA scenery animation (neon, lanterns, marquee…)
           updateOsakaFx(dt) // OSAKA boss hazards (telegraphs, pools, splitters…)
+          updateOsakaRain(dt) // OSAKA rain streaks + ground ripples
+          updateOsakaEnv(dt) // OSAKA collapsing bridges
         }
         // HUNT room compass: rotate the on-screen arrow toward the orb (which
         // sits at the room centre) in the player's local frame. Room phase only.
