@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react"
 import * as THREE from "three"
+import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js"
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 // MAP_SIZE stays at 100: it is the original *city* grid (0–100) that every
@@ -13154,6 +13155,47 @@ export default function ThreeWorld({
         const group = new THREE.Group()
         group.position.set(HUNT_ARENA.x, 0, HUNT_ARENA.z)
         const add = (m: THREE.Object3D) => group.add(m)
+        // ── Static-geometry merger (the big draw-call killer) ──────────────────
+        // Every static (non-animated, non-collapsing) mesh is funnelled through
+        // mAdd, which bakes its world transform into a cloned geometry and buckets
+        // it by material. flushMerges() then mergeGeometries()-es each bucket into a
+        // SINGLE mesh — so dozens of buildings/tiles/tubes collapse to one draw call
+        // per material instead of one per mesh. Materials shared with the neon
+        // animator still flicker (animation is per-material). The merged meshes are
+        // children of `group`, so clearOsakaMap disposes them like everything else.
+        const mergeMap = new Map<THREE.Material, THREE.BufferGeometry[]>()
+        const mAdd = (mesh: THREE.Mesh) => {
+          const mat = mesh.material
+          if (Array.isArray(mat)) {
+            add(mesh) // multi-material meshes can't share a single bucket
+            return
+          }
+          mesh.updateMatrix()
+          const g = mesh.geometry.clone().applyMatrix4(mesh.matrix)
+          const arr = mergeMap.get(mat)
+          if (arr) arr.push(g)
+          else mergeMap.set(mat, [g])
+        }
+        const flushMerges = () => {
+          for (const [mat, geos] of mergeMap) {
+            const first = geos[0]
+            if (!first) continue
+            const merged = geos.length === 1 ? first : mergeGeometries(geos, false)
+            if (!merged) {
+              // Incompatible attributes (shouldn't happen for these primitives) —
+              // fall back to one mesh per geometry rather than dropping anything.
+              for (const g of geos) add(new THREE.Mesh(g, mat))
+              continue
+            }
+            if (geos.length > 1) for (const g of geos) g.dispose()
+            const m = new THREE.Mesh(merged, mat)
+            m.castShadow = false
+            m.receiveShadow = false
+            m.frustumCulled = false
+            add(m)
+          }
+          mergeMap.clear()
+        }
         // Draw-call killer: collapse a list of transforms sharing one geo+material
         // into a single InstancedMesh (one draw call instead of N). Shadows off —
         // the OSAKA stage never casts/receives them. clearOsakaMap disposes it like
@@ -13290,7 +13332,7 @@ export default function ThreeWorld({
         ] as const) {
           const wall = new THREE.Mesh(new THREE.BoxGeometry(w, 8, d), wallMat)
           wall.position.set(x, 4, z)
-          add(wall)
+          mAdd(wall)
         }
         // Main street linking the three areas (a touch lighter than the asphalt).
         const street = new THREE.Mesh(
@@ -13384,6 +13426,9 @@ export default function ThreeWorld({
         const railGeo = new THREE.BoxGeometry(0.18, 1.1, 0.18)
         const postXf: Xf[] = []
         const lampPoleMat = new THREE.MeshLambertMaterial({ color: 0x222222 })
+        // One shared bulb material across both bridges so the four bulbs merge into
+        // a single draw call (and flicker together via the neon animator).
+        const bridgeBulbMat = neonMat(0xffeeaa, 1.3, false)
         for (const bx of [-40, 40]) {
           const deck = new THREE.Mesh(new THREE.BoxGeometry(10, 0.6, 24), bridgeMat)
           deck.position.set(bx, 0.3, 75)
@@ -13405,7 +13450,7 @@ export default function ThreeWorld({
             }
             const rail = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.18, 24), bridgeMat)
             rail.position.set(bx + side * 4.6, 1.5, 75)
-            add(rail)
+            mAdd(rail)
           }
           // Two street lamps per bridge — emissive bulbs only (the PointLights that
           // used to back these are dropped; the bulb glow alone reads at night).
@@ -13414,13 +13459,10 @@ export default function ThreeWorld({
             const lz = 75
             const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 4, 6), lampPoleMat)
             pole.position.set(lx, 2.3, lz)
-            add(pole)
-            const bulb = new THREE.Mesh(
-              new THREE.SphereGeometry(0.3, 8, 8),
-              neonMat(0xffeeaa, 1.3, false),
-            )
+            mAdd(pole)
+            const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.3, 8, 8), bridgeBulbMat)
             bulb.position.set(lx, 4.5, lz)
-            add(bulb)
+            mAdd(bulb)
           }
         }
         instAdd(railGeo, bridgeMat, postXf)
@@ -13493,7 +13535,7 @@ export default function ThreeWorld({
           ] as const) {
             const tube = new THREE.Mesh(new THREE.BoxGeometry(fw, fh, 0.12), frameMat)
             tube.position.set(x + fx, bh * 0.6 + fy, pz + facing * 0.05)
-            add(tube)
+            mAdd(tube) // 4 tubes/sign → 1 merged mesh per sign's frame material
           }
           // Rooftop red aviation blinker (shared material; blinks per-mesh).
           const blink = new THREE.Mesh(new THREE.SphereGeometry(0.35, 6, 6), blinkMat)
@@ -13642,12 +13684,12 @@ export default function ThreeWorld({
           leg.position.set(lx, 8, lz)
           leg.rotation.x = (lz / 5) * 0.12
           leg.rotation.z = (-lx / 5) * 0.12
-          add(leg)
+          mAdd(leg)
         }
         // First observation deck.
         const deck1 = new THREE.Mesh(new THREE.CylinderGeometry(7, 7, 2.5, 8), towerMat)
         deck1.position.set(0, 17, 0)
-        add(deck1)
+        mAdd(deck1)
         // Mid trusswork — a lattice of thin members (dense-scaled 30).
         const trussMat = new THREE.MeshLambertMaterial({ color: 0xb8901a })
         const trussV = new THREE.BoxGeometry(0.15, 8, 0.15)
@@ -13667,10 +13709,10 @@ export default function ThreeWorld({
         // Second deck + upper tower + crowning beacon.
         const deck2 = new THREE.Mesh(new THREE.CylinderGeometry(5, 5, 2, 8), towerMat)
         deck2.position.set(0, 27, 0)
-        add(deck2)
+        mAdd(deck2)
         const upper = new THREE.Mesh(new THREE.CylinderGeometry(1.5, 2.5, 18, 8), towerMat2)
         upper.position.set(0, 37, 0)
-        add(upper)
+        mAdd(upper)
         const orbMat = new THREE.MeshStandardMaterial({
           color: 0xffcc00,
           emissive: 0xffaa00,
@@ -13808,16 +13850,17 @@ export default function ThreeWorld({
           side: THREE.DoubleSide,
         })
         const archGeo = new THREE.TorusGeometry(7, 0.25, 6, 12, Math.PI)
-        for (let i = 0; i < dn(7); i++) {
+        const arcN = dn(7)
+        for (let i = 0; i < arcN; i++) {
           const az = -18 + i * 6
           const arch = new THREE.Mesh(archGeo, arcadeMat)
           arch.position.set(0, 0, az)
-          add(arch)
-          if (i < dn(7) - 1) {
+          mAdd(arch)
+          if (i < arcN - 1) {
             const roof = new THREE.Mesh(new THREE.PlaneGeometry(14, 6.2), arcRoofMat)
             roof.rotation.x = -Math.PI / 2
             roof.position.set(0, 6.6, az + 3)
-            add(roof)
+            mAdd(roof)
           }
         }
         // Cobblestone strip under the arcade.
@@ -13868,7 +13911,7 @@ export default function ThreeWorld({
           lampPoleXf.push({ pos: [lx, 3, lz] })
           const bulb = new THREE.Mesh(lampBulbGeo, lampBulbMat)
           bulb.position.set(lx, 6.2, lz)
-          add(bulb)
+          mAdd(bulb) // all share lampBulbMat → merge into one flickering mesh
         }
         instAdd(lampPoleGeo, lampPoleMat2, lampPoleXf)
         // Electric wires drooping between consecutive lamps (downtown feel).
@@ -13885,7 +13928,7 @@ export default function ThreeWorld({
           wire.position.set((a2[0] + b2[0]) / 2, 5.6, (a2[1] + b2[1]) / 2)
           wire.rotation.z = Math.PI / 2
           wire.rotation.y = -Math.atan2(dz, dx)
-          add(wire)
+          mAdd(wire)
         }
         // ════ AREA 3 — OSAKA CASTLE (north, z -90..-60) — white 5-tier keep ════
         const cz = -78 // keep centre Z
@@ -13913,7 +13956,7 @@ export default function ThreeWorld({
         ] as const) {
           const base = new THREE.Mesh(new THREE.BoxGeometry(s, h, s), stoneMat)
           base.position.set(0, yb + h / 2, cz)
-          add(base)
+          mAdd(base)
         }
         const seamGeo = new THREE.BoxGeometry(2.4, 1.6, 0.3)
         const seamXf: Xf[] = []
@@ -13938,13 +13981,13 @@ export default function ThreeWorld({
         ] as const) {
           const para = new THREE.Mesh(new THREE.BoxGeometry(pw, 1.6, pd), plasterMat)
           para.position.set(px, 8.8, pz)
-          add(para)
+          mAdd(para)
           for (let k = 0; k < dn(8); k++) {
             const slot = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.5, pd + 0.1), plasterMat)
             const off = -13 + k * (26 / 7)
             if (pw > pd) slot.position.set(px + off, 9.8, pz)
             else slot.position.set(px, 9.8, pz + off)
-            add(slot)
+            mAdd(slot)
           }
         }
         // Five tiers: white wall + green curved roof + gold trim + windows.
@@ -13969,24 +14012,24 @@ export default function ThreeWorld({
           const [w, h, rw] = d
           const wall = new THREE.Mesh(new THREE.BoxGeometry(w, h, w), plasterMat)
           wall.position.set(0, ty + h / 2, cz)
-          add(wall)
+          mAdd(wall)
           // Gold trim band along the wall top.
           const band = new THREE.Mesh(new THREE.BoxGeometry(w + 0.1, 0.35, w + 0.1), goldMat)
           band.position.set(0, ty + h - 0.3, cz)
-          add(band)
+          mAdd(band)
           // Window grilles on the south face.
           for (let k = 0; k < dn(idx < 2 ? 3 : 2); k++) {
             const win = new THREE.Mesh(new THREE.BoxGeometry(1.1, 1.6, 0.2), gridMat)
             const span = w * 0.6
             const off = dn(idx < 2 ? 3 : 2) > 1 ? -span / 2 + k * span : 0
             win.position.set(off, ty + h * 0.55, cz + w / 2 + 0.05)
-            add(win)
+            mAdd(win)
           }
           // Green curved roof skirt (4-sided cone) with upturned eaves.
           const roof = new THREE.Mesh(new THREE.ConeGeometry(rw / 2, 2.5, 4), roofMat)
           roof.rotation.y = Math.PI / 4
           roof.position.set(0, ty + h + 1.0, cz)
-          add(roof)
+          mAdd(roof)
           for (let c = 0; c < 4; c++) {
             const ang = (c / 4) * Math.PI * 2 + Math.PI / 4
             const eave = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.3, 0.4), roofMat)
@@ -13997,23 +14040,23 @@ export default function ThreeWorld({
             )
             eave.rotation.y = -ang
             eave.rotation.z = 0.35 // tip upward
-            add(eave)
+            mAdd(eave)
           }
           topRoofY = ty + h + 2.3
           topRoofW = rw
           ty += h
         })
-        // Two golden shachihoko (curved fish) crowning the top roof ridge.
+        // Two golden shachihoko (curved fish) crowning the top roof ridge. Built at
+        // absolute positions (no group) so they merge into the shared gold material.
         for (const sx of [-1, 1]) {
-          const fish = new THREE.Group()
+          const fx = sx * (topRoofW / 2 - 1.2)
           const bodyF = new THREE.Mesh(new THREE.ConeGeometry(0.5, 2.0, 6), goldMat)
+          bodyF.position.set(fx, topRoofY, cz)
           bodyF.rotation.z = sx * 0.5
-          fish.add(bodyF)
+          mAdd(bodyF)
           const headF = new THREE.Mesh(new THREE.SphereGeometry(0.5, 8, 8), goldMat)
-          headF.position.y = -0.9
-          fish.add(headF)
-          fish.position.set(sx * (topRoofW / 2 - 1.2), topRoofY, cz)
-          add(fish)
+          headF.position.set(fx, topRoofY - 0.9, cz)
+          mAdd(headF)
         }
         // Front-facing floodlights washing the keep (the back pair are dropped —
         // unseen on approach): PC keeps the front pair, mobile a single centre wash.
@@ -14030,26 +14073,25 @@ export default function ThreeWorld({
           cl.position.set(lx, 6, lz)
           add(cl)
         }
-        // Ote-mon gate + bridge crossing the moat on the south approach.
+        // Ote-mon gate + bridge crossing the moat on the south approach. Built at
+        // absolute positions (gate origin was z = cz+30) so the wood parts merge.
         const woodMat = new THREE.MeshLambertMaterial({ color: 0x3a2a1a })
-        const gate = new THREE.Group()
+        const gz = cz + 30
         for (const gx of [-3, 3]) {
           const pillar = new THREE.Mesh(new THREE.BoxGeometry(1.2, 7, 1.2), woodMat)
-          pillar.position.set(gx, 3.5, 0)
-          gate.add(pillar)
+          pillar.position.set(gx, 3.5, gz)
+          mAdd(pillar)
         }
         const beam = new THREE.Mesh(new THREE.BoxGeometry(8.4, 1, 1.4), woodMat)
-        beam.position.set(0, 7, 0)
-        gate.add(beam)
+        beam.position.set(0, 7, gz)
+        mAdd(beam)
         const gateRoof = new THREE.Mesh(new THREE.ConeGeometry(5, 2, 4), roofMat)
         gateRoof.rotation.y = Math.PI / 4
-        gateRoof.position.set(0, 8.3, 0)
-        gate.add(gateRoof)
-        gate.position.set(0, 0, cz + 30)
-        add(gate)
+        gateRoof.position.set(0, 8.3, gz)
+        mAdd(gateRoof)
         const bridge = new THREE.Mesh(new THREE.BoxGeometry(8, 0.5, 30), woodMat)
         bridge.position.set(0, 0.25, cz + 45)
-        add(bridge)
+        mAdd(bridge)
         // Stone-tiled decisive-battle plaza in front of the gate.
         const plaza = new THREE.Mesh(
           new THREE.PlaneGeometry(46, 28),
@@ -14079,7 +14121,7 @@ export default function ThreeWorld({
           capXf.push({ pos: [lx, 2.6, lz] })
           const fire = new THREE.Mesh(fireGeo, fireMat)
           fire.position.set(lx, 1.9, lz)
-          add(fire)
+          mAdd(fire) // all share fireMat → merge into one flickering mesh
         }
         instAdd(pedGeo, lanternStoneMat, pedXf)
         instAdd(capGeo, lanternStoneMat, capXf)
@@ -14113,6 +14155,9 @@ export default function ThreeWorld({
         instAdd(trunkGeo, trunkMat, trunkXf)
         const blossomInst = instAdd(blossomGeo, sakuraMat, blossomXf)
         if (blossomInst) osakaCull.push({ obj: blossomInst, cx: 0, cz: cz + 50, r: 80 })
+        // Collapse every static mesh funnelled through mAdd into one merged mesh per
+        // material — the bulk of the draw-call reduction happens here.
+        flushMerges()
         // ── Field-wide lighting + fog — a BRIGHT night-city look (OSAKA only) ──
         // The daytime HUNT key/fill are dimmed to ~nothing (restored on return via
         // huntStageLightSaved); the scene is lit entirely by the OSAKA-only lights
