@@ -820,6 +820,24 @@ const OSAKA_AREA_ZAKO = { dotonbori: 15, tsutenkaku: 20, castle: 25 } as const
 const OSAKA_AREA_ZAKO_MOBILE = { dotonbori: 8, tsutenkaku: 12, castle: 15 } as const
 const OSAKA_TENGU_HP = 2500
 const OSAKA_YAMAYA_HP = 4000
+// ── OSAKA secret routes (FINAL-A) ────────────────────────────────────────────
+// Two hidden areas + two secret weapons. Positions are GROUP-LOCAL to the OSAKA
+// map root (world = local + HUNT_ARENA). The interiors sit far outside the
+// 180×180 field on the same y=0 ground plane (the HUNT_ROOM trick): the player
+// is teleported in and clamped inside, so normal physics/collision are untouched.
+const OSAKA_GATE_POS = { x: -20, z: 62.5 } // 道頓堀川岸の格子戸 (水路口)
+const OSAKA_CRACK_POS = { x: 6, z: -62.84 } // 天守台1F南面のひび割れた壁
+const OSAKA_UNDER = { x: 0, z: 250, w: 6, len: 40, h: 3 } // 地下通路の中心/寸法
+const OSAKA_HIDDEN = { x: 0, z: -300, s: 8, h: 5 } // 石造りの隠し部屋
+const OSAKA_ONIBLADE_DMG = KNIFE_DAMAGE * 3 // 鬼刀: 近接3倍 (240)
+const OSAKA_ONIBLADE_RANGE = 4 // 斬撃範囲半径
+const OSAKA_ONIBLADE_BURN_DMG = 70 // 炎上爆発の連鎖ダメージ
+const OSAKA_ONIBLADE_BURN_RADIUS = 3
+const OSAKA_SPEAR_MELEE_DMG = KNIFE_DAMAGE * 2.5 // 大槍: 近接2.5倍 (200)
+const OSAKA_SPEAR_MELEE_RANGE = 5
+const OSAKA_SPEAR_THROW_DMG = 250 // 貫通投擲 (コア×3が乗る)
+const OSAKA_SPEAR_THROW_DIST = 80
+const OSAKA_SPEAR_SPEED = 46 // 表示用の槍の飛翔速度 (m/s)
 
 // ══ HUNT mode equipment (PR-Z2) ══════════════════════════════════════════════
 // Suit + four dedicated weapons + the rewards bought at the 100-pt menu. All of
@@ -840,14 +858,22 @@ const HUNT_REWARD_COST = 100
 const HUNT_MAX_TICKETS = 3
 // Pulse-weapon delayed in-body burst (seconds from hit to detonation).
 const HUNT_BURST_DELAY = 1.0
-type HuntWeaponId = "pulsegun" | "pulseshotgun" | "capturegun" | "blade" | "gravitycannon"
+type HuntWeaponId =
+  | "pulsegun"
+  | "pulseshotgun"
+  | "capturegun"
+  | "blade"
+  | "gravitycannon"
+  | "oniblade"
+  | "greatspear"
 interface HuntWeaponDef {
   id: HuntWeaponId
   name: string
-  slot: number // number key (6-9, 0 for gravity)
+  slot: number // number key (6-9, 0 for gravity; -1 = letter key, see onKeyDown)
   mag: number // -1 = melee/infinite
   reloadMs: number
   reward?: boolean // true → only from the 100-pt "gravity cannon" reward
+  secret?: boolean // OSAKA hidden weapon — never on the rack, found in-mission
 }
 const HUNT_WEAPONS: HuntWeaponDef[] = [
   { id: "pulsegun", name: "PULSE GUN", slot: 6, mag: 8, reloadMs: 2000 },
@@ -855,6 +881,10 @@ const HUNT_WEAPONS: HuntWeaponDef[] = [
   { id: "capturegun", name: "CAPTURE GUN", slot: 8, mag: 3, reloadMs: 5000 },
   { id: "blade", name: "BLADE", slot: 9, mag: -1, reloadMs: 0 },
   { id: "gravitycannon", name: "GRAVITY CANNON", slot: 0, mag: 2, reloadMs: 10000, reward: true },
+  // OSAKA secret weapons (FINAL-A): run-scoped, granted by the hidden routes.
+  // [Z]/[X] select them (slots 6-0 are taken); removed again by clearOsakaMap.
+  { id: "oniblade", name: "鬼刀", slot: -1, mag: -1, reloadMs: 0, secret: true },
+  { id: "greatspear", name: "大槍", slot: -1, mag: 3, reloadMs: 2800, secret: true },
 ]
 const HUNT_WEAPON_BY_ID: Record<HuntWeaponId, HuntWeaponDef> = Object.fromEntries(
   HUNT_WEAPONS.map((w) => [w.id, w]),
@@ -2377,6 +2407,26 @@ export default function ThreeWorld({
   // Set by the O key (component scope); consumed in the animate loop where
   // spawnOsakaBoss is in scope.
   const osakaSpawnReqRef = useRef(false)
+  // OSAKA secret routes (FINAL-A): per-run state — reset whenever the stage is
+  // (re)built or torn down. loc tracks which hidden interior the player is in.
+  type OsakaSecretRun = {
+    gateOpen: boolean
+    wallBroken: boolean
+    bladeTaken: boolean
+    spearTaken: boolean
+    loc: "none" | "under" | "hidden"
+    ret: { x: number; z: number } // surface point to return to
+  }
+  const osakaSecretRef = useRef<OsakaSecretRun>({
+    gateOpen: false,
+    wallBroken: false,
+    bladeTaken: false,
+    spearTaken: false,
+    loc: "none",
+    ret: { x: 0, z: 0 },
+  })
+  const [osakaHint, setOsakaHint] = useState<string | null>(null) // "[E] 調べる" HUD
+  const osakaHintRef = useRef<string | null>(null)
 
   // ── HUNT equipment (PR-Z2) ──────────────────────────────────────────────────
   // Equipment menu (opened at the rack in the room).
@@ -11921,6 +11971,425 @@ export default function ThreeWorld({
           }
         }
       }
+      // ══ OSAKA SECRET ROUTES (FINAL-A) ═══════════════════════════════════════
+      // ①道頓堀川岸の格子戸 → 地下通路 (鬼刀) / ②天守台のひび割れ壁 → 隠し部屋
+      // (大槍)。構造物は buildOsakaMap が建て、ここはアニメ/転送/取得/戦闘を担う。
+      type OsakaSecretHandles = {
+        gate: THREE.Group // 格子戸 (ヒンジ回転で開く)
+        crack: THREE.Mesh | null // ひび割れ壁 (scale.x → 0 で崩壊)
+        blade: THREE.Group // 鬼刀ピックアップ
+        spear: THREE.Group // 大槍ピックアップ
+        underLights: THREE.PointLight[] // 地下の赤い非常灯 (明滅)
+        gateAnim: number // -1 idle / 0..1 開扉アニメ進行
+        crackAnim: number // -1 idle / 0..1 崩壊アニメ進行
+        debris: { mesh: THREE.Mesh; vx: number; vy: number; vz: number; t: number }[]
+      }
+      let osakaSecret: OsakaSecretHandles | null = null
+      // 投擲槍は表示専用 — ダメージは投擲時のヒットスキャンで確定済み (弾と同じ)。
+      const osakaSpears: { mesh: THREE.Mesh; dir: THREE.Vector3; dist: number }[] = []
+      const osakaSpearGeo = new THREE.CylinderGeometry(0.05, 0.05, 2.6, 5)
+      const osakaSpearMat = new THREE.MeshBasicMaterial({ color: 0xd4af37 })
+      const osakaDebrisGeo = new THREE.BoxGeometry(0.28, 0.22, 0.18)
+      const osakaDebrisMat = new THREE.MeshLambertMaterial({ color: 0x55504a })
+      const osakaSecretFresh = (): typeof osakaSecretRef.current => ({
+        gateOpen: false,
+        wallBroken: false,
+        bladeTaken: false,
+        spearTaken: false,
+        loc: "none",
+        ret: { x: 0, z: 0 },
+      })
+      // 白フラッシュ → 位置移動 (HUNT の転送演出を流用)。
+      function osakaSecretTeleport(x: number, z: number, loc: "none" | "under" | "hidden") {
+        SOUNDS.huntWarp()
+        setHuntWhiteFlash(true)
+        window.setTimeout(() => {
+          focalPoint.set(x, 0, z)
+          playerVelRef.current.x = 0
+          playerVelRef.current.z = 0
+          osakaSecretRef.current.loc = loc
+          setHuntWhiteFlash(false)
+        }, 420)
+      }
+      // 取得 = HUNT 武器として所持 + 自動装備 (ラックには出ない; run 限定)。
+      function osakaGrantSecretWeapon(id: "oniblade" | "greatspear") {
+        const next = new Set(huntOwnedRef.current)
+        next.add(id)
+        huntOwnedRef.current = next
+        setHuntOwned([...next])
+        const def = HUNT_WEAPON_BY_ID[id]
+        if (def.mag >= 0) huntAmmoRef.current[id] = def.mag
+        huntWeaponRef.current = id
+        setHuntWeapon(id)
+        setHuntAmmoUi(def.mag < 0 ? -1 : def.mag)
+      }
+      // 秘密武器の近接 — 雑魚の扇範囲に加えて五変化/中ボスにも届く (新規パス;
+      // 既存の弾道コア判定には触れない)。倒した敵の位置を返す (鬼刀の炎上用)。
+      function osakaSecretMelee(dmg: number, range: number, tag: string): THREE.Vector3[] {
+        camera.getWorldDirection(fwd3)
+        const flen = Math.hypot(fwd3.x, fwd3.z) || 1
+        const nfx = fwd3.x / flen
+        const nfz = fwd3.z / flen
+        const cosHalf = Math.cos(Math.PI / 2.4) // 広い扇 (±75°)
+        let struck = false
+        const killed: THREE.Vector3[] = []
+        for (const e of enemies) {
+          if (e.hp <= 0 || e.aiDriving) continue
+          const dx = e.mesh.position.x - focalPoint.x
+          const dz = e.mesh.position.z - focalPoint.z
+          const d = Math.hypot(dx, dz)
+          if (d > range || d < 1e-3) continue
+          if ((dx / d) * nfx + (dz / d) * nfz < cosHalf) continue
+          struck = true
+          e.hp -= dmg
+          spawnBlood(new THREE.Vector3(e.mesh.position.x, EYE_HEIGHT * 0.8, e.mesh.position.z))
+          if (e.hp <= 0) {
+            killed.push(e.mesh.position.clone())
+            applyEnemyKill(e, tag)
+          }
+        }
+        // 五変化: 体への直接斬撃は減衰なし、正面レイにコアが居れば ×3 (露出依存は
+        // コアの visible/手前判定そのもの)。
+        const ob = osakaBossRef.current
+        if (ob && !ob.transitioning) {
+          const bd = Math.hypot(
+            ob.group.position.x - focalPoint.x,
+            ob.group.position.z - focalPoint.z,
+          )
+          if (bd < range + 3.5) {
+            pointer.set(0, 0)
+            raycaster.setFromCamera(pointer, camera)
+            const cores: THREE.Object3D[] = []
+            ob.group.traverse((c) => {
+              if (c instanceof THREE.Mesh && c.visible && c.userData.osakaCore) cores.push(c)
+            })
+            const ch = raycaster.intersectObjects(cores, false)[0]
+            const isCore = !!ch && ch.distance < range + 6
+            osakaDamage(dmg * (isCore ? OSAKA_CORE_MULT : 1))
+            spawnBlood(
+              new THREE.Vector3(ob.group.position.x, 2 + Math.random() * 3, ob.group.position.z),
+            )
+            struck = true
+          }
+        }
+        // 中ボス: 接近していれば直撃 (天狗は低空にいる間のみ)。
+        const mb = osakaMidBossRef.current
+        if (mb && mb.hp > 0) {
+          const md = Math.hypot(
+            mb.group.position.x - focalPoint.x,
+            mb.group.position.z - focalPoint.z,
+          )
+          if (md < range + 2.5 && mb.group.position.y < 4) {
+            mb.hp -= dmg
+            spawnBlood(new THREE.Vector3(mb.group.position.x, 1.5, mb.group.position.z))
+            struck = true
+          }
+        }
+        if (struck) SOUNDS.hit()
+        recoilRef.current = 0.06
+        knifeSwingRef.current = KNIFE_SWING_TIME
+        return killed
+      }
+      // 鬼刀: 半径4の斬撃。倒した敵は炎上爆発し、周囲の敵に連鎖ダメージ。
+      function osakaBladeSwing() {
+        const now = Date.now()
+        if (now - lastMeleeRef.current < KNIFE_COOLDOWN_MS) return
+        lastMeleeRef.current = now
+        SOUNDS.knife()
+        const killed = osakaSecretMelee(OSAKA_ONIBLADE_DMG, OSAKA_ONIBLADE_RANGE, "oniblade")
+        for (const pos of killed) {
+          spawnExplosion(new THREE.Vector3(pos.x, 1, pos.z))
+          for (const e of enemies) {
+            if (e.hp <= 0 || e.aiDriving) continue
+            const d = Math.hypot(e.mesh.position.x - pos.x, e.mesh.position.z - pos.z)
+            if (d > OSAKA_ONIBLADE_BURN_RADIUS) continue
+            e.hp -= OSAKA_ONIBLADE_BURN_DMG
+            if (e.hp <= 0) applyEnemyKill(e, "oniblade")
+          }
+        }
+        if (killed.length > 0) SOUNDS.rpg()
+      }
+      // 大槍: 通常クリックで近接 (半径5)、ADS 中は貫通投擲 (3発 / R で装填)。
+      function osakaSpearFire() {
+        if (isAimingRef.current) {
+          osakaSpearThrow()
+          return
+        }
+        const now = Date.now()
+        if (now - lastMeleeRef.current < KNIFE_COOLDOWN_MS) return
+        lastMeleeRef.current = now
+        SOUNDS.knife()
+        osakaSecretMelee(OSAKA_SPEAR_MELEE_DMG, OSAKA_SPEAR_MELEE_RANGE, "greatspear")
+      }
+      function osakaSpearThrow() {
+        const now = Date.now()
+        if (now - lastFireTimeRef.current < 600) return
+        if (huntReloadingRef.current) return
+        if (!huntConsumeAmmo("greatspear")) return
+        lastFireTimeRef.current = now
+        SOUNDS.sniper()
+        recoilRef.current = 0.22
+        pointer.set(0, 0)
+        raycaster.setFromCamera(pointer, camera)
+        const nearestWall = raycaster.intersectObjects(wallMeshes, false)[0]
+        const maxD = Math.min(
+          OSAKA_SPEAR_THROW_DIST,
+          nearestWall ? nearestWall.distance : Number.POSITIVE_INFINITY,
+        )
+        // 貫通: レイ上の生存敵 "全員" に1回ずつ (通常弾は最初の1体で停止する)。
+        const parts: THREE.Object3D[] = []
+        for (const e of enemies) {
+          if (e.hp <= 0 || e.aiDriving) continue
+          e.mesh.traverse((c) => {
+            if (c instanceof THREE.Mesh && c.userData.enemyId) parts.push(c)
+          })
+        }
+        const hitIds = new Set<string>()
+        for (const h of raycaster.intersectObjects(parts, false)) {
+          if (h.distance > maxD) break
+          const id = h.object.userData.enemyId as string
+          if (hitIds.has(id)) continue
+          hitIds.add(id)
+          const e = enemies.find((x) => x.id === id)
+          if (!e || e.hp <= 0) continue
+          spawnBlood(h.point)
+          e.hp -= OSAKA_SPEAR_THROW_DMG
+          scoreRef.current += Math.floor(OSAKA_SPEAR_THROW_DMG * 10)
+          setScore(scoreRef.current)
+          if (e.hp <= 0) applyEnemyKill(e, "greatspear")
+        }
+        // 五変化: コア優先レイ → 体 (倍率は通常弾と同一 — コア機構を尊重)。
+        const ob = osakaBossRef.current
+        if (ob && !ob.transitioning) {
+          const obCores: THREE.Object3D[] = []
+          const obBody: THREE.Object3D[] = []
+          ob.group.traverse((c) => {
+            if (c instanceof THREE.Mesh && c.visible) {
+              if (c.userData.osakaCore) obCores.push(c)
+              else if (c.userData.osakaBody) obBody.push(c)
+            }
+          })
+          const coreHit = raycaster.intersectObjects(obCores, false)[0]
+          const bodyHit = raycaster.intersectObjects(obBody, false)[0]
+          const obHit = coreHit ?? bodyHit
+          if (obHit && obHit.distance <= maxD) {
+            spawnBlood(obHit.point)
+            osakaDamage(
+              OSAKA_SPEAR_THROW_DMG * (obHit === coreHit ? OSAKA_CORE_MULT : OSAKA_BODY_MULT),
+            )
+          }
+        }
+        const mb = osakaMidBossRef.current
+        if (mb && mb.hp > 0) {
+          const mbHit = raycaster.intersectObject(mb.group, true)[0]
+          if (mbHit && mbHit.distance <= maxD) {
+            spawnBlood(mbHit.point)
+            mb.hp -= OSAKA_SPEAR_THROW_DMG
+          }
+        }
+        if (hitIds.size > 0) SOUNDS.hit()
+        // 表示用の槍 (共有ジオメトリ — remove のみで破棄不要)。
+        camera.getWorldDirection(fwd3)
+        const dir = fwd3.clone().normalize()
+        const sm = new THREE.Mesh(osakaSpearGeo, osakaSpearMat)
+        sm.position.set(focalPoint.x + dir.x, EYE_HEIGHT - 0.15 + dir.y, focalPoint.z + dir.z)
+        sm.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir)
+        scene.add(sm)
+        osakaSpears.push({ mesh: sm, dir, dist: 0 })
+      }
+      // 毎フレーム: ヒント表示 / [E] 消費 / 開扉・崩壊アニメ / 取得 / クランプ /
+      // 非常灯の明滅 / 投擲槍の飛翔。
+      let osakaSecretT = 0
+      function updateOsakaSecrets(dt: number) {
+        const S = osakaSecret
+        const st = osakaSecretRef.current
+        if (
+          !S ||
+          huntPhaseRef.current !== "mission" ||
+          huntMissionConfigRef.current.stage !== "osaka"
+        ) {
+          if (osakaHintRef.current !== null) {
+            osakaHintRef.current = null
+            setOsakaHint(null)
+          }
+          return
+        }
+        osakaSecretT += dt
+        const px = focalPoint.x
+        const pz = focalPoint.z
+        const ax = HUNT_ARENA.x
+        const az = HUNT_ARENA.z
+        // ── 調査ヒント + アクション ──
+        let hint: string | null = null
+        let action: (() => void) | null = null
+        if (st.loc === "none") {
+          const gd = Math.hypot(px - (ax + OSAKA_GATE_POS.x), pz - (az + OSAKA_GATE_POS.z))
+          const cd = Math.hypot(px - (ax + OSAKA_CRACK_POS.x), pz - (az + OSAKA_CRACK_POS.z))
+          if (!st.gateOpen && gd < 3) {
+            hint = "[E] 調べる — 川沿いの格子戸"
+            action = () => {
+              st.gateOpen = true
+              S.gateAnim = 0
+              SOUNDS.huntOrbOpen()
+              showNotification("格子戸が軋みながら開く……")
+            }
+          } else if (!st.wallBroken && cd < 4) {
+            hint = "[E] 調べる — ひび割れた壁"
+            action = () => {
+              st.wallBroken = true
+              S.crackAnim = 0
+              cameraShakeRef.current.intensity = 5
+              SOUNDS.shotgun()
+              const wx = ax + OSAKA_CRACK_POS.x
+              const wz = az + OSAKA_CRACK_POS.z
+              for (let i = 0; i < 14; i++) {
+                const dm = new THREE.Mesh(osakaDebrisGeo, osakaDebrisMat)
+                dm.position.set(wx + (Math.random() - 0.5) * 2.4, 0.6 + Math.random() * 1.8, wz)
+                dm.scale.setScalar(0.5 + Math.random())
+                scene.add(dm)
+                S.debris.push({
+                  mesh: dm,
+                  vx: (Math.random() - 0.5) * 3,
+                  vy: 1.5 + Math.random() * 3,
+                  vz: 2 + Math.random() * 3,
+                  t: 0,
+                })
+              }
+              spawnExplosion(new THREE.Vector3(wx, 1.2, wz), true)
+            }
+          }
+        } else {
+          const ex = ax + (st.loc === "under" ? OSAKA_UNDER.x : OSAKA_HIDDEN.x)
+          const ez =
+            az +
+            (st.loc === "under"
+              ? OSAKA_UNDER.z - OSAKA_UNDER.len / 2 + 1.6
+              : OSAKA_HIDDEN.z + OSAKA_HIDDEN.s / 2 - 1.2)
+          if (Math.hypot(px - ex, pz - ez) < 2.4) {
+            hint = "[E] 地上へ戻る"
+            action = () => osakaSecretTeleport(st.ret.x, st.ret.z, "none")
+          }
+        }
+        if (hint !== osakaHintRef.current) {
+          osakaHintRef.current = hint
+          setOsakaHint(hint)
+        }
+        if (huntInteractReqRef.current) {
+          // ミッション中の [E] はここが唯一の消費者 (ラック処理は room 限定)。
+          huntInteractReqRef.current = false
+          if (action) action()
+        }
+        // ── 開扉 / 崩壊アニメ → 完了で転送 ──
+        if (S.gateAnim >= 0) {
+          S.gateAnim = Math.min(1, S.gateAnim + dt / 0.9)
+          const k = 1 - (1 - S.gateAnim) * (1 - S.gateAnim) // ease-out
+          S.gate.rotation.y = -1.45 * k
+          if (S.gateAnim >= 1) {
+            S.gateAnim = -1
+            st.ret = { x: ax + OSAKA_GATE_POS.x, z: az + OSAKA_GATE_POS.z + 2.0 }
+            osakaSecretTeleport(
+              ax + OSAKA_UNDER.x,
+              az + OSAKA_UNDER.z - OSAKA_UNDER.len / 2 + 3,
+              "under",
+            )
+          }
+        }
+        if (S.crackAnim >= 0 && S.crack) {
+          S.crackAnim = Math.min(1, S.crackAnim + dt / 0.7)
+          S.crack.scale.x = Math.max(0.02, 1 - S.crackAnim)
+          if (S.crackAnim >= 1) {
+            S.crackAnim = -1
+            S.crack.visible = false
+            st.ret = { x: ax + OSAKA_CRACK_POS.x, z: az + OSAKA_CRACK_POS.z + 2.2 }
+            osakaSecretTeleport(
+              ax + OSAKA_HIDDEN.x,
+              az + OSAKA_HIDDEN.z + OSAKA_HIDDEN.s / 2 - 2,
+              "hidden",
+            )
+          }
+        }
+        // ── 破片の放物運動 ──
+        for (let i = S.debris.length - 1; i >= 0; i--) {
+          const d = S.debris[i]
+          if (!d) continue
+          d.t += dt
+          d.vy -= 9.8 * dt
+          d.mesh.position.x += d.vx * dt
+          d.mesh.position.y = Math.max(0.1, d.mesh.position.y + d.vy * dt)
+          d.mesh.position.z += d.vz * dt
+          d.mesh.rotation.x += dt * 4
+          d.mesh.rotation.z += dt * 3
+          if (d.t > 1.6) {
+            scene.remove(d.mesh)
+            S.debris.splice(i, 1)
+          }
+        }
+        // ── 非常灯の明滅 (地下に居る間だけ) ──
+        if (st.loc === "under") {
+          for (let i = 0; i < S.underLights.length; i++) {
+            const l = S.underLights[i]
+            if (!l) continue
+            l.intensity =
+              Math.random() < 0.04 ? 0.2 : 1.4 + Math.sin(osakaSecretT * 6 + i * 1.7) * 0.5
+          }
+        }
+        // ── 武器ピックアップ (bob + 取得) ──
+        if (!st.bladeTaken) {
+          S.blade.rotation.y += dt * 1.4
+          S.blade.position.y = 1.45 + Math.sin(osakaSecretT * 2.2) * 0.12
+          const bx = ax + OSAKA_UNDER.x
+          const bz = az + OSAKA_UNDER.z + OSAKA_UNDER.len / 2 - 4
+          if (st.loc === "under" && Math.hypot(px - bx, pz - bz) < 2.1) {
+            st.bladeTaken = true
+            S.blade.visible = false
+            osakaGrantSecretWeapon("oniblade")
+            osakaBanner("隠し武器『地下の鬼刀』入手")
+            showNotification("⚔ 鬼刀 — [Z]で装備 / 斬った敵は炎上爆発する")
+            SOUNDS.clear()
+          }
+        }
+        if (!st.spearTaken) {
+          S.spear.rotation.y += dt * 0.8
+          const sx = ax + OSAKA_HIDDEN.x
+          const sz = az + OSAKA_HIDDEN.z - 2.5
+          if (st.loc === "hidden" && Math.hypot(px - sx, pz - sz) < 2.1) {
+            st.spearTaken = true
+            S.spear.visible = false
+            osakaGrantSecretWeapon("greatspear")
+            osakaBanner("隠し武器『城主の大槍』入手")
+            showNotification("⚔ 大槍 — [X]で装備 / ADS+射撃で貫通投擲 (3発)")
+            SOUNDS.clear()
+          }
+        }
+        // ── 隠し空間のクランプ (HUNT_ROOM と同じ方式 — 物理を一切触らない) ──
+        if (st.loc === "under") {
+          const cx = ax + OSAKA_UNDER.x
+          const cz2 = az + OSAKA_UNDER.z
+          const hw = OSAKA_UNDER.w / 2 - 0.5
+          const hl = OSAKA_UNDER.len / 2 - 0.5
+          focalPoint.x = Math.max(cx - hw, Math.min(cx + hw, focalPoint.x))
+          focalPoint.z = Math.max(cz2 - hl, Math.min(cz2 + hl, focalPoint.z))
+          focalPoint.y = 0
+        } else if (st.loc === "hidden") {
+          const cx = ax + OSAKA_HIDDEN.x
+          const cz2 = az + OSAKA_HIDDEN.z
+          const hh = OSAKA_HIDDEN.s / 2 - 0.5
+          focalPoint.x = Math.max(cx - hh, Math.min(cx + hh, focalPoint.x))
+          focalPoint.z = Math.max(cz2 - hh, Math.min(cz2 + hh, focalPoint.z))
+          focalPoint.y = 0
+        }
+        // ── 投擲槍の飛翔 (表示のみ) ──
+        for (let i = osakaSpears.length - 1; i >= 0; i--) {
+          const s = osakaSpears[i]
+          if (!s) continue
+          s.mesh.position.addScaledVector(s.dir, OSAKA_SPEAR_SPEED * dt)
+          s.dist += OSAKA_SPEAR_SPEED * dt
+          if (s.dist > OSAKA_SPEAR_THROW_DIST) {
+            scene.remove(s.mesh)
+            osakaSpears.splice(i, 1)
+          }
+        }
+      }
       // Per-phase periodic sub-attacks fire on their own timers (reset on a phase
       // change), independent of the main attackTimer.
       let osakaPhaseSeen = 0
@@ -12522,7 +12991,7 @@ export default function ThreeWorld({
             mb.group.position.x += (toX / dist) * step
             mb.group.position.z += (toZ / dist) * step
             mb.group.position.y = Math.max(2.0, mb.group.position.y - 9 * dt)
-            if (dist < 4 && !mb.diveHit && safeToHit) {
+            if (dist < 4 && !mb.diveHit && safeToHit && osakaSecretRef.current.loc === "none") {
               applyPlayerDamage(60, 7)
               mb.diveHit = true
             }
@@ -12547,7 +13016,8 @@ export default function ThreeWorld({
               true,
               false,
             )
-            if (dist < 12 && safeToHit) applyPlayerDamage(40, 5)
+            if (dist < 12 && safeToHit && osakaSecretRef.current.loc === "none")
+              applyPlayerDamage(40, 5)
           }
         } else {
           // Yamaya: slow ground stalk + rock volleys + quakes; enraged below 50%.
@@ -12572,7 +13042,8 @@ export default function ThreeWorld({
             mb.quakeCd = 8
             cameraShakeRef.current.intensity = 6
             for (const fl of mb.flash) fl.intensity = 6
-            if (dist < 15 && safeToHit) applyPlayerDamage(30, 8)
+            if (dist < 15 && safeToHit && osakaSecretRef.current.loc === "none")
+              applyPlayerDamage(30, 8)
           }
           for (const fl of mb.flash) fl.intensity = Math.max(0, fl.intensity - dt * 12)
         }
@@ -14159,6 +14630,212 @@ export default function ThreeWorld({
         instAdd(trunkGeo, trunkMat, trunkXf)
         const blossomInst = instAdd(blossomGeo, sakuraMat, blossomXf)
         if (blossomInst) osakaCull.push({ obj: blossomInst, cx: 0, cz: cz + 50, r: 80 })
+        // ════ SECRET ROUTES (FINAL-A) — 隠しルート2種の構造物 ═══════════════════
+        // 静的シェルは mAdd でマージ (draw call 増ほぼゼロ)、動く物 (格子戸・ひび
+        // 壁・武器・非常灯) だけ個別。内部空間はフィールド外の y=0 平面に実体を置き、
+        // updateOsakaSecrets が転送とクランプを行う。
+        {
+          const secretStone = new THREE.MeshLambertMaterial({ color: 0x35302a })
+          const secretDark = new THREE.MeshLambertMaterial({ color: 0x1f1c19 })
+          const shell = (
+            w: number,
+            h: number,
+            d: number,
+            x: number,
+            y: number,
+            z: number,
+            mat: THREE.MeshLambertMaterial,
+          ) => {
+            const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat)
+            m.position.set(x, y, z)
+            mAdd(m)
+          }
+          // ── 地下通路 (幅6 × 高3 × 長40) ──
+          const { x: ux, z: uz, w: uw, len: ul, h: uh } = OSAKA_UNDER
+          shell(uw + 2, 0.4, ul + 2, ux, -0.2, uz, secretDark) // 床
+          shell(uw + 2, 0.4, ul + 2, ux, uh + 0.2, uz, secretDark) // 天井
+          shell(0.4, uh, ul + 2, ux - uw / 2 - 0.2, uh / 2, uz, secretStone)
+          shell(0.4, uh, ul + 2, ux + uw / 2 + 0.2, uh / 2, uz, secretStone)
+          shell(uw + 0.8, uh, 0.4, ux, uh / 2, uz - ul / 2 - 0.2, secretStone)
+          shell(uw + 0.8, uh, 0.4, ux, uh / 2, uz + ul / 2 + 0.2, secretStone)
+          // 赤い非常灯 ×4 — 灯体はちらつく neon マテリアル (マージ)、光源は個別
+          // PointLight (updateOsakaSecrets が明滅)。
+          const undLightMat = neonMat(0xff2222, 2.2, true, 9)
+          const underLights: THREE.PointLight[] = []
+          for (let i = 0; i < 4; i++) {
+            const lz = uz - ul / 2 + 6 + i * ((ul - 12) / 3)
+            const lampBox = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.18, 0.14), undLightMat)
+            lampBox.position.set(ux - uw / 2 + 0.35, uh - 0.4, lz)
+            mAdd(lampBox)
+            const pl = new THREE.PointLight(0xff3322, 1.6, 9)
+            pl.position.set(ux - uw / 2 + 0.6, uh - 0.5, lz)
+            add(pl)
+            underLights.push(pl)
+          }
+          // 出入りパッド (緑の発光円盤) — [E] で地上へ戻る目印。
+          const padMat = neonMat(0x00ff88, 1.6, false)
+          const upad = new THREE.Mesh(new THREE.CylinderGeometry(1.0, 1.0, 0.08, 12), padMat)
+          upad.position.set(ux, 0.05, uz - ul / 2 + 1.6)
+          mAdd(upad)
+          // 鬼刀 — 石の台座 + 浮遊する刀 (bob/rotate は updateOsakaSecrets)。
+          shell(1.4, 0.9, 1.4, ux, 0.45, uz + ul / 2 - 4, secretStone)
+          const blade = new THREE.Group()
+          const bladeMat = new THREE.MeshStandardMaterial({
+            color: 0x991111,
+            emissive: 0xff2200,
+            emissiveIntensity: 0.9,
+            metalness: 0.7,
+            roughness: 0.25,
+          })
+          const goldTrimMat = new THREE.MeshStandardMaterial({
+            color: 0xd4af37,
+            emissive: 0xd4af37,
+            emissiveIntensity: 0.4,
+          })
+          const bladeEdge = new THREE.Mesh(new THREE.BoxGeometry(0.07, 1.15, 0.16), bladeMat)
+          bladeEdge.position.y = 0.62
+          blade.add(bladeEdge)
+          const tsuba = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.16, 0.04, 8), goldTrimMat)
+          blade.add(tsuba)
+          const grip = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.34, 0.09), secretDark)
+          grip.position.y = -0.2
+          blade.add(grip)
+          blade.position.set(ux, 1.45, uz + ul / 2 - 4)
+          blade.rotation.z = 0.5
+          add(blade)
+          const bladeGlow = new THREE.PointLight(0xff3311, 1.4, 7)
+          bladeGlow.position.set(ux, 1.7, uz + ul / 2 - 4)
+          add(bladeGlow)
+          // ── 石造りの隠し部屋 (8×8×5) ──
+          const { x: hx, z: hz, s: hs, h: hh } = OSAKA_HIDDEN
+          shell(hs + 2, 0.4, hs + 2, hx, -0.2, hz, secretDark)
+          shell(hs + 2, 0.4, hs + 2, hx, hh + 0.2, hz, secretDark)
+          shell(0.4, hh, hs + 2, hx - hs / 2 - 0.2, hh / 2, hz, secretStone)
+          shell(0.4, hh, hs + 2, hx + hs / 2 + 0.2, hh / 2, hz, secretStone)
+          shell(hs + 0.8, hh, 0.4, hx, hh / 2, hz - hs / 2 - 0.2, secretStone)
+          shell(hs + 0.8, hh, 0.4, hx, hh / 2, hz + hs / 2 + 0.2, secretStone)
+          // 松明 ×2 (オレンジの光 + 炎の発光体)。
+          const torchMat = neonMat(0xff9933, 2.0, false)
+          for (const tx of [hx - hs / 2 + 0.6, hx + hs / 2 - 0.6]) {
+            const flame = new THREE.Mesh(new THREE.SphereGeometry(0.14, 6, 6), torchMat)
+            flame.position.set(tx, 2.6, hz)
+            mAdd(flame)
+            const tl = new THREE.PointLight(0xff8833, 1.8, 10)
+            tl.position.set(tx, 2.6, hz)
+            add(tl)
+          }
+          const hpad = new THREE.Mesh(new THREE.CylinderGeometry(1.0, 1.0, 0.08, 12), padMat)
+          hpad.position.set(hx, 0.05, hz + hs / 2 - 1.2)
+          mAdd(hpad)
+          // 甲冑台座 + 城主の大槍。
+          shell(1.6, 0.5, 1.6, hx, 0.25, hz - 2.5, secretStone)
+          const armorMat = new THREE.MeshStandardMaterial({
+            color: 0x3a1a1a,
+            metalness: 0.6,
+            roughness: 0.5,
+          })
+          const torso = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.95, 0.5), armorMat)
+          torso.position.set(hx, 1.0, hz - 2.5)
+          add(torso)
+          const helm = new THREE.Mesh(new THREE.SphereGeometry(0.27, 10, 8), armorMat)
+          helm.position.set(hx, 1.75, hz - 2.5)
+          add(helm)
+          for (const hsx of [-1, 1]) {
+            const horn = new THREE.Mesh(new THREE.ConeGeometry(0.06, 0.5, 6), goldTrimMat)
+            horn.position.set(hx + hsx * 0.18, 2.1, hz - 2.5)
+            horn.rotation.z = -hsx * 0.5
+            add(horn)
+          }
+          const spear = new THREE.Group()
+          const shaft = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.045, 0.045, 3.4, 6),
+            new THREE.MeshStandardMaterial({ color: 0x5a3a22, roughness: 0.7 }),
+          )
+          spear.add(shaft)
+          const spearHead = new THREE.Mesh(new THREE.ConeGeometry(0.12, 0.55, 6), goldTrimMat)
+          spearHead.position.y = 1.95
+          spear.add(spearHead)
+          const spearRing = new THREE.Mesh(new THREE.TorusGeometry(0.09, 0.025, 6, 10), goldTrimMat)
+          spearRing.position.y = 1.62
+          spearRing.rotation.x = Math.PI / 2
+          spear.add(spearRing)
+          spear.position.set(hx + 0.7, 1.7, hz - 2.5)
+          spear.rotation.z = 0.35
+          add(spear)
+          const spearGlow = new THREE.PointLight(0xffcc55, 1.2, 7)
+          spearGlow.position.set(hx + 0.7, 2.2, hz - 2.5)
+          add(spearGlow)
+          // ── ①格子戸 (道頓堀川岸の水路口) ──
+          const gp = OSAKA_GATE_POS
+          shell(3.2, 3.0, 1.0, gp.x, 1.5, gp.z - 0.55, secretStone) // 水路躯体
+          const recess = new THREE.Mesh(
+            new THREE.PlaneGeometry(2.3, 2.5),
+            new THREE.MeshBasicMaterial({ color: 0x010503 }),
+          )
+          recess.position.set(gp.x, 1.3, gp.z - 0.04)
+          add(recess) // 奥の暗闇 (開いた先がある感)
+          const gate = new THREE.Group()
+          gate.position.set(gp.x - 1.1, 0.1, gp.z) // 左端ヒンジで開く
+          const barMat = new THREE.MeshLambertMaterial({ color: 0x2a2a2a })
+          for (let i = 0; i < 7; i++) {
+            const bar = new THREE.Mesh(new THREE.BoxGeometry(0.07, 2.4, 0.07), barMat)
+            bar.position.set(0.14 + i * 0.32, 1.2, 0)
+            gate.add(bar)
+          }
+          for (const hy of [0.35, 2.05]) {
+            const hbar = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.09, 0.09), barMat)
+            hbar.position.set(1.1, hy, 0)
+            gate.add(hbar)
+          }
+          add(gate)
+          const gateLight = new THREE.PointLight(0x00ff88, 2.4, 8)
+          gateLight.position.set(gp.x, 1.8, gp.z + 1.2)
+          add(gateLight)
+          // ── ②天守台1F南面のひび割れた壁 (CanvasTexture) ──
+          const cv = document.createElement("canvas")
+          cv.width = 256
+          cv.height = 256
+          const cc = cv.getContext("2d")
+          let crack: THREE.Mesh | null = null
+          if (cc) {
+            cc.fillStyle = "#5f5f50" // 石垣に馴染む地色
+            cc.fillRect(0, 0, 256, 256)
+            cc.strokeStyle = "#16140f"
+            cc.lineWidth = 5
+            cc.beginPath()
+            cc.moveTo(128, 6)
+            let cxp = 128
+            for (let yy = 30; yy <= 250; yy += 22) {
+              cxp += (rnd() - 0.5) * 46
+              cc.lineTo(cxp, yy)
+            }
+            cc.stroke()
+            cc.lineWidth = 2.5
+            for (let b = 0; b < 5; b++) {
+              cc.beginPath()
+              const sy = 40 + b * 42
+              cc.moveTo(128 + (rnd() - 0.5) * 30, sy)
+              cc.lineTo(128 + (rnd() - 0.5) * 170, sy + 18 + rnd() * 22)
+              cc.stroke()
+            }
+            const crackTex = new THREE.CanvasTexture(cv)
+            const crackMat = new THREE.MeshLambertMaterial({ map: crackTex })
+            crack = new THREE.Mesh(new THREE.PlaneGeometry(3.2, 2.7), crackMat)
+            crack.position.set(OSAKA_CRACK_POS.x, 1.4, OSAKA_CRACK_POS.z)
+            add(crack)
+          }
+          osakaSecret = {
+            gate,
+            crack,
+            blade,
+            spear,
+            underLights,
+            gateAnim: -1,
+            crackAnim: -1,
+            debris: [],
+          }
+          osakaSecretRef.current = osakaSecretFresh()
+        }
         // Collapse every static mesh funnelled through mAdd into one merged mesh per
         // material — the bulk of the draw-call reduction happens here.
         flushMerges()
@@ -14227,6 +14904,31 @@ export default function ThreeWorld({
         for (const r of osakaRipples) disposeFxMesh(r.mesh)
         osakaRipples.length = 0
         osakaBridges.length = 0
+        // Secret-route teardown (FINAL-A): the structures died with the group
+        // above; loose debris/spears (scene-level, shared geo) and the per-run
+        // state + run-scoped secret weapons reset here.
+        if (osakaSecret) {
+          for (const d of osakaSecret.debris) scene.remove(d.mesh)
+          osakaSecret = null
+        }
+        for (const s of osakaSpears) scene.remove(s.mesh)
+        osakaSpears.length = 0
+        osakaSecretRef.current = osakaSecretFresh()
+        if (osakaHintRef.current !== null) {
+          osakaHintRef.current = null
+          setOsakaHint(null)
+        }
+        if (huntWeaponRef.current === "oniblade" || huntWeaponRef.current === "greatspear") {
+          huntWeaponRef.current = null
+          setHuntWeapon(null)
+        }
+        if (huntOwnedRef.current.has("oniblade") || huntOwnedRef.current.has("greatspear")) {
+          const next = new Set(huntOwnedRef.current)
+          next.delete("oniblade")
+          next.delete("greatspear")
+          huntOwnedRef.current = next
+          setHuntOwned([...next])
+        }
         if (huntStageFogWasSaved) {
           scene.fog = huntStageFogSaved
           huntStageFogSaved = null
@@ -16671,6 +17373,15 @@ export default function ThreeWorld({
         // HUNT special weapon equipped → its own firing path (blade fires on
         // release in huntUpdateEquip, so left-click is a no-op for it).
         if (modeRef.current === "hunt" && huntWeaponRef.current) {
+          // OSAKA secret weapons (FINAL-A): melee swing / melee+throw paths.
+          if (huntWeaponRef.current === "oniblade") {
+            osakaBladeSwing()
+            return
+          }
+          if (huntWeaponRef.current === "greatspear") {
+            osakaSpearFire()
+            return
+          }
           if (huntWeaponRef.current !== "blade") fireHuntWeapon()
           return
         }
@@ -17298,6 +18009,7 @@ export default function ThreeWorld({
           updateOsakaFx(dt) // OSAKA boss hazards (telegraphs, pools, splitters…)
           updateOsakaRain(dt) // OSAKA rain streaks + ground ripples
           updateOsakaEnv(dt) // OSAKA collapsing bridges
+          updateOsakaSecrets(dt) // OSAKA 隠しルート (FINAL-A): 戸/壁/取得/転送
         }
         // HUNT room compass: rotate the on-screen arrow toward the orb (which
         // sits at the room centre) in the player's local frame. Room phase only.
@@ -19592,6 +20304,9 @@ export default function ThreeWorld({
         else if (e.key === "8") huntSelectHuntWeapon("capturegun")
         else if (e.key === "9") huntSelectHuntWeapon("blade")
         else if (e.key === "0") huntSelectHuntWeapon("gravitycannon")
+        // OSAKA secret weapons (FINAL-A) — selectable once granted in-mission.
+        else if (e.key === "z" || e.key === "Z") huntSelectHuntWeapon("oniblade")
+        else if (e.key === "x" || e.key === "X") huntSelectHuntWeapon("greatspear")
         if (e.key === "f" || e.key === "F") huntPunchReqRef.current = true
         if (e.key === "r" || e.key === "R") huntReloadReqRef.current = true
         // 1-5 fall through to the normal-weapon switch below, which also drops
@@ -20500,6 +21215,26 @@ export default function ThreeWorld({
               </div>
             )}
 
+            {/* ── OSAKA secret-route interact hint (FINAL-A). */}
+            {osakaHint && !isMobile && gamePhase === "playing" && (
+              <div
+                style={{
+                  position: "absolute",
+                  bottom: "30%",
+                  left: "50%",
+                  transform: "translateX(-50%)",
+                  zIndex: 30,
+                  fontFamily: "monospace",
+                  color: "#7dffb0",
+                  fontSize: "0.95rem",
+                  pointerEvents: "none",
+                  textShadow: "0 0 8px #00ff55",
+                }}
+              >
+                {osakaHint}
+              </div>
+            )}
+
             {/* ── Equipment menu (loadout chosen before the countdown ends). */}
             {huntEquipOpen && (
               <div
@@ -20548,30 +21283,32 @@ export default function ThreeWorld({
                 >
                   [1] 強化スーツ {huntSuitChosen ? "✓ 着用" : "— 未着用"}
                 </button>
-                {HUNT_WEAPONS.filter((w) => !w.reward || huntGravityUnlocked).map((w, i) => {
-                  const owned = huntOwned.includes(w.id)
-                  return (
-                    <button
-                      type="button"
-                      key={w.id}
-                      onClick={() => huntPickupWeapon(w.id)}
-                      style={{
-                        display: "block",
-                        width: "100%",
-                        marginBottom: "0.4rem",
-                        padding: "0.45rem",
-                        textAlign: "left",
-                        cursor: "pointer",
-                        fontFamily: "monospace",
-                        background: owned ? "rgba(0,80,40,0.5)" : "rgba(0,20,10,0.6)",
-                        border: `1px solid ${owned ? "#33cc77" : "#225544"}`,
-                        color: owned ? "#9fffc0" : "#7fbfa0",
-                      }}
-                    >
-                      [{i + 2}] {w.name} {owned ? "✓" : "取得"}
-                    </button>
-                  )
-                })}
+                {HUNT_WEAPONS.filter((w) => !w.secret && (!w.reward || huntGravityUnlocked)).map(
+                  (w, i) => {
+                    const owned = huntOwned.includes(w.id)
+                    return (
+                      <button
+                        type="button"
+                        key={w.id}
+                        onClick={() => huntPickupWeapon(w.id)}
+                        style={{
+                          display: "block",
+                          width: "100%",
+                          marginBottom: "0.4rem",
+                          padding: "0.45rem",
+                          textAlign: "left",
+                          cursor: "pointer",
+                          fontFamily: "monospace",
+                          background: owned ? "rgba(0,80,40,0.5)" : "rgba(0,20,10,0.6)",
+                          border: `1px solid ${owned ? "#33cc77" : "#225544"}`,
+                          color: owned ? "#9fffc0" : "#7fbfa0",
+                        }}
+                      >
+                        [{i + 2}] {w.name} {owned ? "✓" : "取得"}
+                      </button>
+                    )
+                  },
+                )}
                 <div style={{ fontSize: "0.62rem", opacity: 0.7, marginTop: "0.6rem" }}>
                   カウントダウン終了までに選べ。選ばなければ生身＋既存武器で転送。[E]で閉じる
                 </div>
@@ -22944,6 +23681,34 @@ export default function ThreeWorld({
                     }}
                   >
                     装備ラック
+                  </button>
+                )}
+                {osakaHint && (
+                  <button
+                    type="button"
+                    onPointerDown={(e) => {
+                      e.preventDefault()
+                      huntInteractReqRef.current = true
+                    }}
+                    style={{
+                      position: "absolute",
+                      bottom: "30%",
+                      left: "50%",
+                      transform: "translateX(-50%)",
+                      padding: "0.7rem 1.4rem",
+                      borderRadius: "8px",
+                      background: "rgba(0,40,20,0.8)",
+                      border: "2px solid #00ff55",
+                      color: "#39ff7a",
+                      fontFamily: "monospace",
+                      fontSize: "0.9rem",
+                      fontWeight: "bold",
+                      touchAction: "none",
+                      userSelect: "none",
+                      zIndex: 33,
+                    }}
+                  >
+                    {osakaHint.replace("[E] ", "")}
                   </button>
                 )}
                 <div
