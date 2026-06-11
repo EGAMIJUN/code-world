@@ -710,14 +710,14 @@ const HUNT_LEVELS: HuntLevel[] = [
 // which is what produces the "you must aim the core" dread. When a form's HP hits
 // zero the parts are blown apart and the next form is built. Surviving the fifth
 // form clears the mission. Runs on the existing HUNT arena (map is a later phase).
-type OsakaBossPhase = 1 | 2 | 3 | 4 | 5
+type OsakaBossPhase = 1 | 2 | 3 | 4 | 5 | 6
 type OsakaBoss = {
   group: THREE.Group
   phase: OsakaBossPhase
   phaseHp: number // current form HP
   phaseMaxHp: number
   core: THREE.Mesh // primary glowing weak-point core (cores[0])
-  cores: THREE.Mesh[] // all live weak-point cores (phase 5 has 3)
+  cores: THREE.Mesh[] // all live weak-point cores (phase 5 has 3, phase 6 has 5)
   coreExposed: boolean // is the core currently hittable
   transitioning: boolean // mid form-change animation (no attacks, no hits)
   attackTimer: number // counts down to the next special attack
@@ -725,6 +725,10 @@ type OsakaBoss = {
   eyes: THREE.Mesh[] // iris meshes that flicker (addClusterEye)
   mouths: THREE.Object3D[] // toothed maws that gape open/closed (scale.y sin)
   nextZakoAt: number // timestamp for the next infinite-zako top-up
+  // Form 6 (FINAL-B) only — instanced limb/eye bundles for draw-call control.
+  armInst: THREE.InstancedMesh | null
+  armData: { ang: number; y: number; r: number; tilt: number; phase: number }[] | null
+  eyeMat: THREE.MeshLambertMaterial | null // shared instanced-eye material (pulse)
 }
 const OSAKA_PHASE_HP: Record<OsakaBossPhase, number> = {
   1: 1500,
@@ -732,7 +736,12 @@ const OSAKA_PHASE_HP: Record<OsakaBossPhase, number> = {
   3: 3500,
   4: 4500,
   5: 6000,
+  6: 12000, // 真・五変化 — 隠し武器2種を携えた者にだけ顕現する第六形態
 }
+// 第六形態の分身召喚 (過去形態のミニチュア4体)。
+const OSAKA_CLONE_NAME = "五変化の分身"
+const OSAKA_CLONE_TINTS = [0xc8c0b0, 0x1a1a2a, 0xe8e0d0, 0x8b4040] as const
+const OSAKA_TRUE_CLEAR_KEY = "osaka_true_clear" // 真エンディング到達フラグ
 const OSAKA_CORE_MULT = 3.0 // core hits hurt triple
 const OSAKA_BODY_MULT = 0.2 // body hits are 80% reduced
 const OSAKA_ZAKO_NAME = "下級妖怪" // tag distinguishing infinite-spawn fodder
@@ -11162,12 +11171,22 @@ export default function ThreeWorld({
         parts: THREE.Object3D[]
         eyes: THREE.Mesh[]
         mouths: THREE.Object3D[]
+        extras: {
+          armInst: THREE.InstancedMesh
+          armData: { ang: number; y: number; r: number; tilt: number; phase: number }[]
+          eyeMat: THREE.MeshLambertMaterial
+        } | null
       } {
         const group = new THREE.Group()
         const parts: THREE.Object3D[] = []
         const cores: THREE.Mesh[] = []
         const eyes: THREE.Mesh[] = []
         const mouths: THREE.Object3D[] = []
+        let extras: {
+          armInst: THREE.InstancedMesh
+          armData: { ang: number; y: number; r: number; tilt: number; phase: number }[]
+          eyeMat: THREE.MeshLambertMaterial
+        } | null = null
         // Mobile halves the part counts so the denser forms stay performant.
         const dense = isMobileDevice ? 0.5 : 1.0
         const dn = (n: number) => Math.max(1, Math.floor(n * dense))
@@ -11335,7 +11354,7 @@ export default function ThreeWorld({
           core.position.set(0, 7.0, 0) // exposed centre-top
           cores.push(core)
           group.add(core)
-        } else {
+        } else if (phase === 5) {
           // 五重混体: every prior form fused into one 15 m horror — ~56 limbs,
           // 28 eyes, six maws, the old-man head + bone skull embedded in the hide,
           // three weak cores each haloed by light, a slow body pulse + red underglow.
@@ -11437,8 +11456,136 @@ export default function ThreeWorld({
             cores.push(c)
             group.add(c)
           }
+        } else if (phase === 6) {
+          // ── 真・五変化 (FINAL-B): 全形態融合の超巨大体 (高さ約25m) ──
+          // 腕と目は InstancedMesh (PC 80本/50個, モバイル半減) — 各1 draw call。
+          const armN = isMobileDevice ? 40 : 80
+          const eyeN = isMobileDevice ? 25 : 50
+          // jitterSphere の肉塊コア (半径5) + 上段の融合塊。全身 osakaBody。
+          const mass = osakaPart(jitterSphere(5, 14, 0.55), 0x4a1420)
+          mass.position.y = 7
+          mass.userData.osakaPulse = true
+          add(mass)
+          const upper = osakaPart(jitterSphere(3.4, 12, 0.4), 0x5a1828)
+          upper.position.y = 13.5
+          add(upper)
+          const crown = osakaPart(jitterSphere(2.1, 10, 0.3), 0x3a0e18)
+          crown.position.y = 18.5
+          add(crown)
+          // 大角2本 — 頂部 ~25m のシルエット。
+          for (const sx of [-1, 1]) {
+            const horn = osakaPart(new THREE.ConeGeometry(0.7, 6.0, 6), 0xe8e0d0)
+            horn.position.set(sx * 1.6, 22.5, 0)
+            horn.rotation.z = -sx * 0.35
+            add(horn)
+          }
+          // 過去5形態の頭部を体表に埋め込む (撃ち抜いてきた顔が全部こちらを見る)。
+          const h1 = osakaPart(new THREE.SphereGeometry(1.0, 10, 8), 0xc8c0b0) // 老翁
+          h1.position.set(-3.2, 10.5, 2.8)
+          add(h1)
+          for (const ex of [-0.35, 0.35]) {
+            const e1 = osakaEye(0.12)
+            e1.position.set(-3.2 + ex, 10.6, 3.7)
+            add(e1)
+          }
+          const h2 = osakaPart(jitterSphere(0.9, 8, 0.2), 0x2a2a3a) // 多腕影鬼
+          h2.position.set(3.4, 11.5, 2.4)
+          add(h2)
+          const e2 = osakaEye(0.16)
+          e2.position.set(3.4, 11.6, 3.2)
+          add(e2)
+          const h3 = osakaPart(new THREE.ConeGeometry(0.9, 1.6, 8), 0xe8e0d0) // 骨触手の髑髏
+          h3.rotation.x = Math.PI
+          h3.position.set(0, 15.8, 3.0)
+          add(h3)
+          for (const sx of [-1, 1]) {
+            const hh3 = osakaPart(new THREE.ConeGeometry(0.14, 0.9, 5), 0xe8e0d0)
+            hh3.position.set(sx * 0.5, 16.8, 3.0)
+            hh3.rotation.z = -sx * 0.4
+            add(hh3)
+          }
+          const h4 = osakaPart(jitterSphere(1.1, 8, 0.3), 0x8b4040) // 肉塊融合
+          h4.position.set(-2.6, 5.2, 4.0)
+          add(h4)
+          const e4 = osakaEye(0.18)
+          e4.position.set(-2.6, 5.4, 5.0)
+          add(e4)
+          const h5 = osakaPart(jitterSphere(1.0, 8, 0.28), 0x6b3038) // 五重混体
+          h5.position.set(2.8, 4.6, 4.2)
+          add(h5)
+          const h5h = osakaPart(new THREE.ConeGeometry(0.12, 0.7, 5), 0xe8e0d0)
+          h5h.position.set(2.8, 5.6, 4.2)
+          add(h5h)
+          // 腕の束 — 根本ピボットの円柱を体表に放射状配置。うねりは
+          // updateOsakaBoss が 2フレームに1回 setMatrixAt で回す。
+          const armGeo = new THREE.CylinderGeometry(0.16, 0.3, 5.2, 5)
+          armGeo.translate(0, 2.6, 0)
+          const armMat = new THREE.MeshLambertMaterial({ color: 0x14141f })
+          const armInst = new THREE.InstancedMesh(armGeo, armMat, armN)
+          armInst.userData.osakaBody = true // まとめて「体」ヒット (InstancedMesh ごと)
+          armInst.frustumCulled = false
+          const armData: { ang: number; y: number; r: number; tilt: number; phase: number }[] = []
+          const armDummy = new THREE.Object3D()
+          for (let i = 0; i < armN; i++) {
+            const a = (i / armN) * Math.PI * 2 + Math.random() * 0.3
+            const y = 2.5 + Math.random() * 13
+            const rAt = y < 11 ? 4.6 - Math.abs(y - 7) * 0.35 : 3.2 - Math.abs(y - 13.5) * 0.3
+            const ad = {
+              ang: a,
+              y,
+              r: Math.max(1.4, rAt),
+              tilt: 1.0 + Math.random() * 0.6,
+              phase: Math.random() * Math.PI * 2,
+            }
+            armData.push(ad)
+            armDummy.position.set(Math.cos(ad.ang) * ad.r, ad.y, Math.sin(ad.ang) * ad.r)
+            armDummy.rotation.set(-Math.sin(ad.ang) * ad.tilt, 0, Math.cos(ad.ang) * ad.tilt)
+            armDummy.updateMatrix()
+            armInst.setMatrixAt(i, armDummy.matrix)
+          }
+          armInst.instanceMatrix.needsUpdate = true
+          group.add(armInst)
+          // 目の群れ — 共有マテリアルで全体明滅 (per-instance flicker はしない)。
+          const eyeGeo = new THREE.SphereGeometry(0.22, 6, 6)
+          const eyeMat = new THREE.MeshLambertMaterial({
+            color: 0xff2200,
+            emissive: 0xff1800,
+            emissiveIntensity: 1.8,
+          })
+          const eyeInst = new THREE.InstancedMesh(eyeGeo, eyeMat, eyeN)
+          eyeInst.frustumCulled = false
+          const eyeDummy = new THREE.Object3D()
+          for (let i = 0; i < eyeN; i++) {
+            const a = Math.random() * Math.PI * 2
+            const y = 3 + Math.random() * 15
+            const rr = (y < 11 ? 5 - Math.abs(y - 7) * 0.4 : 3.5 - Math.abs(y - 13.5) * 0.35) + 0.15
+            eyeDummy.position.set(
+              Math.cos(a) * Math.max(1.2, rr),
+              y,
+              Math.sin(a) * Math.max(1.2, rr),
+            )
+            eyeDummy.scale.setScalar(0.7 + Math.random() * 1.1)
+            eyeDummy.updateMatrix()
+            eyeInst.setMatrixAt(i, eyeDummy.matrix)
+          }
+          eyeInst.instanceMatrix.needsUpdate = true
+          group.add(eyeInst)
+          const under6 = new THREE.PointLight(0xff0000, 2.6, 30)
+          under6.position.set(0, 0.6, 0)
+          group.add(under6)
+          // 弱点コア ×5 — 全部同時露出、ただし高速で体表を周回する (updateOsakaBoss)。
+          for (let i = 0; i < 5; i++) {
+            const c = osakaCore()
+            c.scale.setScalar(2.4)
+            const a = (i / 5) * Math.PI * 2
+            c.position.set(Math.cos(a) * 4.6, 8 + (i % 3) * 3, Math.sin(a) * 4.6)
+            c.add(new THREE.PointLight(0xffdd00, 1.5, 10))
+            cores.push(c)
+            group.add(c)
+          }
+          extras = { armInst, armData, eyeMat }
         }
-        return { group, cores, parts, eyes, mouths }
+        return { group, cores, parts, eyes, mouths, extras }
       }
       // ── OSAKA boss lifecycle + combat ─────────────────────────────────────────
       function disposeOsakaGroup(g: THREE.Group) {
@@ -11460,6 +11607,7 @@ export default function ThreeWorld({
         disposeOsakaGroup(ob.group)
         osakaBossRef.current = null
         clearOsakaFx() // tear down any in-flight telegraphs / pools / splitters
+        osakaClearTrueLighting() // form-6 red lighting / fog / slow debuff (FINAL-B)
         if (osakaFrenzyRef.current) {
           osakaFrenzyRef.current = false
           setOsakaFrenzy(false)
@@ -11535,6 +11683,9 @@ export default function ThreeWorld({
           eyes: built.eyes,
           mouths: built.mouths,
           nextZakoAt: Date.now() + OSAKA_ZAKO_INTERVAL,
+          armInst: built.extras?.armInst ?? null,
+          armData: built.extras?.armData ?? null,
+          eyeMat: built.extras?.eyeMat ?? null,
         }
         spawnOsakaEscort(HUNT_ARENA.x - 6, HUNT_ARENA.z)
         spawnOsakaEscort(HUNT_ARENA.x + 6, HUNT_ARENA.z)
@@ -11595,9 +11746,17 @@ export default function ThreeWorld({
         window.setTimeout(() => {
           scene.remove(flash)
           if (osakaGenRef.current !== gen || !osakaBossRef.current) return // encounter ended
-          if (nextNum > 5) {
-            osakaBossDefeat()
+          if (nextNum > 6) {
+            osakaTrueDefeat() // 第六形態を討った — 真エンディングへ (FINAL-B)
             return
+          }
+          if (nextNum === 6) {
+            // 第六形態は隠し武器2種を両方携えた者の前にだけ顕現する。
+            const sst = osakaSecretRef.current
+            if (!(sst.bladeTaken && sst.spearTaken)) {
+              osakaBossDefeat()
+              return
+            }
           }
           const np = nextNum as OsakaBossPhase
           const built = buildOsakaBossPhase(np)
@@ -11619,9 +11778,18 @@ export default function ThreeWorld({
             eyes: built.eyes,
             mouths: built.mouths,
             nextZakoAt: Date.now() + OSAKA_ZAKO_INTERVAL,
+            armInst: built.extras?.armInst ?? null,
+            armData: built.extras?.armData ?? null,
+            eyeMat: built.extras?.eyeMat ?? null,
           }
           SOUNDS.bossRoar()
-          showNotification(`第${np}形態 へ変化`)
+          if (np === 6) {
+            osakaApplyTrueLighting()
+            osakaBanner("真・五変化 顕現")
+            showNotification("☠ 第六形態 — 五つのコアは常に剥き出し、だが速い")
+          } else {
+            showNotification(`第${np}形態 へ変化`)
+          }
         }, 800)
       }
       // Fire one enemy projectile from the boss (reuses the shared enemy bullet
@@ -11765,6 +11933,8 @@ export default function ThreeWorld({
         osakaFx.pool.length = 0
         osakaFx.ghost.length = 0
         osakaFx.split.length = 0
+        for (const w of osakaWaves) disposeFxMesh(w.mesh)
+        osakaWaves.length = 0
       }
       // Per-frame FX driver: telegraph bursts, pool ticks, ghost contact, splitter
       // homing + self-detonation. Damage respects the spawn-invuln window.
@@ -11825,6 +11995,24 @@ export default function ThreeWorld({
             if (safe && d < 3) applyPlayerDamage(22, 4)
             disposeFxMesh(s.mesh)
             osakaFx.split.splice(i, 1)
+          }
+        }
+        // 第六形態の全画面波 (FINAL-B): 予兆中は安全地帯が明滅、時間で全域に発破。
+        for (let i = osakaWaves.length - 1; i >= 0; i--) {
+          const w = osakaWaves[i]
+          if (!w) continue
+          w.mat.opacity = 0.35 + 0.35 * Math.abs(Math.sin(now * 0.015))
+          if (now >= w.at) {
+            osakaQuake(7, 700)
+            spawnExplosion(new THREE.Vector3(px, 1, pz), false, false)
+            if (
+              safe &&
+              Math.hypot(px - w.x, pz - w.z) > w.r &&
+              osakaSecretRef.current.loc === "none"
+            )
+              applyPlayerDamage(65, 8)
+            disposeFxMesh(w.mesh)
+            osakaWaves.splice(i, 1)
           }
         }
       }
@@ -12395,6 +12583,213 @@ export default function ThreeWorld({
       let osakaPhaseSeen = 0
       let osakaAuxA = 0
       let osakaAuxB = 0
+      // ══ 第六形態 真・五変化 (FINAL-B) — 専用ライティング/全画面波/分身/鈍化 ══
+      let osakaSlowUntil = 0 // 時空歪曲: この時刻まで移動速度半減
+      let osakaArmFrame = 0 // 腕 InstancedMesh の更新間引き (2フレに1回)
+      const osakaArmDummy = new THREE.Object3D()
+      let osakaTrueLights: THREE.Group | null = null
+      let osakaTrueFogSaved: THREE.Fog | THREE.FogExp2 | null = null
+      let osakaTrueFogWasSet = false
+      // 赤黒い決戦ライティング — 顕現時に被せ、ボス消滅時に必ず剥がす。
+      function osakaApplyTrueLighting() {
+        if (osakaTrueLights) return
+        const g = new THREE.Group()
+        g.add(new THREE.AmbientLight(0x441111, 2.4))
+        const dir = new THREE.DirectionalLight(0xff2222, 1.6)
+        dir.position.set(10, 40, -10)
+        g.add(dir)
+        const pl = new THREE.PointLight(0xff0000, 4, 70)
+        pl.position.set(HUNT_ARENA.x, 18, HUNT_ARENA.z)
+        g.add(pl)
+        scene.add(g)
+        osakaTrueLights = g
+        osakaTrueFogSaved = scene.fog
+        osakaTrueFogWasSet = true
+        scene.fog = new THREE.Fog(0x1a0004, 60, 260) // 赤黒い決戦の靄
+      }
+      function osakaClearTrueLighting() {
+        if (osakaTrueLights) {
+          scene.remove(osakaTrueLights)
+          osakaTrueLights = null
+        }
+        if (osakaTrueFogWasSet) {
+          scene.fog = osakaTrueFogSaved
+          osakaTrueFogSaved = null
+          osakaTrueFogWasSet = false
+        }
+        osakaSlowUntil = 0
+      }
+      // 全画面攻撃: 安全地帯1箇所だけが光り、1.7秒後にフィールド全体を波が薙ぐ。
+      const osakaWaves: {
+        mesh: THREE.Mesh
+        mat: THREE.MeshBasicMaterial
+        x: number
+        z: number
+        r: number
+        at: number
+      }[] = []
+      function osakaFullscreenWave(px: number, pz: number) {
+        const a = Math.random() * Math.PI * 2
+        const r = 5 + Math.random() * 9
+        const sx = px + Math.cos(a) * r
+        const sz = pz + Math.sin(a) * r
+        const mat = new THREE.MeshBasicMaterial({
+          color: 0x33ff88,
+          transparent: true,
+          opacity: 0.5,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+        })
+        const m = new THREE.Mesh(osakaDiscGeo, mat)
+        m.rotation.x = -Math.PI / 2
+        m.position.set(sx, 0.07, sz)
+        m.scale.set(3.5, 3.5, 3.5)
+        scene.add(m)
+        osakaWaves.push({ mesh: m, mat, x: sx, z: sz, r: 3.5, at: Date.now() + 1700 })
+        osakaBanner("全方位衝撃波 — 光る場所へ！")
+        SOUNDS.alert()
+      }
+      // 分身召喚: 過去形態のミニチュア4体 (通常エネミーAIに乗せる — 既存の被弾/
+      // 近接/スコア処理がそのまま効く)。
+      function osakaSummonClones() {
+        const ob = osakaBossRef.current
+        if (!ob) return
+        const live = enemies.filter((e) => e.hp > 0 && e.huntName === OSAKA_CLONE_NAME).length
+        const room = Math.min(4 - live, 4)
+        if (room <= 0) return
+        for (let i = 0; i < room; i++) {
+          const a = (i / room) * Math.PI * 2 + Math.random()
+          const safe = findSafeSpawnNear(
+            ob.group.position.x + Math.cos(a) * 7,
+            ob.group.position.z + Math.sin(a) * 7,
+            ENEMY_RADIUS,
+          )
+          huntMakeEnemy(
+            "terraformer",
+            safe.x,
+            safe.z,
+            1.25,
+            OSAKA_CLONE_TINTS[i % 4] ?? 0x8b4040,
+            0xff2200,
+            30,
+            350,
+            4.2,
+            false,
+            OSAKA_CLONE_NAME,
+            "fleshball",
+          )
+        }
+        osakaBanner("分身召喚 — 過去の形態が蘇る")
+        SOUNDS.bossRoar()
+      }
+      // 第六形態の攻撃プール — 過去全形態の攻撃 (0-5)。毎回2種を同時発動する。
+      function osakaTrueAttack(kind: number) {
+        const ob = osakaBossRef.current
+        if (!ob) return
+        const now = Date.now()
+        const px = focalPoint.x
+        const pz = focalPoint.z
+        const toX = px - ob.group.position.x
+        const toZ = pz - ob.group.position.z
+        const dist = Math.hypot(toX, toZ) || 1
+        const bossPos = new THREE.Vector3(ob.group.position.x, 2, ob.group.position.z)
+        const aim = new THREE.Vector3(toX, 0, toZ)
+        const safeToHit = now > spawnInvulnUntilRef.current
+        if (kind === 0) {
+          // 鉄球 16方位バラージ (第五形態)
+          for (let i = 0; i < 16; i++) {
+            const a = (i / 16) * Math.PI * 2
+            osakaFireBolt(
+              new THREE.Vector3(bossPos.x, 10, bossPos.z),
+              new THREE.Vector3(Math.cos(a), 0, Math.sin(a)),
+              18,
+              20,
+              0xffaa00,
+            )
+          }
+        } else if (kind === 1) {
+          // 腕の連撃 — 外へ行進する衝撃波 (第二形態)
+          for (let i = 0; i < 8; i++) {
+            const a = (i / 8) * Math.PI * 2
+            const rr = 3 + (i % 4) * 2.5
+            osakaTelegraph(
+              ob.group.position.x + Math.cos(a) * rr,
+              ob.group.position.z + Math.sin(a) * rr,
+              3,
+              450 + i * 110,
+              22,
+            )
+          }
+          osakaQuake(5)
+        } else if (kind === 2) {
+          // 骨の雨 (第三形態)
+          const n = isMobileDevice ? 5 : 10
+          for (let i = 0; i < n; i++) {
+            osakaTelegraph(
+              px + (Math.random() - 0.5) * 22,
+              pz + (Math.random() - 0.5) * 22,
+              2.2,
+              700,
+              18,
+              0xddeeff,
+            )
+          }
+        } else if (kind === 3) {
+          // 分裂体の放出 (第四形態)
+          for (let i = 0; i < (isMobileDevice ? 2 : 4); i++) {
+            const a = (i / 4) * Math.PI * 2
+            osakaSplitter(
+              ob.group.position.x + Math.cos(a) * 3,
+              ob.group.position.z + Math.sin(a) * 3,
+            )
+          }
+        } else if (kind === 4) {
+          // 念弾3連 + 追尾呪弾 (第三/第一形態)
+          for (let i = -1; i <= 1; i++) {
+            const d = aim.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), i * 0.18)
+            osakaFireBolt(new THREE.Vector3(bossPos.x, 12, bossPos.z), d, 24, 18)
+          }
+          const cm = new THREE.Mesh(
+            new THREE.SphereGeometry(0.45, 8, 8),
+            new THREE.MeshBasicMaterial({ color: 0xaa44ff }),
+          )
+          cm.position.set(bossPos.x, 3, bossPos.z)
+          scene.add(cm)
+          bullets.push({
+            mesh: cm,
+            velocity: aim.clone().normalize().multiplyScalar(6),
+            life: 5,
+            isEnemy: true,
+            damage: 20,
+            homePlayer: true,
+            homeTurn: 1.1,
+          })
+        } else {
+          // 酸の池 + 突進 (第四形態)
+          const baseAng = Math.atan2(toZ, toX)
+          for (let i = -1; i <= 1; i++) {
+            const a = baseAng + i * 0.4
+            osakaPool(bossPos.x + Math.cos(a) * 7, bossPos.z + Math.sin(a) * 7, 3.2, 3000)
+          }
+          if (dist < 7 && safeToHit && osakaSecretRef.current.loc === "none")
+            applyPlayerDamage(36, 7)
+        }
+      }
+      // 第六形態撃破 — 真エンディングフラグを永続化してクリアへ (演出は FINAL-C)。
+      function osakaTrueDefeat() {
+        try {
+          localStorage.setItem(OSAKA_TRUE_CLEAR_KEY, "1")
+        } catch {
+          /* ignore */
+        }
+        disposeOsakaBoss()
+        SOUNDS.clear()
+        if (huntMissionConfigRef.current.stage === "osaka") {
+          osakaProgressRef.current.area = "clear"
+          osakaBanner("真・五変化 撃破")
+        }
+        huntReturnToRoom("clear")
+      }
       // Per-frame boss driver: core pulse/reveal, limb sway, stalk, fodder top-up
       // and the form-specific attack on the attackTimer (1.5× cadence while raging).
       function updateOsakaBoss(dt: number) {
@@ -12419,8 +12814,63 @@ export default function ThreeWorld({
             })
           }
         }
+        // 第六形態 (FINAL-B): コアは5つ常時露出、ただし高速で体表を周回する。
+        // HP10%以下で最終発狂 — コア固定露出 + 画面振動継続 + 赤フラッシュ。
+        if (ob.phase === 6) {
+          const f6 = ob.phaseHp / ob.phaseMaxHp <= 0.1
+          if (f6 !== osakaFrenzyRef.current) {
+            osakaFrenzyRef.current = f6
+            setOsakaFrenzy(f6)
+          }
+          ob.cores.forEach((co, i) => {
+            co.visible = true
+            if (f6) {
+              const a = (i / ob.cores.length) * Math.PI * 2
+              co.position.set(Math.cos(a) * 4.4, 7 + (i % 3) * 3.4, Math.sin(a) * 4.4)
+            } else {
+              const a = t * (1.7 + i * 0.21) + i * ((Math.PI * 2) / 5)
+              co.position.set(
+                Math.cos(a) * 4.6,
+                8 + Math.sin(t * (1.2 + i * 0.13) + i * 1.8) * 4.2,
+                Math.sin(a) * 4.6,
+              )
+            }
+          })
+          if (f6) cameraShakeRef.current.intensity = Math.max(cameraShakeRef.current.intensity, 1.4)
+          // 目 (Instanced) は共有マテリアルで脈動。
+          if (ob.eyeMat) ob.eyeMat.emissiveIntensity = 1.2 + (Math.sin(t * 7) * 0.5 + 0.5) * 1.4
+          // 腕の束は 2フレームに1回だけうねらせる (80本 setMatrixAt の間引き)。
+          if (ob.armInst && ob.armData) {
+            osakaArmFrame++
+            if ((osakaArmFrame & 1) === 0) {
+              for (let i = 0; i < ob.armData.length; i++) {
+                const ad = ob.armData[i]
+                if (!ad) continue
+                const wob = Math.sin(t * 1.7 + ad.phase) * 0.22
+                osakaArmDummy.position.set(Math.cos(ad.ang) * ad.r, ad.y, Math.sin(ad.ang) * ad.r)
+                osakaArmDummy.rotation.set(
+                  -Math.sin(ad.ang) * (ad.tilt + wob),
+                  0,
+                  Math.cos(ad.ang) * (ad.tilt + wob),
+                )
+                osakaArmDummy.updateMatrix()
+                ob.armInst.setMatrixAt(i, osakaArmDummy.matrix)
+              }
+              ob.armInst.instanceMatrix.needsUpdate = true
+            }
+          }
+        }
         const pulse = 0.85 + (Math.sin(t * 4) * 0.5 + 0.5) * 0.3 // 0.85..1.15
-        const coreBase = ob.phase === 2 ? 1.4 : ob.phase === 4 ? 1.6 : ob.phase === 5 ? 1.3 : 1.0
+        const coreBase =
+          ob.phase === 6
+            ? 2.4
+            : ob.phase === 2
+              ? 1.4
+              : ob.phase === 4
+                ? 1.6
+                : ob.phase === 5
+                  ? 1.3
+                  : 1.0
         for (const co of ob.cores) {
           if (co.visible) co.scale.setScalar(coreBase * pulse)
         }
@@ -12457,8 +12907,15 @@ export default function ThreeWorld({
         const rage = hpFrac <= 0.5
         const furious = hpFrac <= 0.25
         const moveSpeed =
-          (ob.phase === 1 ? 3.5 : ob.phase === 2 ? 2.0 : ob.phase === 4 ? 1.5 : 0.8) *
-          (furious ? 1.3 : 1)
+          (ob.phase === 6
+            ? 0.6
+            : ob.phase === 1
+              ? 3.5
+              : ob.phase === 2
+                ? 2.0
+                : ob.phase === 4
+                  ? 1.5
+                  : 0.8) * (furious ? 1.3 : 1)
         if (dist > 3) {
           ob.group.position.x += (toX / dist) * moveSpeed * dt
           ob.group.position.z += (toZ / dist) * moveSpeed * dt
@@ -12519,6 +12976,23 @@ export default function ThreeWorld({
           for (let i = -1; i <= 1; i++) {
             const a = baseAng + i * 0.4
             osakaPool(bossPos.x + Math.cos(a) * 7, bossPos.z + Math.sin(a) * 7, 3.2, 3000)
+          }
+        }
+        // ── 第六形態の専用サブ攻撃 (FINAL-B) ──
+        if (ob.phase === 6 && now >= osakaAuxA) {
+          // 全画面攻撃: 予兆 → 安全地帯1箇所以外に大ダメージ波。
+          osakaAuxA = now + (furious ? 6500 : 9000)
+          osakaFullscreenWave(px, pz)
+        }
+        if (ob.phase === 6 && now >= osakaAuxB) {
+          // 時空歪曲 (移動半減) と分身召喚 (過去形態×4) を交互気味に。
+          osakaAuxB = now + 7000
+          if (Math.random() < 0.5) {
+            osakaSlowUntil = now + 3500
+            showNotification("⌛ 時空歪曲 — 体が重い……")
+            SOUNDS.huntWarn()
+          } else {
+            osakaSummonClones()
           }
         }
         ob.attackTimer -= dt
@@ -12584,7 +13058,7 @@ export default function ThreeWorld({
           }
           osakaQuake(5) // the charge shakes the ground
           cooldown = 4.0
-        } else {
+        } else if (ob.phase === 5) {
           // form 5 五重混体: every prior form's attack at random, plus a doubled
           // 16-way iron-ball barrage. Frenzy (≤20% HP) rides the furious cadence.
           const roll = Math.random()
@@ -12667,8 +13141,18 @@ export default function ThreeWorld({
             if (dist < 6 && safeToHit) applyPlayerDamage(34, 7)
           }
           cooldown = 1.4
+        } else {
+          // 第六形態 真・五変化 (FINAL-B): 全形態の攻撃プールから毎回2種を同時に。
+          const a1 = Math.floor(Math.random() * 6)
+          let a2 = Math.floor(Math.random() * 5)
+          if (a2 >= a1) a2 += 1
+          osakaTrueAttack(a1)
+          osakaTrueAttack(a2)
+          cooldown = 1.7
         }
-        ob.attackTimer = cooldown * (furious ? 0.5 : rage ? 0.667 : 1)
+        // 最終発狂 (第六形態 HP≤10%) は最速ケイデンス。
+        const f6Frenzy = ob.phase === 6 && ob.phaseHp / ob.phaseMaxHp <= 0.1
+        ob.attackTimer = cooldown * (f6Frenzy ? 0.35 : furious ? 0.5 : rage ? 0.667 : 1)
       }
       // ══ OSAKA area progression (Phase 2b) ════════════════════════════════════
       // Dotonbori → Tsutenkaku → Castle, each: clear the fodder wave → mid-boss →
@@ -18094,7 +18578,10 @@ export default function ThreeWorld({
         const isSprinting = keysRef.current.has("Shift")
         // HUNT suit: +50% move speed while the suit holds.
         const huntSuitSpeed = huntSuitActiveRef.current ? HUNT_SUIT_SPEED : 1
-        const spd = MOVE_SPEED * (isSprinting ? SPRINT_MULTIPLIER : 1) * huntSuitSpeed
+        // 時空歪曲 (真・五変化): 効果時間中は移動速度半減 (FINAL-B)。
+        const osakaSlowMul = Date.now() < osakaSlowUntil ? 0.5 : 1
+        const spd =
+          MOVE_SPEED * (isSprinting ? SPRINT_MULTIPLIER : 1) * huntSuitSpeed * osakaSlowMul
         // Desired world-space velocity from input.
         const desiredVx = (fwdX * -inVz + Math.cos(camState.yaw) * inVx) * spd
         const desiredVz = (fwdZ * -inVz + -Math.sin(camState.yaw) * inVx) * spd
