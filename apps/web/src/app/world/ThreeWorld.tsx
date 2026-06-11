@@ -743,6 +743,31 @@ const OSAKA_CLONE_NAME = "五変化の分身"
 const OSAKA_CLONE_TINTS = [0xc8c0b0, 0x1a1a2a, 0xe8e0d0, 0x8b4040] as const
 const OSAKA_TRUE_CLEAR_KEY = "osaka_true_clear" // 真エンディング到達フラグ
 const OSAKA_BEST_KEY = "osaka_best_score" // 大阪編の自己ベストスコア (FINAL-E)
+// ── 演出強化 (FINAL-F): 形態名/決め台詞/フォーム色 (全て創作オリジナル) ──────
+const OSAKA_FORM_NAMES: Record<OsakaBossPhase, string> = {
+  1: "第一形態『老翁』",
+  2: "第二形態『多腕影鬼』",
+  3: "第三形態『骨触手』",
+  4: "第四形態『肉塊融合』",
+  5: "第五形態『五重混体』",
+  6: "真・五変化",
+}
+const OSAKA_FORM_QUOTES: Record<OsakaBossPhase, string> = {
+  1: "「ようこそ大阪へ。帰り道は、もう無いがのう」",
+  2: "「腕の数だけ、お前を掴む理由がある」",
+  3: "「骨の髄まで、しゃぶり尽くしてやろう」",
+  4: "「混ざれ。肉は肉に還るのみ」",
+  5: "「五つで一つ。一つで全て」",
+  6: "「――顕現。これが儂の、真の貌よ」",
+}
+const OSAKA_FORM_COLORS: Record<OsakaBossPhase, string> = {
+  1: "#9aa0c0",
+  2: "#9966ff",
+  3: "#ddeeff",
+  4: "#cc5544",
+  5: "#ff8800",
+  6: "#ff2233",
+}
 // ── 専用スーツ「鬼神」(FINAL-D) — 真クリアで解放される赤黒い和風鎧 ──────────
 // 強化スーツ (scout) と択一。耐久消費なしで被ダメ20%減・移動1.3倍・近接1.5倍。
 const SUIT_KIND_KEY = "cw_suit_kind" // "scout" | "kishin" (選択の永続化)
@@ -2463,6 +2488,17 @@ export default function ThreeWorld({
   const osakaRunRef = useRef({ start: 0, kills: 0, dmg: 0, shots: 0, hits: 0 })
   // JSX のボタンから effect 内の関数を呼ぶ橋 (spawnMissionRef と同じパターン)。
   const osakaEndingActionRef = useRef<{ retry: () => void } | null>(null)
+  // 演出強化 (FINAL-F): 形態変化カットイン + ボス専用HPバー。
+  const [osakaCutin, setOsakaCutin] = useState<{
+    title: string
+    sub: string | null
+    tone: "form" | "true"
+  } | null>(null)
+  const [osakaBossHud, setOsakaBossHud] = useState<{
+    name: string
+    pct: number
+    phase: OsakaBossPhase
+  } | null>(null)
 
   // ── HUNT equipment (PR-Z2) ──────────────────────────────────────────────────
   // Equipment menu (opened at the rack in the room).
@@ -11731,6 +11767,10 @@ export default function ThreeWorld({
         osakaBossRef.current = null
         clearOsakaFx() // tear down any in-flight telegraphs / pools / splitters
         osakaClearTrueLighting() // form-6 red lighting / fog / slow debuff (FINAL-B)
+        // ボス専用HPバーを畳む (FINAL-F)。
+        osakaHudLastPct = -1
+        osakaHudLastPhase = 0
+        setOsakaBossHud(null)
         if (osakaFrenzyRef.current) {
           osakaFrenzyRef.current = false
           setOsakaFrenzy(false)
@@ -11814,6 +11854,7 @@ export default function ThreeWorld({
         spawnOsakaEscort(HUNT_ARENA.x + 6, HUNT_ARENA.z)
         SOUNDS.bossRoar()
         showNotification("五変化 — 不死身のボス出現")
+        osakaShowCutin(OSAKA_FORM_NAMES[1], OSAKA_FORM_QUOTES[1], "form")
       }
       // A shot landed: core hits hurt ×3, body hits are ×0.2. Draining a form's HP
       // triggers the change to the next form.
@@ -11828,6 +11869,8 @@ export default function ThreeWorld({
       }
       // Final defeat (survived form 5): tear everything down and clear the mission.
       function osakaBossDefeat() {
+        const obPos = osakaBossRef.current?.group.position.clone()
+        if (obPos) osakaDefeatBlast(obPos) // 撃破大爆発 (FINAL-F)
         disposeOsakaBoss()
         SOUNDS.clear()
         showNotification("五変化 撃破 — 不死身を討ち取った")
@@ -11844,6 +11887,7 @@ export default function ThreeWorld({
         const ob = osakaBossRef.current
         if (!ob || ob.transitioning) return
         ob.transitioning = true
+        osakaHitStopUntil = Date.now() + 130 // 形態撃破の小さなタメ (FINAL-F)
         const c = ob.group.position.clone()
         for (let i = 0; i < 3; i++) {
           spawnExplosion(
@@ -11909,10 +11953,10 @@ export default function ThreeWorld({
           SOUNDS.bossRoar()
           if (np === 6) {
             osakaApplyTrueLighting()
-            osakaBanner("真・五変化 顕現")
+            osakaShowCutin("真・五変化 顕現", OSAKA_FORM_QUOTES[6], "true")
             showNotification("☠ 第六形態 — 五つのコアは常に剥き出し、だが速い")
           } else {
-            showNotification(`第${np}形態 へ変化`)
+            osakaShowCutin(OSAKA_FORM_NAMES[np], OSAKA_FORM_QUOTES[np], "form")
           }
         }, 800)
       }
@@ -12921,6 +12965,8 @@ export default function ThreeWorld({
         // 鬼神スーツを即時解放 (FINAL-D) — リロード不要でラックに並ぶ。
         kishinUnlockedRef.current = true
         setKishinUnlocked(true)
+        const obPos6 = osakaBossRef.current?.group.position.clone()
+        if (obPos6) osakaDefeatBlast(obPos6) // 撃破大爆発 (FINAL-F)
         disposeOsakaBoss()
         SOUNDS.clear()
         if (huntMissionConfigRef.current.stage === "osaka") {
@@ -13065,6 +13111,41 @@ export default function ThreeWorld({
           huntBeginMission()
         },
       }
+      // ══ 演出強化 (FINAL-F): カットイン / ヒットストップ / 撃破大爆発 ═════════
+      let osakaCutinGen = 0
+      function osakaShowCutin(title: string, sub: string | null, tone: "form" | "true") {
+        const gen = ++osakaCutinGen
+        setOsakaCutin({ title, sub, tone })
+        window.setTimeout(() => {
+          if (osakaCutinGen === gen) setOsakaCutin(null)
+        }, 2500)
+      }
+      let osakaHitStopUntil = 0 // この時刻まで dt を 6% に潰す (一瞬の時間停止)
+      let osakaHudFrame = 0
+      let osakaHudLastPct = -1
+      let osakaHudLastPhase = 0
+      // 撃破大爆発: 炎の環 + 白フラッシュ + ヒットストップ + 大シェイク。
+      function osakaDefeatBlast(center: THREE.Vector3) {
+        const n = isMobileDevice ? 7 : 14
+        for (let i = 0; i < n; i++) {
+          const a = (i / n) * Math.PI * 2
+          const rr = 1.5 + (i % 3) * 2.2
+          const py = 0.8 + (i % 4) * 2.0
+          window.setTimeout(() => {
+            spawnExplosion(
+              new THREE.Vector3(center.x + Math.cos(a) * rr, py, center.z + Math.sin(a) * rr),
+              false,
+              false,
+            )
+          }, i * 45)
+        }
+        setHuntWhiteFlash(true)
+        window.setTimeout(() => setHuntWhiteFlash(false), 280)
+        osakaHitStopUntil = Date.now() + 240
+        cameraShakeRef.current.intensity = 10
+        SOUNDS.rpg()
+        SOUNDS.collapse()
+      }
       // Per-frame boss driver: core pulse/reveal, limb sway, stalk, fodder top-up
       // and the form-specific attack on the attackTimer (1.5× cadence while raging).
       function updateOsakaBoss(dt: number) {
@@ -13072,6 +13153,16 @@ export default function ThreeWorld({
         if (!ob || ob.transitioning) return
         const now = Date.now()
         const t = now / 1000
+        // ボス専用HPバー (FINAL-F): 5フレに1回、変化があった時だけ state 更新。
+        osakaHudFrame++
+        if (osakaHudFrame % 5 === 0) {
+          const hudPct = Math.max(0, ob.phaseHp / ob.phaseMaxHp)
+          if (Math.abs(hudPct - osakaHudLastPct) > 0.004 || osakaHudLastPhase !== ob.phase) {
+            osakaHudLastPct = hudPct
+            osakaHudLastPhase = ob.phase
+            setOsakaBossHud({ name: OSAKA_FORM_NAMES[ob.phase], pct: hudPct, phase: ob.phase })
+          }
+        }
         // Form 5: the three cores rotate exposure (only the lit one is hittable);
         // at ≤20% HP the boss goes berserk — every core exposed + red screen flash.
         if (ob.phase === 5) {
@@ -18582,7 +18673,9 @@ export default function ThreeWorld({
         // Cap dt to 50ms so a tab refocus / long pause doesn't yank everything
         // (massive lerp blends + massive position deltas would look like
         // teleportation and could clip through walls).
-        const dt = Math.min(clock.getDelta(), 0.05)
+        let dt = Math.min(clock.getDelta(), 0.05)
+        // ヒットストップ (FINAL-F): ボス撃破の瞬間だけ世界が止まる。
+        if (Date.now() < osakaHitStopUntil) dt *= 0.06
         const refs = sceneRef.current
         if (!refs) return
         frameCount = (frameCount + 1) | 0
@@ -22038,6 +22131,118 @@ export default function ThreeWorld({
                 }}
               >
                 {osakaHint}
+              </div>
+            )}
+
+            {/* ── OSAKA ボス専用HPバー (FINAL-F): 画面上部・形態ごとに色変化 ── */}
+            {osakaBossHud && gamePhase === "playing" && (
+              <div
+                style={{
+                  position: "absolute",
+                  top: "3.2rem",
+                  left: "50%",
+                  transform: "translateX(-50%)",
+                  width: "min(70vw, 720px)",
+                  zIndex: 28,
+                  pointerEvents: "none",
+                  fontFamily: "monospace",
+                }}
+              >
+                <div
+                  style={{ display: "flex", justifyContent: "space-between", marginBottom: "3px" }}
+                >
+                  <span
+                    style={{
+                      color: OSAKA_FORM_COLORS[osakaBossHud.phase],
+                      fontSize: "0.9rem",
+                      fontWeight: "bold",
+                      letterSpacing: "0.2em",
+                      textShadow: "0 0 8px rgba(255,60,60,0.7)",
+                      fontFamily: "'Hiragino Mincho ProN','Yu Mincho',serif",
+                    }}
+                  >
+                    ☠ {osakaBossHud.name}
+                  </span>
+                  <span style={{ color: "#ffccd0", fontSize: "0.7rem" }}>
+                    {Math.ceil(osakaBossHud.pct * 100)}%
+                  </span>
+                </div>
+                <div
+                  style={{
+                    height: "14px",
+                    background: "rgba(0,0,0,0.75)",
+                    border: `1px solid ${OSAKA_FORM_COLORS[osakaBossHud.phase]}`,
+                    boxShadow: "0 0 12px rgba(0,0,0,0.6)",
+                    overflow: "hidden",
+                  }}
+                >
+                  <div
+                    style={{
+                      height: "100%",
+                      width: `${osakaBossHud.pct * 100}%`,
+                      background: `linear-gradient(90deg, #220008, ${OSAKA_FORM_COLORS[osakaBossHud.phase]})`,
+                      transition: "width 0.18s",
+                    }}
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* ── 形態変化カットイン (FINAL-F): 和風帯が画面端から流れる ── */}
+            {osakaCutin && (
+              <div
+                style={{
+                  position: "absolute",
+                  top: "20%",
+                  left: 0,
+                  right: 0,
+                  zIndex: 75,
+                  pointerEvents: "none",
+                  overflow: "hidden",
+                }}
+              >
+                <div
+                  style={{
+                    background:
+                      "linear-gradient(90deg, transparent 0%, rgba(90,0,16,0.88) 18%, rgba(15,0,4,0.92) 50%, rgba(90,0,16,0.88) 82%, transparent 100%)",
+                    borderTop: "1px solid #ff4455",
+                    borderBottom: "1px solid #ff4455",
+                    padding: "0.9rem 0",
+                    textAlign: "center",
+                    animation: "osakaCutinSlide 2.5s ease-in-out forwards",
+                  }}
+                >
+                  <div
+                    style={{
+                      fontFamily: "'Hiragino Mincho ProN','Yu Mincho',serif",
+                      fontSize: osakaCutin.tone === "true" ? "2.6rem" : "2rem",
+                      color: osakaCutin.tone === "true" ? "#ff3344" : "#ffd24a",
+                      letterSpacing: "0.4em",
+                      fontWeight: "bold",
+                      textShadow: "0 0 26px rgba(255,50,60,0.8)",
+                    }}
+                  >
+                    {osakaCutin.title}
+                  </div>
+                  {osakaCutin.sub && (
+                    <div
+                      style={{
+                        marginTop: "0.35rem",
+                        color: "#dba8b0",
+                        fontSize: "0.85rem",
+                        letterSpacing: "0.22em",
+                        fontFamily: "'Hiragino Mincho ProN','Yu Mincho',serif",
+                      }}
+                    >
+                      {osakaCutin.sub}
+                    </div>
+                  )}
+                </div>
+                <style>
+                  {
+                    "@keyframes osakaCutinSlide { 0% { transform: translateX(55vw); opacity: 0; } 13% { transform: translateX(0); opacity: 1; } 80% { transform: translateX(0); opacity: 1; } 100% { transform: translateX(-55vw); opacity: 0; } }"
+                  }
+                </style>
               </div>
             )}
 
