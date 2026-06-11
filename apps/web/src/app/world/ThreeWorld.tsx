@@ -584,9 +584,11 @@ interface HuntLevel {
 // stage = arena dressing (outdoor day vs. indoor green-lit hall);
 // difficulty = which HUNT_LEVELS entry a fresh run starts at (1/2/3).
 type HuntMissionConfig = {
-  stage: "outdoor" | "indoor" | "osaka"
+  stage: "outdoor" | "indoor" | "osaka" | "osaka_oni"
   difficulty: 1 | 2 | 3
 }
+// OSAKA 鬼モード (FINAL-H): マップ/進行は OSAKA と共通、倍率と守衛だけが変わる。
+const isOsakaStage = (s: HuntMissionConfig["stage"]): boolean => s === "osaka" || s === "osaka_oni"
 // Per-theme minion spec — reuse an existing enemy model with a colour/scale
 // tweak. base = model, tint = body recolour, eyes = eye-glow colour.
 type HuntCreatureKind =
@@ -743,6 +745,14 @@ const OSAKA_CLONE_NAME = "五変化の分身"
 const OSAKA_CLONE_TINTS = [0xc8c0b0, 0x1a1a2a, 0xe8e0d0, 0x8b4040] as const
 const OSAKA_TRUE_CLEAR_KEY = "osaka_true_clear" // 真エンディング到達フラグ
 const OSAKA_BEST_KEY = "osaka_best_score" // 大阪編の自己ベストスコア (FINAL-E)
+// ── 鬼モード (FINAL-H) ───────────────────────────────────────────────────────
+const OSAKA_ONI_CLEAR_KEY = "osaka_oni_clear" // 称号「大阪の鬼」解放フラグ
+const OSAKA_ONI_GUARD_NAME = "鬼衆" // 隠し武器を守る強敵
+const OSAKA_ONI_ZAKO_MULT = 1.5
+const OSAKA_ONI_MIDBOSS_HP_MULT = 2
+const OSAKA_ONI_MIDBOSS_CD_MULT = 1 / 1.5 // 攻撃頻度1.5倍 = クールダウン÷1.5
+const OSAKA_ONI_BOSS_HP_MULT = 1.5
+const OSAKA_ONI_CLEAR_BONUS = 3000
 // ── 演出強化 (FINAL-F): 形態名/決め台詞/フォーム色 (全て創作オリジナル) ──────
 const OSAKA_FORM_NAMES: Record<OsakaBossPhase, string> = {
   1: "第一形態『老翁』",
@@ -2481,9 +2491,14 @@ export default function ThreeWorld({
     bonus: number // クリア/隠し武器/ノーダメの合算ボーナス (FINAL-E)
     best: number // 送信前の自己ベスト
     newBest: boolean
+    oni: boolean // 鬼モードでのクリアか (FINAL-H)
+    titleNew: boolean // 今回のクリアで称号「大阪の鬼」を新規獲得したか
   }
   const [osakaEnding, setOsakaEnding] = useState<OsakaEndingState | null>(null)
   const osakaEndingRef = useRef<OsakaEndingState | null>(null)
+  // 称号「大阪の鬼」(FINAL-H): 鬼モードクリアで解放、HUDに常時表示。
+  const oniTitleOwnedRef = useRef(false)
+  const [oniTitleOwned, setOniTitleOwned] = useState(false)
   // ラン内の戦績 (タイム/キル/命中率/被ダメ) — リザルトとランク評価の材料。
   const osakaRunRef = useRef({ start: 0, kills: 0, dmg: 0, shots: 0, hits: 0 })
   // JSX のボタンから effect 内の関数を呼ぶ橋 (spawnMissionRef と同じパターン)。
@@ -11836,8 +11851,8 @@ export default function ThreeWorld({
         osakaBossRef.current = {
           group: built.group,
           phase: 1,
-          phaseHp: OSAKA_PHASE_HP[1],
-          phaseMaxHp: OSAKA_PHASE_HP[1],
+          phaseHp: Math.round(OSAKA_PHASE_HP[1] * (osakaOni() ? OSAKA_ONI_BOSS_HP_MULT : 1)),
+          phaseMaxHp: Math.round(OSAKA_PHASE_HP[1] * (osakaOni() ? OSAKA_ONI_BOSS_HP_MULT : 1)),
           core: primary,
           cores: built.cores,
           coreExposed: true,
@@ -11875,7 +11890,7 @@ export default function ThreeWorld({
         disposeOsakaBoss()
         SOUNDS.clear()
         showNotification("五変化 撃破 — 不死身を討ち取った")
-        if (huntMissionConfigRef.current.stage === "osaka") {
+        if (isOsakaStage(huntMissionConfigRef.current.stage)) {
           osakaProgressRef.current.area = "clear"
           osakaStartEnding("normal") // 暗転 →「大阪編 クリア」→ リザルト (FINAL-C)
         } else {
@@ -11936,8 +11951,8 @@ export default function ThreeWorld({
           osakaBossRef.current = {
             group: built.group,
             phase: np,
-            phaseHp: OSAKA_PHASE_HP[np],
-            phaseMaxHp: OSAKA_PHASE_HP[np],
+            phaseHp: Math.round(OSAKA_PHASE_HP[np] * (osakaOni() ? OSAKA_ONI_BOSS_HP_MULT : 1)),
+            phaseMaxHp: Math.round(OSAKA_PHASE_HP[np] * (osakaOni() ? OSAKA_ONI_BOSS_HP_MULT : 1)),
             core: primary,
             cores: built.cores,
             coreExposed: true,
@@ -12571,7 +12586,7 @@ export default function ThreeWorld({
         if (
           !S ||
           huntPhaseRef.current !== "mission" ||
-          huntMissionConfigRef.current.stage !== "osaka"
+          !isOsakaStage(huntMissionConfigRef.current.stage)
         ) {
           if (osakaHintRef.current !== null) {
             osakaHintRef.current = null
@@ -12970,7 +12985,7 @@ export default function ThreeWorld({
         if (obPos6) osakaDefeatBlast(obPos6) // 撃破大爆発 (FINAL-F)
         disposeOsakaBoss()
         SOUNDS.clear()
-        if (huntMissionConfigRef.current.stage === "osaka") {
+        if (isOsakaStage(huntMissionConfigRef.current.stage)) {
           osakaProgressRef.current.area = "clear"
           osakaStartEnding("true")
         } else {
@@ -12985,7 +13000,41 @@ export default function ThreeWorld({
         osakaRunRef.current = { start: Date.now(), kills: 0, dmg: 0, shots: 0, hits: 0 }
       }
       function osakaRunIsLive(): boolean {
-        return huntMissionConfigRef.current.stage === "osaka" && huntPhaseRef.current === "mission"
+        return (
+          isOsakaStage(huntMissionConfigRef.current.stage) && huntPhaseRef.current === "mission"
+        )
+      }
+      // 鬼モード判定 (FINAL-H)。
+      function osakaOni(): boolean {
+        return huntMissionConfigRef.current.stage === "osaka_oni"
+      }
+      // 鬼モードの守衛 (FINAL-H): 隠し武器への道を強敵「鬼衆」が固める。
+      // 格子戸/ひび壁の前に1体ずつ + 地下通路/隠し部屋の中に1体ずつ。
+      function osakaSpawnOniGuards() {
+        const ax = HUNT_ARENA.x
+        const az = HUNT_ARENA.z
+        const posts: [number, number][] = [
+          [ax + OSAKA_GATE_POS.x, az + OSAKA_GATE_POS.z + 2.5], // 格子戸の前
+          [ax + OSAKA_CRACK_POS.x, az + OSAKA_CRACK_POS.z + 2.5], // ひび壁の前
+          [ax + OSAKA_UNDER.x, az + OSAKA_UNDER.z + 4], // 地下通路の中ほど
+          [ax + OSAKA_HIDDEN.x, az + OSAKA_HIDDEN.z + 1.2], // 隠し部屋の中
+        ]
+        for (const [gx, gz] of posts) {
+          huntMakeEnemy(
+            "terraformer",
+            gx,
+            gz,
+            1.8,
+            0x8a1a1a,
+            0xff2200,
+            25,
+            1400,
+            4.5,
+            false,
+            OSAKA_ONI_GUARD_NAME,
+            "tall",
+          )
+        }
       }
       function osakaRunShot() {
         if (osakaRunIsLive()) osakaRunRef.current.shots++
@@ -13019,10 +13068,24 @@ export default function ThreeWorld({
         const accuracy = run.shots > 0 ? run.hits / run.shots : 0
         // ── スコアボーナス (FINAL-E): クリア + 隠し武器発見 + ノーダメ ──
         const sst = osakaSecretRef.current
+        const oni = osakaOni()
         let bonus = kind === "true" ? 15000 : 5000
         if (sst.bladeTaken) bonus += 2000
         if (sst.spearTaken) bonus += 2000
         if (run.dmg === 0) bonus += 10000 // ノーダメクリア
+        if (oni) bonus += OSAKA_ONI_CLEAR_BONUS // 鬼モード (FINAL-H)
+        // 称号「大阪の鬼」: 鬼モードクリアで解放 + 永続化。
+        let titleNew = false
+        if (oni) {
+          try {
+            titleNew = localStorage.getItem(OSAKA_ONI_CLEAR_KEY) !== "1"
+            localStorage.setItem(OSAKA_ONI_CLEAR_KEY, "1")
+          } catch {
+            /* ignore */
+          }
+          oniTitleOwnedRef.current = true
+          setOniTitleOwned(true)
+        }
         scoreRef.current += bonus
         setScore(scoreRef.current)
         // 自己ベスト (localStorage) — 更新なら保存して result でバッジ表示。
@@ -13073,6 +13136,8 @@ export default function ThreeWorld({
           bonus,
           best,
           newBest,
+          oni,
+          titleNew,
         }
         huntClearEnemies() // 静かな暗転のために残存雑魚を掃く
         huntInputLockRef.current = true
@@ -13540,7 +13605,8 @@ export default function ThreeWorld({
       // Spawn a fixed fodder wave for an area (mobile counts are roughly halved).
       function osakaSpawnAreaZako(area: "dotonbori" | "tsutenkaku" | "castle") {
         const counts = isMobileDevice ? OSAKA_AREA_ZAKO_MOBILE : OSAKA_AREA_ZAKO
-        const n = counts[area]
+        // 鬼モード (FINAL-H): 雑魚 1.5倍。
+        const n = Math.ceil(counts[area] * (osakaOni() ? OSAKA_ONI_ZAKO_MULT : 1))
         const c = osakaAreaCenter(area)
         for (let i = 0; i < n; i++) {
           const a = Math.random() * Math.PI * 2
@@ -13642,8 +13708,8 @@ export default function ThreeWorld({
         osakaMidBossRef.current = {
           kind: "tengu",
           group: g,
-          hp: OSAKA_TENGU_HP,
-          maxHp: OSAKA_TENGU_HP,
+          hp: OSAKA_TENGU_HP * (osakaOni() ? OSAKA_ONI_MIDBOSS_HP_MULT : 1),
+          maxHp: OSAKA_TENGU_HP * (osakaOni() ? OSAKA_ONI_MIDBOSS_HP_MULT : 1),
           baseY: 5.5,
           hover: 0,
           diveCd: 5,
@@ -13736,8 +13802,8 @@ export default function ThreeWorld({
         osakaMidBossRef.current = {
           kind: "yamaya",
           group: g,
-          hp: OSAKA_YAMAYA_HP,
-          maxHp: OSAKA_YAMAYA_HP,
+          hp: OSAKA_YAMAYA_HP * (osakaOni() ? OSAKA_ONI_MIDBOSS_HP_MULT : 1),
+          maxHp: OSAKA_YAMAYA_HP * (osakaOni() ? OSAKA_ONI_MIDBOSS_HP_MULT : 1),
           baseY: 0,
           hover: 0,
           diveCd: 0,
@@ -13819,6 +13885,7 @@ export default function ThreeWorld({
         }
         const now = Date.now()
         const safeToHit = now > spawnInvulnUntilRef.current
+        const oniCd = osakaOni() ? OSAKA_ONI_MIDBOSS_CD_MULT : 1 // 鬼: 攻撃頻度1.5倍
         const px = focalPoint.x
         const pz = focalPoint.z
         const toX = px - mb.group.position.x
@@ -13856,12 +13923,12 @@ export default function ThreeWorld({
             if (mb.diveCd <= 0) {
               mb.diving = 0.9
               mb.diveHit = false
-              mb.diveCd = 5
+              mb.diveCd = 5 * oniCd
             }
           }
           // Front gust cone (the boss faces the player, so a near player is in it).
           if (mb.gustCd <= 0) {
-            mb.gustCd = 3
+            mb.gustCd = 3 * oniCd
             spawnExplosion(
               new THREE.Vector3(mb.group.position.x, 2, mb.group.position.z),
               true,
@@ -13881,7 +13948,7 @@ export default function ThreeWorld({
           mb.rockCd -= dt
           mb.quakeCd -= dt
           if (mb.rockCd <= 0) {
-            mb.rockCd = rage ? 2 : 4
+            mb.rockCd = (rage ? 2 : 4) * oniCd
             const from = new THREE.Vector3(mb.group.position.x, 4, mb.group.position.z)
             const aim = new THREE.Vector3(toX, 0, toZ)
             for (let i = -1; i <= 1; i++) {
@@ -13890,7 +13957,7 @@ export default function ThreeWorld({
             }
           }
           if (mb.quakeCd <= 0) {
-            mb.quakeCd = 8
+            mb.quakeCd = 8 * oniCd
             cameraShakeRef.current.intensity = 6
             for (const fl of mb.flash) fl.intensity = 6
             if (dist < 15 && safeToHit && osakaSecretRef.current.loc === "none")
@@ -13960,9 +14027,10 @@ export default function ThreeWorld({
       let huntPanelClickAt = 0 // throttle held-fire so one tap = one selection
       // Clickable regions in normalised canvas space (top-left origin).
       type HuntPanelHit =
-        | { kind: "stage"; value: "outdoor" | "indoor" | "osaka" }
+        | { kind: "stage"; value: "outdoor" | "indoor" | "osaka" | "osaka_oni" }
         | { kind: "difficulty"; value: 1 | 2 | 3 }
         | { kind: "deploy" }
+      // 4段目に「OSAKA 鬼」(FINAL-H) が入ったぶん、ステージ行は少し詰めてある。
       const HUNT_PANEL_REGIONS: {
         x0: number
         y0: number
@@ -13970,13 +14038,14 @@ export default function ThreeWorld({
         y1: number
         hit: HuntPanelHit
       }[] = [
-        { x0: 0.05, y0: 0.24, x1: 0.46, y1: 0.36, hit: { kind: "stage", value: "outdoor" } },
-        { x0: 0.05, y0: 0.38, x1: 0.46, y1: 0.5, hit: { kind: "stage", value: "indoor" } },
-        { x0: 0.05, y0: 0.52, x1: 0.46, y1: 0.64, hit: { kind: "stage", value: "osaka" } },
+        { x0: 0.05, y0: 0.22, x1: 0.46, y1: 0.33, hit: { kind: "stage", value: "outdoor" } },
+        { x0: 0.05, y0: 0.345, x1: 0.46, y1: 0.455, hit: { kind: "stage", value: "indoor" } },
+        { x0: 0.05, y0: 0.47, x1: 0.46, y1: 0.58, hit: { kind: "stage", value: "osaka" } },
+        { x0: 0.05, y0: 0.595, x1: 0.46, y1: 0.705, hit: { kind: "stage", value: "osaka_oni" } },
         { x0: 0.54, y0: 0.24, x1: 0.95, y1: 0.36, hit: { kind: "difficulty", value: 1 } },
         { x0: 0.54, y0: 0.38, x1: 0.95, y1: 0.5, hit: { kind: "difficulty", value: 2 } },
         { x0: 0.54, y0: 0.52, x1: 0.95, y1: 0.64, hit: { kind: "difficulty", value: 3 } },
-        { x0: 0.22, y0: 0.72, x1: 0.78, y1: 0.9, hit: { kind: "deploy" } },
+        { x0: 0.22, y0: 0.74, x1: 0.78, y1: 0.92, hit: { kind: "deploy" } },
       ]
       // ── HUNT indoor stage overlay (built per mission, disposed on return) ─────
       let huntIndoorGroup: THREE.Group | null = null
@@ -14320,14 +14389,18 @@ export default function ThreeWorld({
         ctx.font = "bold 38px monospace"
         ctx.fillText("MISSION SELECT", W / 2, H * 0.12)
         // Column headers.
-        const osaka = cfg.stage === "osaka"
+        const osaka = isOsakaStage(cfg.stage)
         ctx.fillStyle = "#88ffcc"
         ctx.font = "bold 22px monospace"
         ctx.fillText("STAGE", W * 0.255, H * 0.18)
         // OSAKA is a fixed max-difficulty stage → the difficulty column is hidden.
         if (osaka) {
           ctx.fillStyle = "#ff4444"
-          ctx.fillText("OSAKA — 固定 / 最高難度", W * 0.745, H * 0.42)
+          ctx.fillText(
+            cfg.stage === "osaka_oni" ? "OSAKA 鬼 — 全てが上回る" : "OSAKA — 固定 / 最高難度",
+            W * 0.745,
+            H * 0.42,
+          )
         } else {
           ctx.fillText("DIFFICULTY", W * 0.745, H * 0.18)
         }
@@ -14340,8 +14413,10 @@ export default function ThreeWorld({
           const deploy = r.hit.kind === "deploy"
           // OSAKA is the fixed max-difficulty stage → render it in red so it reads
           // as the dangerous endgame option (green stays the normal accent).
-          const isOsakaRow = r.hit.kind === "stage" && r.hit.value === "osaka"
-          const accent = isOsakaRow ? "#ff4444" : "#00ff88"
+          // 鬼 (FINAL-H) はさらに毒々しい赤紫で「上がいる」ことを示す。
+          const isOsakaRow = r.hit.kind === "stage" && isOsakaStage(r.hit.value)
+          const isOniRow = r.hit.kind === "stage" && r.hit.value === "osaka_oni"
+          const accent = isOniRow ? "#ff2266" : isOsakaRow ? "#ff4444" : "#00ff88"
           const x = r.x0 * W
           const y = r.y0 * H
           const w = (r.x1 - r.x0) * W
@@ -14361,7 +14436,9 @@ export default function ThreeWorld({
           ctx.font = deploy ? "bold 30px monospace" : "bold 26px monospace"
           const label =
             r.hit.kind === "stage"
-              ? r.hit.value.toUpperCase()
+              ? r.hit.value === "osaka_oni"
+                ? "OSAKA 鬼"
+                : r.hit.value.toUpperCase()
               : r.hit.kind === "difficulty"
                 ? `LV${r.hit.value}`
                 : "[ DEPLOY ]"
@@ -14374,7 +14451,7 @@ export default function ThreeWorld({
       function huntPanelHitAt(u: number, v: number): HuntPanelHit | null {
         const cx = u
         const cy = 1 - v // canvas rows run top→bottom
-        const osaka = huntMissionConfigRef.current.stage === "osaka"
+        const osaka = isOsakaStage(huntMissionConfigRef.current.stage)
         for (const r of HUNT_PANEL_REGIONS) {
           if (osaka && r.hit.kind === "difficulty") continue // hidden in OSAKA
           if (cx >= r.x0 && cx <= r.x1 && cy >= r.y0 && cy <= r.y1) return r.hit
@@ -15893,11 +15970,11 @@ export default function ThreeWorld({
       }
       // ── HUNT indoor stage: dim the world, drop a ceiling + green point lights,
       // and recolour the floor/walls. Reversed by huntClearStage on return. ──
-      function huntApplyStage(stage: "outdoor" | "indoor" | "osaka") {
+      function huntApplyStage(stage: HuntMissionConfig["stage"]) {
         perfStageApplied = stage // surfaced by the ?debug=1 perf HUD
         huntClearStage() // idempotent — never stack overlays
-        if (stage === "osaka") {
-          buildOsakaMap()
+        if (isOsakaStage(stage)) {
+          buildOsakaMap() // 鬼モードもマップは共通 (倍率だけ変わる; FINAL-H)
           return
         }
         if (stage !== "indoor") return
@@ -16219,7 +16296,7 @@ export default function ThreeWorld({
         // OSAKA is a fixed, max-difficulty stage — always start at the top level.
         // (Area progression + the 五変化 boss land in Phase 2b; for now the O key
         // still summons the boss into the freshly built OSAKA field.)
-        if (huntMissionConfigRef.current.stage === "osaka") {
+        if (isOsakaStage(huntMissionConfigRef.current.stage)) {
           huntHasDeployedRef.current = true
           huntLevelIdxRef.current = HUNT_LEVELS.length - 1
         } else if (!huntHasDeployedRef.current) {
@@ -16237,12 +16314,13 @@ export default function ThreeWorld({
         setHuntScore(0)
         const hpScale = lv.level === 3 ? 1 + 0.2 * huntRepeatRef.current : 1
         const th = HUNT_THEMES[lv.theme]
-        const isOsaka = huntMissionConfigRef.current.stage === "osaka"
+        const isOsaka = isOsakaStage(huntMissionConfigRef.current.stage)
         if (isOsaka) {
           // OSAKA drives its own area progression (Dotonbori → … → 五変化 boss)
           // instead of the generic minion ring + single HUNT boss.
           osakaRunReset() // リザルト用のラン戦績 (タイム/キル/命中率/被ダメ) を起動
           osakaInitProgression()
+          if (osakaOni()) osakaSpawnOniGuards() // 鬼: 隠し武器への道に守衛 (FINAL-H)
         } else {
           // Minions ring the arena centre.
           for (let i = 0; i < lv.zakoCount; i++) {
@@ -16937,12 +17015,12 @@ export default function ThreeWorld({
         } else if (phase === "mission" && huntMissionReadyRef.current) {
           huntUpdateEquip(dt)
           // OSAKA: drive the area progression (wave clear → mid-boss → next area).
-          if (huntMissionConfigRef.current.stage === "osaka") updateOsakaProgress()
+          if (isOsakaStage(huntMissionConfigRef.current.stage)) updateOsakaProgress()
           // Arena boundary: shrink on Lv3, else fixed. OSAKA is a linear march
           // across a 180m field, not a shrinking-ring survival, so its boundary +
           // head-pop are disabled (the player must be free to cross the map).
           const lv = HUNT_LEVELS[huntLevelIdxRef.current]
-          if (huntMissionConfigRef.current.stage !== "osaka") {
+          if (!isOsakaStage(huntMissionConfigRef.current.stage)) {
             if (lv?.shrink) {
               const tt = Math.min(1, (now - huntShrinkStartRef.current) / (HUNT_SHRINK_SEC * 1000))
               huntRadiusRef.current = HUNT_BASE_RADIUS - (HUNT_BASE_RADIUS - HUNT_MIN_RADIUS) * tt
@@ -17024,7 +17102,7 @@ export default function ThreeWorld({
           // stage is fully driven by updateOsakaProgress (its empty waves between
           // areas must never trip this generic clear).
           if (
-            huntMissionConfigRef.current.stage !== "osaka" &&
+            !isOsakaStage(huntMissionConfigRef.current.stage) &&
             !osakaBossRef.current &&
             enemies.filter((e) => e.hp > 0).length === 0
           ) {
@@ -17098,6 +17176,10 @@ export default function ThreeWorld({
             huntSuitKindRef.current = "kishin"
             setHuntSuitKind("kishin")
           }
+          // 称号「大阪の鬼」(FINAL-H)。
+          const ot = localStorage.getItem(OSAKA_ONI_CLEAR_KEY) === "1"
+          oniTitleOwnedRef.current = ot
+          setOniTitleOwned(ot)
         } catch {
           /* ignore */
         }
@@ -22152,6 +22234,26 @@ export default function ThreeWorld({
               </div>
             )}
 
+            {/* ── 称号「大阪の鬼」バッジ (FINAL-H): 鬼モードクリアで常時表示 ── */}
+            {oniTitleOwned && gamePhase === "playing" && (
+              <div
+                style={{
+                  position: "absolute",
+                  top: "0.5rem",
+                  left: "0.6rem",
+                  zIndex: 26,
+                  fontFamily: "monospace",
+                  color: "#ff4466",
+                  fontSize: "0.68rem",
+                  letterSpacing: "0.22em",
+                  pointerEvents: "none",
+                  textShadow: "0 0 8px rgba(255,40,80,0.8)",
+                }}
+              >
+                👹 大阪の鬼
+              </div>
+            )}
+
             {/* ── OSAKA ボス専用HPバー (FINAL-F): 画面上部・形態ごとに色変化 ── */}
             {osakaBossHud && gamePhase === "playing" && (
               <div
@@ -22346,6 +22448,7 @@ export default function ThreeWorld({
                       }}
                     >
                       {osakaEnding.kind === "true" ? "真・大阪編 制覇" : "大阪編 クリア"}
+                      {osakaEnding.oni ? " 👹鬼" : ""}
                     </div>
                     <div
                       style={{
@@ -22413,6 +22516,20 @@ export default function ThreeWorld({
                         }}
                       >
                         専用スーツ『鬼神』解放！
+                      </div>
+                    )}
+                    {osakaEnding.titleNew && (
+                      <div
+                        style={{
+                          marginTop: "0.6rem",
+                          padding: "0.5rem",
+                          border: "1px solid #ff2266",
+                          color: "#ff77aa",
+                          fontSize: "0.8rem",
+                          letterSpacing: "0.15em",
+                        }}
+                      >
+                        👹 称号『大阪の鬼』獲得！
                       </div>
                     )}
                     <div
