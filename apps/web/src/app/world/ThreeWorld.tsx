@@ -11908,7 +11908,7 @@ export default function ThreeWorld({
         showNotification("五変化 撃破 — 不死身を討ち取った")
         if (isOsakaStage(huntMissionConfigRef.current.stage)) {
           osakaProgressRef.current.area = "clear"
-          osakaStartEnding("normal") // 暗転 →「大阪編 クリア」→ リザルト (FINAL-C)
+          osakaBeginEndingSoon("normal") // 爆発を見せてから暗転 → リザルト (FINAL-C)
         } else {
           huntReturnToRoom("clear") // O キー召喚 (通常 HUNT アリーナ) は従来通り
         }
@@ -13043,7 +13043,7 @@ export default function ThreeWorld({
         SOUNDS.clear()
         if (isOsakaStage(huntMissionConfigRef.current.stage)) {
           osakaProgressRef.current.area = "clear"
-          osakaStartEnding("true")
+          osakaBeginEndingSoon("true")
         } else {
           huntReturnToRoom("clear")
         }
@@ -13221,6 +13221,16 @@ export default function ThreeWorld({
         if (acc > 0.5) pts += 1
         if (trueKill) pts += 1
         return pts >= 6 ? "S" : pts >= 4 ? "A" : pts >= 2 ? "B" : "C"
+      }
+      // 撃破大爆発 (FINAL-F) を見せ切ってから暗転に入る。即時に無敵+入力ロック
+      // だけ掛け、950ms 後に本編のエンディングを開始する。
+      function osakaBeginEndingSoon(kind: "normal" | "true") {
+        huntInputLockRef.current = true
+        spawnInvulnUntilRef.current = Date.now() + 600000
+        window.setTimeout(() => {
+          if (!osakaEndingRef.current && isOsakaStage(huntMissionConfigRef.current.stage))
+            osakaStartEnding(kind)
+        }, 950)
       }
       function osakaStartEnding(kind: "normal" | "true") {
         const run = osakaRunRef.current
