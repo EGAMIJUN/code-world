@@ -742,6 +742,7 @@ const OSAKA_PHASE_HP: Record<OsakaBossPhase, number> = {
 const OSAKA_CLONE_NAME = "五変化の分身"
 const OSAKA_CLONE_TINTS = [0xc8c0b0, 0x1a1a2a, 0xe8e0d0, 0x8b4040] as const
 const OSAKA_TRUE_CLEAR_KEY = "osaka_true_clear" // 真エンディング到達フラグ
+const OSAKA_BEST_KEY = "osaka_best_score" // 大阪編の自己ベストスコア (FINAL-E)
 // ── 専用スーツ「鬼神」(FINAL-D) — 真クリアで解放される赤黒い和風鎧 ──────────
 // 強化スーツ (scout) と択一。耐久消費なしで被ダメ20%減・移動1.3倍・近接1.5倍。
 const SUIT_KIND_KEY = "cw_suit_kind" // "scout" | "kishin" (選択の永続化)
@@ -2452,6 +2453,9 @@ export default function ThreeWorld({
     timeSec: number
     damageTaken: number
     rank: "S" | "A" | "B" | "C"
+    bonus: number // クリア/隠し武器/ノーダメの合算ボーナス (FINAL-E)
+    best: number // 送信前の自己ベスト
+    newBest: boolean
   }
   const [osakaEnding, setOsakaEnding] = useState<OsakaEndingState | null>(null)
   const osakaEndingRef = useRef<OsakaEndingState | null>(null)
@@ -12659,7 +12663,9 @@ export default function ThreeWorld({
             st.bladeTaken = true
             S.blade.visible = false
             osakaGrantSecretWeapon("oniblade")
-            osakaBanner("隠し武器『地下の鬼刀』入手")
+            scoreRef.current += 2000 // 隠し武器発見ボーナス (FINAL-E)
+            setScore(scoreRef.current)
+            osakaBanner("隠し武器『地下の鬼刀』入手 +2000")
             showNotification("⚔ 鬼刀 — [Z]で装備 / 斬った敵は炎上爆発する")
             SOUNDS.clear()
           }
@@ -12672,7 +12678,9 @@ export default function ThreeWorld({
             st.spearTaken = true
             S.spear.visible = false
             osakaGrantSecretWeapon("greatspear")
-            osakaBanner("隠し武器『城主の大槍』入手")
+            scoreRef.current += 2000 // 隠し武器発見ボーナス (FINAL-E)
+            setScore(scoreRef.current)
+            osakaBanner("隠し武器『城主の大槍』入手 +2000")
             showNotification("⚔ 大槍 — [X]で装備 / ADS+射撃で貫通投擲 (3発)")
             SOUNDS.clear()
           }
@@ -12962,6 +12970,50 @@ export default function ThreeWorld({
         const run = osakaRunRef.current
         const timeSec = Math.max(1, Math.floor((Date.now() - run.start) / 1000))
         const accuracy = run.shots > 0 ? run.hits / run.shots : 0
+        // ── スコアボーナス (FINAL-E): クリア + 隠し武器発見 + ノーダメ ──
+        const sst = osakaSecretRef.current
+        let bonus = kind === "true" ? 15000 : 5000
+        if (sst.bladeTaken) bonus += 2000
+        if (sst.spearTaken) bonus += 2000
+        if (run.dmg === 0) bonus += 10000 // ノーダメクリア
+        scoreRef.current += bonus
+        setScore(scoreRef.current)
+        // 自己ベスト (localStorage) — 更新なら保存して result でバッジ表示。
+        let best = 0
+        try {
+          best = Number.parseInt(localStorage.getItem(OSAKA_BEST_KEY) ?? "0", 10) || 0
+        } catch {
+          /* ignore */
+        }
+        const newBest = scoreRef.current > best
+        if (newBest) {
+          try {
+            localStorage.setItem(OSAKA_BEST_KEY, String(scoreRef.current))
+          } catch {
+            /* ignore */
+          }
+        }
+        // 既存ランキングへ送信 (FINAL-E): クリアを1試合 (victory) として記録。
+        // 未ログイン/オフラインは黙って読み飛ばす (401/network は無視)。
+        fetch(`${API_URL}/api/profile/stats`, {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            kills: run.kills,
+            deaths: 0,
+            score: scoreRef.current,
+            killstreak: maxKillstreakRef.current,
+            headshots: headshotsRef.current,
+            durationSec: timeSec,
+            mode: "osaka",
+            mapId: "osaka",
+            weaponKills: weaponKillsRef.current,
+            result: "victory",
+          }),
+        }).catch(() => {
+          /* ignore */
+        })
         const st = {
           kind,
           stage: "fade" as const,
@@ -12971,6 +13023,9 @@ export default function ThreeWorld({
           timeSec,
           damageTaken: Math.round(run.dmg),
           rank: osakaComputeRank(timeSec, run.dmg, accuracy, kind === "true"),
+          bonus,
+          best,
+          newBest,
         }
         huntClearEnemies() // 静かな暗転のために残存雑魚を掃く
         huntInputLockRef.current = true
@@ -22081,6 +22136,7 @@ export default function ThreeWorld({
                     {(
                       [
                         ["SCORE", String(osakaEnding.score).padStart(6, "0")],
+                        ["クリアボーナス", `+${osakaEnding.bonus}`],
                         ["KILL", String(osakaEnding.kills)],
                         ["命中率", `${Math.round(osakaEnding.accuracy * 100)}%`],
                         [
@@ -22090,6 +22146,12 @@ export default function ThreeWorld({
                           ).padStart(2, "0")}`,
                         ],
                         ["被ダメージ", String(osakaEnding.damageTaken)],
+                        [
+                          "自己ベスト",
+                          osakaEnding.newBest
+                            ? `★更新! ${osakaEnding.score}`
+                            : String(Math.max(osakaEnding.best, 0)),
+                        ],
                       ] as const
                     ).map(([k, v]) => (
                       <div

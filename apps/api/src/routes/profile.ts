@@ -80,8 +80,9 @@ profileRouter.get("/:id/matches", async (c: Context) => {
   return c.json({ data: rows })
 })
 
-const VALID_MODES = new Set(["wave_defense", "ffa", "tdm", "mission", "zombie"])
-const VALID_MAPS = new Set(["urban", "desert", "snow"])
+// "hunt" は HUNT モードの死亡時送信、"osaka" は大阪編クリア時の送信 (FINAL-E)。
+const VALID_MODES = new Set(["wave_defense", "ffa", "tdm", "mission", "zombie", "hunt", "osaka"])
+const VALID_MAPS = new Set(["urban", "desert", "snow", "sky", "osaka"])
 
 profileRouter.post("/stats", async (c: Context) => {
   const auth = await getAuthUser(c)
