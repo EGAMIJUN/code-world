@@ -2436,6 +2436,23 @@ export default function ThreeWorld({
   })
   const [osakaHint, setOsakaHint] = useState<string | null>(null) // "[E] 調べる" HUD
   const osakaHintRef = useRef<string | null>(null)
+  // OSAKA クリア演出 (FINAL-C): 暗転 → タイトル → リザルト の3段。
+  type OsakaEndingState = {
+    kind: "normal" | "true"
+    stage: "fade" | "title" | "result"
+    score: number
+    kills: number
+    accuracy: number // 0..1
+    timeSec: number
+    damageTaken: number
+    rank: "S" | "A" | "B" | "C"
+  }
+  const [osakaEnding, setOsakaEnding] = useState<OsakaEndingState | null>(null)
+  const osakaEndingRef = useRef<OsakaEndingState | null>(null)
+  // ラン内の戦績 (タイム/キル/命中率/被ダメ) — リザルトとランク評価の材料。
+  const osakaRunRef = useRef({ start: 0, kills: 0, dmg: 0, shots: 0, hits: 0 })
+  // JSX のボタンから effect 内の関数を呼ぶ橋 (spawnMissionRef と同じパターン)。
+  const osakaEndingActionRef = useRef<{ retry: () => void } | null>(null)
 
   // ── HUNT equipment (PR-Z2) ──────────────────────────────────────────────────
   // Equipment menu (opened at the rack in the room).
@@ -6872,6 +6889,7 @@ export default function ThreeWorld({
         }
         playerHpRef.current = Math.max(0, playerHpRef.current - aaShield(dmg))
         setPlayerHp(playerHpRef.current)
+        osakaRunHurt(dmg) // OSAKA リザルトの被ダメ集計 (FINAL-C; osaka 中のみ加算)
         lastDamageTimeRef.current = Date.now()
         cameraShakeRef.current.intensity = shake
         setDamageFlash(true)
@@ -11710,9 +11728,10 @@ export default function ThreeWorld({
         showNotification("五変化 撃破 — 不死身を討ち取った")
         if (huntMissionConfigRef.current.stage === "osaka") {
           osakaProgressRef.current.area = "clear"
-          osakaBanner("大阪編クリア") // big red centre banner (3s)
+          osakaStartEnding("normal") // 暗転 →「大阪編 クリア」→ リザルト (FINAL-C)
+        } else {
+          huntReturnToRoom("clear") // O キー召喚 (通常 HUNT アリーナ) は従来通り
         }
-        huntReturnToRoom("clear")
       }
       // Blow the current form apart, flash red for 0.8s, then build the next form
       // (or trigger the final defeat past form 5).
@@ -12775,7 +12794,7 @@ export default function ThreeWorld({
             applyPlayerDamage(36, 7)
         }
       }
-      // 第六形態撃破 — 真エンディングフラグを永続化してクリアへ (演出は FINAL-C)。
+      // 第六形態撃破 — 真エンディングフラグを永続化して専用クリア演出へ。
       function osakaTrueDefeat() {
         try {
           localStorage.setItem(OSAKA_TRUE_CLEAR_KEY, "1")
@@ -12786,9 +12805,98 @@ export default function ThreeWorld({
         SOUNDS.clear()
         if (huntMissionConfigRef.current.stage === "osaka") {
           osakaProgressRef.current.area = "clear"
-          osakaBanner("真・五変化 撃破")
+          osakaStartEnding("true")
+        } else {
+          huntReturnToRoom("clear")
         }
-        huntReturnToRoom("clear")
+      }
+      // ══ クリア演出・リザルト (FINAL-C) ══════════════════════════════════════
+      // 暗転 (真は長め) → タイトル → リザルト。リザルトの RETRY は huntBeginMission
+      // を直接呼び直し、MODE SELECT は onExit (WorldClient のモード選択) へ戻す。
+      let osakaEndingGen = 0
+      function osakaRunReset() {
+        osakaRunRef.current = { start: Date.now(), kills: 0, dmg: 0, shots: 0, hits: 0 }
+      }
+      function osakaRunIsLive(): boolean {
+        return huntMissionConfigRef.current.stage === "osaka" && huntPhaseRef.current === "mission"
+      }
+      function osakaRunShot() {
+        if (osakaRunIsLive()) osakaRunRef.current.shots++
+      }
+      function osakaRunHit() {
+        if (osakaRunIsLive()) osakaRunRef.current.hits++
+      }
+      function osakaRunHurt(dmg: number) {
+        if (osakaRunIsLive()) osakaRunRef.current.dmg += dmg
+      }
+      // ランク評価: タイム・被ダメ・命中率・真ルートで加点し S/A/B/C を返す。
+      function osakaComputeRank(
+        timeSec: number,
+        dmg: number,
+        acc: number,
+        trueKill: boolean,
+      ): "S" | "A" | "B" | "C" {
+        let pts = 0
+        if (timeSec < 480) pts += 2
+        else if (timeSec < 720) pts += 1
+        if (dmg === 0) pts += 3
+        else if (dmg < 150) pts += 2
+        else if (dmg < 400) pts += 1
+        if (acc > 0.5) pts += 1
+        if (trueKill) pts += 1
+        return pts >= 6 ? "S" : pts >= 4 ? "A" : pts >= 2 ? "B" : "C"
+      }
+      function osakaStartEnding(kind: "normal" | "true") {
+        const run = osakaRunRef.current
+        const timeSec = Math.max(1, Math.floor((Date.now() - run.start) / 1000))
+        const accuracy = run.shots > 0 ? run.hits / run.shots : 0
+        const st = {
+          kind,
+          stage: "fade" as const,
+          score: scoreRef.current,
+          kills: run.kills,
+          accuracy,
+          timeSec,
+          damageTaken: Math.round(run.dmg),
+          rank: osakaComputeRank(timeSec, run.dmg, accuracy, kind === "true"),
+        }
+        huntClearEnemies() // 静かな暗転のために残存雑魚を掃く
+        huntInputLockRef.current = true
+        spawnInvulnUntilRef.current = Date.now() + 600000
+        document.exitPointerLock?.()
+        osakaEndingRef.current = st
+        setOsakaEnding(st)
+        const gen = ++osakaEndingGen
+        const fadeMs = kind === "true" ? 2600 : 1300
+        const titleMs = kind === "true" ? 3200 : 2000
+        window.setTimeout(() => {
+          if (osakaEndingGen !== gen || !osakaEndingRef.current) return
+          const s2 = { ...osakaEndingRef.current, stage: "title" as const }
+          osakaEndingRef.current = s2
+          setOsakaEnding(s2)
+          SOUNDS.huntJingle()
+          window.setTimeout(() => {
+            if (osakaEndingGen !== gen || !osakaEndingRef.current) return
+            const s3 = { ...osakaEndingRef.current, stage: "result" as const }
+            osakaEndingRef.current = s3
+            setOsakaEnding(s3)
+            SOUNDS.huntTally()
+          }, titleMs)
+        }, fadeMs)
+      }
+      function osakaCloseEnding() {
+        osakaEndingGen++
+        osakaEndingRef.current = null
+        setOsakaEnding(null)
+        huntInputLockRef.current = false
+      }
+      // JSX の RETRY ボタンから呼ばれる (effect 内関数への橋)。
+      osakaEndingActionRef.current = {
+        retry: () => {
+          osakaCloseEnding()
+          spawnInvulnUntilRef.current = Date.now() + 2500
+          huntBeginMission()
+        },
       }
       // Per-frame boss driver: core pulse/reveal, limb sway, stalk, fodder top-up
       // and the form-specific attack on the attackTimer (1.5× cadence while raging).
@@ -15857,6 +15965,7 @@ export default function ThreeWorld({
         if (isOsaka) {
           // OSAKA drives its own area progression (Dotonbori → … → 五変化 boss)
           // instead of the generic minion ring + single HUNT boss.
+          osakaRunReset() // リザルト用のラン戦績 (タイム/キル/命中率/被ダメ) を起動
           osakaInitProgression()
         } else {
           // Minions ring the arena centre.
@@ -17073,6 +17182,7 @@ export default function ThreeWorld({
         hitEnemy.hp = 0
         hitEnemy.dyingTimer = DEATH_ANIM_TOTAL
         hitEnemy.state = "patrol"
+        if (osakaRunIsLive()) osakaRunRef.current.kills++ // OSAKA リザルトの KILL 集計
         // Fall direction: project enemy→shooter onto the enemy's facing.
         // If the shooter is in front (dot > 0 means enemy looking at
         // shooter), the body tips backward (-1). Otherwise face-plant.
@@ -17888,6 +17998,7 @@ export default function ThreeWorld({
         const now = Date.now()
         if (weapon.id === "pistol" && now - lastFireTimeRef.current < 120) return
         lastFireTimeRef.current = now
+        osakaRunShot() // OSAKA リザルトの命中率分母 (osaka 中のみ加算)
 
         // Consume ammo
         if (weapon.maxAmmo !== -1) {
@@ -18021,6 +18132,7 @@ export default function ThreeWorld({
               const isCore = obHit === coreHit
               SOUNDS.hit()
               spawnBlood(obHit.point)
+              osakaRunHit()
               osakaDamage(weapon.hitDamage * (isCore ? OSAKA_CORE_MULT : OSAKA_BODY_MULT))
               enemyHits = []
               shotConsumed = true
@@ -18040,6 +18152,7 @@ export default function ThreeWorld({
             if (!blockedByWall && !blockedByEnemy) {
               SOUNDS.hit()
               spawnBlood(mbHit.point)
+              osakaRunHit()
               osakaMB.hp -= weapon.hitDamage
               enemyHits = []
               shotConsumed = true
@@ -18102,6 +18215,7 @@ export default function ThreeWorld({
           if (hitEnemy && enemyHits[0]) {
             SOUNDS.hit()
             spawnBlood(enemyHits[0].point)
+            osakaRunHit()
             const bodyH = hitEnemy.config.bodyH
             const enemyBottomY = hitEnemy.mesh.position.y - bodyH / 2
             const isHeadshot = enemyHits[0].point.y >= enemyBottomY + bodyH * 0.67
@@ -21719,6 +21833,190 @@ export default function ThreeWorld({
                 }}
               >
                 {osakaHint}
+              </div>
+            )}
+
+            {/* ── OSAKA クリア演出: 暗転 → タイトル → リザルト (FINAL-C) ── */}
+            {osakaEnding && (
+              <div
+                style={{
+                  position: "absolute",
+                  inset: 0,
+                  zIndex: 80,
+                  background: osakaEnding.kind === "true" ? "#070003" : "#000",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  flexDirection: "column",
+                  fontFamily: "monospace",
+                  pointerEvents: "auto",
+                }}
+              >
+                {osakaEnding.stage === "title" && (
+                  <div style={{ textAlign: "center" }}>
+                    <div
+                      style={{
+                        fontSize: "3rem",
+                        fontWeight: "bold",
+                        letterSpacing: "0.3em",
+                        color: osakaEnding.kind === "true" ? "#ff3344" : "#ffd24a",
+                        fontFamily: "'Hiragino Mincho ProN','Yu Mincho',serif",
+                        textShadow:
+                          osakaEnding.kind === "true"
+                            ? "0 0 34px rgba(255,40,60,0.7)"
+                            : "0 0 26px rgba(255,210,74,0.5)",
+                      }}
+                    >
+                      {osakaEnding.kind === "true" ? "真・大阪編 制覇" : "大阪編 クリア"}
+                    </div>
+                    {osakaEnding.kind === "true" && (
+                      <div
+                        style={{
+                          marginTop: "1.2rem",
+                          color: "#cc8899",
+                          fontSize: "0.9rem",
+                          letterSpacing: "0.45em",
+                        }}
+                      >
+                        六つ目の貌は、もう何処にも居ない
+                      </div>
+                    )}
+                  </div>
+                )}
+                {osakaEnding.stage === "result" && (
+                  <div
+                    style={{
+                      minWidth: "360px",
+                      border: `2px solid ${osakaEnding.kind === "true" ? "#ff3344" : "#ffd24a"}`,
+                      boxShadow:
+                        osakaEnding.kind === "true"
+                          ? "0 0 40px rgba(255,40,60,0.35)"
+                          : "0 0 30px rgba(255,210,74,0.3)",
+                      padding: "1.6rem 2rem",
+                      background: "rgba(10,0,4,0.94)",
+                      color: "#ffe8ee",
+                      textAlign: "center",
+                    }}
+                  >
+                    <div
+                      style={{
+                        fontSize: "1.1rem",
+                        fontWeight: "bold",
+                        letterSpacing: "0.25em",
+                        marginBottom: "0.9rem",
+                        color: osakaEnding.kind === "true" ? "#ff5566" : "#ffd24a",
+                      }}
+                    >
+                      {osakaEnding.kind === "true" ? "真・大阪編 制覇" : "大阪編 クリア"}
+                    </div>
+                    <div
+                      style={{
+                        fontSize: "4rem",
+                        fontWeight: "bold",
+                        lineHeight: 1,
+                        marginBottom: "0.8rem",
+                        color:
+                          osakaEnding.rank === "S"
+                            ? "#ffd700"
+                            : osakaEnding.rank === "A"
+                              ? "#ff5566"
+                              : osakaEnding.rank === "B"
+                                ? "#44aaff"
+                                : "#9aa0a6",
+                        textShadow: "0 0 24px rgba(255,255,255,0.25)",
+                      }}
+                    >
+                      {osakaEnding.rank}
+                    </div>
+                    {(
+                      [
+                        ["SCORE", String(osakaEnding.score).padStart(6, "0")],
+                        ["KILL", String(osakaEnding.kills)],
+                        ["命中率", `${Math.round(osakaEnding.accuracy * 100)}%`],
+                        [
+                          "クリアタイム",
+                          `${Math.floor(osakaEnding.timeSec / 60)}:${String(
+                            osakaEnding.timeSec % 60,
+                          ).padStart(2, "0")}`,
+                        ],
+                        ["被ダメージ", String(osakaEnding.damageTaken)],
+                      ] as const
+                    ).map(([k, v]) => (
+                      <div
+                        key={k}
+                        style={{
+                          display: "flex",
+                          justifyContent: "space-between",
+                          fontSize: "0.85rem",
+                          padding: "0.18rem 0.4rem",
+                          color: "#ffd8e0",
+                        }}
+                      >
+                        <span style={{ opacity: 0.75 }}>{k}</span>
+                        <span style={{ fontWeight: "bold" }}>{v}</span>
+                      </div>
+                    ))}
+                    {osakaEnding.kind === "true" && (
+                      <div
+                        style={{
+                          marginTop: "0.9rem",
+                          padding: "0.5rem",
+                          border: "1px solid #ff3344",
+                          color: "#ff8899",
+                          fontSize: "0.8rem",
+                          letterSpacing: "0.15em",
+                        }}
+                      >
+                        専用スーツ『鬼神』解放！
+                      </div>
+                    )}
+                    <div
+                      style={{
+                        display: "flex",
+                        gap: "0.8rem",
+                        marginTop: "1.2rem",
+                        justifyContent: "center",
+                      }}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => osakaEndingActionRef.current?.retry()}
+                        style={{
+                          padding: "0.6rem 1.4rem",
+                          background: "rgba(255,60,80,0.18)",
+                          border: "1px solid #ff5566",
+                          color: "#ff99aa",
+                          fontFamily: "monospace",
+                          fontWeight: "bold",
+                          cursor: "pointer",
+                          letterSpacing: "0.12em",
+                        }}
+                      >
+                        RETRY
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          osakaEndingRef.current = null
+                          setOsakaEnding(null)
+                          onExit?.()
+                        }}
+                        style={{
+                          padding: "0.6rem 1.4rem",
+                          background: "rgba(255,210,74,0.14)",
+                          border: "1px solid #ffd24a",
+                          color: "#ffe18a",
+                          fontFamily: "monospace",
+                          fontWeight: "bold",
+                          cursor: "pointer",
+                          letterSpacing: "0.12em",
+                        }}
+                      >
+                        MODE SELECT
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 
