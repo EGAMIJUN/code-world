@@ -13314,8 +13314,8 @@ export default function ThreeWorld({
           // Lambert (cheap) keeps main's faint neon-reflection emissive so the
           // asphalt never goes pure black.
           new THREE.MeshLambertMaterial({
-            color: 0x1c1c20,
-            emissive: 0x1a1520,
+            color: 0x3a3a40,
+            emissive: 0x1a1828,
             emissiveIntensity: 1,
           }),
         )
@@ -13337,7 +13337,11 @@ export default function ThreeWorld({
         // Main street linking the three areas (a touch lighter than the asphalt).
         const street = new THREE.Mesh(
           new THREE.PlaneGeometry(14, 170),
-          new THREE.MeshLambertMaterial({ color: 0x26262c }),
+          new THREE.MeshLambertMaterial({
+            color: 0x3a3a40,
+            emissive: 0x1a1828,
+            emissiveIntensity: 1,
+          }),
         )
         street.rotation.x = -Math.PI / 2
         street.position.set(0, 0.02, 0)
@@ -13518,7 +13522,7 @@ export default function ThreeWorld({
               map: tex,
               emissive: sign.col,
               emissiveMap: tex,
-              emissiveIntensity: 2.5, // brighter night-city neon
+              emissiveIntensity: 4.0, // brighter night-city neon
             }),
           )
           const pz = z + facing * (bd / 2 + 0.15)
@@ -13549,7 +13553,7 @@ export default function ThreeWorld({
         const neonCount = fullLights ? 3 : 1
         for (let i = 0; i < neonCount; i++) {
           // Fewer lights (perf) but main's brighter intensity/range + wide spread.
-          const pl = new THREE.PointLight(i % 2 === 0 ? 0xff3366 : 0x33ddff, 3.0, 38)
+          const pl = new THREE.PointLight(i % 2 === 0 ? 0xff3366 : 0x33ddff, 5.0, 38)
           pl.castShadow = false
           pl.position.set(-70 + (i / Math.max(1, neonCount - 1)) * 140, 6, 70 + (i % 2) * 10)
           add(pl)
@@ -13721,7 +13725,7 @@ export default function ThreeWorld({
         const orbTop = new THREE.Mesh(new THREE.SphereGeometry(2.5, sseg(12), sseg(12)), orbMat)
         orbTop.position.set(0, 47, 0)
         add(orbTop)
-        const towerLight = new THREE.PointLight(0xffcc00, 5, 60)
+        const towerLight = new THREE.PointLight(0xffcc00, 8, 60)
         towerLight.castShadow = false
         towerLight.position.set(0, 47, 0)
         add(towerLight)
@@ -13884,9 +13888,9 @@ export default function ThreeWorld({
           new THREE.PlaneGeometry(14, 44),
           // Lambert (cheap) + main's faint emissive so the cobbles read at night.
           new THREE.MeshLambertMaterial({
-            color: 0x4a4a45,
+            color: 0x3a3a40,
             map: cobTex,
-            emissive: 0x1a1520,
+            emissive: 0x1a1828,
             emissiveIntensity: 1,
           }),
         )
@@ -14068,7 +14072,7 @@ export default function ThreeWorld({
             ]
           : [[0, cz + 12]]
         for (const [lx, lz] of castleLights) {
-          const cl = new THREE.PointLight(0xffeedd, 5, 50)
+          const cl = new THREE.PointLight(0xffeedd, 8, 50)
           cl.castShadow = false
           cl.position.set(lx, 6, lz)
           add(cl)
@@ -14097,8 +14101,8 @@ export default function ThreeWorld({
           new THREE.PlaneGeometry(46, 28),
           // Lambert (cheap) + main's faint emissive so the plaza reads at night.
           new THREE.MeshLambertMaterial({
-            color: 0x4a4a45,
-            emissive: 0x1a1520,
+            color: 0x3a3a40,
+            emissive: 0x1a1828,
             emissiveIntensity: 1,
           }),
         )
@@ -14169,24 +14173,25 @@ export default function ThreeWorld({
           huntStageLightSaved.push({ light, intensity: light.intensity })
           light.intensity = 0.05
         }
-        // Keep the bluish ambient colour; intensity 3.5 on it fills shadows
-        // strongly without clipping to white (a brighter colour would white-out).
-        const osakaAmbient = new THREE.AmbientLight(0x222233, 3.5)
+        // Bright "lit night-city" levels — the bluish ambient colour is kept so
+        // intensity 6.0 lifts the whole scene without going daytime-flat. If the
+        // neon ever white-clips, drop osakaAmbient 6.0 → 4.5.
+        const osakaAmbient = new THREE.AmbientLight(0x222233, 6.0)
         add(osakaAmbient)
-        const osakaHemi = new THREE.HemisphereLight(0x5577cc, 0x443355, 2.0)
+        const osakaHemi = new THREE.HemisphereLight(0x5577cc, 0x443355, 3.0)
         osakaHemi.position.set(0, 60, 0)
         add(osakaHemi)
-        const moonlight = new THREE.DirectionalLight(0xccddff, 1.5)
+        const moonlight = new THREE.DirectionalLight(0xccddff, 2.5)
         moonlight.castShadow = false
         moonlight.position.set(20, 50, 20)
         add(moonlight)
-        const osakaFill = new THREE.DirectionalLight(0xaabbff, 0.8)
+        const osakaFill = new THREE.DirectionalLight(0xaabbff, 1.5)
         osakaFill.castShadow = false
         osakaFill.position.set(-30, 40, -20)
         add(osakaFill)
         huntStageFogSaved = scene.fog
         huntStageFogWasSaved = true
-        scene.fog = new THREE.Fog(0x222845, 100, 320)
+        scene.fog = new THREE.Fog(0x333355, 150, 400) // thinner haze → see further
         scene.add(group)
         osakaMapMeshesRef.current.push(group)
         buildOsakaRain() // OSAKA-only rain field (disposed with the map)
