@@ -11738,7 +11738,8 @@ export default function ThreeWorld({
             c.scale.setScalar(2.4)
             const a = (i / 5) * Math.PI * 2
             c.position.set(Math.cos(a) * 4.6, 8 + (i % 3) * 3, Math.sin(a) * 4.6)
-            c.add(new THREE.PointLight(0xffdd00, 1.5, 10))
+            // コアの後光はモバイルでは省略 (発光マテリアルで十分視認できる)。
+            if (!isMobileDevice) c.add(new THREE.PointLight(0xffdd00, 1.5, 10))
             cores.push(c)
             group.add(c)
           }
@@ -15517,10 +15518,13 @@ export default function ThreeWorld({
             const lampBox = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.18, 0.14), undLightMat)
             lampBox.position.set(ux - uw / 2 + 0.35, uh - 0.4, lz)
             mAdd(lampBox)
-            const pl = new THREE.PointLight(0xff3322, 1.6, 9)
-            pl.position.set(ux - uw / 2 + 0.6, uh - 0.5, lz)
-            add(pl)
-            underLights.push(pl)
+            // 灯体4つは見た目通り、PointLight はモバイル2灯に間引く (FINAL-G)。
+            if (!isMobileDevice || i % 2 === 0) {
+              const pl = new THREE.PointLight(0xff3322, 1.6, 9)
+              pl.position.set(ux - uw / 2 + 0.6, uh - 0.5, lz)
+              add(pl)
+              underLights.push(pl)
+            }
           }
           // 出入りパッド (緑の発光円盤) — [E] で地上へ戻る目印。
           const padMat = neonMat(0x00ff88, 1.6, false)
@@ -15553,9 +15557,11 @@ export default function ThreeWorld({
           blade.position.set(ux, 1.45, uz + ul / 2 - 4)
           blade.rotation.z = 0.5
           add(blade)
-          const bladeGlow = new THREE.PointLight(0xff3311, 1.4, 7)
-          bladeGlow.position.set(ux, 1.7, uz + ul / 2 - 4)
-          add(bladeGlow)
+          if (!isMobileDevice) {
+            const bladeGlow = new THREE.PointLight(0xff3311, 1.4, 7)
+            bladeGlow.position.set(ux, 1.7, uz + ul / 2 - 4)
+            add(bladeGlow)
+          }
           // ── 石造りの隠し部屋 (8×8×5) ──
           const { x: hx, z: hz, s: hs, h: hh } = OSAKA_HIDDEN
           shell(hs + 2, 0.4, hs + 2, hx, -0.2, hz, secretDark)
@@ -15566,13 +15572,18 @@ export default function ThreeWorld({
           shell(hs + 0.8, hh, 0.4, hx, hh / 2, hz + hs / 2 + 0.2, secretStone)
           // 松明 ×2 (オレンジの光 + 炎の発光体)。
           const torchMat = neonMat(0xff9933, 2.0, false)
-          for (const tx of [hx - hs / 2 + 0.6, hx + hs / 2 - 0.6]) {
+          const torchXs = [hx - hs / 2 + 0.6, hx + hs / 2 - 0.6]
+          for (let ti = 0; ti < torchXs.length; ti++) {
+            const tx = torchXs[ti] ?? hx
             const flame = new THREE.Mesh(new THREE.SphereGeometry(0.14, 6, 6), torchMat)
             flame.position.set(tx, 2.6, hz)
             mAdd(flame)
-            const tl = new THREE.PointLight(0xff8833, 1.8, 10)
-            tl.position.set(tx, 2.6, hz)
-            add(tl)
+            // モバイルは灯1つに間引き (FINAL-G) — 炎の発光体は両方残す。
+            if (!isMobileDevice || ti === 0) {
+              const tl = new THREE.PointLight(0xff8833, 1.8, 10)
+              tl.position.set(tx, 2.6, hz)
+              add(tl)
+            }
           }
           const hpad = new THREE.Mesh(new THREE.CylinderGeometry(1.0, 1.0, 0.08, 12), padMat)
           hpad.position.set(hx, 0.05, hz + hs / 2 - 1.2)
@@ -15612,9 +15623,11 @@ export default function ThreeWorld({
           spear.position.set(hx + 0.7, 1.7, hz - 2.5)
           spear.rotation.z = 0.35
           add(spear)
-          const spearGlow = new THREE.PointLight(0xffcc55, 1.2, 7)
-          spearGlow.position.set(hx + 0.7, 2.2, hz - 2.5)
-          add(spearGlow)
+          if (!isMobileDevice) {
+            const spearGlow = new THREE.PointLight(0xffcc55, 1.2, 7)
+            spearGlow.position.set(hx + 0.7, 2.2, hz - 2.5)
+            add(spearGlow)
+          }
           // ── ①格子戸 (道頓堀川岸の水路口) ──
           const gp = OSAKA_GATE_POS
           shell(3.2, 3.0, 1.0, gp.x, 1.5, gp.z - 0.55, secretStone) // 水路躯体
@@ -15627,16 +15640,21 @@ export default function ThreeWorld({
           const gate = new THREE.Group()
           gate.position.set(gp.x - 1.1, 0.1, gp.z) // 左端ヒンジで開く
           const barMat = new THREE.MeshLambertMaterial({ color: 0x2a2a2a })
+          // 格子9本は1ジオメトリにマージ — 回転する戸全体で 1 draw call (FINAL-G)。
+          const barGeos: THREE.BufferGeometry[] = []
           for (let i = 0; i < 7; i++) {
-            const bar = new THREE.Mesh(new THREE.BoxGeometry(0.07, 2.4, 0.07), barMat)
-            bar.position.set(0.14 + i * 0.32, 1.2, 0)
-            gate.add(bar)
+            const bg = new THREE.BoxGeometry(0.07, 2.4, 0.07)
+            bg.translate(0.14 + i * 0.32, 1.2, 0)
+            barGeos.push(bg)
           }
           for (const hy of [0.35, 2.05]) {
-            const hbar = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.09, 0.09), barMat)
-            hbar.position.set(1.1, hy, 0)
-            gate.add(hbar)
+            const bg = new THREE.BoxGeometry(2.2, 0.09, 0.09)
+            bg.translate(1.1, hy, 0)
+            barGeos.push(bg)
           }
+          const gateGeo = mergeGeometries(barGeos, false)
+          for (const bg of barGeos) bg.dispose()
+          if (gateGeo) gate.add(new THREE.Mesh(gateGeo, barMat))
           add(gate)
           const gateLight = new THREE.PointLight(0x00ff88, 2.4, 8)
           gateLight.position.set(gp.x, 1.8, gp.z + 1.2)
@@ -22207,15 +22225,25 @@ export default function ThreeWorld({
                       "linear-gradient(90deg, transparent 0%, rgba(90,0,16,0.88) 18%, rgba(15,0,4,0.92) 50%, rgba(90,0,16,0.88) 82%, transparent 100%)",
                     borderTop: "1px solid #ff4455",
                     borderBottom: "1px solid #ff4455",
-                    padding: "0.9rem 0",
+                    padding: isMobile ? "0.5rem 0" : "0.9rem 0",
                     textAlign: "center",
-                    animation: "osakaCutinSlide 2.5s ease-in-out forwards",
+                    // モバイルはスライドせずフェードのみの簡略版 (FINAL-G)。
+                    animation: isMobile
+                      ? "osakaCutinFade 2.5s ease-in-out forwards"
+                      : "osakaCutinSlide 2.5s ease-in-out forwards",
                   }}
                 >
                   <div
                     style={{
                       fontFamily: "'Hiragino Mincho ProN','Yu Mincho',serif",
-                      fontSize: osakaCutin.tone === "true" ? "2.6rem" : "2rem",
+                      fontSize:
+                        osakaCutin.tone === "true"
+                          ? isMobile
+                            ? "1.6rem"
+                            : "2.6rem"
+                          : isMobile
+                            ? "1.25rem"
+                            : "2rem",
                       color: osakaCutin.tone === "true" ? "#ff3344" : "#ffd24a",
                       letterSpacing: "0.4em",
                       fontWeight: "bold",
@@ -22229,7 +22257,7 @@ export default function ThreeWorld({
                       style={{
                         marginTop: "0.35rem",
                         color: "#dba8b0",
-                        fontSize: "0.85rem",
+                        fontSize: isMobile ? "0.68rem" : "0.85rem",
                         letterSpacing: "0.22em",
                         fontFamily: "'Hiragino Mincho ProN','Yu Mincho',serif",
                       }}
@@ -22240,7 +22268,7 @@ export default function ThreeWorld({
                 </div>
                 <style>
                   {
-                    "@keyframes osakaCutinSlide { 0% { transform: translateX(55vw); opacity: 0; } 13% { transform: translateX(0); opacity: 1; } 80% { transform: translateX(0); opacity: 1; } 100% { transform: translateX(-55vw); opacity: 0; } }"
+                    "@keyframes osakaCutinSlide { 0% { transform: translateX(55vw); opacity: 0; } 13% { transform: translateX(0); opacity: 1; } 80% { transform: translateX(0); opacity: 1; } 100% { transform: translateX(-55vw); opacity: 0; } } @keyframes osakaCutinFade { 0% { opacity: 0; } 15% { opacity: 1; } 80% { opacity: 1; } 100% { opacity: 0; } }"
                   }
                 </style>
               </div>
