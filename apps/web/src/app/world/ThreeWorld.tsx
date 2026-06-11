@@ -11646,13 +11646,26 @@ export default function ThreeWorld({
           const crown = osakaPart(jitterSphere(2.1, 10, 0.3), 0x3a0e18)
           crown.position.y = 18.5
           add(crown)
-          // 大角2本 — 頂部 ~25m のシルエット。
-          for (const sx of [-1, 1]) {
-            const horn = osakaPart(new THREE.ConeGeometry(0.7, 6.0, 6), 0xe8e0d0)
-            horn.position.set(sx * 1.6, 22.5, 0)
-            horn.rotation.z = -sx * 0.35
-            add(horn)
+          // 白骨色のパーツ (大角2・髑髏・小角2・第五の角) は1ジオメトリにマージ —
+          // 個別6メッシュ → 1 draw call (FINAL-J)。位置/回転はジオメトリへ焼き込む。
+          const paleGeos: THREE.BufferGeometry[] = []
+          const bakePale = (
+            g: THREE.BufferGeometry,
+            x: number,
+            y: number,
+            z: number,
+            rx = 0,
+            rz = 0,
+          ) => {
+            const m4 = new THREE.Matrix4()
+              .makeRotationFromEuler(new THREE.Euler(rx, 0, rz))
+              .setPosition(x, y, z)
+            g.applyMatrix4(m4)
+            paleGeos.push(g)
           }
+          // 大角2本 — 頂部 ~25m のシルエット。
+          bakePale(new THREE.ConeGeometry(0.7, 6.0, 6), -1.6, 22.5, 0, 0, 0.35)
+          bakePale(new THREE.ConeGeometry(0.7, 6.0, 6), 1.6, 22.5, 0, 0, -0.35)
           // 過去5形態の頭部を体表に埋め込む (撃ち抜いてきた顔が全部こちらを見る)。
           const h1 = osakaPart(new THREE.SphereGeometry(1.0, 10, 8), 0xc8c0b0) // 老翁
           h1.position.set(-3.2, 10.5, 2.8)
@@ -11668,16 +11681,10 @@ export default function ThreeWorld({
           const e2 = osakaEye(0.16)
           e2.position.set(3.4, 11.6, 3.2)
           add(e2)
-          const h3 = osakaPart(new THREE.ConeGeometry(0.9, 1.6, 8), 0xe8e0d0) // 骨触手の髑髏
-          h3.rotation.x = Math.PI
-          h3.position.set(0, 15.8, 3.0)
-          add(h3)
-          for (const sx of [-1, 1]) {
-            const hh3 = osakaPart(new THREE.ConeGeometry(0.14, 0.9, 5), 0xe8e0d0)
-            hh3.position.set(sx * 0.5, 16.8, 3.0)
-            hh3.rotation.z = -sx * 0.4
-            add(hh3)
-          }
+          // 骨触手の髑髏 (逆さ円錐) + 小角2本 — paleGeos へ焼き込み。
+          bakePale(new THREE.ConeGeometry(0.9, 1.6, 8), 0, 15.8, 3.0, Math.PI, 0)
+          bakePale(new THREE.ConeGeometry(0.14, 0.9, 5), -0.5, 16.8, 3.0, 0, 0.4)
+          bakePale(new THREE.ConeGeometry(0.14, 0.9, 5), 0.5, 16.8, 3.0, 0, -0.4)
           const h4 = osakaPart(jitterSphere(1.1, 8, 0.3), 0x8b4040) // 肉塊融合
           h4.position.set(-2.6, 5.2, 4.0)
           add(h4)
@@ -11687,9 +11694,18 @@ export default function ThreeWorld({
           const h5 = osakaPart(jitterSphere(1.0, 8, 0.28), 0x6b3038) // 五重混体
           h5.position.set(2.8, 4.6, 4.2)
           add(h5)
-          const h5h = osakaPart(new THREE.ConeGeometry(0.12, 0.7, 5), 0xe8e0d0)
-          h5h.position.set(2.8, 5.6, 4.2)
-          add(h5h)
+          // 五重混体ミニ塊の角 — paleGeos へ焼き込み、ここでまとめて1メッシュ化。
+          bakePale(new THREE.ConeGeometry(0.12, 0.7, 5), 2.8, 5.6, 4.2)
+          const paleMerged = mergeGeometries(paleGeos, false)
+          for (const pg of paleGeos) pg.dispose()
+          if (paleMerged) {
+            const paleMesh = new THREE.Mesh(
+              paleMerged,
+              new THREE.MeshLambertMaterial({ color: 0xe8e0d0 }),
+            )
+            paleMesh.userData.osakaBody = true
+            add(paleMesh)
+          }
           // 腕の束 — 根本ピボットの円柱を体表に放射状配置。うねりは
           // updateOsakaBoss が 2フレームに1回 setMatrixAt で回す。
           const armGeo = new THREE.CylinderGeometry(0.16, 0.3, 5.2, 5)
@@ -12613,6 +12629,7 @@ export default function ThreeWorld({
       // 毎フレーム: ヒント表示 / [E] 消費 / 開扉・崩壊アニメ / 取得 / クランプ /
       // 非常灯の明滅 / 投擲槍の飛翔。
       let osakaSecretT = 0
+      let osakaSecretFrame = 0 // 演出系 (bob/明滅) の2フレ間引き用 (FINAL-J)
       function updateOsakaSecrets(dt: number) {
         const S = osakaSecret
         const st = osakaSecretRef.current
@@ -12628,6 +12645,10 @@ export default function ThreeWorld({
           return
         }
         osakaSecretT += dt
+        osakaSecretFrame++
+        // 演出系 (bob/回転/非常灯) は2フレに1回、dt を倍にして速度を保つ (FINAL-J)。
+        const fx2 = (osakaSecretFrame & 1) === 0
+        const cdt = dt * 2
         const px = focalPoint.x
         const pz = focalPoint.z
         const ax = HUNT_ARENA.x
@@ -12737,8 +12758,8 @@ export default function ThreeWorld({
             S.debris.splice(i, 1)
           }
         }
-        // ── 非常灯の明滅 (地下に居る間だけ) ──
-        if (st.loc === "under") {
+        // ── 非常灯の明滅 (地下に居る間だけ・2フレに1回) ──
+        if (fx2 && st.loc === "under") {
           for (let i = 0; i < S.underLights.length; i++) {
             const l = S.underLights[i]
             if (!l) continue
@@ -12746,10 +12767,12 @@ export default function ThreeWorld({
               Math.random() < 0.04 ? 0.2 : 1.4 + Math.sin(osakaSecretT * 6 + i * 1.7) * 0.5
           }
         }
-        // ── 武器ピックアップ (bob + 取得) ──
+        // ── 武器ピックアップ (bob は間引き、取得判定は毎フレーム) ──
         if (!st.bladeTaken) {
-          S.blade.rotation.y += dt * 1.4
-          S.blade.position.y = 1.45 + Math.sin(osakaSecretT * 2.2) * 0.12
+          if (fx2) {
+            S.blade.rotation.y += cdt * 1.4
+            S.blade.position.y = 1.45 + Math.sin(osakaSecretT * 2.2) * 0.12
+          }
           const bx = ax + OSAKA_UNDER.x
           const bz = az + OSAKA_UNDER.z + OSAKA_UNDER.len / 2 - 4
           if (st.loc === "under" && Math.hypot(px - bx, pz - bz) < 2.1) {
@@ -12764,7 +12787,7 @@ export default function ThreeWorld({
           }
         }
         if (!st.spearTaken) {
-          S.spear.rotation.y += dt * 0.8
+          if (fx2) S.spear.rotation.y += cdt * 0.8
           const sx = ax + OSAKA_HIDDEN.x
           const sz = az + OSAKA_HIDDEN.z - 2.5
           if (st.loc === "hidden" && Math.hypot(px - sx, pz - sz) < 2.1) {
@@ -15812,17 +15835,18 @@ export default function ThreeWorld({
             metalness: 0.6,
             roughness: 0.5,
           })
+          // 甲冑は動かない → mAdd で他の静的物とマージ (FINAL-J)。
           const torso = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.95, 0.5), armorMat)
           torso.position.set(hx, 1.0, hz - 2.5)
-          add(torso)
+          mAdd(torso)
           const helm = new THREE.Mesh(new THREE.SphereGeometry(0.27, 10, 8), armorMat)
           helm.position.set(hx, 1.75, hz - 2.5)
-          add(helm)
+          mAdd(helm)
           for (const hsx of [-1, 1]) {
             const horn = new THREE.Mesh(new THREE.ConeGeometry(0.06, 0.5, 6), goldTrimMat)
             horn.position.set(hx + hsx * 0.18, 2.1, hz - 2.5)
             horn.rotation.z = -hsx * 0.5
-            add(horn)
+            mAdd(horn)
           }
           const spear = new THREE.Group()
           const shaft = new THREE.Mesh(
