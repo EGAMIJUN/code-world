@@ -742,6 +742,12 @@ const OSAKA_PHASE_HP: Record<OsakaBossPhase, number> = {
 const OSAKA_CLONE_NAME = "五変化の分身"
 const OSAKA_CLONE_TINTS = [0xc8c0b0, 0x1a1a2a, 0xe8e0d0, 0x8b4040] as const
 const OSAKA_TRUE_CLEAR_KEY = "osaka_true_clear" // 真エンディング到達フラグ
+// ── 専用スーツ「鬼神」(FINAL-D) — 真クリアで解放される赤黒い和風鎧 ──────────
+// 強化スーツ (scout) と択一。耐久消費なしで被ダメ20%減・移動1.3倍・近接1.5倍。
+const SUIT_KIND_KEY = "cw_suit_kind" // "scout" | "kishin" (選択の永続化)
+const KISHIN_SPEED = 1.3
+const KISHIN_DMG_CUT = 0.8 // 被ダメ 20% 減 (HUNT_SUIT_CUT と違い耐久を消費しない)
+const KISHIN_MELEE_MULT = 1.5
 const OSAKA_CORE_MULT = 3.0 // core hits hurt triple
 const OSAKA_BODY_MULT = 0.2 // body hits are 80% reduced
 const OSAKA_ZAKO_NAME = "下級妖怪" // tag distinguishing infinite-spawn fodder
@@ -2464,6 +2470,11 @@ export default function ThreeWorld({
   // Chosen loadout (kept across warps; weapons are "owned" once grabbed).
   const huntSuitChosenRef = useRef(false)
   const [huntSuitChosen, setHuntSuitChosen] = useState(false)
+  // スーツ種別 (FINAL-D): 強化スーツ (scout) / 鬼神 (kishin, 真クリアで解放)。
+  const huntSuitKindRef = useRef<"scout" | "kishin">("scout")
+  const [huntSuitKind, setHuntSuitKind] = useState<"scout" | "kishin">("scout")
+  const kishinUnlockedRef = useRef(false)
+  const [kishinUnlocked, setKishinUnlocked] = useState(false)
   const huntOwnedRef = useRef<Set<HuntWeaponId>>(new Set())
   const [huntOwned, setHuntOwned] = useState<HuntWeaponId[]>([])
   // Active HUNT weapon (null → normal weapons) + per-weapon ammo + reload.
@@ -2500,9 +2511,41 @@ export default function ThreeWorld({
   //    useCallback so both the JSX buttons and the key-event effect can use
   //    them; they only touch refs/state setters).
   const huntToggleSuitChoice = useCallback(() => {
-    const v = !huntSuitChosenRef.current
-    huntSuitChosenRef.current = v
-    setHuntSuitChosen(v)
+    // [1] 強化スーツ: 着脱トグル。鬼神を着ていた場合は強化スーツへ切替。
+    const wasScout = huntSuitChosenRef.current && huntSuitKindRef.current === "scout"
+    if (wasScout) {
+      huntSuitChosenRef.current = false
+      setHuntSuitChosen(false)
+    } else {
+      huntSuitKindRef.current = "scout"
+      setHuntSuitKind("scout")
+      huntSuitChosenRef.current = true
+      setHuntSuitChosen(true)
+    }
+    try {
+      localStorage.setItem(SUIT_KIND_KEY, huntSuitKindRef.current)
+    } catch {
+      /* ignore */
+    }
+  }, [])
+  // [7] 鬼神 (FINAL-D): 真クリア解放後のみ。着脱トグル + 選択の永続化。
+  const huntChooseKishin = useCallback(() => {
+    if (!kishinUnlockedRef.current) return
+    const wasKishin = huntSuitChosenRef.current && huntSuitKindRef.current === "kishin"
+    if (wasKishin) {
+      huntSuitChosenRef.current = false
+      setHuntSuitChosen(false)
+    } else {
+      huntSuitKindRef.current = "kishin"
+      setHuntSuitKind("kishin")
+      huntSuitChosenRef.current = true
+      setHuntSuitChosen(true)
+    }
+    try {
+      localStorage.setItem(SUIT_KIND_KEY, huntSuitKindRef.current)
+    } catch {
+      /* ignore */
+    }
   }, [])
   const huntPickupWeapon = useCallback((id: HuntWeaponId) => {
     if (id === "gravitycannon" && !huntGravityUnlockedRef.current) return
@@ -6060,6 +6103,54 @@ export default function ThreeWorld({
           leg.rotation.x = 0.45
           legs.add(leg)
         }
+        // 鬼神スーツの装飾 (FINAL-D): 赤黒の胴鎧 + 金の肩当て/帯 + 角 + 背中オーラ。
+        // 常に生成しておき、showPlayerAvatar が選択状態で visible を切り替える。
+        const kishin = new THREE.Group()
+        const kArmorMat = new THREE.MeshStandardMaterial({
+          color: 0x2a0508,
+          metalness: 0.55,
+          roughness: 0.45,
+          emissive: 0x550000,
+          emissiveIntensity: 0.35,
+        })
+        const kGoldMat = new THREE.MeshStandardMaterial({
+          color: 0xd4af37,
+          emissive: 0xd4af37,
+          emissiveIntensity: 0.5,
+          metalness: 0.8,
+          roughness: 0.3,
+        })
+        const kChest = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.42, 0.3), kArmorMat)
+        kChest.position.y = 0.36
+        kishin.add(kChest)
+        const kBelt = new THREE.Mesh(new THREE.BoxGeometry(0.48, 0.07, 0.32), kGoldMat)
+        kBelt.position.y = 0.12
+        kishin.add(kBelt)
+        for (const s of [-1, 1]) {
+          const kShoulder = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.1, 0.2), kGoldMat)
+          kShoulder.position.set(s * 0.3, 0.58, 0)
+          kishin.add(kShoulder)
+          const kHorn = new THREE.Mesh(new THREE.ConeGeometry(0.035, 0.26, 5), kGoldMat)
+          kHorn.position.set(s * 0.1, 1.02, 0)
+          kHorn.rotation.z = -s * 0.45
+          kishin.add(kHorn)
+        }
+        const kAura = new THREE.Mesh(
+          new THREE.PlaneGeometry(0.7, 0.9),
+          new THREE.MeshBasicMaterial({
+            color: 0xff2233,
+            transparent: true,
+            opacity: 0.35,
+            side: THREE.DoubleSide,
+            depthWrite: false,
+            blending: THREE.AdditiveBlending,
+          }),
+        )
+        kAura.position.set(0, 0.45, 0.22) // 背面 (forward は -z)
+        kishin.add(kAura)
+        kishin.visible = false
+        upper.add(kishin)
+        g.userData.kishin = kishin
         g.userData.upper = upper
         g.userData.legs = legs
         g.visible = false
@@ -6096,6 +6187,10 @@ export default function ThreeWorld({
         avatarBodyMat.color.setHex(
           team === "red" ? 0xff4444 : team === "blue" ? 0x4488ff : 0xffcc00,
         )
+        // 鬼神スーツの装飾 (FINAL-D): 着用中だけ赤黒鎧を被せる。
+        const kishinG = playerAvatar.userData.kishin as THREE.Group | undefined
+        if (kishinG)
+          kishinG.visible = huntSuitChosenRef.current && huntSuitKindRef.current === "kishin"
         parent.add(playerAvatar)
         playerAvatar.visible = true
       }
@@ -6865,6 +6960,12 @@ export default function ThreeWorld({
       // damage site can route through it.
       function aaShield(raw: number) {
         let dmg = aaMountedRef.current ? raw * AA_MOUNT_DMG_MULT : raw
+        // 鬼神 (FINAL-D): 耐久を消費せず被ダメ20%減 — 壊れない代わりに軽減は浅い。
+        if (huntSuitActiveRef.current && huntSuitKindRef.current === "kishin") {
+          setHuntSuitFlash(true)
+          window.setTimeout(() => setHuntSuitFlash(false), 130)
+          return dmg * KISHIN_DMG_CUT
+        }
         // HUNT suit: durability soaks the hit and only HUNT_SUIT_CUT of it reaches
         // HP; the suit breaks (all effects gone) once durability hits 0.
         if (huntSuitActiveRef.current && huntSuitDurRef.current > 0) {
@@ -12303,7 +12404,11 @@ export default function ThreeWorld({
         if (now - lastMeleeRef.current < KNIFE_COOLDOWN_MS) return
         lastMeleeRef.current = now
         SOUNDS.knife()
-        const killed = osakaSecretMelee(OSAKA_ONIBLADE_DMG, OSAKA_ONIBLADE_RANGE, "oniblade")
+        const killed = osakaSecretMelee(
+          OSAKA_ONIBLADE_DMG * meleeSuitMult(),
+          OSAKA_ONIBLADE_RANGE,
+          "oniblade",
+        )
         for (const pos of killed) {
           spawnExplosion(new THREE.Vector3(pos.x, 1, pos.z))
           for (const e of enemies) {
@@ -12326,7 +12431,11 @@ export default function ThreeWorld({
         if (now - lastMeleeRef.current < KNIFE_COOLDOWN_MS) return
         lastMeleeRef.current = now
         SOUNDS.knife()
-        osakaSecretMelee(OSAKA_SPEAR_MELEE_DMG, OSAKA_SPEAR_MELEE_RANGE, "greatspear")
+        osakaSecretMelee(
+          OSAKA_SPEAR_MELEE_DMG * meleeSuitMult(),
+          OSAKA_SPEAR_MELEE_RANGE,
+          "greatspear",
+        )
       }
       function osakaSpearThrow() {
         const now = Date.now()
@@ -12801,6 +12910,9 @@ export default function ThreeWorld({
         } catch {
           /* ignore */
         }
+        // 鬼神スーツを即時解放 (FINAL-D) — リロード不要でラックに並ぶ。
+        kishinUnlockedRef.current = true
+        setKishinUnlocked(true)
         disposeOsakaBoss()
         SOUNDS.clear()
         if (huntMissionConfigRef.current.stage === "osaka") {
@@ -16233,6 +16345,12 @@ export default function ThreeWorld({
         if (a - 1 <= 0) huntReload()
         return true
       }
+      // 鬼神スーツ着用中は近接1.5倍 (FINAL-D) — 全近接ダメージ源がここを通す。
+      function meleeSuitMult(): number {
+        return huntSuitActiveRef.current && huntSuitKindRef.current === "kishin"
+          ? KISHIN_MELEE_MULT
+          : 1
+      }
       // Suit punch ([F]) + blade slash/thrust — quiet melee in a forward cone.
       function huntConeMelee(dmg: number, range: number, tag: string) {
         camera.getWorldDirection(fwd3)
@@ -16262,14 +16380,14 @@ export default function ThreeWorld({
         const now = Date.now()
         if (now - lastMeleeRef.current < KNIFE_COOLDOWN_MS) return
         lastMeleeRef.current = now
-        huntConeMelee(HUNT_PUNCH_DAMAGE, HUNT_PUNCH_RANGE, "punch")
+        huntConeMelee(HUNT_PUNCH_DAMAGE * meleeSuitMult(), HUNT_PUNCH_RANGE, "punch")
       }
       function huntBlade(thrust: boolean) {
         const now = Date.now()
         if (now - lastMeleeRef.current < KNIFE_COOLDOWN_MS) return
         lastMeleeRef.current = now
         SOUNDS.knife()
-        huntConeMelee(thrust ? 350 : 200, thrust ? 3.0 : 1.8, "blade")
+        huntConeMelee((thrust ? 350 : 200) * meleeSuitMult(), thrust ? 3.0 : 1.8, "blade")
       }
       // Capture wire/ring + teleport pillar (created per capture; ≤3 at once).
       function huntStartCapture(e: CombatEnemy) {
@@ -16808,6 +16926,14 @@ export default function ThreeWorld({
           setHuntGravityUnlocked(gv)
           huntClearsRef.current =
             Number.parseInt(localStorage.getItem(HUNT_CLEARS_KEY) ?? "0", 10) || 0
+          // 鬼神スーツ (FINAL-D): 真クリアの証で解放、選択は永続化されている。
+          const ku = localStorage.getItem(OSAKA_TRUE_CLEAR_KEY) === "1"
+          kishinUnlockedRef.current = ku
+          setKishinUnlocked(ku)
+          if (ku && localStorage.getItem(SUIT_KIND_KEY) === "kishin") {
+            huntSuitKindRef.current = "kishin"
+            setHuntSuitKind("kishin")
+          }
         } catch {
           /* ignore */
         }
@@ -17857,7 +17983,7 @@ export default function ThreeWorld({
           const dot = (dx / d) * nfx + (dz / d) * nfz
           if (dot < cosHalf) continue
           struck = true
-          const dmg = headHeightAim ? 9999 : KNIFE_DAMAGE
+          const dmg = headHeightAim ? 9999 : Math.round(KNIFE_DAMAGE * meleeSuitMult())
           e.hp -= dmg
           scoreRef.current += Math.floor(Math.min(dmg, e.maxHp) * 10)
           setScore(scoreRef.current)
@@ -18691,7 +18817,11 @@ export default function ThreeWorld({
         const fwdZ = -Math.cos(camState.yaw)
         const isSprinting = keysRef.current.has("Shift")
         // HUNT suit: +50% move speed while the suit holds.
-        const huntSuitSpeed = huntSuitActiveRef.current ? HUNT_SUIT_SPEED : 1
+        const huntSuitSpeed = huntSuitActiveRef.current
+          ? huntSuitKindRef.current === "kishin"
+            ? KISHIN_SPEED
+            : HUNT_SUIT_SPEED
+          : 1
         // 時空歪曲 (真・五変化): 効果時間中は移動速度半減 (FINAL-B)。
         const osakaSlowMul = Date.now() < osakaSlowUntil ? 0.5 : 1
         const spd =
@@ -20887,6 +21017,8 @@ export default function ThreeWorld({
         else if (e.key === "4") huntPickupWeapon("capturegun")
         else if (e.key === "5") huntPickupWeapon("blade")
         else if (e.key === "6") huntPickupWeapon("gravitycannon")
+        else if (e.key === "7")
+          huntChooseKishin() // 鬼神スーツ (FINAL-D)
         else if (e.key === "e" || e.key === "E" || e.key === "Escape") {
           huntEquipOpenRef.current = false
           setHuntEquipOpen(false)
@@ -21015,6 +21147,7 @@ export default function ThreeWorld({
     unlockedWeapons,
     huntChooseReward,
     huntToggleSuitChoice,
+    huntChooseKishin,
     huntPickupWeapon,
     huntSelectHuntWeapon,
     huntClearHuntWeapon,
@@ -21724,24 +21857,41 @@ export default function ThreeWorld({
                     marginBottom: "2px",
                   }}
                 >
-                  {huntSuitActive ? "SUIT" : "SUIT BROKEN"}
+                  {huntSuitKind === "kishin"
+                    ? "鬼神 — 不壊"
+                    : huntSuitActive
+                      ? "SUIT"
+                      : "SUIT BROKEN"}
                 </div>
                 <div
                   style={{
                     height: "7px",
                     background: "rgba(0,0,0,0.85)",
-                    border: "1px solid rgba(150,200,255,0.4)",
+                    border: `1px solid ${
+                      huntSuitKind === "kishin" ? "rgba(255,80,100,0.5)" : "rgba(150,200,255,0.4)"
+                    }`,
                     overflow: "hidden",
                   }}
                 >
                   <div
                     style={{
                       height: "100%",
-                      width: `${Math.round((huntSuitDur / HUNT_SUIT_MAX) * 100)}%`,
-                      background: huntSuitActive
-                        ? "linear-gradient(90deg,#2a4a6a,#7fd0ff)"
-                        : "#552222",
-                      boxShadow: huntSuitActive ? "0 0 6px #66ccff" : "none",
+                      width:
+                        huntSuitKind === "kishin"
+                          ? "100%"
+                          : `${Math.round((huntSuitDur / HUNT_SUIT_MAX) * 100)}%`,
+                      background:
+                        huntSuitKind === "kishin"
+                          ? "linear-gradient(90deg,#5a1020,#ff4455)"
+                          : huntSuitActive
+                            ? "linear-gradient(90deg,#2a4a6a,#7fd0ff)"
+                            : "#552222",
+                      boxShadow:
+                        huntSuitKind === "kishin"
+                          ? "0 0 6px #ff4455"
+                          : huntSuitActive
+                            ? "0 0 6px #66ccff"
+                            : "none",
                       transition: "width 0.2s",
                     }}
                   />
@@ -22061,12 +22211,48 @@ export default function ThreeWorld({
                     textAlign: "left",
                     cursor: "pointer",
                     fontFamily: "monospace",
-                    background: huntSuitChosen ? "rgba(0,120,255,0.25)" : "rgba(0,20,10,0.6)",
-                    border: `1px solid ${huntSuitChosen ? "#66ccff" : "#225544"}`,
-                    color: huntSuitChosen ? "#9fdfff" : "#7fbfa0",
+                    background:
+                      huntSuitChosen && huntSuitKind === "scout"
+                        ? "rgba(0,120,255,0.25)"
+                        : "rgba(0,20,10,0.6)",
+                    border: `1px solid ${
+                      huntSuitChosen && huntSuitKind === "scout" ? "#66ccff" : "#225544"
+                    }`,
+                    color: huntSuitChosen && huntSuitKind === "scout" ? "#9fdfff" : "#7fbfa0",
                   }}
                 >
-                  [1] 強化スーツ {huntSuitChosen ? "✓ 着用" : "— 未着用"}
+                  [1] 強化スーツ{" "}
+                  {huntSuitChosen && huntSuitKind === "scout" ? "✓ 着用" : "— 未着用"}
+                </button>
+                {/* 鬼神 (FINAL-D): 真・大阪編制覇で解放される赤黒い和風鎧。 */}
+                <button
+                  type="button"
+                  onClick={huntChooseKishin}
+                  disabled={!kishinUnlocked}
+                  style={{
+                    display: "block",
+                    width: "100%",
+                    marginBottom: "0.5rem",
+                    padding: "0.5rem",
+                    textAlign: "left",
+                    cursor: kishinUnlocked ? "pointer" : "not-allowed",
+                    fontFamily: "monospace",
+                    opacity: kishinUnlocked ? 1 : 0.55,
+                    background:
+                      huntSuitChosen && huntSuitKind === "kishin"
+                        ? "rgba(255,40,60,0.22)"
+                        : "rgba(20,0,8,0.6)",
+                    border: `1px solid ${
+                      huntSuitChosen && huntSuitKind === "kishin" ? "#ff5566" : "#553344"
+                    }`,
+                    color: huntSuitChosen && huntSuitKind === "kishin" ? "#ff99aa" : "#bb7788",
+                  }}
+                >
+                  {kishinUnlocked
+                    ? `[7] 鬼神 — 速1.3×/被ダメ-20%/近接1.5× ${
+                        huntSuitChosen && huntSuitKind === "kishin" ? "✓ 着用" : ""
+                      }`
+                    : "🔒 鬼神 — 真・大阪編 制覇で解放"}
                 </button>
                 {HUNT_WEAPONS.filter((w) => !w.secret && (!w.reward || huntGravityUnlocked)).map(
                   (w, i) => {
