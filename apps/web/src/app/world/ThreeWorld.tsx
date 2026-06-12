@@ -731,6 +731,11 @@ type OsakaBoss = {
   armInst: THREE.InstancedMesh | null
   armData: { ang: number; y: number; r: number; tilt: number; phase: number }[] | null
   eyeMat: THREE.MeshLambertMaterial | null // shared instanced-eye material (pulse)
+  // 顕現シーケンス (P-C): 腕は0.1sごとに1本ずつ生え (この本数だけ揺らす)、
+  // 目は5秒間ランダムに開眼していく。モバイルは即全開 (armReveal=全数, eyeData=null)。
+  armReveal: number
+  eyeInst: THREE.InstancedMesh | null
+  eyeData: { i: number; x: number; y: number; z: number; s: number; at: number }[] | null
 }
 const OSAKA_PHASE_HP: Record<OsakaBossPhase, number> = {
   1: 1500,
@@ -2508,12 +2513,15 @@ export default function ThreeWorld({
     title: string
     sub: string | null
     tone: "form" | "true"
+    grand: boolean // 画面全体を使う大型版 (真ボス顕現; P-C)
   } | null>(null)
   const [osakaBossHud, setOsakaBossHud] = useState<{
     name: string
     pct: number
     phase: OsakaBossPhase
   } | null>(null)
+  // 真ボス顕現の完全暗転 (P-C): 0.8秒の闇 → 赤光の拡散と同時にフェードアウト。
+  const [osakaBlackout, setOsakaBlackout] = useState(false)
 
   // ── HUNT equipment (PR-Z2) ──────────────────────────────────────────────────
   // Equipment menu (opened at the rack in the room).
@@ -11349,6 +11357,8 @@ export default function ThreeWorld({
           armInst: THREE.InstancedMesh
           armData: { ang: number; y: number; r: number; tilt: number; phase: number }[]
           eyeMat: THREE.MeshLambertMaterial
+          eyeInst: THREE.InstancedMesh
+          eyeData: { i: number; x: number; y: number; z: number; s: number; at: number }[] | null
         } | null
       } {
         const group = new THREE.Group()
@@ -11360,6 +11370,8 @@ export default function ThreeWorld({
           armInst: THREE.InstancedMesh
           armData: { ang: number; y: number; r: number; tilt: number; phase: number }[]
           eyeMat: THREE.MeshLambertMaterial
+          eyeInst: THREE.InstancedMesh
+          eyeData: { i: number; x: number; y: number; z: number; s: number; at: number }[] | null
         } | null = null
         // Mobile halves the part counts so the denser forms stay performant.
         const dense = isMobileDevice ? 0.5 : 1.0
@@ -11730,6 +11742,9 @@ export default function ThreeWorld({
             armData.push(ad)
             armDummy.position.set(Math.cos(ad.ang) * ad.r, ad.y, Math.sin(ad.ang) * ad.r)
             armDummy.rotation.set(-Math.sin(ad.ang) * ad.tilt, 0, Math.cos(ad.ang) * ad.tilt)
+            // 顕現シーケンス (P-C): PC では腕は scale 0 で隠し、0.1s に1本ずつ
+            // armReveal を進めて生やす。モバイルは最初から全開。
+            armDummy.scale.setScalar(isMobileDevice ? 1 : 0.001)
             armDummy.updateMatrix()
             armInst.setMatrixAt(i, armDummy.matrix)
           }
@@ -11745,18 +11760,23 @@ export default function ThreeWorld({
           const eyeInst = new THREE.InstancedMesh(eyeGeo, eyeMat, eyeN)
           eyeInst.frustumCulled = false
           const eyeDummy = new THREE.Object3D()
+          // 顕現シーケンス (P-C): PC では目を scale 0 で隠し、出現後 0.8〜5.8s の
+          // 間にランダムなタイミングで1個ずつ開眼させる (eyeData)。
+          const eyeData: { i: number; x: number; y: number; z: number; s: number; at: number }[] =
+            []
           for (let i = 0; i < eyeN; i++) {
             const a = Math.random() * Math.PI * 2
             const y = 3 + Math.random() * 15
             const rr = (y < 11 ? 5 - Math.abs(y - 7) * 0.4 : 3.5 - Math.abs(y - 13.5) * 0.35) + 0.15
-            eyeDummy.position.set(
-              Math.cos(a) * Math.max(1.2, rr),
-              y,
-              Math.sin(a) * Math.max(1.2, rr),
-            )
-            eyeDummy.scale.setScalar(0.7 + Math.random() * 1.1)
+            const ex = Math.cos(a) * Math.max(1.2, rr)
+            const ez = Math.sin(a) * Math.max(1.2, rr)
+            const es = 0.7 + Math.random() * 1.1
+            eyeDummy.position.set(ex, y, ez)
+            eyeDummy.scale.setScalar(isMobileDevice ? es : 0.001)
             eyeDummy.updateMatrix()
             eyeInst.setMatrixAt(i, eyeDummy.matrix)
+            if (!isMobileDevice)
+              eyeData.push({ i, x: ex, y, z: ez, s: es, at: 0.8 + Math.random() * 5.0 })
           }
           eyeInst.instanceMatrix.needsUpdate = true
           group.add(eyeInst)
@@ -11774,7 +11794,13 @@ export default function ThreeWorld({
             cores.push(c)
             group.add(c)
           }
-          extras = { armInst, armData, eyeMat }
+          extras = {
+            armInst,
+            armData,
+            eyeMat,
+            eyeInst,
+            eyeData: isMobileDevice ? null : eyeData,
+          }
         }
         return { group, cores, parts, eyes, mouths, extras }
       }
@@ -11881,6 +11907,9 @@ export default function ThreeWorld({
           armInst: built.extras?.armInst ?? null,
           armData: built.extras?.armData ?? null,
           eyeMat: built.extras?.eyeMat ?? null,
+          armReveal: isMobileDevice ? (built.extras?.armData?.length ?? 0) : 0,
+          eyeInst: built.extras?.eyeInst ?? null,
+          eyeData: built.extras?.eyeData ?? null,
         }
         spawnOsakaEscort(HUNT_ARENA.x - 6, HUNT_ARENA.z)
         spawnOsakaEscort(HUNT_ARENA.x + 6, HUNT_ARENA.z)
@@ -11981,11 +12010,16 @@ export default function ThreeWorld({
             armInst: built.extras?.armInst ?? null,
             armData: built.extras?.armData ?? null,
             eyeMat: built.extras?.eyeMat ?? null,
+            armReveal: isMobileDevice ? (built.extras?.armData?.length ?? 0) : 0,
+            eyeInst: built.extras?.eyeInst ?? null,
+            eyeData: built.extras?.eyeData ?? null,
           }
           SOUNDS.bossRoar()
           if (np === 6) {
-            osakaApplyTrueLighting()
-            osakaShowCutin("真・五変化 顕現", OSAKA_FORM_QUOTES[6], "true")
+            // 顕現シーケンス (P-C): 完全暗闇 → コアだけ灯る → 赤光が0.5sで広がる
+            // → グランドカットイン。赤光は 0 から (rampFromZero)。
+            osakaApplyTrueLighting(true)
+            osakaBeginTrueIntro()
             showNotification("☠ 第六形態 — 五つのコアは常に剥き出し、だが速い")
           } else {
             osakaShowCutin(OSAKA_FORM_NAMES[np], OSAKA_FORM_QUOTES[np], "form")
@@ -12863,22 +12897,58 @@ export default function ThreeWorld({
       let osakaTrueLights: THREE.Group | null = null
       let osakaTrueFogSaved: THREE.Fog | THREE.FogExp2 | null = null
       let osakaTrueFogWasSet = false
+      // 顕現シーケンス (P-C) の進行と、消灯した街明かりの復元リスト。
+      let osakaTrueIntro: { t: number; lit: boolean } | null = null
+      let osakaIntroLightSaved: { l: THREE.Light; base: number }[] = []
+      let osakaTrueLightItems: { l: THREE.Light; base: number }[] = []
       // 赤黒い決戦ライティング — 顕現時に被せ、ボス消滅時に必ず剥がす。
-      function osakaApplyTrueLighting() {
+      // rampFromZero (P-C): 顕現シーケンスが 0→基準値 へ 0.5s で広げる。
+      function osakaApplyTrueLighting(rampFromZero = false) {
         if (osakaTrueLights) return
         const g = new THREE.Group()
-        g.add(new THREE.AmbientLight(0x441111, 2.4))
+        const amb = new THREE.AmbientLight(0x441111, 2.4)
+        g.add(amb)
         const dir = new THREE.DirectionalLight(0xff2222, 1.6)
         dir.position.set(10, 40, -10)
         g.add(dir)
-        const pl = new THREE.PointLight(0xff0000, 4, 70)
+        const pl = new THREE.PointLight(0xff0000, 8, 70) // 赤の主光源 (0→8 拡散)
         pl.position.set(HUNT_ARENA.x, 18, HUNT_ARENA.z)
         g.add(pl)
+        osakaTrueLightItems = [
+          { l: amb, base: 2.4 },
+          { l: dir, base: 1.6 },
+          { l: pl, base: 8 },
+        ]
+        if (rampFromZero) for (const it of osakaTrueLightItems) it.l.intensity = 0
         scene.add(g)
         osakaTrueLights = g
         osakaTrueFogSaved = scene.fog
         osakaTrueFogWasSet = true
         scene.fog = new THREE.Fog(0x1a0004, 60, 260) // 赤黒い決戦の靄
+      }
+      // 顕現シーケンス開始 (P-C): 全マップ光を消灯し、闇の中でコアだけ灯す。
+      function osakaBeginTrueIntro() {
+        const ob = osakaBossRef.current
+        if (!ob) return
+        osakaTrueIntro = { t: 0, lit: false }
+        setOsakaBlackout(true)
+        osakaIntroLightSaved = []
+        const collect = (root: THREE.Object3D) => {
+          root.traverse((o) => {
+            if (o instanceof THREE.Light) {
+              osakaIntroLightSaved.push({ l: o, base: o.intensity })
+              o.intensity = 0
+            }
+          })
+        }
+        const mapRoot = osakaMapMeshesRef.current[0]
+        if (mapRoot) collect(mapRoot)
+        collect(ob.group)
+        for (const co of ob.cores) {
+          const m = co.material
+          if (m instanceof THREE.MeshLambertMaterial) m.emissiveIntensity = 0
+        }
+        SOUNDS.huntWarn()
       }
       function osakaClearTrueLighting() {
         if (osakaTrueLights) {
@@ -12890,6 +12960,12 @@ export default function ThreeWorld({
           osakaTrueFogSaved = null
           osakaTrueFogWasSet = false
         }
+        // 顕現シーケンスの残骸を確実に戻す (P-C)。
+        for (const sv of osakaIntroLightSaved) sv.l.intensity = sv.base
+        osakaIntroLightSaved = []
+        osakaTrueLightItems = []
+        osakaTrueIntro = null
+        setOsakaBlackout(false)
         osakaSlowUntil = 0
       }
       // 全画面攻撃: 安全地帯1箇所だけが光り、1.7秒後にフィールド全体を波が薙ぐ。
@@ -13370,12 +13446,21 @@ export default function ThreeWorld({
       }
       // ══ 演出強化 (FINAL-F): カットイン / ヒットストップ / 撃破大爆発 ═════════
       let osakaCutinGen = 0
-      function osakaShowCutin(title: string, sub: string | null, tone: "form" | "true") {
+      // grand (P-C): 画面全体を使う大型カットイン (真ボス顕現用)。
+      function osakaShowCutin(
+        title: string,
+        sub: string | null,
+        tone: "form" | "true",
+        grand = false,
+      ) {
         const gen = ++osakaCutinGen
-        setOsakaCutin({ title, sub, tone })
-        window.setTimeout(() => {
-          if (osakaCutinGen === gen) setOsakaCutin(null)
-        }, 2500)
+        setOsakaCutin({ title, sub, tone, grand })
+        window.setTimeout(
+          () => {
+            if (osakaCutinGen === gen) setOsakaCutin(null)
+          },
+          grand ? 3400 : 2500,
+        )
       }
       let osakaHitStopUntil = 0 // この時刻まで dt を 6% に潰す (一瞬の時間停止)
       let osakaHudFrame = 0
@@ -13460,13 +13545,65 @@ export default function ThreeWorld({
             }
           })
           if (f6) cameraShakeRef.current.intensity = Math.max(cameraShakeRef.current.intensity, 1.4)
+          // ── 顕現シーケンス (P-C): 闇→コア点灯→赤光拡散→腕/目の順次出現 ──
+          const intro = osakaTrueIntro
+          if (intro) {
+            intro.t += dt
+            const t6 = intro.t
+            if (t6 < 0.8) {
+              // 完全な暗闇の中、五つのコアだけが灯り始める。
+              const kIn = t6 / 0.8
+              for (const co of ob.cores) {
+                const m = co.material
+                if (m instanceof THREE.MeshLambertMaterial) m.emissiveIntensity = 3 * kIn
+              }
+            } else {
+              if (!intro.lit) {
+                intro.lit = true
+                setOsakaBlackout(false) // CSS 0.45s で闇が引いていく
+                osakaShowCutin("真・五変化 顕現", OSAKA_FORM_QUOTES[6], "true", true)
+                SOUNDS.bossRoar()
+                for (const co of ob.cores) {
+                  const m = co.material
+                  if (m instanceof THREE.MeshLambertMaterial) m.emissiveIntensity = 2.5
+                }
+              }
+              // 赤い光が 0.5s で 0→基準値 (主光源は 8) に広がり、街明かりは35%へ。
+              const k2 = Math.min(1, (t6 - 0.8) / 0.5)
+              for (const it of osakaTrueLightItems) it.l.intensity = it.base * k2
+              for (const sv of osakaIntroLightSaved) sv.l.intensity = sv.base * 0.35 * k2
+            }
+            // 腕: 0.8s 以降 0.1s ごとに1本ずつ (モバイルは armReveal=全数で素通り)。
+            if (ob.armData && ob.armReveal < ob.armData.length) {
+              ob.armReveal = Math.min(ob.armData.length, Math.max(0, Math.floor((t6 - 0.8) / 0.1)))
+            }
+            // 目: 0.8〜5.8s の間にランダムなタイミングで開眼。
+            if (ob.eyeInst && ob.eyeData) {
+              let dirty = false
+              for (const ed of ob.eyeData) {
+                if (ed.at >= 0 && t6 >= ed.at) {
+                  osakaEyeDummy.position.set(ed.x, ed.y, ed.z)
+                  osakaEyeDummy.rotation.set(0, 0, 0)
+                  osakaEyeDummy.scale.setScalar(ed.s)
+                  osakaEyeDummy.updateMatrix()
+                  ob.eyeInst.setMatrixAt(ed.i, osakaEyeDummy.matrix)
+                  ed.at = -1
+                  dirty = true
+                }
+              }
+              if (dirty) ob.eyeInst.instanceMatrix.needsUpdate = true
+            }
+            const introDur = Math.max(6, 0.9 + (ob.armData ? ob.armData.length * 0.1 : 0))
+            if (t6 >= introDur) osakaTrueIntro = null
+          }
           // 目 (Instanced) は共有マテリアルで脈動。
           if (ob.eyeMat) ob.eyeMat.emissiveIntensity = 1.2 + (Math.sin(t * 7) * 0.5 + 0.5) * 1.4
           // 腕の束は 2フレームに1回だけうねらせる (80本 setMatrixAt の間引き)。
+          // 顕現中は armReveal 本目まで — それ以降は scale 0 のまま隠れている。
           if (ob.armInst && ob.armData) {
             osakaArmFrame++
             if ((osakaArmFrame & 1) === 0) {
-              for (let i = 0; i < ob.armData.length; i++) {
+              for (let i = 0; i < Math.min(ob.armData.length, ob.armReveal); i++) {
                 const ad = ob.armData[i]
                 if (!ad) continue
                 const wob = Math.sin(t * 1.7 + ad.phase) * 0.22
@@ -13525,6 +13662,8 @@ export default function ThreeWorld({
           osakaSpawnZako(2)
           ob.nextZakoAt = now + OSAKA_ZAKO_INTERVAL
         }
+        // 顕現中 (最初の3秒) は移動も攻撃もしない — 演出を見せ切る (P-C)。
+        if (ob.phase === 6 && osakaTrueIntro && osakaTrueIntro.t < 3.0) return
         // Rage tiers: ≤50% → 1.5× cadence; ≤25% → 2× cadence + 1.3× move speed.
         const hpFrac = ob.phaseHp / ob.phaseMaxHp
         const rage = hpFrac <= 0.5
@@ -22553,6 +22692,19 @@ export default function ThreeWorld({
               </div>
             )}
 
+            {/* ── 真ボス顕現の完全暗転 (P-C): 常設div、opacityのみ切替 ── */}
+            <div
+              style={{
+                position: "absolute",
+                inset: 0,
+                zIndex: 45,
+                background: "#000",
+                opacity: osakaBlackout ? 0.96 : 0,
+                pointerEvents: "none",
+                transition: "opacity 0.45s ease-out",
+              }}
+            />
+
             {/* ── OSAKA ボス専用HPバー (FINAL-F): 画面上部・形態ごとに色変化 ── */}
             {osakaBossHud && gamePhase === "playing" && (
               <div
@@ -22612,12 +22764,16 @@ export default function ThreeWorld({
               <div
                 style={{
                   position: "absolute",
-                  top: "20%",
+                  top: osakaCutin.grand ? 0 : "20%",
+                  bottom: osakaCutin.grand ? 0 : "auto",
                   left: 0,
                   right: 0,
                   zIndex: 75,
                   pointerEvents: "none",
                   overflow: "hidden",
+                  display: osakaCutin.grand ? "flex" : "block",
+                  flexDirection: "column",
+                  justifyContent: "center",
                 }}
               >
                 <div
@@ -22637,8 +22793,11 @@ export default function ThreeWorld({
                   <div
                     style={{
                       fontFamily: "'Hiragino Mincho ProN','Yu Mincho',serif",
-                      fontSize:
-                        osakaCutin.tone === "true"
+                      fontSize: osakaCutin.grand
+                        ? isMobile
+                          ? "2.2rem"
+                          : "4rem"
+                        : osakaCutin.tone === "true"
                           ? isMobile
                             ? "1.6rem"
                             : "2.6rem"
@@ -22646,9 +22805,11 @@ export default function ThreeWorld({
                             ? "1.25rem"
                             : "2rem",
                       color: osakaCutin.tone === "true" ? "#ff3344" : "#ffd24a",
-                      letterSpacing: "0.4em",
+                      letterSpacing: osakaCutin.grand ? "0.55em" : "0.4em",
                       fontWeight: "bold",
-                      textShadow: "0 0 26px rgba(255,50,60,0.8)",
+                      textShadow: osakaCutin.grand
+                        ? "0 0 48px rgba(255,30,50,0.95)"
+                        : "0 0 26px rgba(255,50,60,0.8)",
                     }}
                   >
                     {osakaCutin.title}
