@@ -14276,6 +14276,41 @@ export default function ThreeWorld({
       // Scene fog saved on entering the OSAKA stage so it restores on return.
       let huntStageFogSaved: THREE.Scene["fog"] = null
       let huntStageFogWasSaved = false
+      // Base-world renderables hidden during OSAKA (the dim, fogged urban map is
+      // near-invisible under the OSAKA night city but still costs draw calls).
+      // Toggling `.visible` does NOT affect collision (ALL_AABBS) or bullet wall
+      // raycast (invisible meshes still intersect), so gameplay is unchanged.
+      const osakaHiddenBase: THREE.Object3D[] = []
+      function osakaHideBaseWorld() {
+        osakaShowBaseWorld() // restore any prior hide first (idempotent)
+        // Things the player still needs to see during OSAKA: the FPS weapon
+        // viewmodel (gunGroup, a scene child positioned each frame) and the
+        // third-person avatar. Everything else at scene root is base-world dressing.
+        const keep = new Set<THREE.Object3D>([gunGroup, playerAvatar])
+        for (const child of scene.children) {
+          if (
+            !child.visible ||
+            keep.has(child) ||
+            child instanceof THREE.Light ||
+            child instanceof THREE.Camera
+          )
+            continue
+          // Only hide things that actually render (skip empty pivots/helpers).
+          let renders = false
+          child.traverse((o) => {
+            if (o instanceof THREE.Mesh || o instanceof THREE.Points || o instanceof THREE.Line)
+              renders = true
+          })
+          if (renders) {
+            child.visible = false
+            osakaHiddenBase.push(child)
+          }
+        }
+      }
+      function osakaShowBaseWorld() {
+        for (const o of osakaHiddenBase) o.visible = true
+        osakaHiddenBase.length = 0
+      }
       function buildHuntRoom() {
         const cx = HUNT_ROOM.x
         const cz = HUNT_ROOM.z
@@ -16204,6 +16239,10 @@ export default function ThreeWorld({
         perfStageApplied = stage // surfaced by the ?debug=1 perf HUD
         huntClearStage() // idempotent — never stack overlays
         if (isOsakaStage(stage)) {
+          // Hide the base urban world (dim/fogged, near-invisible, wrong city) so
+          // it stops eating draw calls. Done BEFORE buildOsakaMap so the freshly
+          // added OSAKA group stays visible. Restored by huntClearStage.
+          osakaHideBaseWorld()
           buildOsakaMap() // 鬼モードもマップは共通 (倍率だけ変わる; FINAL-H)
           return
         }
@@ -16263,6 +16302,7 @@ export default function ThreeWorld({
         }
         clearOsakaMap() // dispose the OSAKA field + restore the prior fog
         osakaTeardownMid() // dispose the OSAKA mid-boss + projectiles, reset progress
+        osakaShowBaseWorld() // un-hide the base urban world hidden for OSAKA
         huntFlickerLights.length = 0
         for (const s of huntStageLightSaved) s.light.intensity = s.intensity
         huntStageLightSaved.length = 0
@@ -21379,9 +21419,31 @@ export default function ThreeWorld({
                   ? perfStageApplied
                   : huntPhaseRef.current
                 : `${modeRef.current}/${mapId}`
+            // Per-group renderable breakdown (≈1 draw call per visible renderable)
+            // so the HUD pinpoints what's costing draw calls. Cheap: only a few
+            // small sub-trees are walked, refreshed 1/4 frames.
+            const countRenderables = (root: THREE.Object3D | null | undefined): number => {
+              if (!root) return 0
+              let c = 0
+              root.traverse((o) => {
+                if (
+                  o.visible &&
+                  (o instanceof THREE.Mesh || o instanceof THREE.Points || o instanceof THREE.Line)
+                )
+                  c++
+              })
+              return c
+            }
+            const bossDC = countRenderables(osakaBossRef.current?.group)
+            const mapDC = countRenderables(osakaMapMeshesRef.current[0])
+            let enemyDC = 0
+            for (const e of enemies) if (e.hp > 0) enemyDC += countRenderables(e.mesh)
             perfHud.textContent =
               `FPS        ${perfFps}\n` +
               `draw calls ${info.render.calls}\n` +
+              `  boss     ${bossDC}\n` +
+              `  osakaMap ${mapDC}\n` +
+              `  enemies  ${enemyDC}\n` +
               `triangles  ${info.render.triangles.toLocaleString()}\n` +
               `geometries ${info.memory.geometries}\n` +
               `textures   ${info.memory.textures}\n` +
