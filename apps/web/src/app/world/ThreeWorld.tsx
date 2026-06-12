@@ -12454,6 +12454,8 @@ export default function ThreeWorld({
         blade: THREE.Group // 鬼刀ピックアップ
         spear: THREE.Group // 大槍ピックアップ
         underLights: THREE.PointLight[] // 地下の赤い非常灯 (明滅)
+        // 入口を遠くからでも見つけられる縦ビーム + 光源 ("kind" で取得後に消す)。
+        beacons: { kind: "gate" | "crack"; beam: THREE.Mesh; light: THREE.PointLight }[]
         gateAnim: number // -1 idle / 0..1 開扉アニメ進行
         crackAnim: number // -1 idle / 0..1 崩壊アニメ進行
         debris: { mesh: THREE.Mesh; vx: number; vy: number; vz: number; t: number }[]
@@ -12482,6 +12484,10 @@ export default function ThreeWorld({
           playerVelRef.current.x = 0
           playerVelRef.current.z = 0
           osakaSecretRef.current.loc = loc
+          // 転送後、武器の方を向かせる (暗い通路で背を向けて迷わないように)。
+          // under は通路の奥(+z)に鬼刀、hidden は祭壇(-z)に大槍がある。
+          if (loc === "under") camState.yaw = 0
+          else if (loc === "hidden") camState.yaw = Math.PI
           setHuntWhiteFlash(false)
         }, 420)
       }
@@ -12709,10 +12715,27 @@ export default function ThreeWorld({
         // ── 調査ヒント + アクション ──
         let hint: string | null = null
         let action: (() => void) | null = null
+        // 入口ビーコンの脈動 + 取得後の消灯 (2フレに1回)。
+        if (fx2) {
+          for (const b of S.beacons) {
+            const opened = b.kind === "gate" ? st.gateOpen : st.wallBroken
+            if (opened) {
+              if (b.beam.visible) {
+                b.beam.visible = false
+                b.light.visible = false
+              }
+            } else {
+              const pulse = 0.32 + 0.28 * (0.5 + 0.5 * Math.sin(osakaSecretT * 2.4))
+              ;(b.beam.material as THREE.MeshBasicMaterial).opacity = pulse
+              b.light.intensity = 2.4 + Math.sin(osakaSecretT * 2.4) * 1.0
+            }
+          }
+        }
         if (st.loc === "none") {
           const gd = Math.hypot(px - (ax + OSAKA_GATE_POS.x), pz - (az + OSAKA_GATE_POS.z))
           const cd = Math.hypot(px - (ax + OSAKA_CRACK_POS.x), pz - (az + OSAKA_CRACK_POS.z))
-          if (!st.gateOpen && gd < 3) {
+          // 判定半径を広めにして「近づけば必ず調べられる」ようにする (取得導線)。
+          if (!st.gateOpen && gd < 4.5) {
             hint = "[E] 調べる — 川沿いの格子戸"
             action = () => {
               st.gateOpen = true
@@ -12720,7 +12743,7 @@ export default function ThreeWorld({
               SOUNDS.huntOrbOpen()
               showNotification("格子戸が軋みながら開く……")
             }
-          } else if (!st.wallBroken && cd < 4) {
+          } else if (!st.wallBroken && cd < 5.5) {
             hint = "[E] 調べる — ひび割れた壁"
             action = () => {
               st.wallBroken = true
@@ -12752,7 +12775,7 @@ export default function ThreeWorld({
             (st.loc === "under"
               ? OSAKA_UNDER.z - OSAKA_UNDER.len / 2 + 1.6
               : OSAKA_HIDDEN.z + OSAKA_HIDDEN.s / 2 - 1.2)
-          if (Math.hypot(px - ex, pz - ez) < 2.4) {
+          if (Math.hypot(px - ex, pz - ez) < 3.2) {
             hint = "[E] 地上へ戻る"
             action = () => osakaSecretTeleport(st.ret.x, st.ret.z, "none")
           }
@@ -12828,7 +12851,7 @@ export default function ThreeWorld({
           }
           const bx = ax + OSAKA_UNDER.x
           const bz = az + OSAKA_UNDER.z + OSAKA_UNDER.len / 2 - 4
-          if (st.loc === "under" && Math.hypot(px - bx, pz - bz) < 2.1) {
+          if (st.loc === "under" && Math.hypot(px - bx, pz - bz) < 3.2) {
             st.bladeTaken = true
             S.blade.visible = false
             osakaGrantSecretWeapon("oniblade")
@@ -12843,7 +12866,7 @@ export default function ThreeWorld({
           if (fx2) S.spear.rotation.y += cdt * 0.8
           const sx = ax + OSAKA_HIDDEN.x
           const sz = az + OSAKA_HIDDEN.z - 2.5
-          if (st.loc === "hidden" && Math.hypot(px - sx, pz - sz) < 2.1) {
+          if (st.loc === "hidden" && Math.hypot(px - sx, pz - sz) < 3.2) {
             st.spearTaken = true
             S.spear.visible = false
             osakaGrantSecretWeapon("greatspear")
@@ -13862,6 +13885,11 @@ export default function ThreeWorld({
         camState.yaw = Math.PI // face north, toward Tsutenkaku/Castle
         osakaSpawnAreaZako("dotonbori")
         osakaBanner("道頓堀 — 妖怪を討て")
+        // 隠し武器の導線を一度だけ案内 (光の柱が入口の目印)。
+        window.setTimeout(() => {
+          if (isOsakaStage(huntMissionConfigRef.current.stage))
+            showNotification("光の柱を [E] で調べると隠し武器が手に入る")
+        }, 3200)
       }
       // ── Mid-boss 1: 天狗 (Tengu) — a flying long-nosed yokai (Dotonbori) ──
       function buildTengu(): THREE.Group {
@@ -15887,14 +15915,28 @@ export default function ThreeWorld({
           const grip = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.34, 0.09), secretDark)
           grip.position.y = -0.2
           blade.add(grip)
-          blade.position.set(ux, 1.45, uz + ul / 2 - 4)
+          const bladeZ = uz + ul / 2 - 4
+          blade.position.set(ux, 1.45, bladeZ)
           blade.rotation.z = 0.5
           add(blade)
-          if (!isMobileDevice) {
-            const bladeGlow = new THREE.PointLight(0xff3311, 1.4, 7)
-            bladeGlow.position.set(ux, 1.7, uz + ul / 2 - 4)
-            add(bladeGlow)
-          }
+          // 暗い通路の奥でも遠くから見える強い赤光 + 立ち上る光柱 (取得導線)。
+          const bladeGlow = new THREE.PointLight(0xff3311, 4.0, 30)
+          bladeGlow.position.set(ux, 1.7, bladeZ)
+          add(bladeGlow)
+          const bladeBeam = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.12, 0.3, 3, 8, 1, true),
+            new THREE.MeshBasicMaterial({
+              color: 0xff3311,
+              transparent: true,
+              opacity: 0.4,
+              side: THREE.DoubleSide,
+              depthWrite: false,
+              blending: THREE.AdditiveBlending,
+            }),
+          )
+          bladeBeam.position.set(ux, 2.6, bladeZ)
+          bladeBeam.frustumCulled = false
+          add(bladeBeam)
           // ── 石造りの隠し部屋 (8×8×5) ──
           const { x: hx, z: hz, s: hs, h: hh } = OSAKA_HIDDEN
           shell(hs + 2, 0.4, hs + 2, hx, -0.2, hz, secretDark)
@@ -15957,11 +15999,24 @@ export default function ThreeWorld({
           spear.position.set(hx + 0.7, 1.7, hz - 2.5)
           spear.rotation.z = 0.35
           add(spear)
-          if (!isMobileDevice) {
-            const spearGlow = new THREE.PointLight(0xffcc55, 1.2, 7)
-            spearGlow.position.set(hx + 0.7, 2.2, hz - 2.5)
-            add(spearGlow)
-          }
+          // 隠し部屋でも一目で分かる金色の光 + 光柱 (取得導線)。
+          const spearGlow = new THREE.PointLight(0xffcc55, 3.0, 16)
+          spearGlow.position.set(hx + 0.7, 2.2, hz - 2.5)
+          add(spearGlow)
+          const spearBeam = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.12, 0.3, 3, 8, 1, true),
+            new THREE.MeshBasicMaterial({
+              color: 0xffcc55,
+              transparent: true,
+              opacity: 0.4,
+              side: THREE.DoubleSide,
+              depthWrite: false,
+              blending: THREE.AdditiveBlending,
+            }),
+          )
+          spearBeam.position.set(hx + 0.7, 3.0, hz - 2.5)
+          spearBeam.frustumCulled = false
+          add(spearBeam)
           // ── ①格子戸 (道頓堀川岸の水路口) ──
           const gp = OSAKA_GATE_POS
           shell(3.2, 3.0, 1.0, gp.x, 1.5, gp.z - 0.55, secretStone) // 水路躯体
@@ -16026,12 +16081,39 @@ export default function ThreeWorld({
             crack.position.set(OSAKA_CRACK_POS.x, 1.4, OSAKA_CRACK_POS.z)
             add(crack)
           }
+          // ── 入口ビーコン ── 遠くからでも見つけられる、空へ伸びる発光ビーム +
+          // 強い光源。取得導線。鬼刀=緑、大槍=金。調査で開いたら消える。
+          const beacons: { kind: "gate" | "crack"; beam: THREE.Mesh; light: THREE.PointLight }[] =
+            []
+          const makeBeacon = (kind: "gate" | "crack", bx: number, bz: number, col: number) => {
+            const beam = new THREE.Mesh(
+              new THREE.CylinderGeometry(0.18, 0.45, 16, 8, 1, true),
+              new THREE.MeshBasicMaterial({
+                color: col,
+                transparent: true,
+                opacity: 0.42,
+                side: THREE.DoubleSide,
+                depthWrite: false,
+                blending: THREE.AdditiveBlending,
+              }),
+            )
+            beam.position.set(bx, 8, bz)
+            beam.frustumCulled = false
+            add(beam)
+            const light = new THREE.PointLight(col, 3.2, 26)
+            light.position.set(bx, 3, bz)
+            add(light)
+            beacons.push({ kind, beam, light })
+          }
+          makeBeacon("gate", gp.x, gp.z + 0.6, 0x00ff88)
+          makeBeacon("crack", OSAKA_CRACK_POS.x, OSAKA_CRACK_POS.z + 0.6, 0xffcc33)
           osakaSecret = {
             gate,
             crack,
             blade,
             spear,
             underLights,
+            beacons,
             gateAnim: -1,
             crackAnim: -1,
             debris: [],
