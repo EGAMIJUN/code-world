@@ -758,6 +758,15 @@ const OSAKA_ONI_MIDBOSS_HP_MULT = 2
 const OSAKA_ONI_MIDBOSS_CD_MULT = 1 / 1.5 // 攻撃頻度1.5倍 = クールダウン÷1.5
 const OSAKA_ONI_BOSS_HP_MULT = 1.5
 const OSAKA_ONI_CLEAR_BONUS = 3000
+// 鬼モードリザルトの炎エフェクト配置 (P-D) — index ハッシュで決定論的に生成し、
+// 安定 id を key に使う (noArrayIndexKey 対応)。
+const ONI_EMBERS = Array.from({ length: 20 }, (_, i) => ({
+  id: `ember-${(i * 53) % 100}-${(i * 37) % 24}-${i % 7}`,
+  left: (i * 53) % 100,
+  delay: ((i * 37) % 24) / 10,
+  dur: 2.6 + ((i * 29) % 14) / 10,
+  size: 0.8 + ((i * 17) % 10) / 12,
+}))
 // ── 演出強化 (FINAL-F): 形態名/決め台詞/フォーム色 (全て創作オリジナル) ──────
 const OSAKA_FORM_NAMES: Record<OsakaBossPhase, string> = {
   1: "第一形態『老翁』",
@@ -2522,6 +2531,8 @@ export default function ThreeWorld({
   } | null>(null)
   // 真ボス顕現の完全暗転 (P-C): 0.8秒の闇 → 赤光の拡散と同時にフェードアウト。
   const [osakaBlackout, setOsakaBlackout] = useState(false)
+  // 鬼モード進行中 (P-D): 画面縁の燃焼オーバーレイ等の表示ゲート。
+  const [osakaOniActive, setOsakaOniActive] = useState(false)
 
   // ── HUNT equipment (PR-Z2) ──────────────────────────────────────────────────
   // Equipment menu (opened at the rack in the room).
@@ -11871,8 +11882,8 @@ export default function ThreeWorld({
             safe.x,
             safe.z,
             leek ? 1.0 : 1.6,
-            leek ? 0xb03030 : 0x402038,
-            leek ? 0xffcc33 : 0xff5522,
+            osakaOni() ? (leek ? 0xcc1111 : 0x5a0f0f) : leek ? 0xb03030 : 0x402038,
+            osakaOni() ? 0xff2200 : leek ? 0xffcc33 : 0xff5522,
             3,
             120,
             leek ? 2.6 : 1.8,
@@ -12304,12 +12315,14 @@ export default function ThreeWorld({
       let osakaMapFrame = 0
       // Build the rain field (InstancedMesh streaks; PC 400 / mobile 80).
       function buildOsakaRain() {
-        const count = isMobileDevice ? 80 : 400
-        const geo = new THREE.BoxGeometry(0.025, 1.3, 0.025)
+        // 鬼モード (P-D): 雨は「血の雨」— 太く重い滴を少数 (PC80/モバイル30)。
+        const oniRain = osakaOni()
+        const count = oniRain ? (isMobileDevice ? 30 : 80) : isMobileDevice ? 80 : 400
+        const geo = new THREE.BoxGeometry(oniRain ? 0.06 : 0.025, 1.3, oniRain ? 0.06 : 0.025)
         const mat = new THREE.MeshBasicMaterial({
-          color: 0x9fc4ff,
+          color: oniRain ? 0xaa0000 : 0x9fc4ff,
           transparent: true,
-          opacity: 0.5,
+          opacity: oniRain ? 0.65 : 0.5,
           depthWrite: false,
         })
         const mesh = new THREE.InstancedMesh(geo, mat, count)
@@ -13936,8 +13949,9 @@ export default function ThreeWorld({
       // Spawn a fixed fodder wave for an area (mobile counts are roughly halved).
       function osakaSpawnAreaZako(area: "dotonbori" | "tsutenkaku" | "castle") {
         const counts = isMobileDevice ? OSAKA_AREA_ZAKO_MOBILE : OSAKA_AREA_ZAKO
-        // 鬼モード (FINAL-H): 雑魚 1.5倍。
-        const n = Math.ceil(counts[area] * (osakaOni() ? OSAKA_ONI_ZAKO_MULT : 1))
+        // 鬼モード (FINAL-H): 雑魚 1.5倍。(P-D): 全雑魚が赤く染まる。
+        const oniZ = osakaOni()
+        const n = Math.ceil(counts[area] * (oniZ ? OSAKA_ONI_ZAKO_MULT : 1))
         const c = osakaAreaCenter(area)
         for (let i = 0; i < n; i++) {
           const a = Math.random() * Math.PI * 2
@@ -13949,8 +13963,8 @@ export default function ThreeWorld({
             safe.x,
             safe.z,
             leek ? 1.0 : 1.6,
-            leek ? 0xb03030 : 0x402038,
-            leek ? 0xffcc33 : 0xff5522,
+            oniZ ? (leek ? 0xcc1111 : 0x5a0f0f) : leek ? 0xb03030 : 0x402038,
+            oniZ ? 0xff2200 : leek ? 0xffcc33 : 0xff5522,
             3,
             120,
             leek ? 2.6 : 1.8,
@@ -16469,6 +16483,7 @@ export default function ThreeWorld({
         }
         clearOsakaMap() // dispose the OSAKA field + restore the prior fog
         osakaTeardownMid() // dispose the OSAKA mid-boss + projectiles, reset progress
+        setOsakaOniActive(false) // 鬼モードの画面演出を畳む (P-D)
         huntFlickerLights.length = 0
         for (const s of huntStageLightSaved) s.light.intensity = s.intensity
         huntStageLightSaved.length = 0
@@ -16756,7 +16771,13 @@ export default function ThreeWorld({
           // instead of the generic minion ring + single HUNT boss.
           osakaRunReset() // リザルト用のラン戦績 (タイム/キル/命中率/被ダメ) を起動
           osakaInitProgression()
-          if (osakaOni()) osakaSpawnOniGuards() // 鬼: 隠し武器への道に守衛 (FINAL-H)
+          setOsakaOniActive(osakaOni())
+          if (osakaOni()) {
+            osakaSpawnOniGuards() // 鬼: 隠し武器への道に守衛 (FINAL-H)
+            // 鬼モード開始カットイン (P-D)。
+            osakaShowCutin("鬼ノ道、始マル", null, "true")
+            SOUNDS.bossRoar()
+          }
         } else {
           // Minions ring the arena centre.
           for (let i = 0; i < lv.zakoCount; i++) {
@@ -22692,6 +22713,25 @@ export default function ThreeWorld({
               </div>
             )}
 
+            {/* ── 鬼モード: 画面の縁が赤くじわじわ燃えるオーバーレイ (P-D) ── */}
+            {osakaOniActive && gamePhase === "playing" && !osakaEnding && (
+              <div
+                style={{
+                  position: "absolute",
+                  inset: 0,
+                  zIndex: 6,
+                  pointerEvents: "none",
+                  animation: "oniBurn 2.6s ease-in-out infinite",
+                }}
+              >
+                <style>
+                  {
+                    "@keyframes oniBurn { 0%,100% { box-shadow: inset 0 0 90px 22px rgba(160,10,10,0.5); } 50% { box-shadow: inset 0 0 150px 42px rgba(220,30,20,0.72); } }"
+                  }
+                </style>
+              </div>
+            )}
+
             {/* ── 真ボス顕現の完全暗転 (P-C): 常設div、opacityのみ切替 ── */}
             <div
               style={{
@@ -22852,6 +22892,38 @@ export default function ThreeWorld({
                   pointerEvents: "auto",
                 }}
               >
+                {/* 鬼モードクリア: 炎が降り注ぐ (P-D)。indexハッシュ配置で再描画安定 */}
+                {osakaEnding.stage === "result" && osakaEnding.oni && (
+                  <div
+                    style={{
+                      position: "absolute",
+                      inset: 0,
+                      overflow: "hidden",
+                      pointerEvents: "none",
+                    }}
+                  >
+                    {ONI_EMBERS.slice(0, isMobile ? 10 : 20).map((em) => (
+                      <span
+                        key={em.id}
+                        style={{
+                          position: "absolute",
+                          top: "-8%",
+                          left: `${em.left}%`,
+                          fontSize: `${em.size}rem`,
+                          animation: `oniEmber ${em.dur}s linear ${em.delay}s infinite`,
+                          opacity: 0,
+                        }}
+                      >
+                        🔥
+                      </span>
+                    ))}
+                    <style>
+                      {
+                        "@keyframes oniEmber { 0% { transform: translateY(0) rotate(0deg); opacity: 0; } 8% { opacity: 0.9; } 90% { opacity: 0.7; } 100% { transform: translateY(115vh) rotate(70deg); opacity: 0; } }"
+                      }
+                    </style>
+                  </div>
+                )}
                 {osakaEnding.stage === "title" && (
                   <div style={{ textAlign: "center" }}>
                     <div

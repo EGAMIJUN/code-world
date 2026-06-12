@@ -48,6 +48,15 @@ export default function ProfilePage() {
   const router = useRouter()
   const { t } = useI18n()
   const [profile, setProfile] = useState<ProfileData | null>(null)
+  // 称号「大阪の鬼」(OSAKA 鬼モードクリアの証) — この端末の達成記録から表示。
+  const [oniTitle, setOniTitle] = useState(false)
+  useEffect(() => {
+    try {
+      setOniTitle(localStorage.getItem("osaka_oni_clear") === "1")
+    } catch {
+      /* ignore */
+    }
+  }, [])
   const [matches, setMatches] = useState<MatchEntry[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -180,6 +189,23 @@ export default function ProfilePage() {
               }}
             >
               {countryFlag(profile.countryCode)} {profile.username}
+              {oniTitle && (
+                <span
+                  style={{
+                    marginLeft: "0.6rem",
+                    color: "#ff4466",
+                    fontSize: "0.75rem",
+                    border: "1px solid #ff4466",
+                    borderRadius: "6px",
+                    padding: "2px 8px",
+                    verticalAlign: "middle",
+                    textShadow: "0 0 8px rgba(255,40,80,0.7)",
+                    letterSpacing: "0.15em",
+                  }}
+                >
+                  👹 大阪の鬼
+                </span>
+              )}
             </div>
             <div style={{ fontSize: "0.7rem", color: "#005500", letterSpacing: "0.05em" }}>
               JOINED {new Date(profile.createdAt).toLocaleDateString()}
