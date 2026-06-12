@@ -13599,7 +13599,8 @@ export default function ThreeWorld({
         }
         ob.attackTimer -= dt
         if (ob.attackTimer > 0) return
-        let cooldown = 2.0
+        // Every branch below assigns a value — no dead initialiser (CodeQL).
+        let cooldown: number
         if (ob.phase === 1) {
           // melee lunge + occasional blink-teleport, now leaving 3 afterimages
           // that each keep a brief lunge hitbox where the boss used to be.
@@ -20798,8 +20799,10 @@ export default function ThreeWorld({
         // critical, and the old per-frame "filter + traverse-every-enemy-
         // skeleton + raycast against ~20*N parts" was the single most
         // expensive thing in the loop. Also skipped on mobile (no
-        // crosshair shown there).
-        if (!isMobile && frameCount % 4 === 0) {
+        // crosshair shown there). NOTE: the React `isMobile` state is captured
+        // at mount (always false inside this effect) — use the effect-local
+        // isMobileDevice instead (CodeQL: useless conditional).
+        if (!isMobileDevice && frameCount % 4 === 0) {
           pointer.set(0, 0)
           raycaster.setFromCamera(pointer, camera)
           const aimParts: THREE.Object3D[] = []
