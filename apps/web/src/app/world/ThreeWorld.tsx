@@ -1089,6 +1089,13 @@ const WALL_AABBS: WallAABB[] = MAP_OBJECTS.map(([x, z, w, d, type]) => ({
   h: wallHeightFor(type, w, d),
 }))
 const ALL_AABBS: WallAABB[] = WALL_AABBS
+// OSAKA suppresses ALL base-map collision (the urban AABBs + the world bounds):
+// the city map is hidden during OSAKA (PR #97), so its collision must go too or
+// the player bumps invisible walls. OSAKA registers no AABBs of its own (its
+// buildings are visual-only; the secret rooms confine via soft clamps), so a flat
+// "no wall collision while OSAKA" is correct and matches the open-field design.
+// Module-scoped like ALL_AABBS, so it's reset on each mount (see the scene init).
+let osakaSuppressBaseCollision = false
 
 // Height-aware AABB sweep. `feetY` is the mover's foot altitude (default 0 =
 // ground). A wall only blocks if its top rises more than a step above the
@@ -1097,6 +1104,10 @@ const ALL_AABBS: WallAABB[] = WALL_AABBS
 // movers (enemies, spawn search) pass feetY=0 and, since every wall here is
 // ≥0.6m tall (> STEP_UP_MAX), behave exactly as the old 2D check did.
 function collidesWithWall(px: number, pz: number, radius: number, feetY = 0): boolean {
+  // OSAKA: the base city map (collision + world bounds) is suppressed so the
+  // player/enemies don't hit the now-hidden urban buildings, and the secret
+  // rooms (outside the normal world bounds) stay reachable.
+  if (osakaSuppressBaseCollision) return false
   if (
     px - radius < WORLD_MIN ||
     px + radius > WORLD_MAX ||
@@ -1122,6 +1133,8 @@ function collidesWithWall(px: number, pz: number, radius: number, feetY = 0): bo
 // True if a point is inside *any* wall's 3D AABB. Used for bullet-vs-wall:
 // y is checked so a barricade doesn't stop a shot flying over it at eye height.
 function pointInsideWall(px: number, py: number, pz: number): boolean {
+  // OSAKA: no base-map walls (see collidesWithWall) → bullets fly free.
+  if (osakaSuppressBaseCollision) return false
   for (const w of ALL_AABBS) {
     if (w.disabled) continue
     if (px > w.x1 && px < w.x2 && pz > w.z1 && pz < w.z2 && py >= (w.y0 ?? 0) && py <= w.h)
@@ -2985,6 +2998,7 @@ export default function ThreeWorld({
       // ALL_AABBS is module-scoped, so the `disabled` flag would otherwise leak
       // into the next mount (walls/shots passing through phantom rubble).
       for (const w of ALL_AABBS) w.disabled = false
+      osakaSuppressBaseCollision = false // reset the module flag on each mount
       // SKY: a dedicated aerial-combat arena — you fight enemy jets in a high,
       // bright sky over the existing world (which reads as the distant terrain).
       const isSky = mapId === "sky"
@@ -12093,8 +12107,14 @@ export default function ThreeWorld({
         ghost: [] as { obj: THREE.Mesh; until: number; born: number; hit: boolean }[],
         split: [] as { mesh: THREE.Mesh; mat: THREE.Material; until: number }[],
       }
+      // Shared FX geometries — reused across every telegraph/pool/ripple/ghost/
+      // splitter so disposeFxMesh never frees them (see the note there). Disposing
+      // a SHARED geometry per-mesh was the stutter bug: rain ripples expire ~10×/s,
+      // each dispose() freed osakaRingGeo's GPU buffer, forcing a re-upload on the
+      // next ripple/telegraph the same frame → constant hitching during OSAKA play.
       const osakaRingGeo = new THREE.RingGeometry(0.84, 1, 24)
       const osakaDiscGeo = new THREE.CircleGeometry(1, 20)
+      const osakaFxSphereGeo = new THREE.SphereGeometry(1, 8, 8) // ghost/splitter (unit)
       let osakaQuakeUntil = 0 // ground-jitter window for lanterns/signs
       // A short screen/ground quake (reuses the rotational camera-shake system so
       // amplitude stays mobile-safe).
@@ -12151,8 +12171,8 @@ export default function ThreeWorld({
           opacity: 0.45,
           depthWrite: false,
         })
-        const m = new THREE.Mesh(new THREE.SphereGeometry(1.4, 8, 8), mat)
-        m.scale.set(1, 2.4, 1)
+        const m = new THREE.Mesh(osakaFxSphereGeo, mat) // shared unit sphere (radius via scale)
+        m.scale.set(1.4, 1.4 * 2.4, 1.4)
         m.position.set(x, 2.4, z)
         scene.add(m)
         const now = Date.now()
@@ -12165,14 +12185,20 @@ export default function ThreeWorld({
           emissive: 0x3a0010,
           emissiveIntensity: 0.6,
         })
-        const m = new THREE.Mesh(new THREE.SphereGeometry(0.7, 8, 8), mat)
+        const m = new THREE.Mesh(osakaFxSphereGeo, mat) // shared unit sphere (radius via scale)
+        m.scale.setScalar(0.7)
         m.position.set(x, 0.8, z)
         scene.add(m)
         osakaFx.split.push({ mesh: m, mat, until: Date.now() + 6000 })
       }
       function disposeFxMesh(m: THREE.Mesh) {
         scene.remove(m)
-        m.geometry.dispose()
+        // Do NOT dispose the geometry: every FX mesh shares one of the pooled
+        // geometries above (osakaRingGeo / osakaDiscGeo / osakaFxSphereGeo), so
+        // freeing it here would yank a still-in-use GPU buffer and force a
+        // re-upload next frame (the OSAKA stutter). Only the per-instance material
+        // is owned by this mesh, so only that is disposed. The shared geometries
+        // live for the component lifetime (released on unmount).
         const mm = m.material
         if (Array.isArray(mm)) for (const x of mm) x.dispose()
         else mm.dispose()
@@ -12303,7 +12329,15 @@ export default function ThreeWorld({
         }
       }
       // ══ OSAKA environment: rain, ripples, collapsing bridges ════════════════
-      let osakaRain: { mesh: THREE.InstancedMesh; vy: Float32Array; count: number } | null = null
+      // pos = flat [x,y,z, …] per drop. Updating these + a single makeTranslation
+      // per drop avoids the per-frame getMatrixAt+decompose+recompose (400 drops ×
+      // a matrix decomposition every frame was the steady-state drain).
+      let osakaRain: {
+        mesh: THREE.InstancedMesh
+        vy: Float32Array
+        pos: Float32Array
+        count: number
+      } | null = null
       const osakaRipples: { mesh: THREE.Mesh; mat: THREE.MeshBasicMaterial; t: number }[] = []
       const osakaBridges: {
         mesh: THREE.Mesh
@@ -12334,19 +12368,21 @@ export default function ThreeWorld({
         const mesh = new THREE.InstancedMesh(geo, mat, count)
         mesh.frustumCulled = false
         const vy = new Float32Array(count)
+        const pos = new Float32Array(count * 3)
         for (let i = 0; i < count; i++) {
-          osakaRainDummy.position.set(
-            -90 + Math.random() * 180,
-            Math.random() * 40,
-            -90 + Math.random() * 180,
-          )
-          osakaRainDummy.updateMatrix()
+          const x = -90 + Math.random() * 180
+          const y = Math.random() * 40
+          const z = -90 + Math.random() * 180
+          pos[i * 3] = x
+          pos[i * 3 + 1] = y
+          pos[i * 3 + 2] = z
+          osakaRainDummy.matrix.makeTranslation(x, y, z)
           mesh.setMatrixAt(i, osakaRainDummy.matrix)
           vy[i] = 26 + Math.random() * 12
         }
         mesh.instanceMatrix.needsUpdate = true
         scene.add(mesh)
-        osakaRain = { mesh, vy, count }
+        osakaRain = { mesh, vy, pos, count }
         osakaMapMeshesRef.current.push(mesh) // disposed with the map
       }
       function osakaRipple(x: number, z: number) {
@@ -12368,29 +12404,29 @@ export default function ThreeWorld({
       // Per-frame rain fall + occasional ground ripples (OSAKA stage only).
       function updateOsakaRain(dt: number) {
         if (osakaRain) {
-          const { mesh, vy, count } = osakaRain
+          const { mesh, vy, pos, count } = osakaRain
           const cx = focalPoint.x
           const cz = focalPoint.z
+          const m = osakaRainDummy.matrix
           for (let i = 0; i < count; i++) {
-            mesh.getMatrixAt(i, osakaRainDummy.matrix)
-            osakaRainDummy.matrix.decompose(
-              osakaRainDummy.position,
-              osakaRainDummy.quaternion,
-              osakaRainDummy.scale,
-            )
-            osakaRainDummy.position.y -= (vy[i] ?? 30) * dt
-            if (osakaRainDummy.position.y < 0) {
+            const b = i * 3
+            let x = pos[b] ?? 0
+            let y = (pos[b + 1] ?? 0) - (vy[i] ?? 30) * dt
+            let z = pos[b + 2] ?? 0
+            if (y < 0) {
               // landed → reset to the top near the player + an occasional ripple
-              if (Math.random() < 0.04)
-                osakaRipple(osakaRainDummy.position.x, osakaRainDummy.position.z)
-              osakaRainDummy.position.set(
-                cx - 90 + Math.random() * 180,
-                35 + Math.random() * 8,
-                cz - 90 + Math.random() * 180,
-              )
+              if (Math.random() < 0.04) osakaRipple(x, z)
+              x = cx - 90 + Math.random() * 180
+              y = 35 + Math.random() * 8
+              z = cz - 90 + Math.random() * 180
             }
-            osakaRainDummy.updateMatrix()
-            mesh.setMatrixAt(i, osakaRainDummy.matrix)
+            pos[b] = x
+            pos[b + 1] = y
+            pos[b + 2] = z
+            // Drops are pure translations (no rotation/scale), so build the matrix
+            // directly — no getMatrixAt / decompose / recompose round-trip.
+            m.makeTranslation(x, y, z)
+            mesh.setMatrixAt(i, m)
           }
           mesh.instanceMatrix.needsUpdate = true
         }
@@ -14306,11 +14342,15 @@ export default function ThreeWorld({
       let huntStageFogWasSaved = false
       // Base-world renderables hidden during OSAKA (the dim, fogged urban map is
       // near-invisible under the OSAKA night city but still costs draw calls).
-      // Toggling `.visible` does NOT affect collision (ALL_AABBS) or bullet wall
-      // raycast (invisible meshes still intersect), so gameplay is unchanged.
+      // Hiding the meshes also requires suppressing their collision (handled via
+      // osakaSuppressBaseCollision) so the player doesn't bump invisible walls.
       const osakaHiddenBase: THREE.Object3D[] = []
       function osakaHideBaseWorld() {
         osakaShowBaseWorld() // restore any prior hide first (idempotent)
+        // Suppress base-map collision + world bounds for the duration of OSAKA so
+        // the now-invisible urban buildings have no phantom hitboxes, and the
+        // secret rooms (beyond the normal bounds) stay reachable.
+        osakaSuppressBaseCollision = true
         // Things the player still needs to see during OSAKA: the FPS weapon
         // viewmodel (gunGroup, a scene child positioned each frame) and the
         // third-person avatar. Everything else at scene root is base-world dressing.
@@ -14334,10 +14374,17 @@ export default function ThreeWorld({
             osakaHiddenBase.push(child)
           }
         }
+        // wallMeshes are raycast directly (non-recursive) for bullet-vs-wall, so a
+        // hidden parent doesn't spare them — they'd still occlude shots at enemies
+        // / the boss through invisible urban buildings. Drop them off layer 0 so the
+        // default raycaster skips them (rendering is already off via .visible).
+        for (const m of wallMeshes) m.layers.disable(0)
       }
       function osakaShowBaseWorld() {
         for (const o of osakaHiddenBase) o.visible = true
         osakaHiddenBase.length = 0
+        for (const m of wallMeshes) m.layers.enable(0) // back to raycastable
+        osakaSuppressBaseCollision = false // base-map collision + bounds back on
       }
       function buildHuntRoom() {
         const cx = HUNT_ROOM.x
