@@ -531,6 +531,11 @@ const SOUNDS = {
     _noise(0.7, 0.45, "lowpass", 500)
     _tone(70, 0.3, 0.3, "square", 40)
   },
+  // 水音 (P-E): 橋崩落の水しぶき — 低域ノイズ + 沈むサイン。
+  splash() {
+    _noise(0.32, 0.5, "lowpass", 900)
+    _tone(220, 0.2, 0.16, "sine", 70)
+  },
 }
 
 // ══ HUNT mode data (transfer missions) — PR-Z1 ═══════════════════════════════
@@ -12242,9 +12247,30 @@ export default function ThreeWorld({
             osakaFx.split.splice(i, 1)
           }
         }
-        // ── エリアミニイベントの遅延処理 (FINAL-I) ──
+        // ── エリアミニイベントの遅延処理 (FINAL-I / P-E) ──
+        // 通天閣: 0.3秒ごとに1群ずつ灯りが落ちる → 全消灯で赤化タイマーを起動。
+        if (osakaNeonSeq) {
+          const A2s = osakaAnim
+          if (!A2s) {
+            osakaNeonSeq = null
+          } else if (now >= osakaNeonSeq.nextAt) {
+            const end = Math.min(A2s.neon.length, osakaNeonSeq.idx + osakaNeonSeq.chunk)
+            for (let k = osakaNeonSeq.idx; k < end; k++) {
+              const nn = A2s.neon[k]
+              if (!nn) continue
+              nn.base = 0
+              nn.mat.emissiveIntensity = 0
+            }
+            osakaNeonSeq.idx = end
+            osakaNeonSeq.nextAt = now + 300
+            if (osakaNeonSeq.idx >= A2s.neon.length) {
+              osakaNeonSeq = null
+              osakaNeonRedAt = now + 700 // 闇の溜めの後、全部が赤に点く
+            }
+          }
+        }
         if (osakaNeonRedAt > 0 && now >= osakaNeonRedAt) {
-          // 消灯から1.4秒 — 街全体のネオンが一斉に赤へ染まる。
+          // 全消灯ののち — 街全体のネオンが一斉に赤へ染まる。
           osakaNeonRedAt = 0
           const A2 = osakaAnim
           if (A2) {
@@ -12254,25 +12280,50 @@ export default function ThreeWorld({
               nn.base = 1.6
             }
           }
-          osakaShowCutin("新世界は闇に落ちた", null, "true")
+          osakaShowCutin(
+            "新世界は闇に落ちた",
+            "塔は赤い独り言を繰り返す\n還る灯は もう無い",
+            "true",
+          )
           SOUNDS.huntWarn()
         }
+        // 水しぶき (P-E): 上方向に飛んで重力で落ちる白い飛沫。
+        for (let i = osakaSplashes.length - 1; i >= 0; i--) {
+          const sp = osakaSplashes[i]
+          if (!sp) continue
+          sp.t += dt
+          sp.vy -= 16 * dt
+          sp.mesh.position.x += sp.vx * dt
+          sp.mesh.position.y += sp.vy * dt
+          sp.mesh.position.z += sp.vz * dt
+          if (sp.t > 1.1 || sp.mesh.position.y < -0.4) {
+            scene.remove(sp.mesh)
+            osakaSplashes.splice(i, 1)
+          }
+        }
+        // 大阪城の目玉 (P-E): 各目玉が独立したランダム周期で点いたり消えたりする。
         if (osakaCastleEyes) {
           if (now >= osakaCastleEyes.until) {
             scene.remove(osakaCastleEyes.mesh)
             osakaCastleEyes.mesh.geometry.dispose()
             ;(osakaCastleEyes.mesh.material as THREE.Material).dispose()
             osakaCastleEyes = null
-          } else if ((osakaMapFrame & 3) === 0) {
-            // 3フレに1回、目玉がランダムに現れては消える。
+          } else {
             const ce = osakaCastleEyes
-            ce.pts.forEach((p, i) => {
-              osakaEyeDummy.position.set(p[0], p[1], p[2])
-              osakaEyeDummy.scale.setScalar(Math.random() < 0.3 ? 0.001 : 0.6 + Math.random() * 0.9)
+            let eyesDirty = false
+            for (let i = 0; i < ce.pts.length; i++) {
+              const p = ce.pts[i]
+              if (!p || now < p.nextAt) continue
+              p.on = !p.on
+              p.nextAt = now + (p.on ? 250 + Math.random() * 600 : 120 + Math.random() * 380)
+              osakaEyeDummy.position.set(p.x, p.y, p.z)
+              osakaEyeDummy.rotation.set(0, 0, 0)
+              osakaEyeDummy.scale.setScalar(p.on ? p.s : 0.001)
               osakaEyeDummy.updateMatrix()
               ce.mesh.setMatrixAt(i, osakaEyeDummy.matrix)
-            })
-            ce.mesh.instanceMatrix.needsUpdate = true
+              eyesDirty = true
+            }
+            if (eyesDirty) ce.mesh.instanceMatrix.needsUpdate = true
           }
         }
         // 第六形態の全画面波 (FINAL-B): 予兆中は安全地帯が明滅、時間で全域に発破。
@@ -13202,31 +13253,66 @@ export default function ThreeWorld({
           )
         }
       }
-      // ══ エリアミニイベント (FINAL-I) ═════════════════════════════════════════
+      // ══ エリアミニイベント (FINAL-I / P-E) ═══════════════════════════════════
       let osakaNeonRedAt = 0 // 通天閣クリア演出: この時刻に全ネオンが赤化する
+      // 順次消灯シーケンス (P-E): 0.3秒ごとに1群ずつネオンが落ちていく。
+      let osakaNeonSeq: { idx: number; nextAt: number; chunk: number } | null = null
       let osakaCastleEyes: {
         mesh: THREE.InstancedMesh
         until: number
-        pts: [number, number, number][]
+        pts: { x: number; y: number; z: number; s: number; on: boolean; nextAt: number }[]
       } | null = null
       const osakaEyeDummy = new THREE.Object3D()
-      // 道頓堀クリア: 全部の橋が同時に崩れ落ちる。
+      // 水しぶき (P-E): 橋崩落の白い飛沫 — 共有ジオメトリ、上方向に飛散して重力落下。
+      const osakaSplashes: {
+        mesh: THREE.Mesh
+        vx: number
+        vy: number
+        vz: number
+        t: number
+      }[] = []
+      const osakaSplashGeo = new THREE.SphereGeometry(0.09, 6, 6)
+      const osakaSplashMat = new THREE.MeshBasicMaterial({
+        color: 0xeef6ff,
+        transparent: true,
+        opacity: 0.85,
+      })
+      // 道頓堀クリア: 全部の橋が同時に崩れ落ち、白い水しぶきが立つ。
       function osakaEventDotonbori() {
         for (const b of osakaBridges) {
           if (b.state !== "falling") b.state = "falling"
         }
+        // 水しぶき (P-E): 両橋の落水点から上方向へ 20 個 (モバイル10)。
+        const ns = isMobileDevice ? 10 : 20
+        for (let i = 0; i < ns; i++) {
+          const bx = i % 2 === 0 ? HUNT_ARENA.x - 40 : HUNT_ARENA.x + 40
+          const m = new THREE.Mesh(osakaSplashGeo, osakaSplashMat)
+          m.position.set(
+            bx + (Math.random() - 0.5) * 8,
+            0.2,
+            HUNT_ARENA.z + 75 + (Math.random() - 0.5) * 18,
+          )
+          scene.add(m)
+          osakaSplashes.push({
+            mesh: m,
+            vx: (Math.random() - 0.5) * 2,
+            vy: 5 + Math.random() * 4.5,
+            vz: (Math.random() - 0.5) * 2,
+            t: 0,
+          })
+        }
+        SOUNDS.splash() // 水音 (P-E)
         osakaQuake(5, 900)
         SOUNDS.collapse()
-        osakaShowCutin("道頓堀は終わった", null, "form")
+        osakaShowCutin("道頓堀は終わった", "看板の灯は水底へ沈み\n橋は もう誰も渡さない", "form")
       }
-      // 通天閣クリア: ネオン全消灯 → (1.4s後) 真っ赤に染まる。頂上灯は爆発で消滅。
+      // 通天閣クリア (P-E): 0.3秒ごとに1群ずつ灯りが落ち、全消灯後に真っ赤に点く。
+      // 頂上灯はイベント開始の爆発で吹き飛ぶ。
       function osakaEventTsutenkaku() {
         const A2 = osakaAnim
         if (A2) {
-          for (const n of A2.neon) {
-            n.base = 0
-            n.mat.emissiveIntensity = 0
-          }
+          const chunk = Math.max(1, Math.ceil(A2.neon.length / 7))
+          osakaNeonSeq = { idx: 0, nextAt: Date.now(), chunk }
           const orb = osakaMapMeshesRef.current[0]?.getObjectByName("osakaTowerOrb")
           if (orb) {
             const wp = new THREE.Vector3()
@@ -13241,15 +13327,20 @@ export default function ThreeWorld({
         }
         SOUNDS.rpg()
         osakaQuake(4, 600)
-        osakaNeonRedAt = Date.now() + 1400
+        // 赤化タイマーは消灯シーケンス完了時に updateOsakaFx がセットする。
       }
       // 大阪城ボス出現: 窓に無数の目玉が明滅 + 地震 + 外壁の剥落。
       function osakaEventCastle() {
-        osakaBanner("城主は既にいない")
+        osakaShowCutin(
+          "城主は既にいない",
+          "天守の窓という窓に 目が開く\n城が、こちらを見ている",
+          "true",
+        )
         osakaQuake(7, 1600)
         SOUNDS.collapse()
-        const n = isMobileDevice ? 12 : 24
-        const geo = new THREE.SphereGeometry(0.42, 8, 8)
+        // 目玉 30個 (モバイル15)、サイズ 0.1〜0.3、各自が独立タイミングで明滅 (P-E)。
+        const n = isMobileDevice ? 15 : 30
+        const geo = new THREE.SphereGeometry(1, 8, 8) // scale = 実半径 (0.1〜0.3)
         const mat = new THREE.MeshLambertMaterial({
           color: 0xf2ece0,
           emissive: 0xff2200,
@@ -13265,25 +13356,30 @@ export default function ThreeWorld({
           [12, 24.4],
           [9, 27.9],
         ]
-        const pts: [number, number, number][] = []
         const czw = HUNT_ARENA.z - 78 // 天守中心 (world z)
+        const now0 = Date.now()
+        const pts: { x: number; y: number; z: number; s: number; on: boolean; nextAt: number }[] =
+          []
         for (let i = 0; i < n; i++) {
           const tier = tiers[i % tiers.length] ?? [12, 16]
-          pts.push([
-            HUNT_ARENA.x + (Math.random() - 0.5) * tier[0] * 0.7,
-            tier[1],
-            czw + tier[0] / 2 + 0.4,
-          ])
-        }
-        pts.forEach((p, i) => {
-          osakaEyeDummy.position.set(p[0], p[1], p[2])
-          osakaEyeDummy.scale.setScalar(0.9)
+          const p = {
+            x: HUNT_ARENA.x + (Math.random() - 0.5) * tier[0] * 0.7,
+            y: tier[1],
+            z: czw + tier[0] / 2 + 0.4,
+            s: 0.1 + Math.random() * 0.2,
+            on: Math.random() < 0.5,
+            nextAt: now0 + Math.random() * 600,
+          }
+          pts.push(p)
+          osakaEyeDummy.position.set(p.x, p.y, p.z)
+          osakaEyeDummy.rotation.set(0, 0, 0)
+          osakaEyeDummy.scale.setScalar(p.on ? p.s : 0.001)
           osakaEyeDummy.updateMatrix()
           im.setMatrixAt(i, osakaEyeDummy.matrix)
-        })
+        }
         im.instanceMatrix.needsUpdate = true
         scene.add(im)
-        osakaCastleEyes = { mesh: im, until: Date.now() + 7000, pts }
+        osakaCastleEyes = { mesh: im, until: now0 + 7000, pts }
         // 外壁の剥落 — 大きめの石塊が南面から落ちる (debris 更新系に相乗り)。
         const S = osakaSecret
         if (S) {
@@ -14325,7 +14421,15 @@ export default function ThreeWorld({
           p.area = "boss"
           p.midBossSpawned = true
           osakaEventCastle() // 目玉窓 + 地震 + 外壁剥落 +「城主は既にいない」(FINAL-I)
-          spawnOsakaBoss() // 出現アナウンスは形態カットイン (FINAL-F) が担う
+          // 城主のカットインを見せ切ってからボス召喚 (P-E)。形態カットインが続く。
+          window.setTimeout(() => {
+            if (
+              isOsakaStage(huntMissionConfigRef.current.stage) &&
+              huntPhaseRef.current === "mission" &&
+              !osakaBossRef.current
+            )
+              spawnOsakaBoss()
+          }, 2600)
         } else {
           p.midBossSpawned = true
           if (p.area === "dotonbori") spawnTengu()
@@ -16291,8 +16395,11 @@ export default function ThreeWorld({
         for (const r of osakaRipples) disposeFxMesh(r.mesh)
         osakaRipples.length = 0
         osakaBridges.length = 0
-        // Mini-event teardown (FINAL-I): castle eyes + pending neon-red timer.
+        // Mini-event teardown (FINAL-I / P-E): castle eyes + neon timers + splashes.
         osakaNeonRedAt = 0
+        osakaNeonSeq = null
+        for (const sp of osakaSplashes) scene.remove(sp.mesh)
+        osakaSplashes.length = 0
         if (osakaCastleEyes) {
           scene.remove(osakaCastleEyes.mesh)
           osakaCastleEyes.mesh.geometry.dispose()
@@ -22861,6 +22968,8 @@ export default function ThreeWorld({
                         color: "#dba8b0",
                         fontSize: isMobile ? "0.68rem" : "0.85rem",
                         letterSpacing: "0.22em",
+                        lineHeight: 1.7,
+                        whiteSpace: "pre-line", // 複数行の演出テキスト (P-E)
                         fontFamily: "'Hiragino Mincho ProN','Yu Mincho',serif",
                       }}
                     >
