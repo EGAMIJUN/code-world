@@ -11251,45 +11251,20 @@ export default function ThreeWorld({
         osakaJitter(g, amp)
         return g
       }
-      // Stamp a 3-layer eye (white sclera + emissive red iris + black pupil) onto a
-      // group at (x,y,z). The iris is pushed to `sink` so the animator can flicker
-      // its emissiveIntensity. Decoration only — NOT tagged osakaBody, so it never
-      // enters the weak-point raycast and can't bury a core.
-      function addClusterEye(
-        group: THREE.Group,
-        sink: THREE.Mesh[],
-        x: number,
-        y: number,
-        z: number,
-        s: number,
-      ) {
-        const white = new THREE.Mesh(
-          new THREE.SphereGeometry(s, 8, 8),
-          new THREE.MeshLambertMaterial({ color: 0xf2ece0 }),
-        )
-        white.position.set(x, y, z)
-        group.add(white)
-        const iris = new THREE.Mesh(
-          new THREE.SphereGeometry(s * 0.6, 8, 8),
-          new THREE.MeshLambertMaterial({
-            color: 0xff2200,
-            emissive: 0xff1800,
-            emissiveIntensity: 1.8,
-          }),
-        )
-        iris.position.set(x, y, z + s * 0.5)
-        group.add(iris)
-        const pupil = new THREE.Mesh(
-          new THREE.SphereGeometry(s * 0.28, 6, 6),
-          new THREE.MeshBasicMaterial({ color: 0x050505 }),
-        )
-        pupil.position.set(x, y, z + s * 0.78)
-        group.add(pupil)
-        sink.push(iris)
+      // Record an eye position. PERF: instead of building 3 meshes per eye (white
+      // sclera + iris + pupil = up to 84 draw calls on phase 5), every eye for a
+      // form is accumulated here and baked into ONE InstancedMesh of emissive
+      // spheres at the end of buildOsakaBossPhase (see the finalize pass). The
+      // shared material's emissiveIntensity is flickered by the animator.
+      type OsakaEyeXf = { x: number; y: number; z: number; s: number }
+      function addClusterEye(accum: OsakaEyeXf[], x: number, y: number, z: number, s: number) {
+        accum.push({ x, y, z, s })
       }
-      // A gaping toothed maw: a dark mouth box ringed with white fang cones. The
+      // A gaping toothed maw: a dark gum sphere ringed with white fang cones. The
       // returned group is pushed to `sink` so the animator can gape it open/closed
-      // via scale.y. Decoration only (not raycast body).
+      // via scale.y. PERF: the 14 fang cones are merged into ONE geometry, so each
+      // maw is just 2 draw calls (gum + fangs) instead of 15. Decoration only (not
+      // raycast body).
       function addMouth(
         group: THREE.Group,
         sink: THREE.Object3D[],
@@ -11306,18 +11281,22 @@ export default function ThreeWorld({
         gum.scale.set(1, 0.6, 0.6)
         maw.add(gum)
         const fangN = 7
+        const fangGeos: THREE.BufferGeometry[] = []
         for (let i = 0; i < fangN; i++) {
           const a = (i / (fangN - 1) - 0.5) * Math.PI * 0.9
           for (const yy of [s * 0.42, -s * 0.42]) {
-            const fang = new THREE.Mesh(
-              new THREE.ConeGeometry(s * 0.1, s * 0.5, 5),
-              new THREE.MeshLambertMaterial({ color: 0xf0e8d8 }),
-            )
-            fang.position.set(Math.sin(a) * s * 0.8, yy, s * 0.45)
-            fang.rotation.x = yy > 0 ? Math.PI : 0
-            maw.add(fang)
+            const fg = new THREE.ConeGeometry(s * 0.1, s * 0.5, 5)
+            const m4 = new THREE.Matrix4()
+              .makeRotationX(yy > 0 ? Math.PI : 0)
+              .setPosition(Math.sin(a) * s * 0.8, yy, s * 0.45)
+            fg.applyMatrix4(m4)
+            fangGeos.push(fg)
           }
         }
+        const fangMerged = mergeGeometries(fangGeos, false)
+        for (const g of fangGeos) g.dispose()
+        if (fangMerged)
+          maw.add(new THREE.Mesh(fangMerged, new THREE.MeshLambertMaterial({ color: 0xf0e8d8 })))
         maw.position.set(x, y, z)
         group.add(maw)
         sink.push(maw)
@@ -11346,20 +11325,22 @@ export default function ThreeWorld({
         eyes: THREE.Mesh[]
         mouths: THREE.Object3D[]
         extras: {
-          armInst: THREE.InstancedMesh
-          armData: { ang: number; y: number; r: number; tilt: number; phase: number }[]
-          eyeMat: THREE.MeshLambertMaterial
+          armInst: THREE.InstancedMesh | null
+          armData: { ang: number; y: number; r: number; tilt: number; phase: number }[] | null
+          eyeMat: THREE.MeshLambertMaterial | null
         } | null
       } {
         const group = new THREE.Group()
         const parts: THREE.Object3D[] = []
         const cores: THREE.Mesh[] = []
-        const eyes: THREE.Mesh[] = []
+        const eyes: THREE.Mesh[] = [] // legacy field — eyes are now instanced (see finalize)
         const mouths: THREE.Object3D[] = []
+        // PERF: every form's eyes accumulate here and bake into ONE InstancedMesh.
+        const eyeAccum: OsakaEyeXf[] = []
         let extras: {
-          armInst: THREE.InstancedMesh
-          armData: { ang: number; y: number; r: number; tilt: number; phase: number }[]
-          eyeMat: THREE.MeshLambertMaterial
+          armInst: THREE.InstancedMesh | null
+          armData: { ang: number; y: number; r: number; tilt: number; phase: number }[] | null
+          eyeMat: THREE.MeshLambertMaterial | null
         } | null = null
         // Mobile halves the part counts so the denser forms stay performant.
         const dense = isMobileDevice ? 0.5 : 1.0
@@ -11415,7 +11396,7 @@ export default function ThreeWorld({
             const a = Math.random() * Math.PI * 2
             const yy = 2.0 + Math.random() * 4.0
             const rr = (yy > 5.0 ? 0.85 : 1.25) + Math.random() * 0.2
-            addClusterEye(group, eyes, Math.cos(a) * rr, yy, Math.sin(a) * rr + 0.2, 0.13)
+            addClusterEye(eyeAccum, Math.cos(a) * rr, yy, Math.sin(a) * rr + 0.2, 0.13)
           }
           const core = osakaCore()
           core.scale.setScalar(1.4)
@@ -11451,8 +11432,7 @@ export default function ThreeWorld({
           for (let i = 0; i < eyeN; i++) {
             const a = Math.random() * Math.PI * 2
             addClusterEye(
-              group,
-              eyes,
+              eyeAccum,
               Math.cos(a) * 0.7,
               4.6 + (Math.random() - 0.5) * 1.4,
               Math.sin(a) * 0.7 + 0.3,
@@ -11492,8 +11472,7 @@ export default function ThreeWorld({
           for (let i = 0; i < eyeN; i++) {
             const a = Math.random() * Math.PI * 2
             addClusterEye(
-              group,
-              eyes,
+              eyeAccum,
               Math.cos(a) * 2.5,
               2.6 + Math.random() * 3.4,
               Math.sin(a) * 2.5 + 0.2,
@@ -11540,8 +11519,8 @@ export default function ThreeWorld({
           const oldHead = osakaPart(jitterSphere(1.0, 8, 0.15), 0xc8c0b0)
           oldHead.position.set(0, 11.0, 0)
           add(oldHead)
-          addClusterEye(group, eyes, -0.3, 11.1, 0.85, 0.13)
-          addClusterEye(group, eyes, 0.3, 11.1, 0.85, 0.13)
+          addClusterEye(eyeAccum, -0.3, 11.1, 0.85, 0.13)
+          addClusterEye(eyeAccum, 0.3, 11.1, 0.85, 0.13)
           const boneSkull = osakaPart(new THREE.ConeGeometry(0.9, 1.7, 6), 0xe8e0d0)
           boneSkull.rotation.x = Math.PI
           boneSkull.rotation.z = 0.4
@@ -11592,8 +11571,7 @@ export default function ThreeWorld({
             const a = Math.random() * Math.PI * 2
             const rr = 3.05 + Math.random() * 0.2
             addClusterEye(
-              group,
-              eyes,
+              eyeAccum,
               Math.cos(a) * rr,
               3.0 + Math.random() * 6.0,
               Math.sin(a) * rr + 0.2,
@@ -11775,6 +11753,81 @@ export default function ThreeWorld({
             group.add(c)
           }
           extras = { armInst, armData, eyeMat }
+        }
+        // ══ DRAW-CALL FINALIZE (every form) ════════════════════════════════════
+        // (a) all of this form's eyes → ONE InstancedMesh of emissive spheres;
+        // (b) every solid body part (osakaPart, tagged osakaBody, non-emissive,
+        // non-pulse) merged by colour into one mesh per colour. This collapses
+        // phase-5 from ~245 individual meshes to ~20 draw calls. The negligible
+        // per-limb idle sway is dropped; cores / mouths / the pulse blob / the
+        // glowing eyes stay live. Hit detection still works — merged meshes keep
+        // userData.osakaBody so the weak-point raycast registers body hits.
+        if (eyeAccum.length > 0) {
+          const eGeo = new THREE.SphereGeometry(1, 6, 6)
+          const eMat = new THREE.MeshLambertMaterial({
+            color: 0xff2200,
+            emissive: 0xff1800,
+            emissiveIntensity: 1.8,
+          })
+          const eInst = new THREE.InstancedMesh(eGeo, eMat, eyeAccum.length)
+          eInst.frustumCulled = false
+          const ed = new THREE.Object3D()
+          eyeAccum.forEach((e, i) => {
+            ed.position.set(e.x, e.y, e.z)
+            ed.rotation.set(0, 0, 0)
+            ed.scale.setScalar(e.s)
+            ed.updateMatrix()
+            eInst.setMatrixAt(i, ed.matrix)
+          })
+          eInst.instanceMatrix.needsUpdate = true
+          group.add(eInst)
+          // Surface the eye material so the animator can flicker it (form 6 keeps
+          // its own eyeMat, set above; this only fills forms 2-5).
+          if (extras) extras.eyeMat = eMat
+          else extras = { armInst: null, armData: null, eyeMat: eMat }
+        }
+        // Merge solid body parts by colour (bake the local transform in).
+        group.updateMatrixWorld(true)
+        const bodyByColor = new Map<number, THREE.BufferGeometry[]>()
+        const bodyToRemove: THREE.Mesh[] = []
+        group.traverse((o) => {
+          if (
+            o instanceof THREE.Mesh &&
+            !(o instanceof THREE.InstancedMesh) &&
+            o.userData.osakaBody === true &&
+            o.userData.osakaPulse !== true &&
+            o.material instanceof THREE.MeshLambertMaterial &&
+            o.material.emissive.getHex() === 0
+          ) {
+            const hex = o.material.color.getHex()
+            const g = o.geometry.clone().applyMatrix4(o.matrixWorld)
+            const arr = bodyByColor.get(hex)
+            if (arr) arr.push(g)
+            else bodyByColor.set(hex, [g])
+            bodyToRemove.push(o)
+          }
+        })
+        for (const m of bodyToRemove) {
+          m.parent?.remove(m)
+          m.geometry.dispose()
+          ;(m.material as THREE.Material).dispose()
+        }
+        for (const [hex, geos] of bodyByColor) {
+          const merged = geos.length === 1 ? geos[0] : mergeGeometries(geos, false)
+          if (!merged) {
+            for (const g of geos) {
+              const mm = new THREE.Mesh(g, new THREE.MeshLambertMaterial({ color: hex }))
+              mm.userData.osakaBody = true
+              mm.frustumCulled = false
+              group.add(mm)
+            }
+            continue
+          }
+          if (geos.length > 1) for (const g of geos) g.dispose()
+          const mm = new THREE.Mesh(merged, new THREE.MeshLambertMaterial({ color: hex }))
+          mm.userData.osakaBody = true
+          mm.frustumCulled = false
+          group.add(mm)
         }
         return { group, cores, parts, eyes, mouths, extras }
       }
@@ -13439,8 +13492,7 @@ export default function ThreeWorld({
             }
           })
           if (f6) cameraShakeRef.current.intensity = Math.max(cameraShakeRef.current.intensity, 1.4)
-          // 目 (Instanced) は共有マテリアルで脈動。
-          if (ob.eyeMat) ob.eyeMat.emissiveIntensity = 1.2 + (Math.sin(t * 7) * 0.5 + 0.5) * 1.4
+          // (目の脈動は下の汎用 eyeMat フリッカーが全形態まとめて処理する)
           // 腕の束は 2フレームに1回だけうねらせる (80本 setMatrixAt の間引き)。
           if (ob.armInst && ob.armData) {
             osakaArmFrame++
@@ -13483,13 +13535,9 @@ export default function ThreeWorld({
           // form-5 fused-flesh mass breathes with a slow whole-body pulse
           if (p.userData.osakaPulse) p.scale.setScalar(1.0 + Math.sin(t * 0.8) * 0.05)
         }
-        // eyes flicker their iris glow between 1.0 and 2.2, each on its own phase
-        for (const e of ob.eyes) {
-          const m = e.material
-          if (m instanceof THREE.MeshLambertMaterial) {
-            m.emissiveIntensity = 1.0 + (Math.sin(t * 6 + e.id) * 0.5 + 0.5) * 1.2
-          }
-        }
+        // Eyes flicker via the shared instanced-eye material (one pulse for the
+        // whole swarm — eyes are now a single InstancedMesh per form, not 84 meshes).
+        if (ob.eyeMat) ob.eyeMat.emissiveIntensity = 1.0 + (Math.sin(t * 6) * 0.5 + 0.5) * 1.2
         // maws gape open and shut on scale.y
         for (const mo of ob.mouths) {
           mo.scale.y = 0.35 + (Math.sin(t * 3 + mo.id) * 0.5 + 0.5) * 0.65
