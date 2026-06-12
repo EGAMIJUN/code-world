@@ -12401,6 +12401,8 @@ export default function ThreeWorld({
         blade: THREE.Group // 鬼刀ピックアップ
         spear: THREE.Group // 大槍ピックアップ
         underLights: THREE.PointLight[] // 地下の赤い非常灯 (明滅)
+        // 入口の「気のせいかもしれない光」(P-B): 弱い PointLight がゆっくり明滅。
+        hintLights: { l: THREE.PointLight; base: number }[]
         gateAnim: number // -1 idle / 0..1 開扉アニメ進行
         crackAnim: number // -1 idle / 0..1 崩壊アニメ進行
         debris: { mesh: THREE.Mesh; vx: number; vy: number; vz: number; t: number }[]
@@ -12692,14 +12694,24 @@ export default function ThreeWorld({
               spawnExplosion(new THREE.Vector3(wx, 1.2, wz), true)
             }
           }
+        } else if (st.loc === "under") {
+          // 南口 = 入ってきた所へ戻る / 北口 (P-B) = 大阪城方面へのショートカット。
+          const exu = ax + OSAKA_UNDER.x
+          const southZ = az + OSAKA_UNDER.z - OSAKA_UNDER.len / 2 + 1.6
+          const northZ = az + OSAKA_UNDER.z + OSAKA_UNDER.len / 2 - 1.2
+          const dS = Math.hypot(px - exu, pz - southZ)
+          const dN = Math.hypot(px - exu, pz - northZ)
+          if (dN < 2.4 && dN <= dS) {
+            hint = "[E] 北口 — 大阪城方面へ抜ける"
+            action = () => osakaSecretTeleport(ax - 3, az - 42, "none")
+          } else if (dS < 2.4) {
+            hint = "[E] 地上へ戻る"
+            action = () => osakaSecretTeleport(st.ret.x, st.ret.z, "none")
+          }
         } else {
-          const ex = ax + (st.loc === "under" ? OSAKA_UNDER.x : OSAKA_HIDDEN.x)
-          const ez =
-            az +
-            (st.loc === "under"
-              ? OSAKA_UNDER.z - OSAKA_UNDER.len / 2 + 1.6
-              : OSAKA_HIDDEN.z + OSAKA_HIDDEN.s / 2 - 1.2)
-          if (Math.hypot(px - ex, pz - ez) < 2.4) {
+          const exh = ax + OSAKA_HIDDEN.x
+          const ezh = az + OSAKA_HIDDEN.z + OSAKA_HIDDEN.s / 2 - 1.2
+          if (Math.hypot(px - exh, pz - ezh) < 2.4) {
             hint = "[E] 地上へ戻る"
             action = () => osakaSecretTeleport(st.ret.x, st.ret.z, "none")
           }
@@ -12756,6 +12768,15 @@ export default function ThreeWorld({
           if (d.t > 1.6) {
             scene.remove(d.mesh)
             S.debris.splice(i, 1)
+          }
+        }
+        // 「気のせいかもしれない光」(P-B) — 入口の弱光がゆっくり呼吸する。
+        if (fx2 && st.loc === "none") {
+          for (let i = 0; i < S.hintLights.length; i++) {
+            const hl = S.hintLights[i]
+            if (!hl) continue
+            hl.l.intensity =
+              hl.base * (0.25 + 0.75 * (0.5 + 0.5 * Math.sin(osakaSecretT * 0.9 + i * 2.1)))
           }
         }
         // ── 非常灯の明滅 (地下に居る間だけ・2フレに1回) ──
@@ -15782,6 +15803,59 @@ export default function ThreeWorld({
           const upad = new THREE.Mesh(new THREE.CylinderGeometry(1.0, 1.0, 0.08, 12), padMat)
           upad.position.set(ux, 0.05, uz - ul / 2 + 1.6)
           mAdd(upad)
+          // 北口パッド (P-B): 通路の反対側 — 大阪城方面へ抜けるショートカット。
+          const npad = new THREE.Mesh(new THREE.CylinderGeometry(1.0, 1.0, 0.08, 12), padMat)
+          npad.position.set(ux, 0.05, uz + ul / 2 - 1.2)
+          mAdd(npad)
+          // 壁の引っかき傷 (P-B): ひっかき傷 + 血痕 + 謎の文字の CanvasTexture を
+          // 左右の壁に1枚ずつ。静的なので mAdd でマージ (テクスチャ別バケット)。
+          {
+            const scv = document.createElement("canvas")
+            scv.width = 256
+            scv.height = 256
+            const sc = scv.getContext("2d")
+            if (sc) {
+              sc.fillStyle = "#2f2b26" // 壁色に馴染む地
+              sc.fillRect(0, 0, 256, 256)
+              // ひっかき傷 — 3〜4本一組の平行線を数クラスタ。
+              sc.strokeStyle = "#6a6258"
+              sc.lineWidth = 2
+              for (let g = 0; g < 6; g++) {
+                const gx2 = 20 + rnd() * 200
+                const gy2 = 20 + rnd() * 180
+                const ang = -0.6 + rnd() * 1.2
+                for (let k = 0; k < 4; k++) {
+                  sc.beginPath()
+                  sc.moveTo(gx2 + k * 7, gy2)
+                  sc.lineTo(gx2 + k * 7 + Math.sin(ang) * 60, gy2 + 40 + Math.cos(ang) * 30)
+                  sc.stroke()
+                }
+              }
+              // 血痕 — 半透明の暗赤の飛沫。
+              sc.fillStyle = "rgba(90,18,18,0.55)"
+              for (let b = 0; b < 9; b++) {
+                sc.beginPath()
+                sc.arc(rnd() * 256, 120 + rnd() * 130, 3 + rnd() * 11, 0, Math.PI * 2)
+                sc.fill()
+              }
+              // 謎の文字 — 掠れた創作の走り書き。
+              sc.fillStyle = "rgba(120,30,30,0.7)"
+              sc.font = "bold 26px serif"
+              sc.fillText("出口ハ無イ", 24, 60)
+              sc.font = "bold 20px serif"
+              sc.fillText("鬼ハ見テイル", 90, 210)
+              const scratchTex = new THREE.CanvasTexture(scv)
+              const scratchMat = new THREE.MeshLambertMaterial({ map: scratchTex })
+              const sw1 = new THREE.Mesh(new THREE.PlaneGeometry(4.2, 2.2), scratchMat)
+              sw1.position.set(ux - uw / 2 + 0.01, 1.4, uz - 6)
+              sw1.rotation.y = Math.PI / 2 // 西壁の内側を向く
+              mAdd(sw1)
+              const sw2 = new THREE.Mesh(new THREE.PlaneGeometry(4.2, 2.2), scratchMat)
+              sw2.position.set(ux + uw / 2 - 0.01, 1.4, uz + 7)
+              sw2.rotation.y = -Math.PI / 2
+              mAdd(sw2)
+            }
+          }
           // 鬼刀 — 石の台座 + 浮遊する刀 (bob/rotate は updateOsakaSecrets)。
           shell(1.4, 0.9, 1.4, ux, 0.45, uz + ul / 2 - 4, secretStone)
           const blade = new THREE.Group()
@@ -15839,6 +15913,38 @@ export default function ThreeWorld({
           const hpad = new THREE.Mesh(new THREE.CylinderGeometry(1.0, 1.0, 0.08, 12), padMat)
           hpad.position.set(hx, 0.05, hz + hs / 2 - 1.2)
           mAdd(hpad)
+          // 石碑 (P-B): 初代城主の遺し文 — 和風・神秘の創作テキストを刻む。
+          {
+            const mcv = document.createElement("canvas")
+            mcv.width = 256
+            mcv.height = 256
+            const mc = mcv.getContext("2d")
+            if (mc) {
+              mc.fillStyle = "#3a352e"
+              mc.fillRect(0, 0, 256, 256)
+              mc.strokeStyle = "#5c554a"
+              mc.lineWidth = 6
+              mc.strokeRect(10, 10, 236, 236)
+              mc.fillStyle = "#d8d0b8"
+              mc.textAlign = "center"
+              mc.font = "bold 24px serif"
+              mc.fillText("五ツノ貌ハ 一ツノ嘘", 128, 62)
+              mc.fillText("槍ハ 主ヲ選ブ", 128, 110)
+              mc.fillText("六ツ目ノ夜", 128, 158)
+              mc.fillText("城ハ目覚メル", 128, 196)
+              mc.font = "16px serif"
+              mc.fillStyle = "#9a907c"
+              mc.fillText("――初代城主 遺シ文", 128, 236)
+              const monTex = new THREE.CanvasTexture(mcv)
+              const monMat = new THREE.MeshLambertMaterial({ map: monTex })
+              const slab = new THREE.Mesh(new THREE.BoxGeometry(1.7, 2.2, 0.22), secretStone)
+              slab.position.set(hx - 2.4, 1.2, hz - hs / 2 + 0.35)
+              mAdd(slab)
+              const face = new THREE.Mesh(new THREE.PlaneGeometry(1.5, 2.0), monMat)
+              face.position.set(hx - 2.4, 1.25, hz - hs / 2 + 0.47)
+              mAdd(face)
+            }
+          }
           // 甲冑台座 + 城主の大槍。
           shell(1.6, 0.5, 1.6, hx, 0.25, hz - 2.5, secretStone)
           const armorMat = new THREE.MeshStandardMaterial({
@@ -15908,9 +16014,16 @@ export default function ThreeWorld({
           for (const bg of barGeos) bg.dispose()
           if (gateGeo) gate.add(new THREE.Mesh(gateGeo, barMat))
           add(gate)
+          // 「気のせいかもしれない光」(P-B): 入口の弱い光がゆっくり明滅する。
+          const hintLights: { l: THREE.PointLight; base: number }[] = []
           const gateLight = new THREE.PointLight(0x00ff88, 2.4, 8)
           gateLight.position.set(gp.x, 1.8, gp.z + 1.2)
           add(gateLight)
+          hintLights.push({ l: gateLight, base: 2.4 })
+          const crackHintLight = new THREE.PointLight(0xffeecc, 0.6, 6)
+          crackHintLight.position.set(OSAKA_CRACK_POS.x, 2.2, OSAKA_CRACK_POS.z + 1.0)
+          add(crackHintLight)
+          hintLights.push({ l: crackHintLight, base: 0.6 })
           // ── ②天守台1F南面のひび割れた壁 (CanvasTexture) ──
           const cv = document.createElement("canvas")
           cv.width = 256
@@ -15950,6 +16063,7 @@ export default function ThreeWorld({
             blade,
             spear,
             underLights,
+            hintLights,
             gateAnim: -1,
             crackAnim: -1,
             debris: [],
