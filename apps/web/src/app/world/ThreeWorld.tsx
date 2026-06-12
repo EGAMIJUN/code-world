@@ -11251,45 +11251,20 @@ export default function ThreeWorld({
         osakaJitter(g, amp)
         return g
       }
-      // Stamp a 3-layer eye (white sclera + emissive red iris + black pupil) onto a
-      // group at (x,y,z). The iris is pushed to `sink` so the animator can flicker
-      // its emissiveIntensity. Decoration only — NOT tagged osakaBody, so it never
-      // enters the weak-point raycast and can't bury a core.
-      function addClusterEye(
-        group: THREE.Group,
-        sink: THREE.Mesh[],
-        x: number,
-        y: number,
-        z: number,
-        s: number,
-      ) {
-        const white = new THREE.Mesh(
-          new THREE.SphereGeometry(s, 8, 8),
-          new THREE.MeshLambertMaterial({ color: 0xf2ece0 }),
-        )
-        white.position.set(x, y, z)
-        group.add(white)
-        const iris = new THREE.Mesh(
-          new THREE.SphereGeometry(s * 0.6, 8, 8),
-          new THREE.MeshLambertMaterial({
-            color: 0xff2200,
-            emissive: 0xff1800,
-            emissiveIntensity: 1.8,
-          }),
-        )
-        iris.position.set(x, y, z + s * 0.5)
-        group.add(iris)
-        const pupil = new THREE.Mesh(
-          new THREE.SphereGeometry(s * 0.28, 6, 6),
-          new THREE.MeshBasicMaterial({ color: 0x050505 }),
-        )
-        pupil.position.set(x, y, z + s * 0.78)
-        group.add(pupil)
-        sink.push(iris)
+      // Record an eye position. PERF: instead of building 3 meshes per eye (white
+      // sclera + iris + pupil = up to 84 draw calls on phase 5), every eye for a
+      // form is accumulated here and baked into ONE InstancedMesh of emissive
+      // spheres at the end of buildOsakaBossPhase (see the finalize pass). The
+      // shared material's emissiveIntensity is flickered by the animator.
+      type OsakaEyeXf = { x: number; y: number; z: number; s: number }
+      function addClusterEye(accum: OsakaEyeXf[], x: number, y: number, z: number, s: number) {
+        accum.push({ x, y, z, s })
       }
-      // A gaping toothed maw: a dark mouth box ringed with white fang cones. The
+      // A gaping toothed maw: a dark gum sphere ringed with white fang cones. The
       // returned group is pushed to `sink` so the animator can gape it open/closed
-      // via scale.y. Decoration only (not raycast body).
+      // via scale.y. PERF: the 14 fang cones are merged into ONE geometry, so each
+      // maw is just 2 draw calls (gum + fangs) instead of 15. Decoration only (not
+      // raycast body).
       function addMouth(
         group: THREE.Group,
         sink: THREE.Object3D[],
@@ -11306,18 +11281,22 @@ export default function ThreeWorld({
         gum.scale.set(1, 0.6, 0.6)
         maw.add(gum)
         const fangN = 7
+        const fangGeos: THREE.BufferGeometry[] = []
         for (let i = 0; i < fangN; i++) {
           const a = (i / (fangN - 1) - 0.5) * Math.PI * 0.9
           for (const yy of [s * 0.42, -s * 0.42]) {
-            const fang = new THREE.Mesh(
-              new THREE.ConeGeometry(s * 0.1, s * 0.5, 5),
-              new THREE.MeshLambertMaterial({ color: 0xf0e8d8 }),
-            )
-            fang.position.set(Math.sin(a) * s * 0.8, yy, s * 0.45)
-            fang.rotation.x = yy > 0 ? Math.PI : 0
-            maw.add(fang)
+            const fg = new THREE.ConeGeometry(s * 0.1, s * 0.5, 5)
+            const m4 = new THREE.Matrix4()
+              .makeRotationX(yy > 0 ? Math.PI : 0)
+              .setPosition(Math.sin(a) * s * 0.8, yy, s * 0.45)
+            fg.applyMatrix4(m4)
+            fangGeos.push(fg)
           }
         }
+        const fangMerged = mergeGeometries(fangGeos, false)
+        for (const g of fangGeos) g.dispose()
+        if (fangMerged)
+          maw.add(new THREE.Mesh(fangMerged, new THREE.MeshLambertMaterial({ color: 0xf0e8d8 })))
         maw.position.set(x, y, z)
         group.add(maw)
         sink.push(maw)
@@ -11346,20 +11325,22 @@ export default function ThreeWorld({
         eyes: THREE.Mesh[]
         mouths: THREE.Object3D[]
         extras: {
-          armInst: THREE.InstancedMesh
-          armData: { ang: number; y: number; r: number; tilt: number; phase: number }[]
-          eyeMat: THREE.MeshLambertMaterial
+          armInst: THREE.InstancedMesh | null
+          armData: { ang: number; y: number; r: number; tilt: number; phase: number }[] | null
+          eyeMat: THREE.MeshLambertMaterial | null
         } | null
       } {
         const group = new THREE.Group()
         const parts: THREE.Object3D[] = []
         const cores: THREE.Mesh[] = []
-        const eyes: THREE.Mesh[] = []
+        const eyes: THREE.Mesh[] = [] // legacy field — eyes are now instanced (see finalize)
         const mouths: THREE.Object3D[] = []
+        // PERF: every form's eyes accumulate here and bake into ONE InstancedMesh.
+        const eyeAccum: OsakaEyeXf[] = []
         let extras: {
-          armInst: THREE.InstancedMesh
-          armData: { ang: number; y: number; r: number; tilt: number; phase: number }[]
-          eyeMat: THREE.MeshLambertMaterial
+          armInst: THREE.InstancedMesh | null
+          armData: { ang: number; y: number; r: number; tilt: number; phase: number }[] | null
+          eyeMat: THREE.MeshLambertMaterial | null
         } | null = null
         // Mobile halves the part counts so the denser forms stay performant.
         const dense = isMobileDevice ? 0.5 : 1.0
@@ -11415,7 +11396,7 @@ export default function ThreeWorld({
             const a = Math.random() * Math.PI * 2
             const yy = 2.0 + Math.random() * 4.0
             const rr = (yy > 5.0 ? 0.85 : 1.25) + Math.random() * 0.2
-            addClusterEye(group, eyes, Math.cos(a) * rr, yy, Math.sin(a) * rr + 0.2, 0.13)
+            addClusterEye(eyeAccum, Math.cos(a) * rr, yy, Math.sin(a) * rr + 0.2, 0.13)
           }
           const core = osakaCore()
           core.scale.setScalar(1.4)
@@ -11451,8 +11432,7 @@ export default function ThreeWorld({
           for (let i = 0; i < eyeN; i++) {
             const a = Math.random() * Math.PI * 2
             addClusterEye(
-              group,
-              eyes,
+              eyeAccum,
               Math.cos(a) * 0.7,
               4.6 + (Math.random() - 0.5) * 1.4,
               Math.sin(a) * 0.7 + 0.3,
@@ -11492,8 +11472,7 @@ export default function ThreeWorld({
           for (let i = 0; i < eyeN; i++) {
             const a = Math.random() * Math.PI * 2
             addClusterEye(
-              group,
-              eyes,
+              eyeAccum,
               Math.cos(a) * 2.5,
               2.6 + Math.random() * 3.4,
               Math.sin(a) * 2.5 + 0.2,
@@ -11540,8 +11519,8 @@ export default function ThreeWorld({
           const oldHead = osakaPart(jitterSphere(1.0, 8, 0.15), 0xc8c0b0)
           oldHead.position.set(0, 11.0, 0)
           add(oldHead)
-          addClusterEye(group, eyes, -0.3, 11.1, 0.85, 0.13)
-          addClusterEye(group, eyes, 0.3, 11.1, 0.85, 0.13)
+          addClusterEye(eyeAccum, -0.3, 11.1, 0.85, 0.13)
+          addClusterEye(eyeAccum, 0.3, 11.1, 0.85, 0.13)
           const boneSkull = osakaPart(new THREE.ConeGeometry(0.9, 1.7, 6), 0xe8e0d0)
           boneSkull.rotation.x = Math.PI
           boneSkull.rotation.z = 0.4
@@ -11592,8 +11571,7 @@ export default function ThreeWorld({
             const a = Math.random() * Math.PI * 2
             const rr = 3.05 + Math.random() * 0.2
             addClusterEye(
-              group,
-              eyes,
+              eyeAccum,
               Math.cos(a) * rr,
               3.0 + Math.random() * 6.0,
               Math.sin(a) * rr + 0.2,
@@ -11775,6 +11753,81 @@ export default function ThreeWorld({
             group.add(c)
           }
           extras = { armInst, armData, eyeMat }
+        }
+        // ══ DRAW-CALL FINALIZE (every form) ════════════════════════════════════
+        // (a) all of this form's eyes → ONE InstancedMesh of emissive spheres;
+        // (b) every solid body part (osakaPart, tagged osakaBody, non-emissive,
+        // non-pulse) merged by colour into one mesh per colour. This collapses
+        // phase-5 from ~245 individual meshes to ~20 draw calls. The negligible
+        // per-limb idle sway is dropped; cores / mouths / the pulse blob / the
+        // glowing eyes stay live. Hit detection still works — merged meshes keep
+        // userData.osakaBody so the weak-point raycast registers body hits.
+        if (eyeAccum.length > 0) {
+          const eGeo = new THREE.SphereGeometry(1, 6, 6)
+          const eMat = new THREE.MeshLambertMaterial({
+            color: 0xff2200,
+            emissive: 0xff1800,
+            emissiveIntensity: 1.8,
+          })
+          const eInst = new THREE.InstancedMesh(eGeo, eMat, eyeAccum.length)
+          eInst.frustumCulled = false
+          const ed = new THREE.Object3D()
+          eyeAccum.forEach((e, i) => {
+            ed.position.set(e.x, e.y, e.z)
+            ed.rotation.set(0, 0, 0)
+            ed.scale.setScalar(e.s)
+            ed.updateMatrix()
+            eInst.setMatrixAt(i, ed.matrix)
+          })
+          eInst.instanceMatrix.needsUpdate = true
+          group.add(eInst)
+          // Surface the eye material so the animator can flicker it (form 6 keeps
+          // its own eyeMat, set above; this only fills forms 2-5).
+          if (extras) extras.eyeMat = eMat
+          else extras = { armInst: null, armData: null, eyeMat: eMat }
+        }
+        // Merge solid body parts by colour (bake the local transform in).
+        group.updateMatrixWorld(true)
+        const bodyByColor = new Map<number, THREE.BufferGeometry[]>()
+        const bodyToRemove: THREE.Mesh[] = []
+        group.traverse((o) => {
+          if (
+            o instanceof THREE.Mesh &&
+            !(o instanceof THREE.InstancedMesh) &&
+            o.userData.osakaBody === true &&
+            o.userData.osakaPulse !== true &&
+            o.material instanceof THREE.MeshLambertMaterial &&
+            o.material.emissive.getHex() === 0
+          ) {
+            const hex = o.material.color.getHex()
+            const g = o.geometry.clone().applyMatrix4(o.matrixWorld)
+            const arr = bodyByColor.get(hex)
+            if (arr) arr.push(g)
+            else bodyByColor.set(hex, [g])
+            bodyToRemove.push(o)
+          }
+        })
+        for (const m of bodyToRemove) {
+          m.parent?.remove(m)
+          m.geometry.dispose()
+          ;(m.material as THREE.Material).dispose()
+        }
+        for (const [hex, geos] of bodyByColor) {
+          const merged = geos.length === 1 ? geos[0] : mergeGeometries(geos, false)
+          if (!merged) {
+            for (const g of geos) {
+              const mm = new THREE.Mesh(g, new THREE.MeshLambertMaterial({ color: hex }))
+              mm.userData.osakaBody = true
+              mm.frustumCulled = false
+              group.add(mm)
+            }
+            continue
+          }
+          if (geos.length > 1) for (const g of geos) g.dispose()
+          const mm = new THREE.Mesh(merged, new THREE.MeshLambertMaterial({ color: hex }))
+          mm.userData.osakaBody = true
+          mm.frustumCulled = false
+          group.add(mm)
         }
         return { group, cores, parts, eyes, mouths, extras }
       }
@@ -12401,6 +12454,8 @@ export default function ThreeWorld({
         blade: THREE.Group // 鬼刀ピックアップ
         spear: THREE.Group // 大槍ピックアップ
         underLights: THREE.PointLight[] // 地下の赤い非常灯 (明滅)
+        // 入口を遠くからでも見つけられる縦ビーム + 光源 ("kind" で取得後に消す)。
+        beacons: { kind: "gate" | "crack"; beam: THREE.Mesh; light: THREE.PointLight }[]
         gateAnim: number // -1 idle / 0..1 開扉アニメ進行
         crackAnim: number // -1 idle / 0..1 崩壊アニメ進行
         debris: { mesh: THREE.Mesh; vx: number; vy: number; vz: number; t: number }[]
@@ -12429,6 +12484,10 @@ export default function ThreeWorld({
           playerVelRef.current.x = 0
           playerVelRef.current.z = 0
           osakaSecretRef.current.loc = loc
+          // 転送後、武器の方を向かせる (暗い通路で背を向けて迷わないように)。
+          // under は通路の奥(+z)に鬼刀、hidden は祭壇(-z)に大槍がある。
+          if (loc === "under") camState.yaw = 0
+          else if (loc === "hidden") camState.yaw = Math.PI
           setHuntWhiteFlash(false)
         }, 420)
       }
@@ -12656,10 +12715,27 @@ export default function ThreeWorld({
         // ── 調査ヒント + アクション ──
         let hint: string | null = null
         let action: (() => void) | null = null
+        // 入口ビーコンの脈動 + 取得後の消灯 (2フレに1回)。
+        if (fx2) {
+          for (const b of S.beacons) {
+            const opened = b.kind === "gate" ? st.gateOpen : st.wallBroken
+            if (opened) {
+              if (b.beam.visible) {
+                b.beam.visible = false
+                b.light.visible = false
+              }
+            } else {
+              const pulse = 0.32 + 0.28 * (0.5 + 0.5 * Math.sin(osakaSecretT * 2.4))
+              ;(b.beam.material as THREE.MeshBasicMaterial).opacity = pulse
+              b.light.intensity = 2.4 + Math.sin(osakaSecretT * 2.4) * 1.0
+            }
+          }
+        }
         if (st.loc === "none") {
           const gd = Math.hypot(px - (ax + OSAKA_GATE_POS.x), pz - (az + OSAKA_GATE_POS.z))
           const cd = Math.hypot(px - (ax + OSAKA_CRACK_POS.x), pz - (az + OSAKA_CRACK_POS.z))
-          if (!st.gateOpen && gd < 3) {
+          // 判定半径を広めにして「近づけば必ず調べられる」ようにする (取得導線)。
+          if (!st.gateOpen && gd < 4.5) {
             hint = "[E] 調べる — 川沿いの格子戸"
             action = () => {
               st.gateOpen = true
@@ -12667,7 +12743,7 @@ export default function ThreeWorld({
               SOUNDS.huntOrbOpen()
               showNotification("格子戸が軋みながら開く……")
             }
-          } else if (!st.wallBroken && cd < 4) {
+          } else if (!st.wallBroken && cd < 5.5) {
             hint = "[E] 調べる — ひび割れた壁"
             action = () => {
               st.wallBroken = true
@@ -12699,7 +12775,7 @@ export default function ThreeWorld({
             (st.loc === "under"
               ? OSAKA_UNDER.z - OSAKA_UNDER.len / 2 + 1.6
               : OSAKA_HIDDEN.z + OSAKA_HIDDEN.s / 2 - 1.2)
-          if (Math.hypot(px - ex, pz - ez) < 2.4) {
+          if (Math.hypot(px - ex, pz - ez) < 3.2) {
             hint = "[E] 地上へ戻る"
             action = () => osakaSecretTeleport(st.ret.x, st.ret.z, "none")
           }
@@ -12775,7 +12851,7 @@ export default function ThreeWorld({
           }
           const bx = ax + OSAKA_UNDER.x
           const bz = az + OSAKA_UNDER.z + OSAKA_UNDER.len / 2 - 4
-          if (st.loc === "under" && Math.hypot(px - bx, pz - bz) < 2.1) {
+          if (st.loc === "under" && Math.hypot(px - bx, pz - bz) < 3.2) {
             st.bladeTaken = true
             S.blade.visible = false
             osakaGrantSecretWeapon("oniblade")
@@ -12790,7 +12866,7 @@ export default function ThreeWorld({
           if (fx2) S.spear.rotation.y += cdt * 0.8
           const sx = ax + OSAKA_HIDDEN.x
           const sz = az + OSAKA_HIDDEN.z - 2.5
-          if (st.loc === "hidden" && Math.hypot(px - sx, pz - sz) < 2.1) {
+          if (st.loc === "hidden" && Math.hypot(px - sx, pz - sz) < 3.2) {
             st.spearTaken = true
             S.spear.visible = false
             osakaGrantSecretWeapon("greatspear")
@@ -13439,8 +13515,7 @@ export default function ThreeWorld({
             }
           })
           if (f6) cameraShakeRef.current.intensity = Math.max(cameraShakeRef.current.intensity, 1.4)
-          // 目 (Instanced) は共有マテリアルで脈動。
-          if (ob.eyeMat) ob.eyeMat.emissiveIntensity = 1.2 + (Math.sin(t * 7) * 0.5 + 0.5) * 1.4
+          // (目の脈動は下の汎用 eyeMat フリッカーが全形態まとめて処理する)
           // 腕の束は 2フレームに1回だけうねらせる (80本 setMatrixAt の間引き)。
           if (ob.armInst && ob.armData) {
             osakaArmFrame++
@@ -13483,13 +13558,9 @@ export default function ThreeWorld({
           // form-5 fused-flesh mass breathes with a slow whole-body pulse
           if (p.userData.osakaPulse) p.scale.setScalar(1.0 + Math.sin(t * 0.8) * 0.05)
         }
-        // eyes flicker their iris glow between 1.0 and 2.2, each on its own phase
-        for (const e of ob.eyes) {
-          const m = e.material
-          if (m instanceof THREE.MeshLambertMaterial) {
-            m.emissiveIntensity = 1.0 + (Math.sin(t * 6 + e.id) * 0.5 + 0.5) * 1.2
-          }
-        }
+        // Eyes flicker via the shared instanced-eye material (one pulse for the
+        // whole swarm — eyes are now a single InstancedMesh per form, not 84 meshes).
+        if (ob.eyeMat) ob.eyeMat.emissiveIntensity = 1.0 + (Math.sin(t * 6) * 0.5 + 0.5) * 1.2
         // maws gape open and shut on scale.y
         for (const mo of ob.mouths) {
           mo.scale.y = 0.35 + (Math.sin(t * 3 + mo.id) * 0.5 + 0.5) * 0.65
@@ -13814,6 +13885,11 @@ export default function ThreeWorld({
         camState.yaw = Math.PI // face north, toward Tsutenkaku/Castle
         osakaSpawnAreaZako("dotonbori")
         osakaBanner("道頓堀 — 妖怪を討て")
+        // 隠し武器の導線を一度だけ案内 (光の柱が入口の目印)。
+        window.setTimeout(() => {
+          if (isOsakaStage(huntMissionConfigRef.current.stage))
+            showNotification("光の柱を [E] で調べると隠し武器が手に入る")
+        }, 3200)
       }
       // ── Mid-boss 1: 天狗 (Tengu) — a flying long-nosed yokai (Dotonbori) ──
       function buildTengu(): THREE.Group {
@@ -14228,6 +14304,41 @@ export default function ThreeWorld({
       // Scene fog saved on entering the OSAKA stage so it restores on return.
       let huntStageFogSaved: THREE.Scene["fog"] = null
       let huntStageFogWasSaved = false
+      // Base-world renderables hidden during OSAKA (the dim, fogged urban map is
+      // near-invisible under the OSAKA night city but still costs draw calls).
+      // Toggling `.visible` does NOT affect collision (ALL_AABBS) or bullet wall
+      // raycast (invisible meshes still intersect), so gameplay is unchanged.
+      const osakaHiddenBase: THREE.Object3D[] = []
+      function osakaHideBaseWorld() {
+        osakaShowBaseWorld() // restore any prior hide first (idempotent)
+        // Things the player still needs to see during OSAKA: the FPS weapon
+        // viewmodel (gunGroup, a scene child positioned each frame) and the
+        // third-person avatar. Everything else at scene root is base-world dressing.
+        const keep = new Set<THREE.Object3D>([gunGroup, playerAvatar])
+        for (const child of scene.children) {
+          if (
+            !child.visible ||
+            keep.has(child) ||
+            child instanceof THREE.Light ||
+            child instanceof THREE.Camera
+          )
+            continue
+          // Only hide things that actually render (skip empty pivots/helpers).
+          let renders = false
+          child.traverse((o) => {
+            if (o instanceof THREE.Mesh || o instanceof THREE.Points || o instanceof THREE.Line)
+              renders = true
+          })
+          if (renders) {
+            child.visible = false
+            osakaHiddenBase.push(child)
+          }
+        }
+      }
+      function osakaShowBaseWorld() {
+        for (const o of osakaHiddenBase) o.visible = true
+        osakaHiddenBase.length = 0
+      }
       function buildHuntRoom() {
         const cx = HUNT_ROOM.x
         const cz = HUNT_ROOM.z
@@ -15804,14 +15915,28 @@ export default function ThreeWorld({
           const grip = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.34, 0.09), secretDark)
           grip.position.y = -0.2
           blade.add(grip)
-          blade.position.set(ux, 1.45, uz + ul / 2 - 4)
+          const bladeZ = uz + ul / 2 - 4
+          blade.position.set(ux, 1.45, bladeZ)
           blade.rotation.z = 0.5
           add(blade)
-          if (!isMobileDevice) {
-            const bladeGlow = new THREE.PointLight(0xff3311, 1.4, 7)
-            bladeGlow.position.set(ux, 1.7, uz + ul / 2 - 4)
-            add(bladeGlow)
-          }
+          // 暗い通路の奥でも遠くから見える強い赤光 + 立ち上る光柱 (取得導線)。
+          const bladeGlow = new THREE.PointLight(0xff3311, 4.0, 30)
+          bladeGlow.position.set(ux, 1.7, bladeZ)
+          add(bladeGlow)
+          const bladeBeam = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.12, 0.3, 3, 8, 1, true),
+            new THREE.MeshBasicMaterial({
+              color: 0xff3311,
+              transparent: true,
+              opacity: 0.4,
+              side: THREE.DoubleSide,
+              depthWrite: false,
+              blending: THREE.AdditiveBlending,
+            }),
+          )
+          bladeBeam.position.set(ux, 2.6, bladeZ)
+          bladeBeam.frustumCulled = false
+          add(bladeBeam)
           // ── 石造りの隠し部屋 (8×8×5) ──
           const { x: hx, z: hz, s: hs, h: hh } = OSAKA_HIDDEN
           shell(hs + 2, 0.4, hs + 2, hx, -0.2, hz, secretDark)
@@ -15874,11 +15999,24 @@ export default function ThreeWorld({
           spear.position.set(hx + 0.7, 1.7, hz - 2.5)
           spear.rotation.z = 0.35
           add(spear)
-          if (!isMobileDevice) {
-            const spearGlow = new THREE.PointLight(0xffcc55, 1.2, 7)
-            spearGlow.position.set(hx + 0.7, 2.2, hz - 2.5)
-            add(spearGlow)
-          }
+          // 隠し部屋でも一目で分かる金色の光 + 光柱 (取得導線)。
+          const spearGlow = new THREE.PointLight(0xffcc55, 3.0, 16)
+          spearGlow.position.set(hx + 0.7, 2.2, hz - 2.5)
+          add(spearGlow)
+          const spearBeam = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.12, 0.3, 3, 8, 1, true),
+            new THREE.MeshBasicMaterial({
+              color: 0xffcc55,
+              transparent: true,
+              opacity: 0.4,
+              side: THREE.DoubleSide,
+              depthWrite: false,
+              blending: THREE.AdditiveBlending,
+            }),
+          )
+          spearBeam.position.set(hx + 0.7, 3.0, hz - 2.5)
+          spearBeam.frustumCulled = false
+          add(spearBeam)
           // ── ①格子戸 (道頓堀川岸の水路口) ──
           const gp = OSAKA_GATE_POS
           shell(3.2, 3.0, 1.0, gp.x, 1.5, gp.z - 0.55, secretStone) // 水路躯体
@@ -15943,12 +16081,39 @@ export default function ThreeWorld({
             crack.position.set(OSAKA_CRACK_POS.x, 1.4, OSAKA_CRACK_POS.z)
             add(crack)
           }
+          // ── 入口ビーコン ── 遠くからでも見つけられる、空へ伸びる発光ビーム +
+          // 強い光源。取得導線。鬼刀=緑、大槍=金。調査で開いたら消える。
+          const beacons: { kind: "gate" | "crack"; beam: THREE.Mesh; light: THREE.PointLight }[] =
+            []
+          const makeBeacon = (kind: "gate" | "crack", bx: number, bz: number, col: number) => {
+            const beam = new THREE.Mesh(
+              new THREE.CylinderGeometry(0.18, 0.45, 16, 8, 1, true),
+              new THREE.MeshBasicMaterial({
+                color: col,
+                transparent: true,
+                opacity: 0.42,
+                side: THREE.DoubleSide,
+                depthWrite: false,
+                blending: THREE.AdditiveBlending,
+              }),
+            )
+            beam.position.set(bx, 8, bz)
+            beam.frustumCulled = false
+            add(beam)
+            const light = new THREE.PointLight(col, 3.2, 26)
+            light.position.set(bx, 3, bz)
+            add(light)
+            beacons.push({ kind, beam, light })
+          }
+          makeBeacon("gate", gp.x, gp.z + 0.6, 0x00ff88)
+          makeBeacon("crack", OSAKA_CRACK_POS.x, OSAKA_CRACK_POS.z + 0.6, 0xffcc33)
           osakaSecret = {
             gate,
             crack,
             blade,
             spear,
             underLights,
+            beacons,
             gateAnim: -1,
             crackAnim: -1,
             debris: [],
@@ -16156,6 +16321,10 @@ export default function ThreeWorld({
         perfStageApplied = stage // surfaced by the ?debug=1 perf HUD
         huntClearStage() // idempotent — never stack overlays
         if (isOsakaStage(stage)) {
+          // Hide the base urban world (dim/fogged, near-invisible, wrong city) so
+          // it stops eating draw calls. Done BEFORE buildOsakaMap so the freshly
+          // added OSAKA group stays visible. Restored by huntClearStage.
+          osakaHideBaseWorld()
           buildOsakaMap() // 鬼モードもマップは共通 (倍率だけ変わる; FINAL-H)
           return
         }
@@ -16215,6 +16384,7 @@ export default function ThreeWorld({
         }
         clearOsakaMap() // dispose the OSAKA field + restore the prior fog
         osakaTeardownMid() // dispose the OSAKA mid-boss + projectiles, reset progress
+        osakaShowBaseWorld() // un-hide the base urban world hidden for OSAKA
         huntFlickerLights.length = 0
         for (const s of huntStageLightSaved) s.light.intensity = s.intensity
         huntStageLightSaved.length = 0
@@ -21331,9 +21501,31 @@ export default function ThreeWorld({
                   ? perfStageApplied
                   : huntPhaseRef.current
                 : `${modeRef.current}/${mapId}`
+            // Per-group renderable breakdown (≈1 draw call per visible renderable)
+            // so the HUD pinpoints what's costing draw calls. Cheap: only a few
+            // small sub-trees are walked, refreshed 1/4 frames.
+            const countRenderables = (root: THREE.Object3D | null | undefined): number => {
+              if (!root) return 0
+              let c = 0
+              root.traverse((o) => {
+                if (
+                  o.visible &&
+                  (o instanceof THREE.Mesh || o instanceof THREE.Points || o instanceof THREE.Line)
+                )
+                  c++
+              })
+              return c
+            }
+            const bossDC = countRenderables(osakaBossRef.current?.group)
+            const mapDC = countRenderables(osakaMapMeshesRef.current[0])
+            let enemyDC = 0
+            for (const e of enemies) if (e.hp > 0) enemyDC += countRenderables(e.mesh)
             perfHud.textContent =
               `FPS        ${perfFps}\n` +
               `draw calls ${info.render.calls}\n` +
+              `  boss     ${bossDC}\n` +
+              `  osakaMap ${mapDC}\n` +
+              `  enemies  ${enemyDC}\n` +
               `triangles  ${info.render.triangles.toLocaleString()}\n` +
               `geometries ${info.memory.geometries}\n` +
               `textures   ${info.memory.textures}\n` +
