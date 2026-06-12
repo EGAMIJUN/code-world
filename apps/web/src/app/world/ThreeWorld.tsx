@@ -584,9 +584,11 @@ interface HuntLevel {
 // stage = arena dressing (outdoor day vs. indoor green-lit hall);
 // difficulty = which HUNT_LEVELS entry a fresh run starts at (1/2/3).
 type HuntMissionConfig = {
-  stage: "outdoor" | "indoor" | "osaka"
+  stage: "outdoor" | "indoor" | "osaka" | "osaka_oni"
   difficulty: 1 | 2 | 3
 }
+// OSAKA 鬼モード (FINAL-H): マップ/進行は OSAKA と共通、倍率と守衛だけが変わる。
+const isOsakaStage = (s: HuntMissionConfig["stage"]): boolean => s === "osaka" || s === "osaka_oni"
 // Per-theme minion spec — reuse an existing enemy model with a colour/scale
 // tweak. base = model, tint = body recolour, eyes = eye-glow colour.
 type HuntCreatureKind =
@@ -710,14 +712,14 @@ const HUNT_LEVELS: HuntLevel[] = [
 // which is what produces the "you must aim the core" dread. When a form's HP hits
 // zero the parts are blown apart and the next form is built. Surviving the fifth
 // form clears the mission. Runs on the existing HUNT arena (map is a later phase).
-type OsakaBossPhase = 1 | 2 | 3 | 4 | 5
+type OsakaBossPhase = 1 | 2 | 3 | 4 | 5 | 6
 type OsakaBoss = {
   group: THREE.Group
   phase: OsakaBossPhase
   phaseHp: number // current form HP
   phaseMaxHp: number
   core: THREE.Mesh // primary glowing weak-point core (cores[0])
-  cores: THREE.Mesh[] // all live weak-point cores (phase 5 has 3)
+  cores: THREE.Mesh[] // all live weak-point cores (phase 5 has 3, phase 6 has 5)
   coreExposed: boolean // is the core currently hittable
   transitioning: boolean // mid form-change animation (no attacks, no hits)
   attackTimer: number // counts down to the next special attack
@@ -725,6 +727,10 @@ type OsakaBoss = {
   eyes: THREE.Mesh[] // iris meshes that flicker (addClusterEye)
   mouths: THREE.Object3D[] // toothed maws that gape open/closed (scale.y sin)
   nextZakoAt: number // timestamp for the next infinite-zako top-up
+  // Form 6 (FINAL-B) only — instanced limb/eye bundles for draw-call control.
+  armInst: THREE.InstancedMesh | null
+  armData: { ang: number; y: number; r: number; tilt: number; phase: number }[] | null
+  eyeMat: THREE.MeshLambertMaterial | null // shared instanced-eye material (pulse)
 }
 const OSAKA_PHASE_HP: Record<OsakaBossPhase, number> = {
   1: 1500,
@@ -732,7 +738,52 @@ const OSAKA_PHASE_HP: Record<OsakaBossPhase, number> = {
   3: 3500,
   4: 4500,
   5: 6000,
+  6: 12000, // 真・五変化 — 隠し武器2種を携えた者にだけ顕現する第六形態
 }
+// 第六形態の分身召喚 (過去形態のミニチュア4体)。
+const OSAKA_CLONE_NAME = "五変化の分身"
+const OSAKA_CLONE_TINTS = [0xc8c0b0, 0x1a1a2a, 0xe8e0d0, 0x8b4040] as const
+const OSAKA_TRUE_CLEAR_KEY = "osaka_true_clear" // 真エンディング到達フラグ
+const OSAKA_BEST_KEY = "osaka_best_score" // 大阪編の自己ベストスコア (FINAL-E)
+// ── 鬼モード (FINAL-H) ───────────────────────────────────────────────────────
+const OSAKA_ONI_CLEAR_KEY = "osaka_oni_clear" // 称号「大阪の鬼」解放フラグ
+const OSAKA_ONI_GUARD_NAME = "鬼衆" // 隠し武器を守る強敵
+const OSAKA_ONI_ZAKO_MULT = 1.5
+const OSAKA_ONI_MIDBOSS_HP_MULT = 2
+const OSAKA_ONI_MIDBOSS_CD_MULT = 1 / 1.5 // 攻撃頻度1.5倍 = クールダウン÷1.5
+const OSAKA_ONI_BOSS_HP_MULT = 1.5
+const OSAKA_ONI_CLEAR_BONUS = 3000
+// ── 演出強化 (FINAL-F): 形態名/決め台詞/フォーム色 (全て創作オリジナル) ──────
+const OSAKA_FORM_NAMES: Record<OsakaBossPhase, string> = {
+  1: "第一形態『老翁』",
+  2: "第二形態『多腕影鬼』",
+  3: "第三形態『骨触手』",
+  4: "第四形態『肉塊融合』",
+  5: "第五形態『五重混体』",
+  6: "真・五変化",
+}
+const OSAKA_FORM_QUOTES: Record<OsakaBossPhase, string> = {
+  1: "「ようこそ大阪へ。帰り道は、もう無いがのう」",
+  2: "「腕の数だけ、お前を掴む理由がある」",
+  3: "「骨の髄まで、しゃぶり尽くしてやろう」",
+  4: "「混ざれ。肉は肉に還るのみ」",
+  5: "「五つで一つ。一つで全て」",
+  6: "「――顕現。これが儂の、真の貌よ」",
+}
+const OSAKA_FORM_COLORS: Record<OsakaBossPhase, string> = {
+  1: "#9aa0c0",
+  2: "#9966ff",
+  3: "#ddeeff",
+  4: "#cc5544",
+  5: "#ff8800",
+  6: "#ff2233",
+}
+// ── 専用スーツ「鬼神」(FINAL-D) — 真クリアで解放される赤黒い和風鎧 ──────────
+// 強化スーツ (scout) と択一。耐久消費なしで被ダメ20%減・移動1.3倍・近接1.5倍。
+const SUIT_KIND_KEY = "cw_suit_kind" // "scout" | "kishin" (選択の永続化)
+const KISHIN_SPEED = 1.3
+const KISHIN_DMG_CUT = 0.8 // 被ダメ 20% 減 (HUNT_SUIT_CUT と違い耐久を消費しない)
+const KISHIN_MELEE_MULT = 1.5
 const OSAKA_CORE_MULT = 3.0 // core hits hurt triple
 const OSAKA_BODY_MULT = 0.2 // body hits are 80% reduced
 const OSAKA_ZAKO_NAME = "下級妖怪" // tag distinguishing infinite-spawn fodder
@@ -820,6 +871,24 @@ const OSAKA_AREA_ZAKO = { dotonbori: 15, tsutenkaku: 20, castle: 25 } as const
 const OSAKA_AREA_ZAKO_MOBILE = { dotonbori: 8, tsutenkaku: 12, castle: 15 } as const
 const OSAKA_TENGU_HP = 2500
 const OSAKA_YAMAYA_HP = 4000
+// ── OSAKA secret routes (FINAL-A) ────────────────────────────────────────────
+// Two hidden areas + two secret weapons. Positions are GROUP-LOCAL to the OSAKA
+// map root (world = local + HUNT_ARENA). The interiors sit far outside the
+// 180×180 field on the same y=0 ground plane (the HUNT_ROOM trick): the player
+// is teleported in and clamped inside, so normal physics/collision are untouched.
+const OSAKA_GATE_POS = { x: -20, z: 62.5 } // 道頓堀川岸の格子戸 (水路口)
+const OSAKA_CRACK_POS = { x: 6, z: -62.84 } // 天守台1F南面のひび割れた壁
+const OSAKA_UNDER = { x: 0, z: 250, w: 6, len: 40, h: 3 } // 地下通路の中心/寸法
+const OSAKA_HIDDEN = { x: 0, z: -300, s: 8, h: 5 } // 石造りの隠し部屋
+const OSAKA_ONIBLADE_DMG = KNIFE_DAMAGE * 3 // 鬼刀: 近接3倍 (240)
+const OSAKA_ONIBLADE_RANGE = 4 // 斬撃範囲半径
+const OSAKA_ONIBLADE_BURN_DMG = 70 // 炎上爆発の連鎖ダメージ
+const OSAKA_ONIBLADE_BURN_RADIUS = 3
+const OSAKA_SPEAR_MELEE_DMG = KNIFE_DAMAGE * 2.5 // 大槍: 近接2.5倍 (200)
+const OSAKA_SPEAR_MELEE_RANGE = 5
+const OSAKA_SPEAR_THROW_DMG = 250 // 貫通投擲 (コア×3が乗る)
+const OSAKA_SPEAR_THROW_DIST = 80
+const OSAKA_SPEAR_SPEED = 46 // 表示用の槍の飛翔速度 (m/s)
 
 // ══ HUNT mode equipment (PR-Z2) ══════════════════════════════════════════════
 // Suit + four dedicated weapons + the rewards bought at the 100-pt menu. All of
@@ -840,14 +909,22 @@ const HUNT_REWARD_COST = 100
 const HUNT_MAX_TICKETS = 3
 // Pulse-weapon delayed in-body burst (seconds from hit to detonation).
 const HUNT_BURST_DELAY = 1.0
-type HuntWeaponId = "pulsegun" | "pulseshotgun" | "capturegun" | "blade" | "gravitycannon"
+type HuntWeaponId =
+  | "pulsegun"
+  | "pulseshotgun"
+  | "capturegun"
+  | "blade"
+  | "gravitycannon"
+  | "oniblade"
+  | "greatspear"
 interface HuntWeaponDef {
   id: HuntWeaponId
   name: string
-  slot: number // number key (6-9, 0 for gravity)
+  slot: number // number key (6-9, 0 for gravity; -1 = letter key, see onKeyDown)
   mag: number // -1 = melee/infinite
   reloadMs: number
   reward?: boolean // true → only from the 100-pt "gravity cannon" reward
+  secret?: boolean // OSAKA hidden weapon — never on the rack, found in-mission
 }
 const HUNT_WEAPONS: HuntWeaponDef[] = [
   { id: "pulsegun", name: "PULSE GUN", slot: 6, mag: 8, reloadMs: 2000 },
@@ -855,6 +932,10 @@ const HUNT_WEAPONS: HuntWeaponDef[] = [
   { id: "capturegun", name: "CAPTURE GUN", slot: 8, mag: 3, reloadMs: 5000 },
   { id: "blade", name: "BLADE", slot: 9, mag: -1, reloadMs: 0 },
   { id: "gravitycannon", name: "GRAVITY CANNON", slot: 0, mag: 2, reloadMs: 10000, reward: true },
+  // OSAKA secret weapons (FINAL-A): run-scoped, granted by the hidden routes.
+  // [Z]/[X] select them (slots 6-0 are taken); removed again by clearOsakaMap.
+  { id: "oniblade", name: "鬼刀", slot: -1, mag: -1, reloadMs: 0, secret: true },
+  { id: "greatspear", name: "大槍", slot: -1, mag: 3, reloadMs: 2800, secret: true },
 ]
 const HUNT_WEAPON_BY_ID: Record<HuntWeaponId, HuntWeaponDef> = Object.fromEntries(
   HUNT_WEAPONS.map((w) => [w.id, w]),
@@ -2377,6 +2458,62 @@ export default function ThreeWorld({
   // Set by the O key (component scope); consumed in the animate loop where
   // spawnOsakaBoss is in scope.
   const osakaSpawnReqRef = useRef(false)
+  // OSAKA secret routes (FINAL-A): per-run state — reset whenever the stage is
+  // (re)built or torn down. loc tracks which hidden interior the player is in.
+  type OsakaSecretRun = {
+    gateOpen: boolean
+    wallBroken: boolean
+    bladeTaken: boolean
+    spearTaken: boolean
+    loc: "none" | "under" | "hidden"
+    ret: { x: number; z: number } // surface point to return to
+  }
+  const osakaSecretRef = useRef<OsakaSecretRun>({
+    gateOpen: false,
+    wallBroken: false,
+    bladeTaken: false,
+    spearTaken: false,
+    loc: "none",
+    ret: { x: 0, z: 0 },
+  })
+  const [osakaHint, setOsakaHint] = useState<string | null>(null) // "[E] 調べる" HUD
+  const osakaHintRef = useRef<string | null>(null)
+  // OSAKA クリア演出 (FINAL-C): 暗転 → タイトル → リザルト の3段。
+  type OsakaEndingState = {
+    kind: "normal" | "true"
+    stage: "fade" | "title" | "result"
+    score: number
+    kills: number
+    accuracy: number // 0..1
+    timeSec: number
+    damageTaken: number
+    rank: "S" | "A" | "B" | "C"
+    bonus: number // クリア/隠し武器/ノーダメの合算ボーナス (FINAL-E)
+    best: number // 送信前の自己ベスト
+    newBest: boolean
+    oni: boolean // 鬼モードでのクリアか (FINAL-H)
+    titleNew: boolean // 今回のクリアで称号「大阪の鬼」を新規獲得したか
+  }
+  const [osakaEnding, setOsakaEnding] = useState<OsakaEndingState | null>(null)
+  const osakaEndingRef = useRef<OsakaEndingState | null>(null)
+  // 称号「大阪の鬼」(FINAL-H): 鬼モードクリアで解放、HUDに常時表示。
+  const oniTitleOwnedRef = useRef(false)
+  const [oniTitleOwned, setOniTitleOwned] = useState(false)
+  // ラン内の戦績 (タイム/キル/命中率/被ダメ) — リザルトとランク評価の材料。
+  const osakaRunRef = useRef({ start: 0, kills: 0, dmg: 0, shots: 0, hits: 0 })
+  // JSX のボタンから effect 内の関数を呼ぶ橋 (spawnMissionRef と同じパターン)。
+  const osakaEndingActionRef = useRef<{ retry: () => void } | null>(null)
+  // 演出強化 (FINAL-F): 形態変化カットイン + ボス専用HPバー。
+  const [osakaCutin, setOsakaCutin] = useState<{
+    title: string
+    sub: string | null
+    tone: "form" | "true"
+  } | null>(null)
+  const [osakaBossHud, setOsakaBossHud] = useState<{
+    name: string
+    pct: number
+    phase: OsakaBossPhase
+  } | null>(null)
 
   // ── HUNT equipment (PR-Z2) ──────────────────────────────────────────────────
   // Equipment menu (opened at the rack in the room).
@@ -2388,6 +2525,11 @@ export default function ThreeWorld({
   // Chosen loadout (kept across warps; weapons are "owned" once grabbed).
   const huntSuitChosenRef = useRef(false)
   const [huntSuitChosen, setHuntSuitChosen] = useState(false)
+  // スーツ種別 (FINAL-D): 強化スーツ (scout) / 鬼神 (kishin, 真クリアで解放)。
+  const huntSuitKindRef = useRef<"scout" | "kishin">("scout")
+  const [huntSuitKind, setHuntSuitKind] = useState<"scout" | "kishin">("scout")
+  const kishinUnlockedRef = useRef(false)
+  const [kishinUnlocked, setKishinUnlocked] = useState(false)
   const huntOwnedRef = useRef<Set<HuntWeaponId>>(new Set())
   const [huntOwned, setHuntOwned] = useState<HuntWeaponId[]>([])
   // Active HUNT weapon (null → normal weapons) + per-weapon ammo + reload.
@@ -2424,9 +2566,41 @@ export default function ThreeWorld({
   //    useCallback so both the JSX buttons and the key-event effect can use
   //    them; they only touch refs/state setters).
   const huntToggleSuitChoice = useCallback(() => {
-    const v = !huntSuitChosenRef.current
-    huntSuitChosenRef.current = v
-    setHuntSuitChosen(v)
+    // [1] 強化スーツ: 着脱トグル。鬼神を着ていた場合は強化スーツへ切替。
+    const wasScout = huntSuitChosenRef.current && huntSuitKindRef.current === "scout"
+    if (wasScout) {
+      huntSuitChosenRef.current = false
+      setHuntSuitChosen(false)
+    } else {
+      huntSuitKindRef.current = "scout"
+      setHuntSuitKind("scout")
+      huntSuitChosenRef.current = true
+      setHuntSuitChosen(true)
+    }
+    try {
+      localStorage.setItem(SUIT_KIND_KEY, huntSuitKindRef.current)
+    } catch {
+      /* ignore */
+    }
+  }, [])
+  // [7] 鬼神 (FINAL-D): 真クリア解放後のみ。着脱トグル + 選択の永続化。
+  const huntChooseKishin = useCallback(() => {
+    if (!kishinUnlockedRef.current) return
+    const wasKishin = huntSuitChosenRef.current && huntSuitKindRef.current === "kishin"
+    if (wasKishin) {
+      huntSuitChosenRef.current = false
+      setHuntSuitChosen(false)
+    } else {
+      huntSuitKindRef.current = "kishin"
+      setHuntSuitKind("kishin")
+      huntSuitChosenRef.current = true
+      setHuntSuitChosen(true)
+    }
+    try {
+      localStorage.setItem(SUIT_KIND_KEY, huntSuitKindRef.current)
+    } catch {
+      /* ignore */
+    }
   }, [])
   const huntPickupWeapon = useCallback((id: HuntWeaponId) => {
     if (id === "gravitycannon" && !huntGravityUnlockedRef.current) return
@@ -5984,6 +6158,54 @@ export default function ThreeWorld({
           leg.rotation.x = 0.45
           legs.add(leg)
         }
+        // 鬼神スーツの装飾 (FINAL-D): 赤黒の胴鎧 + 金の肩当て/帯 + 角 + 背中オーラ。
+        // 常に生成しておき、showPlayerAvatar が選択状態で visible を切り替える。
+        const kishin = new THREE.Group()
+        const kArmorMat = new THREE.MeshStandardMaterial({
+          color: 0x2a0508,
+          metalness: 0.55,
+          roughness: 0.45,
+          emissive: 0x550000,
+          emissiveIntensity: 0.35,
+        })
+        const kGoldMat = new THREE.MeshStandardMaterial({
+          color: 0xd4af37,
+          emissive: 0xd4af37,
+          emissiveIntensity: 0.5,
+          metalness: 0.8,
+          roughness: 0.3,
+        })
+        const kChest = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.42, 0.3), kArmorMat)
+        kChest.position.y = 0.36
+        kishin.add(kChest)
+        const kBelt = new THREE.Mesh(new THREE.BoxGeometry(0.48, 0.07, 0.32), kGoldMat)
+        kBelt.position.y = 0.12
+        kishin.add(kBelt)
+        for (const s of [-1, 1]) {
+          const kShoulder = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.1, 0.2), kGoldMat)
+          kShoulder.position.set(s * 0.3, 0.58, 0)
+          kishin.add(kShoulder)
+          const kHorn = new THREE.Mesh(new THREE.ConeGeometry(0.035, 0.26, 5), kGoldMat)
+          kHorn.position.set(s * 0.1, 1.02, 0)
+          kHorn.rotation.z = -s * 0.45
+          kishin.add(kHorn)
+        }
+        const kAura = new THREE.Mesh(
+          new THREE.PlaneGeometry(0.7, 0.9),
+          new THREE.MeshBasicMaterial({
+            color: 0xff2233,
+            transparent: true,
+            opacity: 0.35,
+            side: THREE.DoubleSide,
+            depthWrite: false,
+            blending: THREE.AdditiveBlending,
+          }),
+        )
+        kAura.position.set(0, 0.45, 0.22) // 背面 (forward は -z)
+        kishin.add(kAura)
+        kishin.visible = false
+        upper.add(kishin)
+        g.userData.kishin = kishin
         g.userData.upper = upper
         g.userData.legs = legs
         g.visible = false
@@ -6020,6 +6242,10 @@ export default function ThreeWorld({
         avatarBodyMat.color.setHex(
           team === "red" ? 0xff4444 : team === "blue" ? 0x4488ff : 0xffcc00,
         )
+        // 鬼神スーツの装飾 (FINAL-D): 着用中だけ赤黒鎧を被せる。
+        const kishinG = playerAvatar.userData.kishin as THREE.Group | undefined
+        if (kishinG)
+          kishinG.visible = huntSuitChosenRef.current && huntSuitKindRef.current === "kishin"
         parent.add(playerAvatar)
         playerAvatar.visible = true
       }
@@ -6789,6 +7015,12 @@ export default function ThreeWorld({
       // damage site can route through it.
       function aaShield(raw: number) {
         let dmg = aaMountedRef.current ? raw * AA_MOUNT_DMG_MULT : raw
+        // 鬼神 (FINAL-D): 耐久を消費せず被ダメ20%減 — 壊れない代わりに軽減は浅い。
+        if (huntSuitActiveRef.current && huntSuitKindRef.current === "kishin") {
+          setHuntSuitFlash(true)
+          window.setTimeout(() => setHuntSuitFlash(false), 130)
+          return dmg * KISHIN_DMG_CUT
+        }
         // HUNT suit: durability soaks the hit and only HUNT_SUIT_CUT of it reaches
         // HP; the suit breaks (all effects gone) once durability hits 0.
         if (huntSuitActiveRef.current && huntSuitDurRef.current > 0) {
@@ -6813,6 +7045,7 @@ export default function ThreeWorld({
         }
         playerHpRef.current = Math.max(0, playerHpRef.current - aaShield(dmg))
         setPlayerHp(playerHpRef.current)
+        osakaRunHurt(dmg) // OSAKA リザルトの被ダメ集計 (FINAL-C; osaka 中のみ加算)
         lastDamageTimeRef.current = Date.now()
         cameraShakeRef.current.intensity = shake
         setDamageFlash(true)
@@ -11112,12 +11345,22 @@ export default function ThreeWorld({
         parts: THREE.Object3D[]
         eyes: THREE.Mesh[]
         mouths: THREE.Object3D[]
+        extras: {
+          armInst: THREE.InstancedMesh
+          armData: { ang: number; y: number; r: number; tilt: number; phase: number }[]
+          eyeMat: THREE.MeshLambertMaterial
+        } | null
       } {
         const group = new THREE.Group()
         const parts: THREE.Object3D[] = []
         const cores: THREE.Mesh[] = []
         const eyes: THREE.Mesh[] = []
         const mouths: THREE.Object3D[] = []
+        let extras: {
+          armInst: THREE.InstancedMesh
+          armData: { ang: number; y: number; r: number; tilt: number; phase: number }[]
+          eyeMat: THREE.MeshLambertMaterial
+        } | null = null
         // Mobile halves the part counts so the denser forms stay performant.
         const dense = isMobileDevice ? 0.5 : 1.0
         const dn = (n: number) => Math.max(1, Math.floor(n * dense))
@@ -11285,7 +11528,7 @@ export default function ThreeWorld({
           core.position.set(0, 7.0, 0) // exposed centre-top
           cores.push(core)
           group.add(core)
-        } else {
+        } else if (phase === 5) {
           // 五重混体: every prior form fused into one 15 m horror — ~56 limbs,
           // 28 eyes, six maws, the old-man head + bone skull embedded in the hide,
           // three weak cores each haloed by light, a slow body pulse + red underglow.
@@ -11387,8 +11630,153 @@ export default function ThreeWorld({
             cores.push(c)
             group.add(c)
           }
+        } else if (phase === 6) {
+          // ── 真・五変化 (FINAL-B): 全形態融合の超巨大体 (高さ約25m) ──
+          // 腕と目は InstancedMesh (PC 80本/50個, モバイル半減) — 各1 draw call。
+          const armN = isMobileDevice ? 40 : 80
+          const eyeN = isMobileDevice ? 25 : 50
+          // jitterSphere の肉塊コア (半径5) + 上段の融合塊。全身 osakaBody。
+          const mass = osakaPart(jitterSphere(5, 14, 0.55), 0x4a1420)
+          mass.position.y = 7
+          mass.userData.osakaPulse = true
+          add(mass)
+          const upper = osakaPart(jitterSphere(3.4, 12, 0.4), 0x5a1828)
+          upper.position.y = 13.5
+          add(upper)
+          const crown = osakaPart(jitterSphere(2.1, 10, 0.3), 0x3a0e18)
+          crown.position.y = 18.5
+          add(crown)
+          // 白骨色のパーツ (大角2・髑髏・小角2・第五の角) は1ジオメトリにマージ —
+          // 個別6メッシュ → 1 draw call (FINAL-J)。位置/回転はジオメトリへ焼き込む。
+          const paleGeos: THREE.BufferGeometry[] = []
+          const bakePale = (
+            g: THREE.BufferGeometry,
+            x: number,
+            y: number,
+            z: number,
+            rx = 0,
+            rz = 0,
+          ) => {
+            const m4 = new THREE.Matrix4()
+              .makeRotationFromEuler(new THREE.Euler(rx, 0, rz))
+              .setPosition(x, y, z)
+            g.applyMatrix4(m4)
+            paleGeos.push(g)
+          }
+          // 大角2本 — 頂部 ~25m のシルエット。
+          bakePale(new THREE.ConeGeometry(0.7, 6.0, 6), -1.6, 22.5, 0, 0, 0.35)
+          bakePale(new THREE.ConeGeometry(0.7, 6.0, 6), 1.6, 22.5, 0, 0, -0.35)
+          // 過去5形態の頭部を体表に埋め込む (撃ち抜いてきた顔が全部こちらを見る)。
+          const h1 = osakaPart(new THREE.SphereGeometry(1.0, 10, 8), 0xc8c0b0) // 老翁
+          h1.position.set(-3.2, 10.5, 2.8)
+          add(h1)
+          for (const ex of [-0.35, 0.35]) {
+            const e1 = osakaEye(0.12)
+            e1.position.set(-3.2 + ex, 10.6, 3.7)
+            add(e1)
+          }
+          const h2 = osakaPart(jitterSphere(0.9, 8, 0.2), 0x2a2a3a) // 多腕影鬼
+          h2.position.set(3.4, 11.5, 2.4)
+          add(h2)
+          const e2 = osakaEye(0.16)
+          e2.position.set(3.4, 11.6, 3.2)
+          add(e2)
+          // 骨触手の髑髏 (逆さ円錐) + 小角2本 — paleGeos へ焼き込み。
+          bakePale(new THREE.ConeGeometry(0.9, 1.6, 8), 0, 15.8, 3.0, Math.PI, 0)
+          bakePale(new THREE.ConeGeometry(0.14, 0.9, 5), -0.5, 16.8, 3.0, 0, 0.4)
+          bakePale(new THREE.ConeGeometry(0.14, 0.9, 5), 0.5, 16.8, 3.0, 0, -0.4)
+          const h4 = osakaPart(jitterSphere(1.1, 8, 0.3), 0x8b4040) // 肉塊融合
+          h4.position.set(-2.6, 5.2, 4.0)
+          add(h4)
+          const e4 = osakaEye(0.18)
+          e4.position.set(-2.6, 5.4, 5.0)
+          add(e4)
+          const h5 = osakaPart(jitterSphere(1.0, 8, 0.28), 0x6b3038) // 五重混体
+          h5.position.set(2.8, 4.6, 4.2)
+          add(h5)
+          // 五重混体ミニ塊の角 — paleGeos へ焼き込み、ここでまとめて1メッシュ化。
+          bakePale(new THREE.ConeGeometry(0.12, 0.7, 5), 2.8, 5.6, 4.2)
+          const paleMerged = mergeGeometries(paleGeos, false)
+          for (const pg of paleGeos) pg.dispose()
+          if (paleMerged) {
+            const paleMesh = new THREE.Mesh(
+              paleMerged,
+              new THREE.MeshLambertMaterial({ color: 0xe8e0d0 }),
+            )
+            paleMesh.userData.osakaBody = true
+            add(paleMesh)
+          }
+          // 腕の束 — 根本ピボットの円柱を体表に放射状配置。うねりは
+          // updateOsakaBoss が 2フレームに1回 setMatrixAt で回す。
+          const armGeo = new THREE.CylinderGeometry(0.16, 0.3, 5.2, 5)
+          armGeo.translate(0, 2.6, 0)
+          const armMat = new THREE.MeshLambertMaterial({ color: 0x14141f })
+          const armInst = new THREE.InstancedMesh(armGeo, armMat, armN)
+          armInst.userData.osakaBody = true // まとめて「体」ヒット (InstancedMesh ごと)
+          armInst.frustumCulled = false
+          const armData: { ang: number; y: number; r: number; tilt: number; phase: number }[] = []
+          const armDummy = new THREE.Object3D()
+          for (let i = 0; i < armN; i++) {
+            const a = (i / armN) * Math.PI * 2 + Math.random() * 0.3
+            const y = 2.5 + Math.random() * 13
+            const rAt = y < 11 ? 4.6 - Math.abs(y - 7) * 0.35 : 3.2 - Math.abs(y - 13.5) * 0.3
+            const ad = {
+              ang: a,
+              y,
+              r: Math.max(1.4, rAt),
+              tilt: 1.0 + Math.random() * 0.6,
+              phase: Math.random() * Math.PI * 2,
+            }
+            armData.push(ad)
+            armDummy.position.set(Math.cos(ad.ang) * ad.r, ad.y, Math.sin(ad.ang) * ad.r)
+            armDummy.rotation.set(-Math.sin(ad.ang) * ad.tilt, 0, Math.cos(ad.ang) * ad.tilt)
+            armDummy.updateMatrix()
+            armInst.setMatrixAt(i, armDummy.matrix)
+          }
+          armInst.instanceMatrix.needsUpdate = true
+          group.add(armInst)
+          // 目の群れ — 共有マテリアルで全体明滅 (per-instance flicker はしない)。
+          const eyeGeo = new THREE.SphereGeometry(0.22, 6, 6)
+          const eyeMat = new THREE.MeshLambertMaterial({
+            color: 0xff2200,
+            emissive: 0xff1800,
+            emissiveIntensity: 1.8,
+          })
+          const eyeInst = new THREE.InstancedMesh(eyeGeo, eyeMat, eyeN)
+          eyeInst.frustumCulled = false
+          const eyeDummy = new THREE.Object3D()
+          for (let i = 0; i < eyeN; i++) {
+            const a = Math.random() * Math.PI * 2
+            const y = 3 + Math.random() * 15
+            const rr = (y < 11 ? 5 - Math.abs(y - 7) * 0.4 : 3.5 - Math.abs(y - 13.5) * 0.35) + 0.15
+            eyeDummy.position.set(
+              Math.cos(a) * Math.max(1.2, rr),
+              y,
+              Math.sin(a) * Math.max(1.2, rr),
+            )
+            eyeDummy.scale.setScalar(0.7 + Math.random() * 1.1)
+            eyeDummy.updateMatrix()
+            eyeInst.setMatrixAt(i, eyeDummy.matrix)
+          }
+          eyeInst.instanceMatrix.needsUpdate = true
+          group.add(eyeInst)
+          const under6 = new THREE.PointLight(0xff0000, 2.6, 30)
+          under6.position.set(0, 0.6, 0)
+          group.add(under6)
+          // 弱点コア ×5 — 全部同時露出、ただし高速で体表を周回する (updateOsakaBoss)。
+          for (let i = 0; i < 5; i++) {
+            const c = osakaCore()
+            c.scale.setScalar(2.4)
+            const a = (i / 5) * Math.PI * 2
+            c.position.set(Math.cos(a) * 4.6, 8 + (i % 3) * 3, Math.sin(a) * 4.6)
+            // コアの後光はモバイルでは省略 (発光マテリアルで十分視認できる)。
+            if (!isMobileDevice) c.add(new THREE.PointLight(0xffdd00, 1.5, 10))
+            cores.push(c)
+            group.add(c)
+          }
+          extras = { armInst, armData, eyeMat }
         }
-        return { group, cores, parts, eyes, mouths }
+        return { group, cores, parts, eyes, mouths, extras }
       }
       // ── OSAKA boss lifecycle + combat ─────────────────────────────────────────
       function disposeOsakaGroup(g: THREE.Group) {
@@ -11410,6 +11798,11 @@ export default function ThreeWorld({
         disposeOsakaGroup(ob.group)
         osakaBossRef.current = null
         clearOsakaFx() // tear down any in-flight telegraphs / pools / splitters
+        osakaClearTrueLighting() // form-6 red lighting / fog / slow debuff (FINAL-B)
+        // ボス専用HPバーを畳む (FINAL-F)。
+        osakaHudLastPct = -1
+        osakaHudLastPhase = 0
+        setOsakaBossHud(null)
         if (osakaFrenzyRef.current) {
           osakaFrenzyRef.current = false
           setOsakaFrenzy(false)
@@ -11474,8 +11867,8 @@ export default function ThreeWorld({
         osakaBossRef.current = {
           group: built.group,
           phase: 1,
-          phaseHp: OSAKA_PHASE_HP[1],
-          phaseMaxHp: OSAKA_PHASE_HP[1],
+          phaseHp: Math.round(OSAKA_PHASE_HP[1] * (osakaOni() ? OSAKA_ONI_BOSS_HP_MULT : 1)),
+          phaseMaxHp: Math.round(OSAKA_PHASE_HP[1] * (osakaOni() ? OSAKA_ONI_BOSS_HP_MULT : 1)),
           core: primary,
           cores: built.cores,
           coreExposed: true,
@@ -11485,11 +11878,15 @@ export default function ThreeWorld({
           eyes: built.eyes,
           mouths: built.mouths,
           nextZakoAt: Date.now() + OSAKA_ZAKO_INTERVAL,
+          armInst: built.extras?.armInst ?? null,
+          armData: built.extras?.armData ?? null,
+          eyeMat: built.extras?.eyeMat ?? null,
         }
         spawnOsakaEscort(HUNT_ARENA.x - 6, HUNT_ARENA.z)
         spawnOsakaEscort(HUNT_ARENA.x + 6, HUNT_ARENA.z)
         SOUNDS.bossRoar()
         showNotification("五変化 — 不死身のボス出現")
+        osakaShowCutin(OSAKA_FORM_NAMES[1], OSAKA_FORM_QUOTES[1], "form")
       }
       // A shot landed: core hits hurt ×3, body hits are ×0.2. Draining a form's HP
       // triggers the change to the next form.
@@ -11504,14 +11901,17 @@ export default function ThreeWorld({
       }
       // Final defeat (survived form 5): tear everything down and clear the mission.
       function osakaBossDefeat() {
+        const obPos = osakaBossRef.current?.group.position.clone()
+        if (obPos) osakaDefeatBlast(obPos) // 撃破大爆発 (FINAL-F)
         disposeOsakaBoss()
         SOUNDS.clear()
         showNotification("五変化 撃破 — 不死身を討ち取った")
-        if (huntMissionConfigRef.current.stage === "osaka") {
+        if (isOsakaStage(huntMissionConfigRef.current.stage)) {
           osakaProgressRef.current.area = "clear"
-          osakaBanner("大阪編クリア") // big red centre banner (3s)
+          osakaBeginEndingSoon("normal") // 爆発を見せてから暗転 → リザルト (FINAL-C)
+        } else {
+          huntReturnToRoom("clear") // O キー召喚 (通常 HUNT アリーナ) は従来通り
         }
-        huntReturnToRoom("clear")
       }
       // Blow the current form apart, flash red for 0.8s, then build the next form
       // (or trigger the final defeat past form 5).
@@ -11519,6 +11919,7 @@ export default function ThreeWorld({
         const ob = osakaBossRef.current
         if (!ob || ob.transitioning) return
         ob.transitioning = true
+        osakaHitStopUntil = Date.now() + 130 // 形態撃破の小さなタメ (FINAL-F)
         const c = ob.group.position.clone()
         for (let i = 0; i < 3; i++) {
           spawnExplosion(
@@ -11545,9 +11946,17 @@ export default function ThreeWorld({
         window.setTimeout(() => {
           scene.remove(flash)
           if (osakaGenRef.current !== gen || !osakaBossRef.current) return // encounter ended
-          if (nextNum > 5) {
-            osakaBossDefeat()
+          if (nextNum > 6) {
+            osakaTrueDefeat() // 第六形態を討った — 真エンディングへ (FINAL-B)
             return
+          }
+          if (nextNum === 6) {
+            // 第六形態は隠し武器2種を両方携えた者の前にだけ顕現する。
+            const sst = osakaSecretRef.current
+            if (!(sst.bladeTaken && sst.spearTaken)) {
+              osakaBossDefeat()
+              return
+            }
           }
           const np = nextNum as OsakaBossPhase
           const built = buildOsakaBossPhase(np)
@@ -11558,8 +11967,8 @@ export default function ThreeWorld({
           osakaBossRef.current = {
             group: built.group,
             phase: np,
-            phaseHp: OSAKA_PHASE_HP[np],
-            phaseMaxHp: OSAKA_PHASE_HP[np],
+            phaseHp: Math.round(OSAKA_PHASE_HP[np] * (osakaOni() ? OSAKA_ONI_BOSS_HP_MULT : 1)),
+            phaseMaxHp: Math.round(OSAKA_PHASE_HP[np] * (osakaOni() ? OSAKA_ONI_BOSS_HP_MULT : 1)),
             core: primary,
             cores: built.cores,
             coreExposed: true,
@@ -11569,9 +11978,18 @@ export default function ThreeWorld({
             eyes: built.eyes,
             mouths: built.mouths,
             nextZakoAt: Date.now() + OSAKA_ZAKO_INTERVAL,
+            armInst: built.extras?.armInst ?? null,
+            armData: built.extras?.armData ?? null,
+            eyeMat: built.extras?.eyeMat ?? null,
           }
           SOUNDS.bossRoar()
-          showNotification(`第${np}形態 へ変化`)
+          if (np === 6) {
+            osakaApplyTrueLighting()
+            osakaShowCutin("真・五変化 顕現", OSAKA_FORM_QUOTES[6], "true")
+            showNotification("☠ 第六形態 — 五つのコアは常に剥き出し、だが速い")
+          } else {
+            osakaShowCutin(OSAKA_FORM_NAMES[np], OSAKA_FORM_QUOTES[np], "form")
+          }
         }, 800)
       }
       // Fire one enemy projectile from the boss (reuses the shared enemy bullet
@@ -11715,6 +12133,8 @@ export default function ThreeWorld({
         osakaFx.pool.length = 0
         osakaFx.ghost.length = 0
         osakaFx.split.length = 0
+        for (const w of osakaWaves) disposeFxMesh(w.mesh)
+        osakaWaves.length = 0
       }
       // Per-frame FX driver: telegraph bursts, pool ticks, ghost contact, splitter
       // homing + self-detonation. Damage respects the spawn-invuln window.
@@ -11775,6 +12195,57 @@ export default function ThreeWorld({
             if (safe && d < 3) applyPlayerDamage(22, 4)
             disposeFxMesh(s.mesh)
             osakaFx.split.splice(i, 1)
+          }
+        }
+        // ── エリアミニイベントの遅延処理 (FINAL-I) ──
+        if (osakaNeonRedAt > 0 && now >= osakaNeonRedAt) {
+          // 消灯から1.4秒 — 街全体のネオンが一斉に赤へ染まる。
+          osakaNeonRedAt = 0
+          const A2 = osakaAnim
+          if (A2) {
+            for (const nn of A2.neon) {
+              nn.mat.color.setHex(0xff0011)
+              nn.mat.emissive.setHex(0xff0011)
+              nn.base = 1.6
+            }
+          }
+          osakaShowCutin("新世界は闇に落ちた", null, "true")
+          SOUNDS.huntWarn()
+        }
+        if (osakaCastleEyes) {
+          if (now >= osakaCastleEyes.until) {
+            scene.remove(osakaCastleEyes.mesh)
+            osakaCastleEyes.mesh.geometry.dispose()
+            ;(osakaCastleEyes.mesh.material as THREE.Material).dispose()
+            osakaCastleEyes = null
+          } else if ((osakaMapFrame & 3) === 0) {
+            // 3フレに1回、目玉がランダムに現れては消える。
+            const ce = osakaCastleEyes
+            ce.pts.forEach((p, i) => {
+              osakaEyeDummy.position.set(p[0], p[1], p[2])
+              osakaEyeDummy.scale.setScalar(Math.random() < 0.3 ? 0.001 : 0.6 + Math.random() * 0.9)
+              osakaEyeDummy.updateMatrix()
+              ce.mesh.setMatrixAt(i, osakaEyeDummy.matrix)
+            })
+            ce.mesh.instanceMatrix.needsUpdate = true
+          }
+        }
+        // 第六形態の全画面波 (FINAL-B): 予兆中は安全地帯が明滅、時間で全域に発破。
+        for (let i = osakaWaves.length - 1; i >= 0; i--) {
+          const w = osakaWaves[i]
+          if (!w) continue
+          w.mat.opacity = 0.35 + 0.35 * Math.abs(Math.sin(now * 0.015))
+          if (now >= w.at) {
+            osakaQuake(7, 700)
+            spawnExplosion(new THREE.Vector3(px, 1, pz), false, false)
+            if (
+              safe &&
+              Math.hypot(px - w.x, pz - w.z) > w.r &&
+              osakaSecretRef.current.loc === "none"
+            )
+              applyPlayerDamage(65, 8)
+            disposeFxMesh(w.mesh)
+            osakaWaves.splice(i, 1)
           }
         }
       }
@@ -11921,11 +12392,996 @@ export default function ThreeWorld({
           }
         }
       }
+      // ══ OSAKA SECRET ROUTES (FINAL-A) ═══════════════════════════════════════
+      // ①道頓堀川岸の格子戸 → 地下通路 (鬼刀) / ②天守台のひび割れ壁 → 隠し部屋
+      // (大槍)。構造物は buildOsakaMap が建て、ここはアニメ/転送/取得/戦闘を担う。
+      type OsakaSecretHandles = {
+        gate: THREE.Group // 格子戸 (ヒンジ回転で開く)
+        crack: THREE.Mesh | null // ひび割れ壁 (scale.x → 0 で崩壊)
+        blade: THREE.Group // 鬼刀ピックアップ
+        spear: THREE.Group // 大槍ピックアップ
+        underLights: THREE.PointLight[] // 地下の赤い非常灯 (明滅)
+        gateAnim: number // -1 idle / 0..1 開扉アニメ進行
+        crackAnim: number // -1 idle / 0..1 崩壊アニメ進行
+        debris: { mesh: THREE.Mesh; vx: number; vy: number; vz: number; t: number }[]
+      }
+      let osakaSecret: OsakaSecretHandles | null = null
+      // 投擲槍は表示専用 — ダメージは投擲時のヒットスキャンで確定済み (弾と同じ)。
+      const osakaSpears: { mesh: THREE.Mesh; dir: THREE.Vector3; dist: number }[] = []
+      const osakaSpearGeo = new THREE.CylinderGeometry(0.05, 0.05, 2.6, 5)
+      const osakaSpearMat = new THREE.MeshBasicMaterial({ color: 0xd4af37 })
+      const osakaDebrisGeo = new THREE.BoxGeometry(0.28, 0.22, 0.18)
+      const osakaDebrisMat = new THREE.MeshLambertMaterial({ color: 0x55504a })
+      const osakaSecretFresh = (): typeof osakaSecretRef.current => ({
+        gateOpen: false,
+        wallBroken: false,
+        bladeTaken: false,
+        spearTaken: false,
+        loc: "none",
+        ret: { x: 0, z: 0 },
+      })
+      // 白フラッシュ → 位置移動 (HUNT の転送演出を流用)。
+      function osakaSecretTeleport(x: number, z: number, loc: "none" | "under" | "hidden") {
+        SOUNDS.huntWarp()
+        setHuntWhiteFlash(true)
+        window.setTimeout(() => {
+          focalPoint.set(x, 0, z)
+          playerVelRef.current.x = 0
+          playerVelRef.current.z = 0
+          osakaSecretRef.current.loc = loc
+          setHuntWhiteFlash(false)
+        }, 420)
+      }
+      // 取得 = HUNT 武器として所持 + 自動装備 (ラックには出ない; run 限定)。
+      function osakaGrantSecretWeapon(id: "oniblade" | "greatspear") {
+        const next = new Set(huntOwnedRef.current)
+        next.add(id)
+        huntOwnedRef.current = next
+        setHuntOwned([...next])
+        const def = HUNT_WEAPON_BY_ID[id]
+        if (def.mag >= 0) huntAmmoRef.current[id] = def.mag
+        huntWeaponRef.current = id
+        setHuntWeapon(id)
+        setHuntAmmoUi(def.mag < 0 ? -1 : def.mag)
+      }
+      // 秘密武器の近接 — 雑魚の扇範囲に加えて五変化/中ボスにも届く (新規パス;
+      // 既存の弾道コア判定には触れない)。倒した敵の位置を返す (鬼刀の炎上用)。
+      function osakaSecretMelee(dmg: number, range: number, tag: string): THREE.Vector3[] {
+        camera.getWorldDirection(fwd3)
+        const flen = Math.hypot(fwd3.x, fwd3.z) || 1
+        const nfx = fwd3.x / flen
+        const nfz = fwd3.z / flen
+        const cosHalf = Math.cos(Math.PI / 2.4) // 広い扇 (±75°)
+        let struck = false
+        const killed: THREE.Vector3[] = []
+        for (const e of enemies) {
+          if (e.hp <= 0 || e.aiDriving) continue
+          const dx = e.mesh.position.x - focalPoint.x
+          const dz = e.mesh.position.z - focalPoint.z
+          const d = Math.hypot(dx, dz)
+          if (d > range || d < 1e-3) continue
+          if ((dx / d) * nfx + (dz / d) * nfz < cosHalf) continue
+          struck = true
+          e.hp -= dmg
+          spawnBlood(new THREE.Vector3(e.mesh.position.x, EYE_HEIGHT * 0.8, e.mesh.position.z))
+          if (e.hp <= 0) {
+            killed.push(e.mesh.position.clone())
+            applyEnemyKill(e, tag)
+          }
+        }
+        // 五変化: 体への直接斬撃は減衰なし、正面レイにコアが居れば ×3 (露出依存は
+        // コアの visible/手前判定そのもの)。
+        const ob = osakaBossRef.current
+        if (ob && !ob.transitioning) {
+          const bd = Math.hypot(
+            ob.group.position.x - focalPoint.x,
+            ob.group.position.z - focalPoint.z,
+          )
+          if (bd < range + 3.5) {
+            pointer.set(0, 0)
+            raycaster.setFromCamera(pointer, camera)
+            const cores: THREE.Object3D[] = []
+            ob.group.traverse((c) => {
+              if (c instanceof THREE.Mesh && c.visible && c.userData.osakaCore) cores.push(c)
+            })
+            const ch = raycaster.intersectObjects(cores, false)[0]
+            const isCore = !!ch && ch.distance < range + 6
+            osakaDamage(dmg * (isCore ? OSAKA_CORE_MULT : 1))
+            spawnBlood(
+              new THREE.Vector3(ob.group.position.x, 2 + Math.random() * 3, ob.group.position.z),
+            )
+            struck = true
+          }
+        }
+        // 中ボス: 接近していれば直撃 (天狗は低空にいる間のみ)。
+        const mb = osakaMidBossRef.current
+        if (mb && mb.hp > 0) {
+          const md = Math.hypot(
+            mb.group.position.x - focalPoint.x,
+            mb.group.position.z - focalPoint.z,
+          )
+          if (md < range + 2.5 && mb.group.position.y < 4) {
+            mb.hp -= dmg
+            spawnBlood(new THREE.Vector3(mb.group.position.x, 1.5, mb.group.position.z))
+            struck = true
+          }
+        }
+        if (struck) SOUNDS.hit()
+        recoilRef.current = 0.06
+        knifeSwingRef.current = KNIFE_SWING_TIME
+        return killed
+      }
+      // 鬼刀: 半径4の斬撃。倒した敵は炎上爆発し、周囲の敵に連鎖ダメージ。
+      function osakaBladeSwing() {
+        const now = Date.now()
+        if (now - lastMeleeRef.current < KNIFE_COOLDOWN_MS) return
+        lastMeleeRef.current = now
+        SOUNDS.knife()
+        const killed = osakaSecretMelee(
+          OSAKA_ONIBLADE_DMG * meleeSuitMult(),
+          OSAKA_ONIBLADE_RANGE,
+          "oniblade",
+        )
+        for (const pos of killed) {
+          spawnExplosion(new THREE.Vector3(pos.x, 1, pos.z))
+          for (const e of enemies) {
+            if (e.hp <= 0 || e.aiDriving) continue
+            const d = Math.hypot(e.mesh.position.x - pos.x, e.mesh.position.z - pos.z)
+            if (d > OSAKA_ONIBLADE_BURN_RADIUS) continue
+            e.hp -= OSAKA_ONIBLADE_BURN_DMG
+            if (e.hp <= 0) applyEnemyKill(e, "oniblade")
+          }
+        }
+        if (killed.length > 0) SOUNDS.rpg()
+      }
+      // 大槍: 通常クリックで近接 (半径5)、ADS 中は貫通投擲 (3発 / R で装填)。
+      function osakaSpearFire() {
+        if (isAimingRef.current) {
+          osakaSpearThrow()
+          return
+        }
+        const now = Date.now()
+        if (now - lastMeleeRef.current < KNIFE_COOLDOWN_MS) return
+        lastMeleeRef.current = now
+        SOUNDS.knife()
+        osakaSecretMelee(
+          OSAKA_SPEAR_MELEE_DMG * meleeSuitMult(),
+          OSAKA_SPEAR_MELEE_RANGE,
+          "greatspear",
+        )
+      }
+      function osakaSpearThrow() {
+        const now = Date.now()
+        if (now - lastFireTimeRef.current < 600) return
+        if (huntReloadingRef.current) return
+        if (!huntConsumeAmmo("greatspear")) return
+        lastFireTimeRef.current = now
+        SOUNDS.sniper()
+        recoilRef.current = 0.22
+        pointer.set(0, 0)
+        raycaster.setFromCamera(pointer, camera)
+        const nearestWall = raycaster.intersectObjects(wallMeshes, false)[0]
+        const maxD = Math.min(
+          OSAKA_SPEAR_THROW_DIST,
+          nearestWall ? nearestWall.distance : Number.POSITIVE_INFINITY,
+        )
+        // 貫通: レイ上の生存敵 "全員" に1回ずつ (通常弾は最初の1体で停止する)。
+        const parts: THREE.Object3D[] = []
+        for (const e of enemies) {
+          if (e.hp <= 0 || e.aiDriving) continue
+          e.mesh.traverse((c) => {
+            if (c instanceof THREE.Mesh && c.userData.enemyId) parts.push(c)
+          })
+        }
+        const hitIds = new Set<string>()
+        for (const h of raycaster.intersectObjects(parts, false)) {
+          if (h.distance > maxD) break
+          const id = h.object.userData.enemyId as string
+          if (hitIds.has(id)) continue
+          hitIds.add(id)
+          const e = enemies.find((x) => x.id === id)
+          if (!e || e.hp <= 0) continue
+          spawnBlood(h.point)
+          e.hp -= OSAKA_SPEAR_THROW_DMG
+          scoreRef.current += Math.floor(OSAKA_SPEAR_THROW_DMG * 10)
+          setScore(scoreRef.current)
+          if (e.hp <= 0) applyEnemyKill(e, "greatspear")
+        }
+        // 五変化: コア優先レイ → 体 (倍率は通常弾と同一 — コア機構を尊重)。
+        const ob = osakaBossRef.current
+        if (ob && !ob.transitioning) {
+          const obCores: THREE.Object3D[] = []
+          const obBody: THREE.Object3D[] = []
+          ob.group.traverse((c) => {
+            if (c instanceof THREE.Mesh && c.visible) {
+              if (c.userData.osakaCore) obCores.push(c)
+              else if (c.userData.osakaBody) obBody.push(c)
+            }
+          })
+          const coreHit = raycaster.intersectObjects(obCores, false)[0]
+          const bodyHit = raycaster.intersectObjects(obBody, false)[0]
+          const obHit = coreHit ?? bodyHit
+          if (obHit && obHit.distance <= maxD) {
+            spawnBlood(obHit.point)
+            osakaDamage(
+              OSAKA_SPEAR_THROW_DMG * (obHit === coreHit ? OSAKA_CORE_MULT : OSAKA_BODY_MULT),
+            )
+          }
+        }
+        const mb = osakaMidBossRef.current
+        if (mb && mb.hp > 0) {
+          const mbHit = raycaster.intersectObject(mb.group, true)[0]
+          if (mbHit && mbHit.distance <= maxD) {
+            spawnBlood(mbHit.point)
+            mb.hp -= OSAKA_SPEAR_THROW_DMG
+          }
+        }
+        if (hitIds.size > 0) SOUNDS.hit()
+        // 表示用の槍 (共有ジオメトリ — remove のみで破棄不要)。
+        camera.getWorldDirection(fwd3)
+        const dir = fwd3.clone().normalize()
+        const sm = new THREE.Mesh(osakaSpearGeo, osakaSpearMat)
+        sm.position.set(focalPoint.x + dir.x, EYE_HEIGHT - 0.15 + dir.y, focalPoint.z + dir.z)
+        sm.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir)
+        scene.add(sm)
+        osakaSpears.push({ mesh: sm, dir, dist: 0 })
+      }
+      // 毎フレーム: ヒント表示 / [E] 消費 / 開扉・崩壊アニメ / 取得 / クランプ /
+      // 非常灯の明滅 / 投擲槍の飛翔。
+      let osakaSecretT = 0
+      let osakaSecretFrame = 0 // 演出系 (bob/明滅) の2フレ間引き用 (FINAL-J)
+      function updateOsakaSecrets(dt: number) {
+        const S = osakaSecret
+        const st = osakaSecretRef.current
+        if (
+          !S ||
+          huntPhaseRef.current !== "mission" ||
+          !isOsakaStage(huntMissionConfigRef.current.stage)
+        ) {
+          if (osakaHintRef.current !== null) {
+            osakaHintRef.current = null
+            setOsakaHint(null)
+          }
+          return
+        }
+        osakaSecretT += dt
+        osakaSecretFrame++
+        // 演出系 (bob/回転/非常灯) は2フレに1回、dt を倍にして速度を保つ (FINAL-J)。
+        const fx2 = (osakaSecretFrame & 1) === 0
+        const cdt = dt * 2
+        const px = focalPoint.x
+        const pz = focalPoint.z
+        const ax = HUNT_ARENA.x
+        const az = HUNT_ARENA.z
+        // ── 調査ヒント + アクション ──
+        let hint: string | null = null
+        let action: (() => void) | null = null
+        if (st.loc === "none") {
+          const gd = Math.hypot(px - (ax + OSAKA_GATE_POS.x), pz - (az + OSAKA_GATE_POS.z))
+          const cd = Math.hypot(px - (ax + OSAKA_CRACK_POS.x), pz - (az + OSAKA_CRACK_POS.z))
+          if (!st.gateOpen && gd < 3) {
+            hint = "[E] 調べる — 川沿いの格子戸"
+            action = () => {
+              st.gateOpen = true
+              S.gateAnim = 0
+              SOUNDS.huntOrbOpen()
+              showNotification("格子戸が軋みながら開く……")
+            }
+          } else if (!st.wallBroken && cd < 4) {
+            hint = "[E] 調べる — ひび割れた壁"
+            action = () => {
+              st.wallBroken = true
+              S.crackAnim = 0
+              cameraShakeRef.current.intensity = 5
+              SOUNDS.shotgun()
+              const wx = ax + OSAKA_CRACK_POS.x
+              const wz = az + OSAKA_CRACK_POS.z
+              for (let i = 0; i < 14; i++) {
+                const dm = new THREE.Mesh(osakaDebrisGeo, osakaDebrisMat)
+                dm.position.set(wx + (Math.random() - 0.5) * 2.4, 0.6 + Math.random() * 1.8, wz)
+                dm.scale.setScalar(0.5 + Math.random())
+                scene.add(dm)
+                S.debris.push({
+                  mesh: dm,
+                  vx: (Math.random() - 0.5) * 3,
+                  vy: 1.5 + Math.random() * 3,
+                  vz: 2 + Math.random() * 3,
+                  t: 0,
+                })
+              }
+              spawnExplosion(new THREE.Vector3(wx, 1.2, wz), true)
+            }
+          }
+        } else {
+          const ex = ax + (st.loc === "under" ? OSAKA_UNDER.x : OSAKA_HIDDEN.x)
+          const ez =
+            az +
+            (st.loc === "under"
+              ? OSAKA_UNDER.z - OSAKA_UNDER.len / 2 + 1.6
+              : OSAKA_HIDDEN.z + OSAKA_HIDDEN.s / 2 - 1.2)
+          if (Math.hypot(px - ex, pz - ez) < 2.4) {
+            hint = "[E] 地上へ戻る"
+            action = () => osakaSecretTeleport(st.ret.x, st.ret.z, "none")
+          }
+        }
+        if (hint !== osakaHintRef.current) {
+          osakaHintRef.current = hint
+          setOsakaHint(hint)
+        }
+        if (huntInteractReqRef.current) {
+          // ミッション中の [E] はここが唯一の消費者 (ラック処理は room 限定)。
+          huntInteractReqRef.current = false
+          if (action) action()
+        }
+        // ── 開扉 / 崩壊アニメ → 完了で転送 ──
+        if (S.gateAnim >= 0) {
+          S.gateAnim = Math.min(1, S.gateAnim + dt / 0.9)
+          const k = 1 - (1 - S.gateAnim) * (1 - S.gateAnim) // ease-out
+          S.gate.rotation.y = -1.45 * k
+          if (S.gateAnim >= 1) {
+            S.gateAnim = -1
+            st.ret = { x: ax + OSAKA_GATE_POS.x, z: az + OSAKA_GATE_POS.z + 2.0 }
+            osakaSecretTeleport(
+              ax + OSAKA_UNDER.x,
+              az + OSAKA_UNDER.z - OSAKA_UNDER.len / 2 + 3,
+              "under",
+            )
+          }
+        }
+        if (S.crackAnim >= 0 && S.crack) {
+          S.crackAnim = Math.min(1, S.crackAnim + dt / 0.7)
+          S.crack.scale.x = Math.max(0.02, 1 - S.crackAnim)
+          if (S.crackAnim >= 1) {
+            S.crackAnim = -1
+            S.crack.visible = false
+            st.ret = { x: ax + OSAKA_CRACK_POS.x, z: az + OSAKA_CRACK_POS.z + 2.2 }
+            osakaSecretTeleport(
+              ax + OSAKA_HIDDEN.x,
+              az + OSAKA_HIDDEN.z + OSAKA_HIDDEN.s / 2 - 2,
+              "hidden",
+            )
+          }
+        }
+        // ── 破片の放物運動 ──
+        for (let i = S.debris.length - 1; i >= 0; i--) {
+          const d = S.debris[i]
+          if (!d) continue
+          d.t += dt
+          d.vy -= 9.8 * dt
+          d.mesh.position.x += d.vx * dt
+          d.mesh.position.y = Math.max(0.1, d.mesh.position.y + d.vy * dt)
+          d.mesh.position.z += d.vz * dt
+          d.mesh.rotation.x += dt * 4
+          d.mesh.rotation.z += dt * 3
+          if (d.t > 1.6) {
+            scene.remove(d.mesh)
+            S.debris.splice(i, 1)
+          }
+        }
+        // ── 非常灯の明滅 (地下に居る間だけ・2フレに1回) ──
+        if (fx2 && st.loc === "under") {
+          for (let i = 0; i < S.underLights.length; i++) {
+            const l = S.underLights[i]
+            if (!l) continue
+            l.intensity =
+              Math.random() < 0.04 ? 0.2 : 1.4 + Math.sin(osakaSecretT * 6 + i * 1.7) * 0.5
+          }
+        }
+        // ── 武器ピックアップ (bob は間引き、取得判定は毎フレーム) ──
+        if (!st.bladeTaken) {
+          if (fx2) {
+            S.blade.rotation.y += cdt * 1.4
+            S.blade.position.y = 1.45 + Math.sin(osakaSecretT * 2.2) * 0.12
+          }
+          const bx = ax + OSAKA_UNDER.x
+          const bz = az + OSAKA_UNDER.z + OSAKA_UNDER.len / 2 - 4
+          if (st.loc === "under" && Math.hypot(px - bx, pz - bz) < 2.1) {
+            st.bladeTaken = true
+            S.blade.visible = false
+            osakaGrantSecretWeapon("oniblade")
+            scoreRef.current += 2000 // 隠し武器発見ボーナス (FINAL-E)
+            setScore(scoreRef.current)
+            osakaBanner("隠し武器『地下の鬼刀』入手 +2000")
+            showNotification("⚔ 鬼刀 — [Z]で装備 / 斬った敵は炎上爆発する")
+            SOUNDS.clear()
+          }
+        }
+        if (!st.spearTaken) {
+          if (fx2) S.spear.rotation.y += cdt * 0.8
+          const sx = ax + OSAKA_HIDDEN.x
+          const sz = az + OSAKA_HIDDEN.z - 2.5
+          if (st.loc === "hidden" && Math.hypot(px - sx, pz - sz) < 2.1) {
+            st.spearTaken = true
+            S.spear.visible = false
+            osakaGrantSecretWeapon("greatspear")
+            scoreRef.current += 2000 // 隠し武器発見ボーナス (FINAL-E)
+            setScore(scoreRef.current)
+            osakaBanner("隠し武器『城主の大槍』入手 +2000")
+            showNotification("⚔ 大槍 — [X]で装備 / ADS+射撃で貫通投擲 (3発)")
+            SOUNDS.clear()
+          }
+        }
+        // ── 隠し空間のクランプ (HUNT_ROOM と同じ方式 — 物理を一切触らない) ──
+        if (st.loc === "under") {
+          const cx = ax + OSAKA_UNDER.x
+          const cz2 = az + OSAKA_UNDER.z
+          const hw = OSAKA_UNDER.w / 2 - 0.5
+          const hl = OSAKA_UNDER.len / 2 - 0.5
+          focalPoint.x = Math.max(cx - hw, Math.min(cx + hw, focalPoint.x))
+          focalPoint.z = Math.max(cz2 - hl, Math.min(cz2 + hl, focalPoint.z))
+          focalPoint.y = 0
+        } else if (st.loc === "hidden") {
+          const cx = ax + OSAKA_HIDDEN.x
+          const cz2 = az + OSAKA_HIDDEN.z
+          const hh = OSAKA_HIDDEN.s / 2 - 0.5
+          focalPoint.x = Math.max(cx - hh, Math.min(cx + hh, focalPoint.x))
+          focalPoint.z = Math.max(cz2 - hh, Math.min(cz2 + hh, focalPoint.z))
+          focalPoint.y = 0
+        }
+        // ── 投擲槍の飛翔 (表示のみ) ──
+        for (let i = osakaSpears.length - 1; i >= 0; i--) {
+          const s = osakaSpears[i]
+          if (!s) continue
+          s.mesh.position.addScaledVector(s.dir, OSAKA_SPEAR_SPEED * dt)
+          s.dist += OSAKA_SPEAR_SPEED * dt
+          if (s.dist > OSAKA_SPEAR_THROW_DIST) {
+            scene.remove(s.mesh)
+            osakaSpears.splice(i, 1)
+          }
+        }
+      }
       // Per-phase periodic sub-attacks fire on their own timers (reset on a phase
       // change), independent of the main attackTimer.
       let osakaPhaseSeen = 0
       let osakaAuxA = 0
       let osakaAuxB = 0
+      // ══ 第六形態 真・五変化 (FINAL-B) — 専用ライティング/全画面波/分身/鈍化 ══
+      let osakaSlowUntil = 0 // 時空歪曲: この時刻まで移動速度半減
+      let osakaArmFrame = 0 // 腕 InstancedMesh の更新間引き (2フレに1回)
+      const osakaArmDummy = new THREE.Object3D()
+      let osakaTrueLights: THREE.Group | null = null
+      let osakaTrueFogSaved: THREE.Fog | THREE.FogExp2 | null = null
+      let osakaTrueFogWasSet = false
+      // 赤黒い決戦ライティング — 顕現時に被せ、ボス消滅時に必ず剥がす。
+      function osakaApplyTrueLighting() {
+        if (osakaTrueLights) return
+        const g = new THREE.Group()
+        g.add(new THREE.AmbientLight(0x441111, 2.4))
+        const dir = new THREE.DirectionalLight(0xff2222, 1.6)
+        dir.position.set(10, 40, -10)
+        g.add(dir)
+        const pl = new THREE.PointLight(0xff0000, 4, 70)
+        pl.position.set(HUNT_ARENA.x, 18, HUNT_ARENA.z)
+        g.add(pl)
+        scene.add(g)
+        osakaTrueLights = g
+        osakaTrueFogSaved = scene.fog
+        osakaTrueFogWasSet = true
+        scene.fog = new THREE.Fog(0x1a0004, 60, 260) // 赤黒い決戦の靄
+      }
+      function osakaClearTrueLighting() {
+        if (osakaTrueLights) {
+          scene.remove(osakaTrueLights)
+          osakaTrueLights = null
+        }
+        if (osakaTrueFogWasSet) {
+          scene.fog = osakaTrueFogSaved
+          osakaTrueFogSaved = null
+          osakaTrueFogWasSet = false
+        }
+        osakaSlowUntil = 0
+      }
+      // 全画面攻撃: 安全地帯1箇所だけが光り、1.7秒後にフィールド全体を波が薙ぐ。
+      const osakaWaves: {
+        mesh: THREE.Mesh
+        mat: THREE.MeshBasicMaterial
+        x: number
+        z: number
+        r: number
+        at: number
+      }[] = []
+      function osakaFullscreenWave(px: number, pz: number) {
+        const a = Math.random() * Math.PI * 2
+        const r = 5 + Math.random() * 9
+        const sx = px + Math.cos(a) * r
+        const sz = pz + Math.sin(a) * r
+        const mat = new THREE.MeshBasicMaterial({
+          color: 0x33ff88,
+          transparent: true,
+          opacity: 0.5,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+        })
+        const m = new THREE.Mesh(osakaDiscGeo, mat)
+        m.rotation.x = -Math.PI / 2
+        m.position.set(sx, 0.07, sz)
+        m.scale.set(3.5, 3.5, 3.5)
+        scene.add(m)
+        osakaWaves.push({ mesh: m, mat, x: sx, z: sz, r: 3.5, at: Date.now() + 1700 })
+        osakaBanner("全方位衝撃波 — 光る場所へ！")
+        SOUNDS.alert()
+      }
+      // 分身召喚: 過去形態のミニチュア4体 (通常エネミーAIに乗せる — 既存の被弾/
+      // 近接/スコア処理がそのまま効く)。
+      function osakaSummonClones() {
+        const ob = osakaBossRef.current
+        if (!ob) return
+        const live = enemies.filter((e) => e.hp > 0 && e.huntName === OSAKA_CLONE_NAME).length
+        const room = Math.min(4 - live, 4)
+        if (room <= 0) return
+        for (let i = 0; i < room; i++) {
+          const a = (i / room) * Math.PI * 2 + Math.random()
+          const safe = findSafeSpawnNear(
+            ob.group.position.x + Math.cos(a) * 7,
+            ob.group.position.z + Math.sin(a) * 7,
+            ENEMY_RADIUS,
+          )
+          huntMakeEnemy(
+            "terraformer",
+            safe.x,
+            safe.z,
+            1.25,
+            OSAKA_CLONE_TINTS[i % 4] ?? 0x8b4040,
+            0xff2200,
+            30,
+            350,
+            4.2,
+            false,
+            OSAKA_CLONE_NAME,
+            "fleshball",
+          )
+        }
+        osakaBanner("分身召喚 — 過去の形態が蘇る")
+        SOUNDS.bossRoar()
+      }
+      // 第六形態の攻撃プール — 過去全形態の攻撃 (0-5)。毎回2種を同時発動する。
+      function osakaTrueAttack(kind: number) {
+        const ob = osakaBossRef.current
+        if (!ob) return
+        const now = Date.now()
+        const px = focalPoint.x
+        const pz = focalPoint.z
+        const toX = px - ob.group.position.x
+        const toZ = pz - ob.group.position.z
+        const dist = Math.hypot(toX, toZ) || 1
+        const bossPos = new THREE.Vector3(ob.group.position.x, 2, ob.group.position.z)
+        const aim = new THREE.Vector3(toX, 0, toZ)
+        const safeToHit = now > spawnInvulnUntilRef.current
+        if (kind === 0) {
+          // 鉄球 16方位バラージ (第五形態)
+          for (let i = 0; i < 16; i++) {
+            const a = (i / 16) * Math.PI * 2
+            osakaFireBolt(
+              new THREE.Vector3(bossPos.x, 10, bossPos.z),
+              new THREE.Vector3(Math.cos(a), 0, Math.sin(a)),
+              18,
+              20,
+              0xffaa00,
+            )
+          }
+        } else if (kind === 1) {
+          // 腕の連撃 — 外へ行進する衝撃波 (第二形態)
+          for (let i = 0; i < 8; i++) {
+            const a = (i / 8) * Math.PI * 2
+            const rr = 3 + (i % 4) * 2.5
+            osakaTelegraph(
+              ob.group.position.x + Math.cos(a) * rr,
+              ob.group.position.z + Math.sin(a) * rr,
+              3,
+              450 + i * 110,
+              22,
+            )
+          }
+          osakaQuake(5)
+        } else if (kind === 2) {
+          // 骨の雨 (第三形態)
+          const n = isMobileDevice ? 5 : 10
+          for (let i = 0; i < n; i++) {
+            osakaTelegraph(
+              px + (Math.random() - 0.5) * 22,
+              pz + (Math.random() - 0.5) * 22,
+              2.2,
+              700,
+              18,
+              0xddeeff,
+            )
+          }
+        } else if (kind === 3) {
+          // 分裂体の放出 (第四形態)
+          for (let i = 0; i < (isMobileDevice ? 2 : 4); i++) {
+            const a = (i / 4) * Math.PI * 2
+            osakaSplitter(
+              ob.group.position.x + Math.cos(a) * 3,
+              ob.group.position.z + Math.sin(a) * 3,
+            )
+          }
+        } else if (kind === 4) {
+          // 念弾3連 + 追尾呪弾 (第三/第一形態)
+          for (let i = -1; i <= 1; i++) {
+            const d = aim.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), i * 0.18)
+            osakaFireBolt(new THREE.Vector3(bossPos.x, 12, bossPos.z), d, 24, 18)
+          }
+          const cm = new THREE.Mesh(
+            new THREE.SphereGeometry(0.45, 8, 8),
+            new THREE.MeshBasicMaterial({ color: 0xaa44ff }),
+          )
+          cm.position.set(bossPos.x, 3, bossPos.z)
+          scene.add(cm)
+          bullets.push({
+            mesh: cm,
+            velocity: aim.clone().normalize().multiplyScalar(6),
+            life: 5,
+            isEnemy: true,
+            damage: 20,
+            homePlayer: true,
+            homeTurn: 1.1,
+          })
+        } else {
+          // 酸の池 + 突進 (第四形態)
+          const baseAng = Math.atan2(toZ, toX)
+          for (let i = -1; i <= 1; i++) {
+            const a = baseAng + i * 0.4
+            osakaPool(bossPos.x + Math.cos(a) * 7, bossPos.z + Math.sin(a) * 7, 3.2, 3000)
+          }
+          if (dist < 7 && safeToHit && osakaSecretRef.current.loc === "none")
+            applyPlayerDamage(36, 7)
+        }
+      }
+      // 第六形態撃破 — 真エンディングフラグを永続化して専用クリア演出へ。
+      function osakaTrueDefeat() {
+        try {
+          localStorage.setItem(OSAKA_TRUE_CLEAR_KEY, "1")
+        } catch {
+          /* ignore */
+        }
+        // 鬼神スーツを即時解放 (FINAL-D) — リロード不要でラックに並ぶ。
+        kishinUnlockedRef.current = true
+        setKishinUnlocked(true)
+        const obPos6 = osakaBossRef.current?.group.position.clone()
+        if (obPos6) osakaDefeatBlast(obPos6) // 撃破大爆発 (FINAL-F)
+        disposeOsakaBoss()
+        SOUNDS.clear()
+        if (isOsakaStage(huntMissionConfigRef.current.stage)) {
+          osakaProgressRef.current.area = "clear"
+          osakaBeginEndingSoon("true")
+        } else {
+          huntReturnToRoom("clear")
+        }
+      }
+      // ══ クリア演出・リザルト (FINAL-C) ══════════════════════════════════════
+      // 暗転 (真は長め) → タイトル → リザルト。リザルトの RETRY は huntBeginMission
+      // を直接呼び直し、MODE SELECT は onExit (WorldClient のモード選択) へ戻す。
+      let osakaEndingGen = 0
+      function osakaRunReset() {
+        osakaRunRef.current = { start: Date.now(), kills: 0, dmg: 0, shots: 0, hits: 0 }
+      }
+      function osakaRunIsLive(): boolean {
+        return (
+          isOsakaStage(huntMissionConfigRef.current.stage) && huntPhaseRef.current === "mission"
+        )
+      }
+      // 鬼モード判定 (FINAL-H)。
+      function osakaOni(): boolean {
+        return huntMissionConfigRef.current.stage === "osaka_oni"
+      }
+      // 鬼モードの守衛 (FINAL-H): 隠し武器への道を強敵「鬼衆」が固める。
+      // 格子戸/ひび壁の前に1体ずつ + 地下通路/隠し部屋の中に1体ずつ。
+      function osakaSpawnOniGuards() {
+        const ax = HUNT_ARENA.x
+        const az = HUNT_ARENA.z
+        const posts: [number, number][] = [
+          [ax + OSAKA_GATE_POS.x, az + OSAKA_GATE_POS.z + 2.5], // 格子戸の前
+          [ax + OSAKA_CRACK_POS.x, az + OSAKA_CRACK_POS.z + 2.5], // ひび壁の前
+          [ax + OSAKA_UNDER.x, az + OSAKA_UNDER.z + 4], // 地下通路の中ほど
+          [ax + OSAKA_HIDDEN.x, az + OSAKA_HIDDEN.z + 1.2], // 隠し部屋の中
+        ]
+        for (const [gx, gz] of posts) {
+          huntMakeEnemy(
+            "terraformer",
+            gx,
+            gz,
+            1.8,
+            0x8a1a1a,
+            0xff2200,
+            25,
+            1400,
+            4.5,
+            false,
+            OSAKA_ONI_GUARD_NAME,
+            "tall",
+          )
+        }
+      }
+      // ══ エリアミニイベント (FINAL-I) ═════════════════════════════════════════
+      let osakaNeonRedAt = 0 // 通天閣クリア演出: この時刻に全ネオンが赤化する
+      let osakaCastleEyes: {
+        mesh: THREE.InstancedMesh
+        until: number
+        pts: [number, number, number][]
+      } | null = null
+      const osakaEyeDummy = new THREE.Object3D()
+      // 道頓堀クリア: 全部の橋が同時に崩れ落ちる。
+      function osakaEventDotonbori() {
+        for (const b of osakaBridges) {
+          if (b.state !== "falling") b.state = "falling"
+        }
+        osakaQuake(5, 900)
+        SOUNDS.collapse()
+        osakaShowCutin("道頓堀は終わった", null, "form")
+      }
+      // 通天閣クリア: ネオン全消灯 → (1.4s後) 真っ赤に染まる。頂上灯は爆発で消滅。
+      function osakaEventTsutenkaku() {
+        const A2 = osakaAnim
+        if (A2) {
+          for (const n of A2.neon) {
+            n.base = 0
+            n.mat.emissiveIntensity = 0
+          }
+          const orb = osakaMapMeshesRef.current[0]?.getObjectByName("osakaTowerOrb")
+          if (orb) {
+            const wp = new THREE.Vector3()
+            orb.getWorldPosition(wp)
+            spawnExplosion(wp, false, false)
+            spawnExplosion(wp.clone().add(new THREE.Vector3(1.2, 1, 0)), true, false)
+            orb.visible = false
+          }
+          if (A2.towerLight) A2.towerLight.intensity = 0
+          A2.towerOrbMat = null // アニメータの hue サイクルから外す
+          A2.towerLight = null
+        }
+        SOUNDS.rpg()
+        osakaQuake(4, 600)
+        osakaNeonRedAt = Date.now() + 1400
+      }
+      // 大阪城ボス出現: 窓に無数の目玉が明滅 + 地震 + 外壁の剥落。
+      function osakaEventCastle() {
+        osakaBanner("城主は既にいない")
+        osakaQuake(7, 1600)
+        SOUNDS.collapse()
+        const n = isMobileDevice ? 12 : 24
+        const geo = new THREE.SphereGeometry(0.42, 8, 8)
+        const mat = new THREE.MeshLambertMaterial({
+          color: 0xf2ece0,
+          emissive: 0xff2200,
+          emissiveIntensity: 1.6,
+        })
+        const im = new THREE.InstancedMesh(geo, mat, n)
+        im.frustumCulled = false
+        // 天守5層の窓の高さに合わせて散らす ([幅, 窓の高さ] per tier)。
+        const tiers: [number, number][] = [
+          [22, 11.3],
+          [18, 16.5],
+          [15, 20.7],
+          [12, 24.4],
+          [9, 27.9],
+        ]
+        const pts: [number, number, number][] = []
+        const czw = HUNT_ARENA.z - 78 // 天守中心 (world z)
+        for (let i = 0; i < n; i++) {
+          const tier = tiers[i % tiers.length] ?? [12, 16]
+          pts.push([
+            HUNT_ARENA.x + (Math.random() - 0.5) * tier[0] * 0.7,
+            tier[1],
+            czw + tier[0] / 2 + 0.4,
+          ])
+        }
+        pts.forEach((p, i) => {
+          osakaEyeDummy.position.set(p[0], p[1], p[2])
+          osakaEyeDummy.scale.setScalar(0.9)
+          osakaEyeDummy.updateMatrix()
+          im.setMatrixAt(i, osakaEyeDummy.matrix)
+        })
+        im.instanceMatrix.needsUpdate = true
+        scene.add(im)
+        osakaCastleEyes = { mesh: im, until: Date.now() + 7000, pts }
+        // 外壁の剥落 — 大きめの石塊が南面から落ちる (debris 更新系に相乗り)。
+        const S = osakaSecret
+        if (S) {
+          for (let i = 0; i < (isMobileDevice ? 5 : 9); i++) {
+            const dm = new THREE.Mesh(osakaDebrisGeo, osakaDebrisMat)
+            dm.position.set(
+              HUNT_ARENA.x - 14 + Math.random() * 28,
+              5.5 + Math.random() * 3.5,
+              czw + 15.3,
+            )
+            dm.scale.setScalar(2.2 + Math.random() * 2)
+            scene.add(dm)
+            S.debris.push({
+              mesh: dm,
+              vx: (Math.random() - 0.5) * 1.5,
+              vy: 0.5,
+              vz: 1 + Math.random() * 2,
+              t: -Math.random() * 0.5,
+            })
+          }
+        }
+      }
+      function osakaRunShot() {
+        if (osakaRunIsLive()) osakaRunRef.current.shots++
+      }
+      function osakaRunHit() {
+        if (osakaRunIsLive()) osakaRunRef.current.hits++
+      }
+      function osakaRunHurt(dmg: number) {
+        if (osakaRunIsLive()) osakaRunRef.current.dmg += dmg
+      }
+      // ランク評価: タイム・被ダメ・命中率・真ルートで加点し S/A/B/C を返す。
+      function osakaComputeRank(
+        timeSec: number,
+        dmg: number,
+        acc: number,
+        trueKill: boolean,
+      ): "S" | "A" | "B" | "C" {
+        let pts = 0
+        if (timeSec < 480) pts += 2
+        else if (timeSec < 720) pts += 1
+        if (dmg === 0) pts += 3
+        else if (dmg < 150) pts += 2
+        else if (dmg < 400) pts += 1
+        if (acc > 0.5) pts += 1
+        if (trueKill) pts += 1
+        return pts >= 6 ? "S" : pts >= 4 ? "A" : pts >= 2 ? "B" : "C"
+      }
+      // 撃破大爆発 (FINAL-F) を見せ切ってから暗転に入る。即時に無敵+入力ロック
+      // だけ掛け、950ms 後に本編のエンディングを開始する。
+      function osakaBeginEndingSoon(kind: "normal" | "true") {
+        huntInputLockRef.current = true
+        spawnInvulnUntilRef.current = Date.now() + 600000
+        window.setTimeout(() => {
+          if (!osakaEndingRef.current && isOsakaStage(huntMissionConfigRef.current.stage))
+            osakaStartEnding(kind)
+        }, 950)
+      }
+      function osakaStartEnding(kind: "normal" | "true") {
+        const run = osakaRunRef.current
+        const timeSec = Math.max(1, Math.floor((Date.now() - run.start) / 1000))
+        const accuracy = run.shots > 0 ? run.hits / run.shots : 0
+        // ── スコアボーナス (FINAL-E): クリア + 隠し武器発見 + ノーダメ ──
+        const sst = osakaSecretRef.current
+        const oni = osakaOni()
+        let bonus = kind === "true" ? 15000 : 5000
+        if (sst.bladeTaken) bonus += 2000
+        if (sst.spearTaken) bonus += 2000
+        if (run.dmg === 0) bonus += 10000 // ノーダメクリア
+        if (oni) bonus += OSAKA_ONI_CLEAR_BONUS // 鬼モード (FINAL-H)
+        // 称号「大阪の鬼」: 鬼モードクリアで解放 + 永続化。
+        let titleNew = false
+        if (oni) {
+          try {
+            titleNew = localStorage.getItem(OSAKA_ONI_CLEAR_KEY) !== "1"
+            localStorage.setItem(OSAKA_ONI_CLEAR_KEY, "1")
+          } catch {
+            /* ignore */
+          }
+          oniTitleOwnedRef.current = true
+          setOniTitleOwned(true)
+        }
+        scoreRef.current += bonus
+        setScore(scoreRef.current)
+        // 自己ベスト (localStorage) — 更新なら保存して result でバッジ表示。
+        let best = 0
+        try {
+          best = Number.parseInt(localStorage.getItem(OSAKA_BEST_KEY) ?? "0", 10) || 0
+        } catch {
+          /* ignore */
+        }
+        const newBest = scoreRef.current > best
+        if (newBest) {
+          try {
+            localStorage.setItem(OSAKA_BEST_KEY, String(scoreRef.current))
+          } catch {
+            /* ignore */
+          }
+        }
+        // 既存ランキングへ送信 (FINAL-E): クリアを1試合 (victory) として記録。
+        // 未ログイン/オフラインは黙って読み飛ばす (401/network は無視)。
+        fetch(`${API_URL}/api/profile/stats`, {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            kills: run.kills,
+            deaths: 0,
+            score: scoreRef.current,
+            killstreak: maxKillstreakRef.current,
+            headshots: headshotsRef.current,
+            durationSec: timeSec,
+            mode: "osaka",
+            mapId: "osaka",
+            weaponKills: weaponKillsRef.current,
+            result: "victory",
+          }),
+        }).catch(() => {
+          /* ignore */
+        })
+        const st = {
+          kind,
+          stage: "fade" as const,
+          score: scoreRef.current,
+          kills: run.kills,
+          accuracy,
+          timeSec,
+          damageTaken: Math.round(run.dmg),
+          rank: osakaComputeRank(timeSec, run.dmg, accuracy, kind === "true"),
+          bonus,
+          best,
+          newBest,
+          oni,
+          titleNew,
+        }
+        huntClearEnemies() // 静かな暗転のために残存雑魚を掃く
+        huntInputLockRef.current = true
+        spawnInvulnUntilRef.current = Date.now() + 600000
+        document.exitPointerLock?.()
+        osakaEndingRef.current = st
+        setOsakaEnding(st)
+        const gen = ++osakaEndingGen
+        const fadeMs = kind === "true" ? 2600 : 1300
+        const titleMs = kind === "true" ? 3200 : 2000
+        window.setTimeout(() => {
+          if (osakaEndingGen !== gen || !osakaEndingRef.current) return
+          const s2 = { ...osakaEndingRef.current, stage: "title" as const }
+          osakaEndingRef.current = s2
+          setOsakaEnding(s2)
+          SOUNDS.huntJingle()
+          window.setTimeout(() => {
+            if (osakaEndingGen !== gen || !osakaEndingRef.current) return
+            const s3 = { ...osakaEndingRef.current, stage: "result" as const }
+            osakaEndingRef.current = s3
+            setOsakaEnding(s3)
+            SOUNDS.huntTally()
+          }, titleMs)
+        }, fadeMs)
+      }
+      function osakaCloseEnding() {
+        osakaEndingGen++
+        osakaEndingRef.current = null
+        setOsakaEnding(null)
+        huntInputLockRef.current = false
+      }
+      // JSX の RETRY ボタンから呼ばれる (effect 内関数への橋)。
+      osakaEndingActionRef.current = {
+        retry: () => {
+          osakaCloseEnding()
+          spawnInvulnUntilRef.current = Date.now() + 2500
+          huntBeginMission()
+        },
+      }
+      // ══ 演出強化 (FINAL-F): カットイン / ヒットストップ / 撃破大爆発 ═════════
+      let osakaCutinGen = 0
+      function osakaShowCutin(title: string, sub: string | null, tone: "form" | "true") {
+        const gen = ++osakaCutinGen
+        setOsakaCutin({ title, sub, tone })
+        window.setTimeout(() => {
+          if (osakaCutinGen === gen) setOsakaCutin(null)
+        }, 2500)
+      }
+      let osakaHitStopUntil = 0 // この時刻まで dt を 6% に潰す (一瞬の時間停止)
+      let osakaHudFrame = 0
+      let osakaHudLastPct = -1
+      let osakaHudLastPhase = 0
+      // 撃破大爆発: 炎の環 + 白フラッシュ + ヒットストップ + 大シェイク。
+      function osakaDefeatBlast(center: THREE.Vector3) {
+        const n = isMobileDevice ? 7 : 14
+        for (let i = 0; i < n; i++) {
+          const a = (i / n) * Math.PI * 2
+          const rr = 1.5 + (i % 3) * 2.2
+          const py = 0.8 + (i % 4) * 2.0
+          window.setTimeout(() => {
+            spawnExplosion(
+              new THREE.Vector3(center.x + Math.cos(a) * rr, py, center.z + Math.sin(a) * rr),
+              false,
+              false,
+            )
+          }, i * 45)
+        }
+        setHuntWhiteFlash(true)
+        window.setTimeout(() => setHuntWhiteFlash(false), 280)
+        osakaHitStopUntil = Date.now() + 240
+        cameraShakeRef.current.intensity = 10
+        SOUNDS.rpg()
+        SOUNDS.collapse()
+      }
       // Per-frame boss driver: core pulse/reveal, limb sway, stalk, fodder top-up
       // and the form-specific attack on the attackTimer (1.5× cadence while raging).
       function updateOsakaBoss(dt: number) {
@@ -11933,6 +13389,16 @@ export default function ThreeWorld({
         if (!ob || ob.transitioning) return
         const now = Date.now()
         const t = now / 1000
+        // ボス専用HPバー (FINAL-F): 5フレに1回、変化があった時だけ state 更新。
+        osakaHudFrame++
+        if (osakaHudFrame % 5 === 0) {
+          const hudPct = Math.max(0, ob.phaseHp / ob.phaseMaxHp)
+          if (Math.abs(hudPct - osakaHudLastPct) > 0.004 || osakaHudLastPhase !== ob.phase) {
+            osakaHudLastPct = hudPct
+            osakaHudLastPhase = ob.phase
+            setOsakaBossHud({ name: OSAKA_FORM_NAMES[ob.phase], pct: hudPct, phase: ob.phase })
+          }
+        }
         // Form 5: the three cores rotate exposure (only the lit one is hittable);
         // at ≤20% HP the boss goes berserk — every core exposed + red screen flash.
         if (ob.phase === 5) {
@@ -11950,8 +13416,63 @@ export default function ThreeWorld({
             })
           }
         }
+        // 第六形態 (FINAL-B): コアは5つ常時露出、ただし高速で体表を周回する。
+        // HP10%以下で最終発狂 — コア固定露出 + 画面振動継続 + 赤フラッシュ。
+        if (ob.phase === 6) {
+          const f6 = ob.phaseHp / ob.phaseMaxHp <= 0.1
+          if (f6 !== osakaFrenzyRef.current) {
+            osakaFrenzyRef.current = f6
+            setOsakaFrenzy(f6)
+          }
+          ob.cores.forEach((co, i) => {
+            co.visible = true
+            if (f6) {
+              const a = (i / ob.cores.length) * Math.PI * 2
+              co.position.set(Math.cos(a) * 4.4, 7 + (i % 3) * 3.4, Math.sin(a) * 4.4)
+            } else {
+              const a = t * (1.7 + i * 0.21) + i * ((Math.PI * 2) / 5)
+              co.position.set(
+                Math.cos(a) * 4.6,
+                8 + Math.sin(t * (1.2 + i * 0.13) + i * 1.8) * 4.2,
+                Math.sin(a) * 4.6,
+              )
+            }
+          })
+          if (f6) cameraShakeRef.current.intensity = Math.max(cameraShakeRef.current.intensity, 1.4)
+          // 目 (Instanced) は共有マテリアルで脈動。
+          if (ob.eyeMat) ob.eyeMat.emissiveIntensity = 1.2 + (Math.sin(t * 7) * 0.5 + 0.5) * 1.4
+          // 腕の束は 2フレームに1回だけうねらせる (80本 setMatrixAt の間引き)。
+          if (ob.armInst && ob.armData) {
+            osakaArmFrame++
+            if ((osakaArmFrame & 1) === 0) {
+              for (let i = 0; i < ob.armData.length; i++) {
+                const ad = ob.armData[i]
+                if (!ad) continue
+                const wob = Math.sin(t * 1.7 + ad.phase) * 0.22
+                osakaArmDummy.position.set(Math.cos(ad.ang) * ad.r, ad.y, Math.sin(ad.ang) * ad.r)
+                osakaArmDummy.rotation.set(
+                  -Math.sin(ad.ang) * (ad.tilt + wob),
+                  0,
+                  Math.cos(ad.ang) * (ad.tilt + wob),
+                )
+                osakaArmDummy.updateMatrix()
+                ob.armInst.setMatrixAt(i, osakaArmDummy.matrix)
+              }
+              ob.armInst.instanceMatrix.needsUpdate = true
+            }
+          }
+        }
         const pulse = 0.85 + (Math.sin(t * 4) * 0.5 + 0.5) * 0.3 // 0.85..1.15
-        const coreBase = ob.phase === 2 ? 1.4 : ob.phase === 4 ? 1.6 : ob.phase === 5 ? 1.3 : 1.0
+        const coreBase =
+          ob.phase === 6
+            ? 2.4
+            : ob.phase === 2
+              ? 1.4
+              : ob.phase === 4
+                ? 1.6
+                : ob.phase === 5
+                  ? 1.3
+                  : 1.0
         for (const co of ob.cores) {
           if (co.visible) co.scale.setScalar(coreBase * pulse)
         }
@@ -11988,8 +13509,15 @@ export default function ThreeWorld({
         const rage = hpFrac <= 0.5
         const furious = hpFrac <= 0.25
         const moveSpeed =
-          (ob.phase === 1 ? 3.5 : ob.phase === 2 ? 2.0 : ob.phase === 4 ? 1.5 : 0.8) *
-          (furious ? 1.3 : 1)
+          (ob.phase === 6
+            ? 0.6
+            : ob.phase === 1
+              ? 3.5
+              : ob.phase === 2
+                ? 2.0
+                : ob.phase === 4
+                  ? 1.5
+                  : 0.8) * (furious ? 1.3 : 1)
         if (dist > 3) {
           ob.group.position.x += (toX / dist) * moveSpeed * dt
           ob.group.position.z += (toZ / dist) * moveSpeed * dt
@@ -12050,6 +13578,23 @@ export default function ThreeWorld({
           for (let i = -1; i <= 1; i++) {
             const a = baseAng + i * 0.4
             osakaPool(bossPos.x + Math.cos(a) * 7, bossPos.z + Math.sin(a) * 7, 3.2, 3000)
+          }
+        }
+        // ── 第六形態の専用サブ攻撃 (FINAL-B) ──
+        if (ob.phase === 6 && now >= osakaAuxA) {
+          // 全画面攻撃: 予兆 → 安全地帯1箇所以外に大ダメージ波。
+          osakaAuxA = now + (furious ? 6500 : 9000)
+          osakaFullscreenWave(px, pz)
+        }
+        if (ob.phase === 6 && now >= osakaAuxB) {
+          // 時空歪曲 (移動半減) と分身召喚 (過去形態×4) を交互気味に。
+          osakaAuxB = now + 7000
+          if (Math.random() < 0.5) {
+            osakaSlowUntil = now + 3500
+            showNotification("⌛ 時空歪曲 — 体が重い……")
+            SOUNDS.huntWarn()
+          } else {
+            osakaSummonClones()
           }
         }
         ob.attackTimer -= dt
@@ -12115,7 +13660,7 @@ export default function ThreeWorld({
           }
           osakaQuake(5) // the charge shakes the ground
           cooldown = 4.0
-        } else {
+        } else if (ob.phase === 5) {
           // form 5 五重混体: every prior form's attack at random, plus a doubled
           // 16-way iron-ball barrage. Frenzy (≤20% HP) rides the furious cadence.
           const roll = Math.random()
@@ -12198,8 +13743,18 @@ export default function ThreeWorld({
             if (dist < 6 && safeToHit) applyPlayerDamage(34, 7)
           }
           cooldown = 1.4
+        } else {
+          // 第六形態 真・五変化 (FINAL-B): 全形態の攻撃プールから毎回2種を同時に。
+          const a1 = Math.floor(Math.random() * 6)
+          let a2 = Math.floor(Math.random() * 5)
+          if (a2 >= a1) a2 += 1
+          osakaTrueAttack(a1)
+          osakaTrueAttack(a2)
+          cooldown = 1.7
         }
-        ob.attackTimer = cooldown * (furious ? 0.5 : rage ? 0.667 : 1)
+        // 最終発狂 (第六形態 HP≤10%) は最速ケイデンス。
+        const f6Frenzy = ob.phase === 6 && ob.phaseHp / ob.phaseMaxHp <= 0.1
+        ob.attackTimer = cooldown * (f6Frenzy ? 0.35 : furious ? 0.5 : rage ? 0.667 : 1)
       }
       // ══ OSAKA area progression (Phase 2b) ════════════════════════════════════
       // Dotonbori → Tsutenkaku → Castle, each: clear the fodder wave → mid-boss →
@@ -12220,7 +13775,8 @@ export default function ThreeWorld({
       // Spawn a fixed fodder wave for an area (mobile counts are roughly halved).
       function osakaSpawnAreaZako(area: "dotonbori" | "tsutenkaku" | "castle") {
         const counts = isMobileDevice ? OSAKA_AREA_ZAKO_MOBILE : OSAKA_AREA_ZAKO
-        const n = counts[area]
+        // 鬼モード (FINAL-H): 雑魚 1.5倍。
+        const n = Math.ceil(counts[area] * (osakaOni() ? OSAKA_ONI_ZAKO_MULT : 1))
         const c = osakaAreaCenter(area)
         for (let i = 0; i < n; i++) {
           const a = Math.random() * Math.PI * 2
@@ -12322,8 +13878,8 @@ export default function ThreeWorld({
         osakaMidBossRef.current = {
           kind: "tengu",
           group: g,
-          hp: OSAKA_TENGU_HP,
-          maxHp: OSAKA_TENGU_HP,
+          hp: OSAKA_TENGU_HP * (osakaOni() ? OSAKA_ONI_MIDBOSS_HP_MULT : 1),
+          maxHp: OSAKA_TENGU_HP * (osakaOni() ? OSAKA_ONI_MIDBOSS_HP_MULT : 1),
           baseY: 5.5,
           hover: 0,
           diveCd: 5,
@@ -12416,8 +13972,8 @@ export default function ThreeWorld({
         osakaMidBossRef.current = {
           kind: "yamaya",
           group: g,
-          hp: OSAKA_YAMAYA_HP,
-          maxHp: OSAKA_YAMAYA_HP,
+          hp: OSAKA_YAMAYA_HP * (osakaOni() ? OSAKA_ONI_MIDBOSS_HP_MULT : 1),
+          maxHp: OSAKA_YAMAYA_HP * (osakaOni() ? OSAKA_ONI_MIDBOSS_HP_MULT : 1),
           baseY: 0,
           hover: 0,
           diveCd: 0,
@@ -12481,10 +14037,12 @@ export default function ThreeWorld({
         p.midBossSpawned = false
         if (mb.kind === "tengu") {
           p.area = "tsutenkaku"
+          osakaEventDotonbori() // 橋の全崩落 +「道頓堀は終わった」(FINAL-I)
           osakaBanner("通天閣へ進め")
           osakaSpawnAreaZako("tsutenkaku")
         } else {
           p.area = "castle"
+          osakaEventTsutenkaku() // ネオン赤化 + 頂上灯爆発 (FINAL-I)
           osakaBanner("大阪城へ進め")
           osakaSpawnAreaZako("castle")
         }
@@ -12499,6 +14057,7 @@ export default function ThreeWorld({
         }
         const now = Date.now()
         const safeToHit = now > spawnInvulnUntilRef.current
+        const oniCd = osakaOni() ? OSAKA_ONI_MIDBOSS_CD_MULT : 1 // 鬼: 攻撃頻度1.5倍
         const px = focalPoint.x
         const pz = focalPoint.z
         const toX = px - mb.group.position.x
@@ -12522,7 +14081,7 @@ export default function ThreeWorld({
             mb.group.position.x += (toX / dist) * step
             mb.group.position.z += (toZ / dist) * step
             mb.group.position.y = Math.max(2.0, mb.group.position.y - 9 * dt)
-            if (dist < 4 && !mb.diveHit && safeToHit) {
+            if (dist < 4 && !mb.diveHit && safeToHit && osakaSecretRef.current.loc === "none") {
               applyPlayerDamage(60, 7)
               mb.diveHit = true
             }
@@ -12536,18 +14095,19 @@ export default function ThreeWorld({
             if (mb.diveCd <= 0) {
               mb.diving = 0.9
               mb.diveHit = false
-              mb.diveCd = 5
+              mb.diveCd = 5 * oniCd
             }
           }
           // Front gust cone (the boss faces the player, so a near player is in it).
           if (mb.gustCd <= 0) {
-            mb.gustCd = 3
+            mb.gustCd = 3 * oniCd
             spawnExplosion(
               new THREE.Vector3(mb.group.position.x, 2, mb.group.position.z),
               true,
               false,
             )
-            if (dist < 12 && safeToHit) applyPlayerDamage(40, 5)
+            if (dist < 12 && safeToHit && osakaSecretRef.current.loc === "none")
+              applyPlayerDamage(40, 5)
           }
         } else {
           // Yamaya: slow ground stalk + rock volleys + quakes; enraged below 50%.
@@ -12560,7 +14120,7 @@ export default function ThreeWorld({
           mb.rockCd -= dt
           mb.quakeCd -= dt
           if (mb.rockCd <= 0) {
-            mb.rockCd = rage ? 2 : 4
+            mb.rockCd = (rage ? 2 : 4) * oniCd
             const from = new THREE.Vector3(mb.group.position.x, 4, mb.group.position.z)
             const aim = new THREE.Vector3(toX, 0, toZ)
             for (let i = -1; i <= 1; i++) {
@@ -12569,10 +14129,11 @@ export default function ThreeWorld({
             }
           }
           if (mb.quakeCd <= 0) {
-            mb.quakeCd = 8
+            mb.quakeCd = 8 * oniCd
             cameraShakeRef.current.intensity = 6
             for (const fl of mb.flash) fl.intensity = 6
-            if (dist < 15 && safeToHit) applyPlayerDamage(30, 8)
+            if (dist < 15 && safeToHit && osakaSecretRef.current.loc === "none")
+              applyPlayerDamage(30, 8)
           }
           for (const fl of mb.flash) fl.intensity = Math.max(0, fl.intensity - dt * 12)
         }
@@ -12588,8 +14149,8 @@ export default function ThreeWorld({
           // No mid-boss in the Castle — the wave hands straight to 五変化.
           p.area = "boss"
           p.midBossSpawned = true
-          osakaBanner("五変化 妖怪 出現")
-          spawnOsakaBoss()
+          osakaEventCastle() // 目玉窓 + 地震 + 外壁剥落 +「城主は既にいない」(FINAL-I)
+          spawnOsakaBoss() // 出現アナウンスは形態カットイン (FINAL-F) が担う
         } else {
           p.midBossSpawned = true
           if (p.area === "dotonbori") spawnTengu()
@@ -12638,9 +14199,10 @@ export default function ThreeWorld({
       let huntPanelClickAt = 0 // throttle held-fire so one tap = one selection
       // Clickable regions in normalised canvas space (top-left origin).
       type HuntPanelHit =
-        | { kind: "stage"; value: "outdoor" | "indoor" | "osaka" }
+        | { kind: "stage"; value: "outdoor" | "indoor" | "osaka" | "osaka_oni" }
         | { kind: "difficulty"; value: 1 | 2 | 3 }
         | { kind: "deploy" }
+      // 4段目に「OSAKA 鬼」(FINAL-H) が入ったぶん、ステージ行は少し詰めてある。
       const HUNT_PANEL_REGIONS: {
         x0: number
         y0: number
@@ -12648,13 +14210,14 @@ export default function ThreeWorld({
         y1: number
         hit: HuntPanelHit
       }[] = [
-        { x0: 0.05, y0: 0.24, x1: 0.46, y1: 0.36, hit: { kind: "stage", value: "outdoor" } },
-        { x0: 0.05, y0: 0.38, x1: 0.46, y1: 0.5, hit: { kind: "stage", value: "indoor" } },
-        { x0: 0.05, y0: 0.52, x1: 0.46, y1: 0.64, hit: { kind: "stage", value: "osaka" } },
+        { x0: 0.05, y0: 0.22, x1: 0.46, y1: 0.33, hit: { kind: "stage", value: "outdoor" } },
+        { x0: 0.05, y0: 0.345, x1: 0.46, y1: 0.455, hit: { kind: "stage", value: "indoor" } },
+        { x0: 0.05, y0: 0.47, x1: 0.46, y1: 0.58, hit: { kind: "stage", value: "osaka" } },
+        { x0: 0.05, y0: 0.595, x1: 0.46, y1: 0.705, hit: { kind: "stage", value: "osaka_oni" } },
         { x0: 0.54, y0: 0.24, x1: 0.95, y1: 0.36, hit: { kind: "difficulty", value: 1 } },
         { x0: 0.54, y0: 0.38, x1: 0.95, y1: 0.5, hit: { kind: "difficulty", value: 2 } },
         { x0: 0.54, y0: 0.52, x1: 0.95, y1: 0.64, hit: { kind: "difficulty", value: 3 } },
-        { x0: 0.22, y0: 0.72, x1: 0.78, y1: 0.9, hit: { kind: "deploy" } },
+        { x0: 0.22, y0: 0.74, x1: 0.78, y1: 0.92, hit: { kind: "deploy" } },
       ]
       // ── HUNT indoor stage overlay (built per mission, disposed on return) ─────
       let huntIndoorGroup: THREE.Group | null = null
@@ -12998,14 +14561,18 @@ export default function ThreeWorld({
         ctx.font = "bold 38px monospace"
         ctx.fillText("MISSION SELECT", W / 2, H * 0.12)
         // Column headers.
-        const osaka = cfg.stage === "osaka"
+        const osaka = isOsakaStage(cfg.stage)
         ctx.fillStyle = "#88ffcc"
         ctx.font = "bold 22px monospace"
         ctx.fillText("STAGE", W * 0.255, H * 0.18)
         // OSAKA is a fixed max-difficulty stage → the difficulty column is hidden.
         if (osaka) {
           ctx.fillStyle = "#ff4444"
-          ctx.fillText("OSAKA — 固定 / 最高難度", W * 0.745, H * 0.42)
+          ctx.fillText(
+            cfg.stage === "osaka_oni" ? "OSAKA 鬼 — 全てが上回る" : "OSAKA — 固定 / 最高難度",
+            W * 0.745,
+            H * 0.42,
+          )
         } else {
           ctx.fillText("DIFFICULTY", W * 0.745, H * 0.18)
         }
@@ -13018,8 +14585,10 @@ export default function ThreeWorld({
           const deploy = r.hit.kind === "deploy"
           // OSAKA is the fixed max-difficulty stage → render it in red so it reads
           // as the dangerous endgame option (green stays the normal accent).
-          const isOsakaRow = r.hit.kind === "stage" && r.hit.value === "osaka"
-          const accent = isOsakaRow ? "#ff4444" : "#00ff88"
+          // 鬼 (FINAL-H) はさらに毒々しい赤紫で「上がいる」ことを示す。
+          const isOsakaRow = r.hit.kind === "stage" && isOsakaStage(r.hit.value)
+          const isOniRow = r.hit.kind === "stage" && r.hit.value === "osaka_oni"
+          const accent = isOniRow ? "#ff2266" : isOsakaRow ? "#ff4444" : "#00ff88"
           const x = r.x0 * W
           const y = r.y0 * H
           const w = (r.x1 - r.x0) * W
@@ -13039,7 +14608,9 @@ export default function ThreeWorld({
           ctx.font = deploy ? "bold 30px monospace" : "bold 26px monospace"
           const label =
             r.hit.kind === "stage"
-              ? r.hit.value.toUpperCase()
+              ? r.hit.value === "osaka_oni"
+                ? "OSAKA 鬼"
+                : r.hit.value.toUpperCase()
               : r.hit.kind === "difficulty"
                 ? `LV${r.hit.value}`
                 : "[ DEPLOY ]"
@@ -13052,7 +14623,7 @@ export default function ThreeWorld({
       function huntPanelHitAt(u: number, v: number): HuntPanelHit | null {
         const cx = u
         const cy = 1 - v // canvas rows run top→bottom
-        const osaka = huntMissionConfigRef.current.stage === "osaka"
+        const osaka = isOsakaStage(huntMissionConfigRef.current.stage)
         for (const r of HUNT_PANEL_REGIONS) {
           if (osaka && r.hit.kind === "difficulty") continue // hidden in OSAKA
           if (cx >= r.x0 && cx <= r.x1 && cy >= r.y0 && cy <= r.y1) return r.hit
@@ -13724,6 +15295,7 @@ export default function ThreeWorld({
         })
         const orbTop = new THREE.Mesh(new THREE.SphereGeometry(2.5, sseg(12), sseg(12)), orbMat)
         orbTop.position.set(0, 47, 0)
+        orbTop.name = "osakaTowerOrb" // 通天閣クリア演出 (FINAL-I) が爆破で消す
         add(orbTop)
         const towerLight = new THREE.PointLight(0xffcc00, 8, 60)
         towerLight.castShadow = false
@@ -14159,6 +15731,230 @@ export default function ThreeWorld({
         instAdd(trunkGeo, trunkMat, trunkXf)
         const blossomInst = instAdd(blossomGeo, sakuraMat, blossomXf)
         if (blossomInst) osakaCull.push({ obj: blossomInst, cx: 0, cz: cz + 50, r: 80 })
+        // ════ SECRET ROUTES (FINAL-A) — 隠しルート2種の構造物 ═══════════════════
+        // 静的シェルは mAdd でマージ (draw call 増ほぼゼロ)、動く物 (格子戸・ひび
+        // 壁・武器・非常灯) だけ個別。内部空間はフィールド外の y=0 平面に実体を置き、
+        // updateOsakaSecrets が転送とクランプを行う。
+        {
+          const secretStone = new THREE.MeshLambertMaterial({ color: 0x35302a })
+          const secretDark = new THREE.MeshLambertMaterial({ color: 0x1f1c19 })
+          const shell = (
+            w: number,
+            h: number,
+            d: number,
+            x: number,
+            y: number,
+            z: number,
+            mat: THREE.MeshLambertMaterial,
+          ) => {
+            const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat)
+            m.position.set(x, y, z)
+            mAdd(m)
+          }
+          // ── 地下通路 (幅6 × 高3 × 長40) ──
+          const { x: ux, z: uz, w: uw, len: ul, h: uh } = OSAKA_UNDER
+          shell(uw + 2, 0.4, ul + 2, ux, -0.2, uz, secretDark) // 床
+          shell(uw + 2, 0.4, ul + 2, ux, uh + 0.2, uz, secretDark) // 天井
+          shell(0.4, uh, ul + 2, ux - uw / 2 - 0.2, uh / 2, uz, secretStone)
+          shell(0.4, uh, ul + 2, ux + uw / 2 + 0.2, uh / 2, uz, secretStone)
+          shell(uw + 0.8, uh, 0.4, ux, uh / 2, uz - ul / 2 - 0.2, secretStone)
+          shell(uw + 0.8, uh, 0.4, ux, uh / 2, uz + ul / 2 + 0.2, secretStone)
+          // 赤い非常灯 ×4 — 灯体はちらつく neon マテリアル (マージ)、光源は個別
+          // PointLight (updateOsakaSecrets が明滅)。
+          const undLightMat = neonMat(0xff2222, 2.2, true, 9)
+          const underLights: THREE.PointLight[] = []
+          for (let i = 0; i < 4; i++) {
+            const lz = uz - ul / 2 + 6 + i * ((ul - 12) / 3)
+            const lampBox = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.18, 0.14), undLightMat)
+            lampBox.position.set(ux - uw / 2 + 0.35, uh - 0.4, lz)
+            mAdd(lampBox)
+            // 灯体4つは見た目通り、PointLight はモバイル2灯に間引く (FINAL-G)。
+            if (!isMobileDevice || i % 2 === 0) {
+              const pl = new THREE.PointLight(0xff3322, 1.6, 9)
+              pl.position.set(ux - uw / 2 + 0.6, uh - 0.5, lz)
+              add(pl)
+              underLights.push(pl)
+            }
+          }
+          // 出入りパッド (緑の発光円盤) — [E] で地上へ戻る目印。
+          const padMat = neonMat(0x00ff88, 1.6, false)
+          const upad = new THREE.Mesh(new THREE.CylinderGeometry(1.0, 1.0, 0.08, 12), padMat)
+          upad.position.set(ux, 0.05, uz - ul / 2 + 1.6)
+          mAdd(upad)
+          // 鬼刀 — 石の台座 + 浮遊する刀 (bob/rotate は updateOsakaSecrets)。
+          shell(1.4, 0.9, 1.4, ux, 0.45, uz + ul / 2 - 4, secretStone)
+          const blade = new THREE.Group()
+          const bladeMat = new THREE.MeshStandardMaterial({
+            color: 0x991111,
+            emissive: 0xff2200,
+            emissiveIntensity: 0.9,
+            metalness: 0.7,
+            roughness: 0.25,
+          })
+          const goldTrimMat = new THREE.MeshStandardMaterial({
+            color: 0xd4af37,
+            emissive: 0xd4af37,
+            emissiveIntensity: 0.4,
+          })
+          const bladeEdge = new THREE.Mesh(new THREE.BoxGeometry(0.07, 1.15, 0.16), bladeMat)
+          bladeEdge.position.y = 0.62
+          blade.add(bladeEdge)
+          const tsuba = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.16, 0.04, 8), goldTrimMat)
+          blade.add(tsuba)
+          const grip = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.34, 0.09), secretDark)
+          grip.position.y = -0.2
+          blade.add(grip)
+          blade.position.set(ux, 1.45, uz + ul / 2 - 4)
+          blade.rotation.z = 0.5
+          add(blade)
+          if (!isMobileDevice) {
+            const bladeGlow = new THREE.PointLight(0xff3311, 1.4, 7)
+            bladeGlow.position.set(ux, 1.7, uz + ul / 2 - 4)
+            add(bladeGlow)
+          }
+          // ── 石造りの隠し部屋 (8×8×5) ──
+          const { x: hx, z: hz, s: hs, h: hh } = OSAKA_HIDDEN
+          shell(hs + 2, 0.4, hs + 2, hx, -0.2, hz, secretDark)
+          shell(hs + 2, 0.4, hs + 2, hx, hh + 0.2, hz, secretDark)
+          shell(0.4, hh, hs + 2, hx - hs / 2 - 0.2, hh / 2, hz, secretStone)
+          shell(0.4, hh, hs + 2, hx + hs / 2 + 0.2, hh / 2, hz, secretStone)
+          shell(hs + 0.8, hh, 0.4, hx, hh / 2, hz - hs / 2 - 0.2, secretStone)
+          shell(hs + 0.8, hh, 0.4, hx, hh / 2, hz + hs / 2 + 0.2, secretStone)
+          // 松明 ×2 (オレンジの光 + 炎の発光体)。
+          const torchMat = neonMat(0xff9933, 2.0, false)
+          const torchXs = [hx - hs / 2 + 0.6, hx + hs / 2 - 0.6]
+          for (let ti = 0; ti < torchXs.length; ti++) {
+            const tx = torchXs[ti] ?? hx
+            const flame = new THREE.Mesh(new THREE.SphereGeometry(0.14, 6, 6), torchMat)
+            flame.position.set(tx, 2.6, hz)
+            mAdd(flame)
+            // モバイルは灯1つに間引き (FINAL-G) — 炎の発光体は両方残す。
+            if (!isMobileDevice || ti === 0) {
+              const tl = new THREE.PointLight(0xff8833, 1.8, 10)
+              tl.position.set(tx, 2.6, hz)
+              add(tl)
+            }
+          }
+          const hpad = new THREE.Mesh(new THREE.CylinderGeometry(1.0, 1.0, 0.08, 12), padMat)
+          hpad.position.set(hx, 0.05, hz + hs / 2 - 1.2)
+          mAdd(hpad)
+          // 甲冑台座 + 城主の大槍。
+          shell(1.6, 0.5, 1.6, hx, 0.25, hz - 2.5, secretStone)
+          const armorMat = new THREE.MeshStandardMaterial({
+            color: 0x3a1a1a,
+            metalness: 0.6,
+            roughness: 0.5,
+          })
+          // 甲冑は動かない → mAdd で他の静的物とマージ (FINAL-J)。
+          const torso = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.95, 0.5), armorMat)
+          torso.position.set(hx, 1.0, hz - 2.5)
+          mAdd(torso)
+          const helm = new THREE.Mesh(new THREE.SphereGeometry(0.27, 10, 8), armorMat)
+          helm.position.set(hx, 1.75, hz - 2.5)
+          mAdd(helm)
+          for (const hsx of [-1, 1]) {
+            const horn = new THREE.Mesh(new THREE.ConeGeometry(0.06, 0.5, 6), goldTrimMat)
+            horn.position.set(hx + hsx * 0.18, 2.1, hz - 2.5)
+            horn.rotation.z = -hsx * 0.5
+            mAdd(horn)
+          }
+          const spear = new THREE.Group()
+          const shaft = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.045, 0.045, 3.4, 6),
+            new THREE.MeshStandardMaterial({ color: 0x5a3a22, roughness: 0.7 }),
+          )
+          spear.add(shaft)
+          const spearHead = new THREE.Mesh(new THREE.ConeGeometry(0.12, 0.55, 6), goldTrimMat)
+          spearHead.position.y = 1.95
+          spear.add(spearHead)
+          const spearRing = new THREE.Mesh(new THREE.TorusGeometry(0.09, 0.025, 6, 10), goldTrimMat)
+          spearRing.position.y = 1.62
+          spearRing.rotation.x = Math.PI / 2
+          spear.add(spearRing)
+          spear.position.set(hx + 0.7, 1.7, hz - 2.5)
+          spear.rotation.z = 0.35
+          add(spear)
+          if (!isMobileDevice) {
+            const spearGlow = new THREE.PointLight(0xffcc55, 1.2, 7)
+            spearGlow.position.set(hx + 0.7, 2.2, hz - 2.5)
+            add(spearGlow)
+          }
+          // ── ①格子戸 (道頓堀川岸の水路口) ──
+          const gp = OSAKA_GATE_POS
+          shell(3.2, 3.0, 1.0, gp.x, 1.5, gp.z - 0.55, secretStone) // 水路躯体
+          const recess = new THREE.Mesh(
+            new THREE.PlaneGeometry(2.3, 2.5),
+            new THREE.MeshBasicMaterial({ color: 0x010503 }),
+          )
+          recess.position.set(gp.x, 1.3, gp.z - 0.04)
+          add(recess) // 奥の暗闇 (開いた先がある感)
+          const gate = new THREE.Group()
+          gate.position.set(gp.x - 1.1, 0.1, gp.z) // 左端ヒンジで開く
+          const barMat = new THREE.MeshLambertMaterial({ color: 0x2a2a2a })
+          // 格子9本は1ジオメトリにマージ — 回転する戸全体で 1 draw call (FINAL-G)。
+          const barGeos: THREE.BufferGeometry[] = []
+          for (let i = 0; i < 7; i++) {
+            const bg = new THREE.BoxGeometry(0.07, 2.4, 0.07)
+            bg.translate(0.14 + i * 0.32, 1.2, 0)
+            barGeos.push(bg)
+          }
+          for (const hy of [0.35, 2.05]) {
+            const bg = new THREE.BoxGeometry(2.2, 0.09, 0.09)
+            bg.translate(1.1, hy, 0)
+            barGeos.push(bg)
+          }
+          const gateGeo = mergeGeometries(barGeos, false)
+          for (const bg of barGeos) bg.dispose()
+          if (gateGeo) gate.add(new THREE.Mesh(gateGeo, barMat))
+          add(gate)
+          const gateLight = new THREE.PointLight(0x00ff88, 2.4, 8)
+          gateLight.position.set(gp.x, 1.8, gp.z + 1.2)
+          add(gateLight)
+          // ── ②天守台1F南面のひび割れた壁 (CanvasTexture) ──
+          const cv = document.createElement("canvas")
+          cv.width = 256
+          cv.height = 256
+          const cc = cv.getContext("2d")
+          let crack: THREE.Mesh | null = null
+          if (cc) {
+            cc.fillStyle = "#5f5f50" // 石垣に馴染む地色
+            cc.fillRect(0, 0, 256, 256)
+            cc.strokeStyle = "#16140f"
+            cc.lineWidth = 5
+            cc.beginPath()
+            cc.moveTo(128, 6)
+            let cxp = 128
+            for (let yy = 30; yy <= 250; yy += 22) {
+              cxp += (rnd() - 0.5) * 46
+              cc.lineTo(cxp, yy)
+            }
+            cc.stroke()
+            cc.lineWidth = 2.5
+            for (let b = 0; b < 5; b++) {
+              cc.beginPath()
+              const sy = 40 + b * 42
+              cc.moveTo(128 + (rnd() - 0.5) * 30, sy)
+              cc.lineTo(128 + (rnd() - 0.5) * 170, sy + 18 + rnd() * 22)
+              cc.stroke()
+            }
+            const crackTex = new THREE.CanvasTexture(cv)
+            const crackMat = new THREE.MeshLambertMaterial({ map: crackTex })
+            crack = new THREE.Mesh(new THREE.PlaneGeometry(3.2, 2.7), crackMat)
+            crack.position.set(OSAKA_CRACK_POS.x, 1.4, OSAKA_CRACK_POS.z)
+            add(crack)
+          }
+          osakaSecret = {
+            gate,
+            crack,
+            blade,
+            spear,
+            underLights,
+            gateAnim: -1,
+            crackAnim: -1,
+            debris: [],
+          }
+          osakaSecretRef.current = osakaSecretFresh()
+        }
         // Collapse every static mesh funnelled through mAdd into one merged mesh per
         // material — the bulk of the draw-call reduction happens here.
         flushMerges()
@@ -14227,6 +16023,39 @@ export default function ThreeWorld({
         for (const r of osakaRipples) disposeFxMesh(r.mesh)
         osakaRipples.length = 0
         osakaBridges.length = 0
+        // Mini-event teardown (FINAL-I): castle eyes + pending neon-red timer.
+        osakaNeonRedAt = 0
+        if (osakaCastleEyes) {
+          scene.remove(osakaCastleEyes.mesh)
+          osakaCastleEyes.mesh.geometry.dispose()
+          ;(osakaCastleEyes.mesh.material as THREE.Material).dispose()
+          osakaCastleEyes = null
+        }
+        // Secret-route teardown (FINAL-A): the structures died with the group
+        // above; loose debris/spears (scene-level, shared geo) and the per-run
+        // state + run-scoped secret weapons reset here.
+        if (osakaSecret) {
+          for (const d of osakaSecret.debris) scene.remove(d.mesh)
+          osakaSecret = null
+        }
+        for (const s of osakaSpears) scene.remove(s.mesh)
+        osakaSpears.length = 0
+        osakaSecretRef.current = osakaSecretFresh()
+        if (osakaHintRef.current !== null) {
+          osakaHintRef.current = null
+          setOsakaHint(null)
+        }
+        if (huntWeaponRef.current === "oniblade" || huntWeaponRef.current === "greatspear") {
+          huntWeaponRef.current = null
+          setHuntWeapon(null)
+        }
+        if (huntOwnedRef.current.has("oniblade") || huntOwnedRef.current.has("greatspear")) {
+          const next = new Set(huntOwnedRef.current)
+          next.delete("oniblade")
+          next.delete("greatspear")
+          huntOwnedRef.current = next
+          setHuntOwned([...next])
+        }
         if (huntStageFogWasSaved) {
           scene.fog = huntStageFogSaved
           huntStageFogSaved = null
@@ -14323,11 +16152,11 @@ export default function ThreeWorld({
       }
       // ── HUNT indoor stage: dim the world, drop a ceiling + green point lights,
       // and recolour the floor/walls. Reversed by huntClearStage on return. ──
-      function huntApplyStage(stage: "outdoor" | "indoor" | "osaka") {
+      function huntApplyStage(stage: HuntMissionConfig["stage"]) {
         perfStageApplied = stage // surfaced by the ?debug=1 perf HUD
         huntClearStage() // idempotent — never stack overlays
-        if (stage === "osaka") {
-          buildOsakaMap()
+        if (isOsakaStage(stage)) {
+          buildOsakaMap() // 鬼モードもマップは共通 (倍率だけ変わる; FINAL-H)
           return
         }
         if (stage !== "indoor") return
@@ -14649,7 +16478,7 @@ export default function ThreeWorld({
         // OSAKA is a fixed, max-difficulty stage — always start at the top level.
         // (Area progression + the 五変化 boss land in Phase 2b; for now the O key
         // still summons the boss into the freshly built OSAKA field.)
-        if (huntMissionConfigRef.current.stage === "osaka") {
+        if (isOsakaStage(huntMissionConfigRef.current.stage)) {
           huntHasDeployedRef.current = true
           huntLevelIdxRef.current = HUNT_LEVELS.length - 1
         } else if (!huntHasDeployedRef.current) {
@@ -14667,11 +16496,13 @@ export default function ThreeWorld({
         setHuntScore(0)
         const hpScale = lv.level === 3 ? 1 + 0.2 * huntRepeatRef.current : 1
         const th = HUNT_THEMES[lv.theme]
-        const isOsaka = huntMissionConfigRef.current.stage === "osaka"
+        const isOsaka = isOsakaStage(huntMissionConfigRef.current.stage)
         if (isOsaka) {
           // OSAKA drives its own area progression (Dotonbori → … → 五変化 boss)
           // instead of the generic minion ring + single HUNT boss.
+          osakaRunReset() // リザルト用のラン戦績 (タイム/キル/命中率/被ダメ) を起動
           osakaInitProgression()
+          if (osakaOni()) osakaSpawnOniGuards() // 鬼: 隠し武器への道に守衛 (FINAL-H)
         } else {
           // Minions ring the arena centre.
           for (let i = 0; i < lv.zakoCount; i++) {
@@ -14938,6 +16769,12 @@ export default function ThreeWorld({
         if (a - 1 <= 0) huntReload()
         return true
       }
+      // 鬼神スーツ着用中は近接1.5倍 (FINAL-D) — 全近接ダメージ源がここを通す。
+      function meleeSuitMult(): number {
+        return huntSuitActiveRef.current && huntSuitKindRef.current === "kishin"
+          ? KISHIN_MELEE_MULT
+          : 1
+      }
       // Suit punch ([F]) + blade slash/thrust — quiet melee in a forward cone.
       function huntConeMelee(dmg: number, range: number, tag: string) {
         camera.getWorldDirection(fwd3)
@@ -14967,14 +16804,14 @@ export default function ThreeWorld({
         const now = Date.now()
         if (now - lastMeleeRef.current < KNIFE_COOLDOWN_MS) return
         lastMeleeRef.current = now
-        huntConeMelee(HUNT_PUNCH_DAMAGE, HUNT_PUNCH_RANGE, "punch")
+        huntConeMelee(HUNT_PUNCH_DAMAGE * meleeSuitMult(), HUNT_PUNCH_RANGE, "punch")
       }
       function huntBlade(thrust: boolean) {
         const now = Date.now()
         if (now - lastMeleeRef.current < KNIFE_COOLDOWN_MS) return
         lastMeleeRef.current = now
         SOUNDS.knife()
-        huntConeMelee(thrust ? 350 : 200, thrust ? 3.0 : 1.8, "blade")
+        huntConeMelee((thrust ? 350 : 200) * meleeSuitMult(), thrust ? 3.0 : 1.8, "blade")
       }
       // Capture wire/ring + teleport pillar (created per capture; ≤3 at once).
       function huntStartCapture(e: CombatEnemy) {
@@ -15360,12 +17197,12 @@ export default function ThreeWorld({
         } else if (phase === "mission" && huntMissionReadyRef.current) {
           huntUpdateEquip(dt)
           // OSAKA: drive the area progression (wave clear → mid-boss → next area).
-          if (huntMissionConfigRef.current.stage === "osaka") updateOsakaProgress()
+          if (isOsakaStage(huntMissionConfigRef.current.stage)) updateOsakaProgress()
           // Arena boundary: shrink on Lv3, else fixed. OSAKA is a linear march
           // across a 180m field, not a shrinking-ring survival, so its boundary +
           // head-pop are disabled (the player must be free to cross the map).
           const lv = HUNT_LEVELS[huntLevelIdxRef.current]
-          if (huntMissionConfigRef.current.stage !== "osaka") {
+          if (!isOsakaStage(huntMissionConfigRef.current.stage)) {
             if (lv?.shrink) {
               const tt = Math.min(1, (now - huntShrinkStartRef.current) / (HUNT_SHRINK_SEC * 1000))
               huntRadiusRef.current = HUNT_BASE_RADIUS - (HUNT_BASE_RADIUS - HUNT_MIN_RADIUS) * tt
@@ -15447,7 +17284,7 @@ export default function ThreeWorld({
           // stage is fully driven by updateOsakaProgress (its empty waves between
           // areas must never trip this generic clear).
           if (
-            huntMissionConfigRef.current.stage !== "osaka" &&
+            !isOsakaStage(huntMissionConfigRef.current.stage) &&
             !osakaBossRef.current &&
             enemies.filter((e) => e.hp > 0).length === 0
           ) {
@@ -15513,6 +17350,18 @@ export default function ThreeWorld({
           setHuntGravityUnlocked(gv)
           huntClearsRef.current =
             Number.parseInt(localStorage.getItem(HUNT_CLEARS_KEY) ?? "0", 10) || 0
+          // 鬼神スーツ (FINAL-D): 真クリアの証で解放、選択は永続化されている。
+          const ku = localStorage.getItem(OSAKA_TRUE_CLEAR_KEY) === "1"
+          kishinUnlockedRef.current = ku
+          setKishinUnlocked(ku)
+          if (ku && localStorage.getItem(SUIT_KIND_KEY) === "kishin") {
+            huntSuitKindRef.current = "kishin"
+            setHuntSuitKind("kishin")
+          }
+          // 称号「大阪の鬼」(FINAL-H)。
+          const ot = localStorage.getItem(OSAKA_ONI_CLEAR_KEY) === "1"
+          oniTitleOwnedRef.current = ot
+          setOniTitleOwned(ot)
         } catch {
           /* ignore */
         }
@@ -15887,6 +17736,7 @@ export default function ThreeWorld({
         hitEnemy.hp = 0
         hitEnemy.dyingTimer = DEATH_ANIM_TOTAL
         hitEnemy.state = "patrol"
+        if (osakaRunIsLive()) osakaRunRef.current.kills++ // OSAKA リザルトの KILL 集計
         // Fall direction: project enemy→shooter onto the enemy's facing.
         // If the shooter is in front (dot > 0 means enemy looking at
         // shooter), the body tips backward (-1). Otherwise face-plant.
@@ -16561,7 +18411,7 @@ export default function ThreeWorld({
           const dot = (dx / d) * nfx + (dz / d) * nfz
           if (dot < cosHalf) continue
           struck = true
-          const dmg = headHeightAim ? 9999 : KNIFE_DAMAGE
+          const dmg = headHeightAim ? 9999 : Math.round(KNIFE_DAMAGE * meleeSuitMult())
           e.hp -= dmg
           scoreRef.current += Math.floor(Math.min(dmg, e.maxHp) * 10)
           setScore(scoreRef.current)
@@ -16671,6 +18521,15 @@ export default function ThreeWorld({
         // HUNT special weapon equipped → its own firing path (blade fires on
         // release in huntUpdateEquip, so left-click is a no-op for it).
         if (modeRef.current === "hunt" && huntWeaponRef.current) {
+          // OSAKA secret weapons (FINAL-A): melee swing / melee+throw paths.
+          if (huntWeaponRef.current === "oniblade") {
+            osakaBladeSwing()
+            return
+          }
+          if (huntWeaponRef.current === "greatspear") {
+            osakaSpearFire()
+            return
+          }
           if (huntWeaponRef.current !== "blade") fireHuntWeapon()
           return
         }
@@ -16693,6 +18552,7 @@ export default function ThreeWorld({
         const now = Date.now()
         if (weapon.id === "pistol" && now - lastFireTimeRef.current < 120) return
         lastFireTimeRef.current = now
+        osakaRunShot() // OSAKA リザルトの命中率分母 (osaka 中のみ加算)
 
         // Consume ammo
         if (weapon.maxAmmo !== -1) {
@@ -16826,6 +18686,7 @@ export default function ThreeWorld({
               const isCore = obHit === coreHit
               SOUNDS.hit()
               spawnBlood(obHit.point)
+              osakaRunHit()
               osakaDamage(weapon.hitDamage * (isCore ? OSAKA_CORE_MULT : OSAKA_BODY_MULT))
               enemyHits = []
               shotConsumed = true
@@ -16845,6 +18706,7 @@ export default function ThreeWorld({
             if (!blockedByWall && !blockedByEnemy) {
               SOUNDS.hit()
               spawnBlood(mbHit.point)
+              osakaRunHit()
               osakaMB.hp -= weapon.hitDamage
               enemyHits = []
               shotConsumed = true
@@ -16907,6 +18769,7 @@ export default function ThreeWorld({
           if (hitEnemy && enemyHits[0]) {
             SOUNDS.hit()
             spawnBlood(enemyHits[0].point)
+            osakaRunHit()
             const bodyH = hitEnemy.config.bodyH
             const enemyBottomY = hitEnemy.mesh.position.y - bodyH / 2
             const isHeadshot = enemyHits[0].point.y >= enemyBottomY + bodyH * 0.67
@@ -17092,7 +18955,9 @@ export default function ThreeWorld({
         // Cap dt to 50ms so a tab refocus / long pause doesn't yank everything
         // (massive lerp blends + massive position deltas would look like
         // teleportation and could clip through walls).
-        const dt = Math.min(clock.getDelta(), 0.05)
+        let dt = Math.min(clock.getDelta(), 0.05)
+        // ヒットストップ (FINAL-F): ボス撃破の瞬間だけ世界が止まる。
+        if (Date.now() < osakaHitStopUntil) dt *= 0.06
         const refs = sceneRef.current
         if (!refs) return
         frameCount = (frameCount + 1) | 0
@@ -17298,6 +19163,7 @@ export default function ThreeWorld({
           updateOsakaFx(dt) // OSAKA boss hazards (telegraphs, pools, splitters…)
           updateOsakaRain(dt) // OSAKA rain streaks + ground ripples
           updateOsakaEnv(dt) // OSAKA collapsing bridges
+          updateOsakaSecrets(dt) // OSAKA 隠しルート (FINAL-A): 戸/壁/取得/転送
         }
         // HUNT room compass: rotate the on-screen arrow toward the orb (which
         // sits at the room centre) in the player's local frame. Room phase only.
@@ -17381,8 +19247,15 @@ export default function ThreeWorld({
         const fwdZ = -Math.cos(camState.yaw)
         const isSprinting = keysRef.current.has("Shift")
         // HUNT suit: +50% move speed while the suit holds.
-        const huntSuitSpeed = huntSuitActiveRef.current ? HUNT_SUIT_SPEED : 1
-        const spd = MOVE_SPEED * (isSprinting ? SPRINT_MULTIPLIER : 1) * huntSuitSpeed
+        const huntSuitSpeed = huntSuitActiveRef.current
+          ? huntSuitKindRef.current === "kishin"
+            ? KISHIN_SPEED
+            : HUNT_SUIT_SPEED
+          : 1
+        // 時空歪曲 (真・五変化): 効果時間中は移動速度半減 (FINAL-B)。
+        const osakaSlowMul = Date.now() < osakaSlowUntil ? 0.5 : 1
+        const spd =
+          MOVE_SPEED * (isSprinting ? SPRINT_MULTIPLIER : 1) * huntSuitSpeed * osakaSlowMul
         // Desired world-space velocity from input.
         const desiredVx = (fwdX * -inVz + Math.cos(camState.yaw) * inVx) * spd
         const desiredVz = (fwdZ * -inVz + -Math.sin(camState.yaw) * inVx) * spd
@@ -19574,6 +21447,8 @@ export default function ThreeWorld({
         else if (e.key === "4") huntPickupWeapon("capturegun")
         else if (e.key === "5") huntPickupWeapon("blade")
         else if (e.key === "6") huntPickupWeapon("gravitycannon")
+        else if (e.key === "7")
+          huntChooseKishin() // 鬼神スーツ (FINAL-D)
         else if (e.key === "e" || e.key === "E" || e.key === "Escape") {
           huntEquipOpenRef.current = false
           setHuntEquipOpen(false)
@@ -19592,6 +21467,9 @@ export default function ThreeWorld({
         else if (e.key === "8") huntSelectHuntWeapon("capturegun")
         else if (e.key === "9") huntSelectHuntWeapon("blade")
         else if (e.key === "0") huntSelectHuntWeapon("gravitycannon")
+        // OSAKA secret weapons (FINAL-A) — selectable once granted in-mission.
+        else if (e.key === "z" || e.key === "Z") huntSelectHuntWeapon("oniblade")
+        else if (e.key === "x" || e.key === "X") huntSelectHuntWeapon("greatspear")
         if (e.key === "f" || e.key === "F") huntPunchReqRef.current = true
         if (e.key === "r" || e.key === "R") huntReloadReqRef.current = true
         // 1-5 fall through to the normal-weapon switch below, which also drops
@@ -19699,6 +21577,7 @@ export default function ThreeWorld({
     unlockedWeapons,
     huntChooseReward,
     huntToggleSuitChoice,
+    huntChooseKishin,
     huntPickupWeapon,
     huntSelectHuntWeapon,
     huntClearHuntWeapon,
@@ -20408,24 +22287,41 @@ export default function ThreeWorld({
                     marginBottom: "2px",
                   }}
                 >
-                  {huntSuitActive ? "SUIT" : "SUIT BROKEN"}
+                  {huntSuitKind === "kishin"
+                    ? "鬼神 — 不壊"
+                    : huntSuitActive
+                      ? "SUIT"
+                      : "SUIT BROKEN"}
                 </div>
                 <div
                   style={{
                     height: "7px",
                     background: "rgba(0,0,0,0.85)",
-                    border: "1px solid rgba(150,200,255,0.4)",
+                    border: `1px solid ${
+                      huntSuitKind === "kishin" ? "rgba(255,80,100,0.5)" : "rgba(150,200,255,0.4)"
+                    }`,
                     overflow: "hidden",
                   }}
                 >
                   <div
                     style={{
                       height: "100%",
-                      width: `${Math.round((huntSuitDur / HUNT_SUIT_MAX) * 100)}%`,
-                      background: huntSuitActive
-                        ? "linear-gradient(90deg,#2a4a6a,#7fd0ff)"
-                        : "#552222",
-                      boxShadow: huntSuitActive ? "0 0 6px #66ccff" : "none",
+                      width:
+                        huntSuitKind === "kishin"
+                          ? "100%"
+                          : `${Math.round((huntSuitDur / HUNT_SUIT_MAX) * 100)}%`,
+                      background:
+                        huntSuitKind === "kishin"
+                          ? "linear-gradient(90deg,#5a1020,#ff4455)"
+                          : huntSuitActive
+                            ? "linear-gradient(90deg,#2a4a6a,#7fd0ff)"
+                            : "#552222",
+                      boxShadow:
+                        huntSuitKind === "kishin"
+                          ? "0 0 6px #ff4455"
+                          : huntSuitActive
+                            ? "0 0 6px #66ccff"
+                            : "none",
                       transition: "width 0.2s",
                     }}
                   />
@@ -20500,6 +22396,374 @@ export default function ThreeWorld({
               </div>
             )}
 
+            {/* ── OSAKA secret-route interact hint (FINAL-A). */}
+            {osakaHint && !isMobile && gamePhase === "playing" && (
+              <div
+                style={{
+                  position: "absolute",
+                  bottom: "30%",
+                  left: "50%",
+                  transform: "translateX(-50%)",
+                  zIndex: 30,
+                  fontFamily: "monospace",
+                  color: "#7dffb0",
+                  fontSize: "0.95rem",
+                  pointerEvents: "none",
+                  textShadow: "0 0 8px #00ff55",
+                }}
+              >
+                {osakaHint}
+              </div>
+            )}
+
+            {/* ── 称号「大阪の鬼」バッジ (FINAL-H): 鬼モードクリアで常時表示 ── */}
+            {oniTitleOwned && gamePhase === "playing" && (
+              <div
+                style={{
+                  position: "absolute",
+                  top: "0.5rem",
+                  left: "0.6rem",
+                  zIndex: 26,
+                  fontFamily: "monospace",
+                  color: "#ff4466",
+                  fontSize: "0.68rem",
+                  letterSpacing: "0.22em",
+                  pointerEvents: "none",
+                  textShadow: "0 0 8px rgba(255,40,80,0.8)",
+                }}
+              >
+                👹 大阪の鬼
+              </div>
+            )}
+
+            {/* ── OSAKA ボス専用HPバー (FINAL-F): 画面上部・形態ごとに色変化 ── */}
+            {osakaBossHud && gamePhase === "playing" && (
+              <div
+                style={{
+                  position: "absolute",
+                  top: "3.2rem",
+                  left: "50%",
+                  transform: "translateX(-50%)",
+                  width: "min(70vw, 720px)",
+                  zIndex: 28,
+                  pointerEvents: "none",
+                  fontFamily: "monospace",
+                }}
+              >
+                <div
+                  style={{ display: "flex", justifyContent: "space-between", marginBottom: "3px" }}
+                >
+                  <span
+                    style={{
+                      color: OSAKA_FORM_COLORS[osakaBossHud.phase],
+                      fontSize: "0.9rem",
+                      fontWeight: "bold",
+                      letterSpacing: "0.2em",
+                      textShadow: "0 0 8px rgba(255,60,60,0.7)",
+                      fontFamily: "'Hiragino Mincho ProN','Yu Mincho',serif",
+                    }}
+                  >
+                    ☠ {osakaBossHud.name}
+                  </span>
+                  <span style={{ color: "#ffccd0", fontSize: "0.7rem" }}>
+                    {Math.ceil(osakaBossHud.pct * 100)}%
+                  </span>
+                </div>
+                <div
+                  style={{
+                    height: "14px",
+                    background: "rgba(0,0,0,0.75)",
+                    border: `1px solid ${OSAKA_FORM_COLORS[osakaBossHud.phase]}`,
+                    boxShadow: "0 0 12px rgba(0,0,0,0.6)",
+                    overflow: "hidden",
+                  }}
+                >
+                  <div
+                    style={{
+                      height: "100%",
+                      width: `${osakaBossHud.pct * 100}%`,
+                      background: `linear-gradient(90deg, #220008, ${OSAKA_FORM_COLORS[osakaBossHud.phase]})`,
+                      transition: "width 0.18s",
+                    }}
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* ── 形態変化カットイン (FINAL-F): 和風帯が画面端から流れる ── */}
+            {osakaCutin && (
+              <div
+                style={{
+                  position: "absolute",
+                  top: "20%",
+                  left: 0,
+                  right: 0,
+                  zIndex: 75,
+                  pointerEvents: "none",
+                  overflow: "hidden",
+                }}
+              >
+                <div
+                  style={{
+                    background:
+                      "linear-gradient(90deg, transparent 0%, rgba(90,0,16,0.88) 18%, rgba(15,0,4,0.92) 50%, rgba(90,0,16,0.88) 82%, transparent 100%)",
+                    borderTop: "1px solid #ff4455",
+                    borderBottom: "1px solid #ff4455",
+                    padding: isMobile ? "0.5rem 0" : "0.9rem 0",
+                    textAlign: "center",
+                    // モバイルはスライドせずフェードのみの簡略版 (FINAL-G)。
+                    animation: isMobile
+                      ? "osakaCutinFade 2.5s ease-in-out forwards"
+                      : "osakaCutinSlide 2.5s ease-in-out forwards",
+                  }}
+                >
+                  <div
+                    style={{
+                      fontFamily: "'Hiragino Mincho ProN','Yu Mincho',serif",
+                      fontSize:
+                        osakaCutin.tone === "true"
+                          ? isMobile
+                            ? "1.6rem"
+                            : "2.6rem"
+                          : isMobile
+                            ? "1.25rem"
+                            : "2rem",
+                      color: osakaCutin.tone === "true" ? "#ff3344" : "#ffd24a",
+                      letterSpacing: "0.4em",
+                      fontWeight: "bold",
+                      textShadow: "0 0 26px rgba(255,50,60,0.8)",
+                    }}
+                  >
+                    {osakaCutin.title}
+                  </div>
+                  {osakaCutin.sub && (
+                    <div
+                      style={{
+                        marginTop: "0.35rem",
+                        color: "#dba8b0",
+                        fontSize: isMobile ? "0.68rem" : "0.85rem",
+                        letterSpacing: "0.22em",
+                        fontFamily: "'Hiragino Mincho ProN','Yu Mincho',serif",
+                      }}
+                    >
+                      {osakaCutin.sub}
+                    </div>
+                  )}
+                </div>
+                <style>
+                  {
+                    "@keyframes osakaCutinSlide { 0% { transform: translateX(55vw); opacity: 0; } 13% { transform: translateX(0); opacity: 1; } 80% { transform: translateX(0); opacity: 1; } 100% { transform: translateX(-55vw); opacity: 0; } } @keyframes osakaCutinFade { 0% { opacity: 0; } 15% { opacity: 1; } 80% { opacity: 1; } 100% { opacity: 0; } }"
+                  }
+                </style>
+              </div>
+            )}
+
+            {/* ── OSAKA クリア演出: 暗転 → タイトル → リザルト (FINAL-C) ── */}
+            {osakaEnding && (
+              <div
+                style={{
+                  position: "absolute",
+                  inset: 0,
+                  zIndex: 80,
+                  background: osakaEnding.kind === "true" ? "#070003" : "#000",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  flexDirection: "column",
+                  fontFamily: "monospace",
+                  pointerEvents: "auto",
+                }}
+              >
+                {osakaEnding.stage === "title" && (
+                  <div style={{ textAlign: "center" }}>
+                    <div
+                      style={{
+                        fontSize: "3rem",
+                        fontWeight: "bold",
+                        letterSpacing: "0.3em",
+                        color: osakaEnding.kind === "true" ? "#ff3344" : "#ffd24a",
+                        fontFamily: "'Hiragino Mincho ProN','Yu Mincho',serif",
+                        textShadow:
+                          osakaEnding.kind === "true"
+                            ? "0 0 34px rgba(255,40,60,0.7)"
+                            : "0 0 26px rgba(255,210,74,0.5)",
+                      }}
+                    >
+                      {osakaEnding.kind === "true" ? "真・大阪編 制覇" : "大阪編 クリア"}
+                    </div>
+                    {osakaEnding.kind === "true" && (
+                      <div
+                        style={{
+                          marginTop: "1.2rem",
+                          color: "#cc8899",
+                          fontSize: "0.9rem",
+                          letterSpacing: "0.45em",
+                        }}
+                      >
+                        六つ目の貌は、もう何処にも居ない
+                      </div>
+                    )}
+                  </div>
+                )}
+                {osakaEnding.stage === "result" && (
+                  <div
+                    style={{
+                      minWidth: "360px",
+                      border: `2px solid ${osakaEnding.kind === "true" ? "#ff3344" : "#ffd24a"}`,
+                      boxShadow:
+                        osakaEnding.kind === "true"
+                          ? "0 0 40px rgba(255,40,60,0.35)"
+                          : "0 0 30px rgba(255,210,74,0.3)",
+                      padding: "1.6rem 2rem",
+                      background: "rgba(10,0,4,0.94)",
+                      color: "#ffe8ee",
+                      textAlign: "center",
+                    }}
+                  >
+                    <div
+                      style={{
+                        fontSize: "1.1rem",
+                        fontWeight: "bold",
+                        letterSpacing: "0.25em",
+                        marginBottom: "0.9rem",
+                        color: osakaEnding.kind === "true" ? "#ff5566" : "#ffd24a",
+                      }}
+                    >
+                      {osakaEnding.kind === "true" ? "真・大阪編 制覇" : "大阪編 クリア"}
+                      {osakaEnding.oni ? " 👹鬼" : ""}
+                    </div>
+                    <div
+                      style={{
+                        fontSize: "4rem",
+                        fontWeight: "bold",
+                        lineHeight: 1,
+                        marginBottom: "0.8rem",
+                        color:
+                          osakaEnding.rank === "S"
+                            ? "#ffd700"
+                            : osakaEnding.rank === "A"
+                              ? "#ff5566"
+                              : osakaEnding.rank === "B"
+                                ? "#44aaff"
+                                : "#9aa0a6",
+                        textShadow: "0 0 24px rgba(255,255,255,0.25)",
+                      }}
+                    >
+                      {osakaEnding.rank}
+                    </div>
+                    {(
+                      [
+                        ["SCORE", String(osakaEnding.score).padStart(6, "0")],
+                        ["クリアボーナス", `+${osakaEnding.bonus}`],
+                        ["KILL", String(osakaEnding.kills)],
+                        ["命中率", `${Math.round(osakaEnding.accuracy * 100)}%`],
+                        [
+                          "クリアタイム",
+                          `${Math.floor(osakaEnding.timeSec / 60)}:${String(
+                            osakaEnding.timeSec % 60,
+                          ).padStart(2, "0")}`,
+                        ],
+                        ["被ダメージ", String(osakaEnding.damageTaken)],
+                        [
+                          "自己ベスト",
+                          osakaEnding.newBest
+                            ? `★更新! ${osakaEnding.score}`
+                            : String(Math.max(osakaEnding.best, 0)),
+                        ],
+                      ] as const
+                    ).map(([k, v]) => (
+                      <div
+                        key={k}
+                        style={{
+                          display: "flex",
+                          justifyContent: "space-between",
+                          fontSize: "0.85rem",
+                          padding: "0.18rem 0.4rem",
+                          color: "#ffd8e0",
+                        }}
+                      >
+                        <span style={{ opacity: 0.75 }}>{k}</span>
+                        <span style={{ fontWeight: "bold" }}>{v}</span>
+                      </div>
+                    ))}
+                    {osakaEnding.kind === "true" && (
+                      <div
+                        style={{
+                          marginTop: "0.9rem",
+                          padding: "0.5rem",
+                          border: "1px solid #ff3344",
+                          color: "#ff8899",
+                          fontSize: "0.8rem",
+                          letterSpacing: "0.15em",
+                        }}
+                      >
+                        専用スーツ『鬼神』解放！
+                      </div>
+                    )}
+                    {osakaEnding.titleNew && (
+                      <div
+                        style={{
+                          marginTop: "0.6rem",
+                          padding: "0.5rem",
+                          border: "1px solid #ff2266",
+                          color: "#ff77aa",
+                          fontSize: "0.8rem",
+                          letterSpacing: "0.15em",
+                        }}
+                      >
+                        👹 称号『大阪の鬼』獲得！
+                      </div>
+                    )}
+                    <div
+                      style={{
+                        display: "flex",
+                        gap: "0.8rem",
+                        marginTop: "1.2rem",
+                        justifyContent: "center",
+                      }}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => osakaEndingActionRef.current?.retry()}
+                        style={{
+                          padding: "0.6rem 1.4rem",
+                          background: "rgba(255,60,80,0.18)",
+                          border: "1px solid #ff5566",
+                          color: "#ff99aa",
+                          fontFamily: "monospace",
+                          fontWeight: "bold",
+                          cursor: "pointer",
+                          letterSpacing: "0.12em",
+                        }}
+                      >
+                        RETRY
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          osakaEndingRef.current = null
+                          setOsakaEnding(null)
+                          onExit?.()
+                        }}
+                        style={{
+                          padding: "0.6rem 1.4rem",
+                          background: "rgba(255,210,74,0.14)",
+                          border: "1px solid #ffd24a",
+                          color: "#ffe18a",
+                          fontFamily: "monospace",
+                          fontWeight: "bold",
+                          cursor: "pointer",
+                          letterSpacing: "0.12em",
+                        }}
+                      >
+                        MODE SELECT
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* ── Equipment menu (loadout chosen before the countdown ends). */}
             {huntEquipOpen && (
               <div
@@ -20541,37 +22805,75 @@ export default function ThreeWorld({
                     textAlign: "left",
                     cursor: "pointer",
                     fontFamily: "monospace",
-                    background: huntSuitChosen ? "rgba(0,120,255,0.25)" : "rgba(0,20,10,0.6)",
-                    border: `1px solid ${huntSuitChosen ? "#66ccff" : "#225544"}`,
-                    color: huntSuitChosen ? "#9fdfff" : "#7fbfa0",
+                    background:
+                      huntSuitChosen && huntSuitKind === "scout"
+                        ? "rgba(0,120,255,0.25)"
+                        : "rgba(0,20,10,0.6)",
+                    border: `1px solid ${
+                      huntSuitChosen && huntSuitKind === "scout" ? "#66ccff" : "#225544"
+                    }`,
+                    color: huntSuitChosen && huntSuitKind === "scout" ? "#9fdfff" : "#7fbfa0",
                   }}
                 >
-                  [1] 強化スーツ {huntSuitChosen ? "✓ 着用" : "— 未着用"}
+                  [1] 強化スーツ{" "}
+                  {huntSuitChosen && huntSuitKind === "scout" ? "✓ 着用" : "— 未着用"}
                 </button>
-                {HUNT_WEAPONS.filter((w) => !w.reward || huntGravityUnlocked).map((w, i) => {
-                  const owned = huntOwned.includes(w.id)
-                  return (
-                    <button
-                      type="button"
-                      key={w.id}
-                      onClick={() => huntPickupWeapon(w.id)}
-                      style={{
-                        display: "block",
-                        width: "100%",
-                        marginBottom: "0.4rem",
-                        padding: "0.45rem",
-                        textAlign: "left",
-                        cursor: "pointer",
-                        fontFamily: "monospace",
-                        background: owned ? "rgba(0,80,40,0.5)" : "rgba(0,20,10,0.6)",
-                        border: `1px solid ${owned ? "#33cc77" : "#225544"}`,
-                        color: owned ? "#9fffc0" : "#7fbfa0",
-                      }}
-                    >
-                      [{i + 2}] {w.name} {owned ? "✓" : "取得"}
-                    </button>
-                  )
-                })}
+                {/* 鬼神 (FINAL-D): 真・大阪編制覇で解放される赤黒い和風鎧。 */}
+                <button
+                  type="button"
+                  onClick={huntChooseKishin}
+                  disabled={!kishinUnlocked}
+                  style={{
+                    display: "block",
+                    width: "100%",
+                    marginBottom: "0.5rem",
+                    padding: "0.5rem",
+                    textAlign: "left",
+                    cursor: kishinUnlocked ? "pointer" : "not-allowed",
+                    fontFamily: "monospace",
+                    opacity: kishinUnlocked ? 1 : 0.55,
+                    background:
+                      huntSuitChosen && huntSuitKind === "kishin"
+                        ? "rgba(255,40,60,0.22)"
+                        : "rgba(20,0,8,0.6)",
+                    border: `1px solid ${
+                      huntSuitChosen && huntSuitKind === "kishin" ? "#ff5566" : "#553344"
+                    }`,
+                    color: huntSuitChosen && huntSuitKind === "kishin" ? "#ff99aa" : "#bb7788",
+                  }}
+                >
+                  {kishinUnlocked
+                    ? `[7] 鬼神 — 速1.3×/被ダメ-20%/近接1.5× ${
+                        huntSuitChosen && huntSuitKind === "kishin" ? "✓ 着用" : ""
+                      }`
+                    : "🔒 鬼神 — 真・大阪編 制覇で解放"}
+                </button>
+                {HUNT_WEAPONS.filter((w) => !w.secret && (!w.reward || huntGravityUnlocked)).map(
+                  (w, i) => {
+                    const owned = huntOwned.includes(w.id)
+                    return (
+                      <button
+                        type="button"
+                        key={w.id}
+                        onClick={() => huntPickupWeapon(w.id)}
+                        style={{
+                          display: "block",
+                          width: "100%",
+                          marginBottom: "0.4rem",
+                          padding: "0.45rem",
+                          textAlign: "left",
+                          cursor: "pointer",
+                          fontFamily: "monospace",
+                          background: owned ? "rgba(0,80,40,0.5)" : "rgba(0,20,10,0.6)",
+                          border: `1px solid ${owned ? "#33cc77" : "#225544"}`,
+                          color: owned ? "#9fffc0" : "#7fbfa0",
+                        }}
+                      >
+                        [{i + 2}] {w.name} {owned ? "✓" : "取得"}
+                      </button>
+                    )
+                  },
+                )}
                 <div style={{ fontSize: "0.62rem", opacity: 0.7, marginTop: "0.6rem" }}>
                   カウントダウン終了までに選べ。選ばなければ生身＋既存武器で転送。[E]で閉じる
                 </div>
@@ -22944,6 +25246,34 @@ export default function ThreeWorld({
                     }}
                   >
                     装備ラック
+                  </button>
+                )}
+                {osakaHint && (
+                  <button
+                    type="button"
+                    onPointerDown={(e) => {
+                      e.preventDefault()
+                      huntInteractReqRef.current = true
+                    }}
+                    style={{
+                      position: "absolute",
+                      bottom: "30%",
+                      left: "50%",
+                      transform: "translateX(-50%)",
+                      padding: "0.7rem 1.4rem",
+                      borderRadius: "8px",
+                      background: "rgba(0,40,20,0.8)",
+                      border: "2px solid #00ff55",
+                      color: "#39ff7a",
+                      fontFamily: "monospace",
+                      fontSize: "0.9rem",
+                      fontWeight: "bold",
+                      touchAction: "none",
+                      userSelect: "none",
+                      zIndex: 33,
+                    }}
+                  >
+                    {osakaHint.replace("[E] ", "")}
                   </button>
                 )}
                 <div
