@@ -12093,8 +12093,14 @@ export default function ThreeWorld({
         ghost: [] as { obj: THREE.Mesh; until: number; born: number; hit: boolean }[],
         split: [] as { mesh: THREE.Mesh; mat: THREE.Material; until: number }[],
       }
+      // Shared FX geometries — reused across every telegraph/pool/ripple/ghost/
+      // splitter so disposeFxMesh never frees them (see the note there). Disposing
+      // a SHARED geometry per-mesh was the stutter bug: rain ripples expire ~10×/s,
+      // each dispose() freed osakaRingGeo's GPU buffer, forcing a re-upload on the
+      // next ripple/telegraph the same frame → constant hitching during OSAKA play.
       const osakaRingGeo = new THREE.RingGeometry(0.84, 1, 24)
       const osakaDiscGeo = new THREE.CircleGeometry(1, 20)
+      const osakaFxSphereGeo = new THREE.SphereGeometry(1, 8, 8) // ghost/splitter (unit)
       let osakaQuakeUntil = 0 // ground-jitter window for lanterns/signs
       // A short screen/ground quake (reuses the rotational camera-shake system so
       // amplitude stays mobile-safe).
@@ -12151,8 +12157,8 @@ export default function ThreeWorld({
           opacity: 0.45,
           depthWrite: false,
         })
-        const m = new THREE.Mesh(new THREE.SphereGeometry(1.4, 8, 8), mat)
-        m.scale.set(1, 2.4, 1)
+        const m = new THREE.Mesh(osakaFxSphereGeo, mat) // shared unit sphere (radius via scale)
+        m.scale.set(1.4, 1.4 * 2.4, 1.4)
         m.position.set(x, 2.4, z)
         scene.add(m)
         const now = Date.now()
@@ -12165,14 +12171,20 @@ export default function ThreeWorld({
           emissive: 0x3a0010,
           emissiveIntensity: 0.6,
         })
-        const m = new THREE.Mesh(new THREE.SphereGeometry(0.7, 8, 8), mat)
+        const m = new THREE.Mesh(osakaFxSphereGeo, mat) // shared unit sphere (radius via scale)
+        m.scale.setScalar(0.7)
         m.position.set(x, 0.8, z)
         scene.add(m)
         osakaFx.split.push({ mesh: m, mat, until: Date.now() + 6000 })
       }
       function disposeFxMesh(m: THREE.Mesh) {
         scene.remove(m)
-        m.geometry.dispose()
+        // Do NOT dispose the geometry: every FX mesh shares one of the pooled
+        // geometries above (osakaRingGeo / osakaDiscGeo / osakaFxSphereGeo), so
+        // freeing it here would yank a still-in-use GPU buffer and force a
+        // re-upload next frame (the OSAKA stutter). Only the per-instance material
+        // is owned by this mesh, so only that is disposed. The shared geometries
+        // live for the component lifetime (released on unmount).
         const mm = m.material
         if (Array.isArray(mm)) for (const x of mm) x.dispose()
         else mm.dispose()
@@ -12303,7 +12315,15 @@ export default function ThreeWorld({
         }
       }
       // ══ OSAKA environment: rain, ripples, collapsing bridges ════════════════
-      let osakaRain: { mesh: THREE.InstancedMesh; vy: Float32Array; count: number } | null = null
+      // pos = flat [x,y,z, …] per drop. Updating these + a single makeTranslation
+      // per drop avoids the per-frame getMatrixAt+decompose+recompose (400 drops ×
+      // a matrix decomposition every frame was the steady-state drain).
+      let osakaRain: {
+        mesh: THREE.InstancedMesh
+        vy: Float32Array
+        pos: Float32Array
+        count: number
+      } | null = null
       const osakaRipples: { mesh: THREE.Mesh; mat: THREE.MeshBasicMaterial; t: number }[] = []
       const osakaBridges: {
         mesh: THREE.Mesh
@@ -12334,19 +12354,21 @@ export default function ThreeWorld({
         const mesh = new THREE.InstancedMesh(geo, mat, count)
         mesh.frustumCulled = false
         const vy = new Float32Array(count)
+        const pos = new Float32Array(count * 3)
         for (let i = 0; i < count; i++) {
-          osakaRainDummy.position.set(
-            -90 + Math.random() * 180,
-            Math.random() * 40,
-            -90 + Math.random() * 180,
-          )
-          osakaRainDummy.updateMatrix()
+          const x = -90 + Math.random() * 180
+          const y = Math.random() * 40
+          const z = -90 + Math.random() * 180
+          pos[i * 3] = x
+          pos[i * 3 + 1] = y
+          pos[i * 3 + 2] = z
+          osakaRainDummy.matrix.makeTranslation(x, y, z)
           mesh.setMatrixAt(i, osakaRainDummy.matrix)
           vy[i] = 26 + Math.random() * 12
         }
         mesh.instanceMatrix.needsUpdate = true
         scene.add(mesh)
-        osakaRain = { mesh, vy, count }
+        osakaRain = { mesh, vy, pos, count }
         osakaMapMeshesRef.current.push(mesh) // disposed with the map
       }
       function osakaRipple(x: number, z: number) {
@@ -12368,29 +12390,29 @@ export default function ThreeWorld({
       // Per-frame rain fall + occasional ground ripples (OSAKA stage only).
       function updateOsakaRain(dt: number) {
         if (osakaRain) {
-          const { mesh, vy, count } = osakaRain
+          const { mesh, vy, pos, count } = osakaRain
           const cx = focalPoint.x
           const cz = focalPoint.z
+          const m = osakaRainDummy.matrix
           for (let i = 0; i < count; i++) {
-            mesh.getMatrixAt(i, osakaRainDummy.matrix)
-            osakaRainDummy.matrix.decompose(
-              osakaRainDummy.position,
-              osakaRainDummy.quaternion,
-              osakaRainDummy.scale,
-            )
-            osakaRainDummy.position.y -= (vy[i] ?? 30) * dt
-            if (osakaRainDummy.position.y < 0) {
+            const b = i * 3
+            let x = pos[b] ?? 0
+            let y = (pos[b + 1] ?? 0) - (vy[i] ?? 30) * dt
+            let z = pos[b + 2] ?? 0
+            if (y < 0) {
               // landed → reset to the top near the player + an occasional ripple
-              if (Math.random() < 0.04)
-                osakaRipple(osakaRainDummy.position.x, osakaRainDummy.position.z)
-              osakaRainDummy.position.set(
-                cx - 90 + Math.random() * 180,
-                35 + Math.random() * 8,
-                cz - 90 + Math.random() * 180,
-              )
+              if (Math.random() < 0.04) osakaRipple(x, z)
+              x = cx - 90 + Math.random() * 180
+              y = 35 + Math.random() * 8
+              z = cz - 90 + Math.random() * 180
             }
-            osakaRainDummy.updateMatrix()
-            mesh.setMatrixAt(i, osakaRainDummy.matrix)
+            pos[b] = x
+            pos[b + 1] = y
+            pos[b + 2] = z
+            // Drops are pure translations (no rotation/scale), so build the matrix
+            // directly — no getMatrixAt / decompose / recompose round-trip.
+            m.makeTranslation(x, y, z)
+            mesh.setMatrixAt(i, m)
           }
           mesh.instanceMatrix.needsUpdate = true
         }
