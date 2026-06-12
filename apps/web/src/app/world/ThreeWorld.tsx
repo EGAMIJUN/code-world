@@ -789,14 +789,17 @@ const OSAKA_FORM_QUOTES: Record<OsakaBossPhase, string> = {
   5: "「五つで一つ。一つで全て」",
   6: "「――顕現。これが儂の、真の貌よ」",
 }
+// 形態色 (P-H 指定): 灰・黒・白・赤・紫・金。黒は視認のため暗灰寄りにする。
 const OSAKA_FORM_COLORS: Record<OsakaBossPhase, string> = {
-  1: "#9aa0c0",
-  2: "#9966ff",
-  3: "#ddeeff",
-  4: "#cc5544",
-  5: "#ff8800",
-  6: "#ff2233",
+  1: "#9aa0a8", // 老翁 — 灰
+  2: "#55555f", // 多腕影鬼 — 黒
+  3: "#e8eef5", // 骨触手 — 白
+  4: "#dd3333", // 肉塊融合 — 赤
+  5: "#9966ff", // 五重混体 — 紫
+  6: "#ffd700", // 真・五変化 — 金
 }
+// 真ボスのHPバー5分割セグメント (P-H) — 安定キー。
+const OSAKA_CORE_SEG_IDS = ["core1", "core2", "core3", "core4", "core5"] as const
 // ── 専用スーツ「鬼神」(FINAL-D) — 真クリアで解放される赤黒い和風鎧 ──────────
 // 強化スーツ (scout) と択一。耐久消費なしで被ダメ20%減・移動1.3倍・近接1.5倍。
 const SUIT_KIND_KEY = "cw_suit_kind" // "scout" | "kishin" (選択の永続化)
@@ -23027,7 +23030,8 @@ export default function ThreeWorld({
                   top: "3.2rem",
                   left: "50%",
                   transform: "translateX(-50%)",
-                  width: "min(70vw, 720px)",
+                  // 真ボスは通常の2倍幅 (P-H)。
+                  width: osakaBossHud.phase === 6 ? "min(94vw, 1240px)" : "min(70vw, 720px)",
                   zIndex: 28,
                   pointerEvents: "none",
                   fontFamily: "monospace",
@@ -23052,24 +23056,68 @@ export default function ThreeWorld({
                     {Math.ceil(osakaBossHud.pct * 100)}%
                   </span>
                 </div>
-                <div
-                  style={{
-                    height: "14px",
-                    background: "rgba(0,0,0,0.75)",
-                    border: `1px solid ${OSAKA_FORM_COLORS[osakaBossHud.phase]}`,
-                    boxShadow: "0 0 12px rgba(0,0,0,0.6)",
-                    overflow: "hidden",
-                  }}
-                >
+                {osakaBossHud.phase === 6 ? (
+                  // 真ボス (P-H): 5つのコアを個別セグメントで表示 — 総HPを
+                  // 左から1コア=20%として削っていく見せ方。
+                  <div style={{ display: "flex", gap: "4px", height: "16px" }}>
+                    {OSAKA_CORE_SEG_IDS.map((segId, idx) => {
+                      const fill = Math.max(0, Math.min(1, osakaBossHud.pct * 5 - idx))
+                      return (
+                        <div
+                          key={segId}
+                          style={{
+                            flex: 1,
+                            background: "rgba(0,0,0,0.75)",
+                            border: "1px solid #ffd700",
+                            overflow: "hidden",
+                          }}
+                        >
+                          <div
+                            style={{
+                              height: "100%",
+                              width: `${fill * 100}%`,
+                              background: "linear-gradient(90deg, #3a2a00, #ffd700)",
+                              transition: "width 0.18s",
+                              animation:
+                                osakaBossHud.pct <= 0.5
+                                  ? "osakaHpBlink 0.8s ease-in-out infinite"
+                                  : "none",
+                            }}
+                          />
+                        </div>
+                      )
+                    })}
+                  </div>
+                ) : (
                   <div
                     style={{
-                      height: "100%",
-                      width: `${osakaBossHud.pct * 100}%`,
-                      background: `linear-gradient(90deg, #220008, ${OSAKA_FORM_COLORS[osakaBossHud.phase]})`,
-                      transition: "width 0.18s",
+                      height: "14px",
+                      background: "rgba(0,0,0,0.75)",
+                      border: `1px solid ${OSAKA_FORM_COLORS[osakaBossHud.phase]}`,
+                      boxShadow: "0 0 12px rgba(0,0,0,0.6)",
+                      overflow: "hidden",
                     }}
-                  />
-                </div>
+                  >
+                    <div
+                      style={{
+                        height: "100%",
+                        width: `${osakaBossHud.pct * 100}%`,
+                        background: `linear-gradient(90deg, #220008, ${OSAKA_FORM_COLORS[osakaBossHud.phase]})`,
+                        transition: "width 0.18s",
+                        // HP50%以下で赤く明滅 (P-H)。
+                        animation:
+                          osakaBossHud.pct <= 0.5
+                            ? "osakaHpBlink 0.8s ease-in-out infinite"
+                            : "none",
+                      }}
+                    />
+                  </div>
+                )}
+                <style>
+                  {
+                    "@keyframes osakaHpBlink { 0%,100% { filter: none; } 50% { filter: brightness(1.6) sepia(1) hue-rotate(-50deg) saturate(6); } }"
+                  }
+                </style>
               </div>
             )}
 
