@@ -1089,6 +1089,13 @@ const WALL_AABBS: WallAABB[] = MAP_OBJECTS.map(([x, z, w, d, type]) => ({
   h: wallHeightFor(type, w, d),
 }))
 const ALL_AABBS: WallAABB[] = WALL_AABBS
+// OSAKA suppresses ALL base-map collision (the urban AABBs + the world bounds):
+// the city map is hidden during OSAKA (PR #97), so its collision must go too or
+// the player bumps invisible walls. OSAKA registers no AABBs of its own (its
+// buildings are visual-only; the secret rooms confine via soft clamps), so a flat
+// "no wall collision while OSAKA" is correct and matches the open-field design.
+// Module-scoped like ALL_AABBS, so it's reset on each mount (see the scene init).
+let osakaSuppressBaseCollision = false
 
 // Height-aware AABB sweep. `feetY` is the mover's foot altitude (default 0 =
 // ground). A wall only blocks if its top rises more than a step above the
@@ -1097,6 +1104,10 @@ const ALL_AABBS: WallAABB[] = WALL_AABBS
 // movers (enemies, spawn search) pass feetY=0 and, since every wall here is
 // ≥0.6m tall (> STEP_UP_MAX), behave exactly as the old 2D check did.
 function collidesWithWall(px: number, pz: number, radius: number, feetY = 0): boolean {
+  // OSAKA: the base city map (collision + world bounds) is suppressed so the
+  // player/enemies don't hit the now-hidden urban buildings, and the secret
+  // rooms (outside the normal world bounds) stay reachable.
+  if (osakaSuppressBaseCollision) return false
   if (
     px - radius < WORLD_MIN ||
     px + radius > WORLD_MAX ||
@@ -1122,6 +1133,8 @@ function collidesWithWall(px: number, pz: number, radius: number, feetY = 0): bo
 // True if a point is inside *any* wall's 3D AABB. Used for bullet-vs-wall:
 // y is checked so a barricade doesn't stop a shot flying over it at eye height.
 function pointInsideWall(px: number, py: number, pz: number): boolean {
+  // OSAKA: no base-map walls (see collidesWithWall) → bullets fly free.
+  if (osakaSuppressBaseCollision) return false
   for (const w of ALL_AABBS) {
     if (w.disabled) continue
     if (px > w.x1 && px < w.x2 && pz > w.z1 && pz < w.z2 && py >= (w.y0 ?? 0) && py <= w.h)
@@ -2985,6 +2998,7 @@ export default function ThreeWorld({
       // ALL_AABBS is module-scoped, so the `disabled` flag would otherwise leak
       // into the next mount (walls/shots passing through phantom rubble).
       for (const w of ALL_AABBS) w.disabled = false
+      osakaSuppressBaseCollision = false // reset the module flag on each mount
       // SKY: a dedicated aerial-combat arena — you fight enemy jets in a high,
       // bright sky over the existing world (which reads as the distant terrain).
       const isSky = mapId === "sky"
@@ -14328,11 +14342,15 @@ export default function ThreeWorld({
       let huntStageFogWasSaved = false
       // Base-world renderables hidden during OSAKA (the dim, fogged urban map is
       // near-invisible under the OSAKA night city but still costs draw calls).
-      // Toggling `.visible` does NOT affect collision (ALL_AABBS) or bullet wall
-      // raycast (invisible meshes still intersect), so gameplay is unchanged.
+      // Hiding the meshes also requires suppressing their collision (handled via
+      // osakaSuppressBaseCollision) so the player doesn't bump invisible walls.
       const osakaHiddenBase: THREE.Object3D[] = []
       function osakaHideBaseWorld() {
         osakaShowBaseWorld() // restore any prior hide first (idempotent)
+        // Suppress base-map collision + world bounds for the duration of OSAKA so
+        // the now-invisible urban buildings have no phantom hitboxes, and the
+        // secret rooms (beyond the normal bounds) stay reachable.
+        osakaSuppressBaseCollision = true
         // Things the player still needs to see during OSAKA: the FPS weapon
         // viewmodel (gunGroup, a scene child positioned each frame) and the
         // third-person avatar. Everything else at scene root is base-world dressing.
@@ -14356,10 +14374,17 @@ export default function ThreeWorld({
             osakaHiddenBase.push(child)
           }
         }
+        // wallMeshes are raycast directly (non-recursive) for bullet-vs-wall, so a
+        // hidden parent doesn't spare them — they'd still occlude shots at enemies
+        // / the boss through invisible urban buildings. Drop them off layer 0 so the
+        // default raycaster skips them (rendering is already off via .visible).
+        for (const m of wallMeshes) m.layers.disable(0)
       }
       function osakaShowBaseWorld() {
         for (const o of osakaHiddenBase) o.visible = true
         osakaHiddenBase.length = 0
+        for (const m of wallMeshes) m.layers.enable(0) // back to raycastable
+        osakaSuppressBaseCollision = false // base-map collision + bounds back on
       }
       function buildHuntRoom() {
         const cx = HUNT_ROOM.x
