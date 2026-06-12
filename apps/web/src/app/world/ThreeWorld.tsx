@@ -12301,6 +12301,22 @@ export default function ThreeWorld({
             osakaSplashes.splice(i, 1)
           }
         }
+        // 桜吹雪 (P-F): ゆっくり回転しながら落下、地表で上空へ循環。2フレに1回。
+        if (osakaSakura && (osakaMapFrame & 1) === 0) {
+          const sk = osakaSakura
+          for (let i = 0; i < sk.pts.length; i++) {
+            const p = sk.pts[i]
+            if (!p) continue
+            p.y -= p.vy * dt * 2
+            if (p.y < 0.1) p.y = 16 + Math.random() * 6
+            osakaEyeDummy.position.set(p.x + Math.sin(now * 0.001 + p.phase) * 1.2, p.y, p.z)
+            osakaEyeDummy.rotation.set(now * 0.001 * p.rs + p.phase, p.phase, now * 0.0013 * p.rs)
+            osakaEyeDummy.scale.setScalar(1)
+            osakaEyeDummy.updateMatrix()
+            sk.mesh.setMatrixAt(i, osakaEyeDummy.matrix)
+          }
+          sk.mesh.instanceMatrix.needsUpdate = true
+        }
         // 大阪城の目玉 (P-E): 各目玉が独立したランダム周期で点いたり消えたりする。
         if (osakaCastleEyes) {
           if (now >= osakaCastleEyes.until) {
@@ -13428,6 +13444,61 @@ export default function ThreeWorld({
         if (trueKill) pts += 1
         return pts >= 6 ? "S" : pts >= 4 ? "A" : pts >= 2 ? "B" : "C"
       }
+      // ══ クリア後の世界変化 (P-F) ═════════════════════════════════════════════
+      // 通常クリア: 街が静寂に包まれる (全光を1/4へ)。真クリア: 光が満ち
+      // (ambient 8.0)、桜の花びらが降り注ぐ。リザルトの背景は半透明にして
+      // 変化した世界を見せる。RETRY のマップ再構築で全て自然に巻き戻る。
+      let osakaSakura: {
+        mesh: THREE.InstancedMesh
+        pts: { x: number; y: number; z: number; vy: number; rs: number; phase: number }[]
+      } | null = null
+      function osakaWorldAfter(kind: "normal" | "true") {
+        const mapRoot = osakaMapMeshesRef.current[0]
+        if (kind === "normal") {
+          // 静寂 — 街の灯がすっと引いていく (BGMは元々イベント駆動のため無音)。
+          if (mapRoot) {
+            mapRoot.traverse((o) => {
+              if (o instanceof THREE.Light) o.intensity *= 0.25
+            })
+          }
+          return
+        }
+        // 真クリア — 全てのライトが輝き、桜が舞う。
+        if (mapRoot) {
+          mapRoot.traverse((o) => {
+            if (o instanceof THREE.AmbientLight) o.intensity = 8.0
+            else if (o instanceof THREE.Light) o.intensity *= 1.4
+          })
+        }
+        const n = isMobileDevice ? 40 : 100
+        const geo = new THREE.PlaneGeometry(0.22, 0.22)
+        const mat = new THREE.MeshBasicMaterial({
+          color: 0xffb7c5,
+          transparent: true,
+          opacity: 0.9,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+        })
+        const im = new THREE.InstancedMesh(geo, mat, n)
+        im.frustumCulled = false
+        const pts: { x: number; y: number; z: number; vy: number; rs: number; phase: number }[] = []
+        for (let i = 0; i < n; i++) {
+          pts.push({
+            x: focalPoint.x + (Math.random() - 0.5) * 52,
+            y: 2 + Math.random() * 20,
+            z: focalPoint.z + (Math.random() - 0.5) * 52,
+            vy: 0.8 + Math.random() * 0.9,
+            rs: 1 + Math.random() * 2,
+            phase: Math.random() * Math.PI * 2,
+          })
+        }
+        scene.add(im)
+        osakaSakura = { mesh: im, pts }
+        // 暗転が明けて世界が見える頃に流す (P-F)。
+        window.setTimeout(() => {
+          if (osakaSakura) osakaShowCutin("大阪に平和が戻った", null, "form")
+        }, 3000)
+      }
       // 撃破大爆発 (FINAL-F) を見せ切ってから暗転に入る。即時に無敵+入力ロック
       // だけ掛け、950ms 後に本編のエンディングを開始する。
       function osakaBeginEndingSoon(kind: "normal" | "true") {
@@ -13516,6 +13587,7 @@ export default function ThreeWorld({
           titleNew,
         }
         huntClearEnemies() // 静かな暗転のために残存雑魚を掃く
+        osakaWorldAfter(kind) // クリア後の世界変化 (P-F): 静寂 or 光+桜
         huntInputLockRef.current = true
         spawnInvulnUntilRef.current = Date.now() + 600000
         document.exitPointerLock?.()
@@ -16400,6 +16472,13 @@ export default function ThreeWorld({
         osakaNeonSeq = null
         for (const sp of osakaSplashes) scene.remove(sp.mesh)
         osakaSplashes.length = 0
+        // 桜吹雪 (P-F) の後始末。
+        if (osakaSakura) {
+          scene.remove(osakaSakura.mesh)
+          osakaSakura.mesh.geometry.dispose()
+          ;(osakaSakura.mesh.material as THREE.Material).dispose()
+          osakaSakura = null
+        }
         if (osakaCastleEyes) {
           scene.remove(osakaCastleEyes.mesh)
           osakaCastleEyes.mesh.geometry.dispose()
@@ -22992,7 +23071,16 @@ export default function ThreeWorld({
                   position: "absolute",
                   inset: 0,
                   zIndex: 80,
-                  background: osakaEnding.kind === "true" ? "#070003" : "#000",
+                  // 暗転後は半透明に戻し、変化した世界 (静寂/桜) を見せる (P-F)。
+                  background:
+                    osakaEnding.stage === "fade"
+                      ? osakaEnding.kind === "true"
+                        ? "#070003"
+                        : "#000"
+                      : osakaEnding.kind === "true"
+                        ? "rgba(7,0,3,0.5)"
+                        : "rgba(0,0,0,0.6)",
+                  transition: "background 1.4s ease-out",
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
