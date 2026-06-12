@@ -12287,6 +12287,33 @@ export default function ThreeWorld({
           )
           SOUNDS.huntWarn()
         }
+        // 鬼刀の斬撃軌跡 (P-G): 拡大しながらフェードアウト。
+        for (let i = osakaSlashFx.length - 1; i >= 0; i--) {
+          const sl = osakaSlashFx[i]
+          if (!sl) continue
+          sl.t += dt
+          const k = sl.t / 0.28
+          sl.mat.opacity = Math.max(0, 0.75 * (1 - k))
+          for (const m of sl.meshes) m.scale.setScalar(1 + k * 0.9)
+          if (k >= 1) {
+            for (const m of sl.meshes) scene.remove(m)
+            sl.mat.dispose()
+            osakaSlashFx.splice(i, 1)
+          }
+        }
+        // 大槍の光の尾 (P-G): 共有マテリアルのため縮小のみで消える。
+        for (let i = osakaTrails.length - 1; i >= 0; i--) {
+          const tr = osakaTrails[i]
+          if (!tr) continue
+          tr.t += dt
+          const k = 1 - tr.t / 0.45
+          if (k <= 0.05) {
+            scene.remove(tr.mesh)
+            osakaTrails.splice(i, 1)
+          } else {
+            tr.mesh.scale.setScalar(k)
+          }
+        }
         // 水しぶき (P-E): 上方向に飛んで重力で落ちる白い飛沫。
         for (let i = osakaSplashes.length - 1; i >= 0; i--) {
           const sp = osakaSplashes[i]
@@ -12528,6 +12555,46 @@ export default function ThreeWorld({
       const osakaSpearMat = new THREE.MeshBasicMaterial({ color: 0xd4af37 })
       const osakaDebrisGeo = new THREE.BoxGeometry(0.28, 0.22, 0.18)
       const osakaDebrisMat = new THREE.MeshLambertMaterial({ color: 0x55504a })
+      // 武器使用エフェクト (P-G): 鬼刀の赤い斬撃軌跡 (扇状の半透明プレーン) と
+      // 大槍の青白い光の尾。軌跡はスイング単位でマテリアルを持ち消滅時に破棄、
+      // 尾の粒は共有マテリアルで縮小フェード (破棄不要)。
+      const osakaSlashGeo = new THREE.PlaneGeometry(1.8, 0.42)
+      const osakaSlashFx: { meshes: THREE.Mesh[]; mat: THREE.MeshBasicMaterial; t: number }[] = []
+      const osakaTrailGeo = new THREE.SphereGeometry(0.07, 5, 5)
+      const osakaTrailMat = new THREE.MeshBasicMaterial({
+        color: 0xaaddff,
+        transparent: true,
+        opacity: 0.8,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+      })
+      const osakaTrails: { mesh: THREE.Mesh; t: number }[] = []
+      function osakaSpawnSlashFx() {
+        const mat = new THREE.MeshBasicMaterial({
+          color: 0xff2233,
+          transparent: true,
+          opacity: 0.75,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+          blending: THREE.AdditiveBlending,
+        })
+        camera.getWorldDirection(fwd3)
+        const dir = fwd3.clone().normalize()
+        const base = new THREE.Vector3(focalPoint.x, EYE_HEIGHT - 0.15, focalPoint.z)
+        base.addScaledVector(dir, 1.7)
+        const nP = isMobileDevice ? 3 : 4
+        const meshes: THREE.Mesh[] = []
+        for (let i = 0; i < nP; i++) {
+          const m = new THREE.Mesh(osakaSlashGeo, mat)
+          m.position.copy(base)
+          m.quaternion.copy(camera.quaternion)
+          m.rotateZ(-0.7 + (i / Math.max(1, nP - 1)) * 1.4) // 扇状に開く
+          m.translateY((i - (nP - 1) / 2) * 0.12)
+          scene.add(m)
+          meshes.push(m)
+        }
+        osakaSlashFx.push({ meshes, mat, t: 0 })
+      }
       const osakaSecretFresh = (): typeof osakaSecretRef.current => ({
         gateOpen: false,
         wallBroken: false,
@@ -12633,6 +12700,7 @@ export default function ThreeWorld({
         if (now - lastMeleeRef.current < KNIFE_COOLDOWN_MS) return
         lastMeleeRef.current = now
         SOUNDS.knife()
+        osakaSpawnSlashFx() // 赤い斬撃軌跡 (P-G)
         const killed = osakaSecretMelee(
           OSAKA_ONIBLADE_DMG * meleeSuitMult(),
           OSAKA_ONIBLADE_RANGE,
@@ -12913,6 +12981,9 @@ export default function ThreeWorld({
           if (st.loc === "under" && Math.hypot(px - bx, pz - bz) < 2.1) {
             st.bladeTaken = true
             S.blade.visible = false
+            // 取得の白フラッシュ (P-G)。
+            setHuntWhiteFlash(true)
+            window.setTimeout(() => setHuntWhiteFlash(false), 180)
             osakaGrantSecretWeapon("oniblade")
             scoreRef.current += 2000 // 隠し武器発見ボーナス (FINAL-E)
             setScore(scoreRef.current)
@@ -12928,6 +12999,9 @@ export default function ThreeWorld({
           if (st.loc === "hidden" && Math.hypot(px - sx, pz - sz) < 2.1) {
             st.spearTaken = true
             S.spear.visible = false
+            // 取得の白フラッシュ (P-G)。
+            setHuntWhiteFlash(true)
+            window.setTimeout(() => setHuntWhiteFlash(false), 180)
             osakaGrantSecretWeapon("greatspear")
             scoreRef.current += 2000 // 隠し武器発見ボーナス (FINAL-E)
             setScore(scoreRef.current)
@@ -12953,12 +13027,18 @@ export default function ThreeWorld({
           focalPoint.z = Math.max(cz2 - hh, Math.min(cz2 + hh, focalPoint.z))
           focalPoint.y = 0
         }
-        // ── 投擲槍の飛翔 (表示のみ) ──
+        // ── 投擲槍の飛翔 (表示のみ) + 青白い光の尾 (P-G) ──
         for (let i = osakaSpears.length - 1; i >= 0; i--) {
           const s = osakaSpears[i]
           if (!s) continue
           s.mesh.position.addScaledVector(s.dir, OSAKA_SPEAR_SPEED * dt)
           s.dist += OSAKA_SPEAR_SPEED * dt
+          if (fx2 && osakaTrails.length < 90) {
+            const tdot = new THREE.Mesh(osakaTrailGeo, osakaTrailMat)
+            tdot.position.copy(s.mesh.position)
+            scene.add(tdot)
+            osakaTrails.push({ mesh: tdot, t: 0 })
+          }
           if (s.dist > OSAKA_SPEAR_THROW_DIST) {
             scene.remove(s.mesh)
             osakaSpears.splice(i, 1)
@@ -16472,6 +16552,14 @@ export default function ThreeWorld({
         osakaNeonSeq = null
         for (const sp of osakaSplashes) scene.remove(sp.mesh)
         osakaSplashes.length = 0
+        // 武器エフェクト (P-G) の後始末。
+        for (const sl of osakaSlashFx) {
+          for (const m of sl.meshes) scene.remove(m)
+          sl.mat.dispose()
+        }
+        osakaSlashFx.length = 0
+        for (const tr of osakaTrails) scene.remove(tr.mesh)
+        osakaTrails.length = 0
         // 桜吹雪 (P-F) の後始末。
         if (osakaSakura) {
           scene.remove(osakaSakura.mesh)
