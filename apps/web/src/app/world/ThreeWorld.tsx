@@ -13070,7 +13070,7 @@ export default function ThreeWorld({
           if (!s) continue
           s.mesh.position.addScaledVector(s.dir, OSAKA_SPEAR_SPEED * dt)
           s.dist += OSAKA_SPEAR_SPEED * dt
-          if (fx2 && osakaTrails.length < 90) {
+          if (fx2 && osakaTrails.length < (isMobileDevice ? 40 : 90)) {
             const tdot = new THREE.Mesh(osakaTrailGeo, osakaTrailMat)
             tdot.position.copy(s.mesh.position)
             scene.add(tdot)
