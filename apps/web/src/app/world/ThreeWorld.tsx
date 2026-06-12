@@ -536,6 +536,16 @@ const SOUNDS = {
     _noise(0.32, 0.5, "lowpass", 900)
     _tone(220, 0.2, 0.16, "sine", 70)
   },
+  // 発見スティング (P-I): 隠しルートを見つけた瞬間の神秘音。
+  discover() {
+    _tone(660, 0.18, 0.2, "sine", 880)
+    _tone(440, 0.3, 0.16, "triangle", 660)
+  },
+  // 真クリアの余韻 (P-I): 低く長い終止音。
+  trueClear() {
+    _tone(110, 0.8, 0.3, "sine", 55)
+    _tone(220, 0.6, 0.18, "triangle", 110)
+  },
 }
 
 // ══ HUNT mode data (transfer missions) — PR-Z1 ═══════════════════════════════
@@ -2510,7 +2520,8 @@ export default function ThreeWorld({
     timeSec: number
     damageTaken: number
     rank: "S" | "A" | "B" | "C"
-    bonus: number // クリア/隠し武器/ノーダメの合算ボーナス (FINAL-E)
+    bonus: number // エンディング時に加算した分 (クリア/ノーダメ/鬼; FINAL-E/P-I)
+    breakdown: { k: string; v: number }[] // 全ボーナスの内訳 (P-I)
     best: number // 送信前の自己ベスト
     newBest: boolean
     oni: boolean // 鬼モードでのクリアか (FINAL-H)
@@ -2521,8 +2532,16 @@ export default function ThreeWorld({
   // 称号「大阪の鬼」(FINAL-H): 鬼モードクリアで解放、HUDに常時表示。
   const oniTitleOwnedRef = useRef(false)
   const [oniTitleOwned, setOniTitleOwned] = useState(false)
-  // ラン内の戦績 (タイム/キル/命中率/被ダメ) — リザルトとランク評価の材料。
-  const osakaRunRef = useRef({ start: 0, kills: 0, dmg: 0, shots: 0, hits: 0 })
+  // ラン内の戦績 (タイム/キル/命中率/被ダメ/発見/形態撃破) — リザルトと内訳の材料。
+  const osakaRunRef = useRef({
+    start: 0,
+    kills: 0,
+    dmg: 0,
+    shots: 0,
+    hits: 0,
+    routesFound: 0, // 隠しルート発見数 (P-I: 各+2000)
+    formsDown: 0, // 形態撃破数 (P-I: 各+500)
+  })
   // JSX のボタンから effect 内の関数を呼ぶ橋 (spawnMissionRef と同じパターン)。
   const osakaEndingActionRef = useRef<{ retry: () => void } | null>(null)
   // 演出強化 (FINAL-F): 形態変化カットイン + ボス専用HPバー。
@@ -11968,6 +11987,12 @@ export default function ThreeWorld({
         if (!ob || ob.transitioning) return
         ob.transitioning = true
         osakaHitStopUntil = Date.now() + 130 // 形態撃破の小さなタメ (FINAL-F)
+        // 形態撃破ボーナス (P-I): 1形態 +500pt (osaka ミッション中のみ)。
+        if (osakaRunIsLive()) {
+          osakaRunRef.current.formsDown++
+          scoreRef.current += 500
+          setScore(scoreRef.current)
+        }
         const c = ob.group.position.clone()
         for (let i = 0; i < 3; i++) {
           spawnExplosion(
@@ -12852,7 +12877,11 @@ export default function ThreeWorld({
               st.gateOpen = true
               S.gateAnim = 0
               SOUNDS.huntOrbOpen()
-              showNotification("格子戸が軋みながら開く……")
+              SOUNDS.discover() // 発見スティング (P-I)
+              osakaRunRef.current.routesFound++
+              scoreRef.current += 2000 // 隠しルート発見ボーナス (P-I)
+              setScore(scoreRef.current)
+              showNotification("隠しルート発見 +2000 — 格子戸が軋みながら開く……")
             }
           } else if (!st.wallBroken && cd < 4) {
             hint = "[E] 調べる — ひび割れた壁"
@@ -12861,6 +12890,11 @@ export default function ThreeWorld({
               S.crackAnim = 0
               cameraShakeRef.current.intensity = 5
               SOUNDS.shotgun()
+              SOUNDS.discover() // 発見スティング (P-I)
+              osakaRunRef.current.routesFound++
+              scoreRef.current += 2000 // 隠しルート発見ボーナス (P-I)
+              setScore(scoreRef.current)
+              showNotification("隠しルート発見 +2000")
               const wx = ax + OSAKA_CRACK_POS.x
               const wz = az + OSAKA_CRACK_POS.z
               for (let i = 0; i < 14; i++) {
@@ -13313,7 +13347,15 @@ export default function ThreeWorld({
       // を直接呼び直し、MODE SELECT は onExit (WorldClient のモード選択) へ戻す。
       let osakaEndingGen = 0
       function osakaRunReset() {
-        osakaRunRef.current = { start: Date.now(), kills: 0, dmg: 0, shots: 0, hits: 0 }
+        osakaRunRef.current = {
+          start: Date.now(),
+          kills: 0,
+          dmg: 0,
+          shots: 0,
+          hits: 0,
+          routesFound: 0,
+          formsDown: 0,
+        }
       }
       function osakaRunIsLive(): boolean {
         return (
@@ -13596,14 +13638,26 @@ export default function ThreeWorld({
         const run = osakaRunRef.current
         const timeSec = Math.max(1, Math.floor((Date.now() - run.start) / 1000))
         const accuracy = run.shots > 0 ? run.hits / run.shots : 0
-        // ── スコアボーナス (FINAL-E): クリア + 隠し武器発見 + ノーダメ ──
+        // ── スコアボーナス (FINAL-E / P-I) ──
+        // ルート発見・武器取得・形態撃破は「その場で」加算済み (二重計上しない)。
+        // ここではクリア系 (クリア/ノーダメ/鬼) だけを加算し、内訳は全件並べる。
         const sst = osakaSecretRef.current
         const oni = osakaOni()
         let bonus = kind === "true" ? 15000 : 5000
-        if (sst.bladeTaken) bonus += 2000
-        if (sst.spearTaken) bonus += 2000
         if (run.dmg === 0) bonus += 10000 // ノーダメクリア
         if (oni) bonus += OSAKA_ONI_CLEAR_BONUS // 鬼モード (FINAL-H)
+        const wpnCount = (sst.bladeTaken ? 1 : 0) + (sst.spearTaken ? 1 : 0)
+        const breakdown: { k: string; v: number }[] = [
+          { k: kind === "true" ? "真クリア" : "クリア", v: kind === "true" ? 15000 : 5000 },
+        ]
+        if (run.routesFound > 0)
+          breakdown.push({ k: `隠しルート発見 ×${run.routesFound}`, v: run.routesFound * 2000 })
+        if (wpnCount > 0) breakdown.push({ k: `隠し武器取得 ×${wpnCount}`, v: wpnCount * 2000 })
+        if (run.formsDown > 0)
+          breakdown.push({ k: `形態撃破 ×${run.formsDown}`, v: run.formsDown * 500 })
+        if (run.dmg === 0) breakdown.push({ k: "ノーダメクリア", v: 10000 })
+        if (oni) breakdown.push({ k: "鬼モード", v: OSAKA_ONI_CLEAR_BONUS })
+        if (kind === "true") SOUNDS.trueClear() // 真クリアの余韻 (P-I)
         // 称号「大阪の鬼」: 鬼モードクリアで解放 + 永続化。
         let titleNew = false
         if (oni) {
@@ -13664,6 +13718,7 @@ export default function ThreeWorld({
           damageTaken: Math.round(run.dmg),
           rank: osakaComputeRank(timeSec, run.dmg, accuracy, kind === "true"),
           bonus,
+          breakdown,
           best,
           newBest,
           oni,
@@ -23337,7 +23392,6 @@ export default function ThreeWorld({
                     {(
                       [
                         ["SCORE", String(osakaEnding.score).padStart(6, "0")],
-                        ["クリアボーナス", `+${osakaEnding.bonus}`],
                         ["KILL", String(osakaEnding.kills)],
                         ["命中率", `${Math.round(osakaEnding.accuracy * 100)}%`],
                         [
@@ -23367,6 +23421,28 @@ export default function ThreeWorld({
                       >
                         <span style={{ opacity: 0.75 }}>{k}</span>
                         <span style={{ fontWeight: "bold" }}>{v}</span>
+                      </div>
+                    ))}
+                    {/* ボーナス内訳 (P-I) */}
+                    <div
+                      style={{
+                        borderTop: "1px solid rgba(255,200,160,0.25)",
+                        margin: "0.5rem 0 0.3rem",
+                      }}
+                    />
+                    {osakaEnding.breakdown.map((b) => (
+                      <div
+                        key={b.k}
+                        style={{
+                          display: "flex",
+                          justifyContent: "space-between",
+                          fontSize: "0.72rem",
+                          padding: "0.12rem 0.4rem",
+                          color: "#ffd9a0",
+                        }}
+                      >
+                        <span style={{ opacity: 0.8 }}>{b.k}</span>
+                        <span>+{b.v}</span>
                       </div>
                     ))}
                     {osakaEnding.kind === "true" && (
