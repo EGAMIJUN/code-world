@@ -4277,27 +4277,21 @@ export default function ThreeWorld({
       }
 
       // A rooftop water tank (cylinder) or AC vent (box), placed at the given
-      // roof-top Y. Kept simple — these read fine from the street and add
-      // city silhouette without any extra lights.
+      // roof-top Y. Kept simple — these read fine from the street and add city
+      // silhouette without any extra lights. Block A perf: accumulated as flat
+      // [x,y,z] runs and baked into three InstancedMeshes by flushRoofInst().
+      const roofInst = { tank: [] as number[], leg: [] as number[], vent: [] as number[] }
       function addRoofUnit(cx: number, topY: number, cz: number, kind: "tank" | "vent") {
         if (kind === "tank") {
-          const tank = new THREE.Mesh(new THREE.CylinderGeometry(0.7, 0.8, 1.4, 12), tankMat)
-          tank.position.set(cx, topY + 0.7, cz)
-          tank.castShadow = true
-          scene.add(tank)
+          roofInst.tank.push(cx, topY + 0.7, cz)
           // Four stubby legs so it reads as a raised water tank.
           for (const sx of [-1, 1]) {
             for (const sz of [-1, 1]) {
-              const leg = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.5, 0.12), railMatM)
-              leg.position.set(cx + sx * 0.5, topY + 0.25, cz + sz * 0.5)
-              scene.add(leg)
+              roofInst.leg.push(cx + sx * 0.5, topY + 0.25, cz + sz * 0.5)
             }
           }
         } else {
-          const vent = new THREE.Mesh(new THREE.BoxGeometry(1.3, 0.8, 1.0), acUnitMat)
-          vent.position.set(cx, topY + 0.4, cz)
-          vent.castShadow = true
-          scene.add(vent)
+          roofInst.vent.push(cx, topY + 0.4, cz)
         }
       }
 
@@ -4955,33 +4949,38 @@ export default function ThreeWorld({
         roofMat: concreteRoofMat,
       })
 
-      // Block A perf: bake all accumulated window panes into four InstancedMeshes
-      // (lit/dim × horizontal/vertical) — replaces hundreds of per-pane draws.
+      // Block A perf: bake the accumulated window panes + rooftop props into a
+      // handful of InstancedMeshes (lit/dim × horizontal/vertical windows, plus
+      // tank / leg / vent) — replaces many hundreds of per-mesh draws.
       {
-        const winDummy = new THREE.Object3D()
-        const flushWindowInst = (
+        const instDummy = new THREE.Object3D()
+        const flushPosInst = (
           flat: number[],
           geo: THREE.BufferGeometry,
           mat: THREE.Material,
+          shadow = false,
         ) => {
           const n = flat.length / 3
           if (n === 0) return
           const im = new THREE.InstancedMesh(geo, mat, n)
-          im.castShadow = false
+          im.castShadow = shadow
           im.receiveShadow = false
           im.frustumCulled = false
           for (let i = 0; i < n; i++) {
-            winDummy.position.set(flat[i * 3] ?? 0, flat[i * 3 + 1] ?? 0, flat[i * 3 + 2] ?? 0)
-            winDummy.updateMatrix()
-            im.setMatrixAt(i, winDummy.matrix)
+            instDummy.position.set(flat[i * 3] ?? 0, flat[i * 3 + 1] ?? 0, flat[i * 3 + 2] ?? 0)
+            instDummy.updateMatrix()
+            im.setMatrixAt(i, instDummy.matrix)
           }
           im.instanceMatrix.needsUpdate = true
           scene.add(im)
         }
-        flushWindowInst(winInst.litH, winGeoH, litWindowMat)
-        flushWindowInst(winInst.litV, winGeoV, litWindowMat)
-        flushWindowInst(winInst.dimH, winGeoH, windowMat)
-        flushWindowInst(winInst.dimV, winGeoV, windowMat)
+        flushPosInst(winInst.litH, winGeoH, litWindowMat)
+        flushPosInst(winInst.litV, winGeoV, litWindowMat)
+        flushPosInst(winInst.dimH, winGeoH, windowMat)
+        flushPosInst(winInst.dimV, winGeoV, windowMat)
+        flushPosInst(roofInst.tank, new THREE.CylinderGeometry(0.7, 0.8, 1.4, 12), tankMat, true)
+        flushPosInst(roofInst.leg, new THREE.BoxGeometry(0.12, 0.5, 0.12), railMatM, true)
+        flushPosInst(roofInst.vent, new THREE.BoxGeometry(1.3, 0.8, 1.0), acUnitMat, true)
       }
 
       // ── Landmark observation tower (Tokyo-Tower-style lattice) ──────────────
@@ -5423,7 +5422,10 @@ export default function ThreeWorld({
           const neonMat = new THREE.MeshStandardMaterial({
             color: n.color,
             emissive: n.color,
-            emissiveIntensity: 1.4,
+            // Block A: brighter for the night city, and the per-sign PointLight
+            // is dropped — emissive under ACESFilmic carries the glow and the
+            // four intersection lamps are the map's only real lights.
+            emissiveIntensity: 2.0,
             roughness: 0.4,
             metalness: 0.2,
           })
@@ -5431,11 +5433,6 @@ export default function ThreeWorld({
           sign.position.set(n.x, 3.2, n.z)
           sign.rotation.y = n.rot
           scene.add(sign)
-          // Add a small point light so the neon casts a colored wash on the
-          // nearby wall (subtle but adds the "wet street" cyberpunk feel).
-          const pl = new THREE.PointLight(n.color, 0.55, 8)
-          pl.position.set(n.x, 3.5, n.z + 0.3)
-          scene.add(pl)
         }
       }
 
