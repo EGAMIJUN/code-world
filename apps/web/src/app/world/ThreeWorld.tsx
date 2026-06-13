@@ -4214,6 +4214,16 @@ export default function ThreeWorld({
       // Shared window-pane geometries (same size for every pane → one buffer).
       const winGeoH = new THREE.BoxGeometry(1.0, 1.0, 0.08) // north / south faces
       const winGeoV = new THREE.BoxGeometry(0.08, 1.0, 1.0) // east / west faces
+      // Block A perf: every window pane used to be its own scene.add() mesh
+      // (~500-900 draws across the city). They're now accumulated here as flat
+      // [x,y,z] runs, split by lit/dim × horizontal/vertical, and baked into
+      // four InstancedMeshes by flushWindowInst() once every builder has run.
+      const winInst = {
+        litH: [] as number[],
+        litV: [] as number[],
+        dimH: [] as number[],
+        dimV: [] as number[],
+      }
 
       // Lay a grid of windows over the requested faces of a footprint between
       // yStart and yTop. Visual only (no collision, no shadows). A deterministic
@@ -4243,17 +4253,24 @@ export default function ThreeWorld({
             const t = (c + 0.5) / cols
             for (const ry of rows) {
               const lit = idx++ % litEvery === 0
-              const mat = lit ? litWindowMat : windowMat
-              const mesh = new THREE.Mesh(horizontal ? winGeoH : winGeoV, mat)
+              const py = ry + paneH / 2
+              let px: number
+              let pz: number
               if (horizontal) {
-                const pz = face === "north" ? o.z - 0.05 : o.z + o.d + 0.05
-                mesh.position.set(o.x + t * o.w, ry + paneH / 2, pz)
+                px = o.x + t * o.w
+                pz = face === "north" ? o.z - 0.05 : o.z + o.d + 0.05
               } else {
-                const px = face === "west" ? o.x - 0.05 : o.x + o.w + 0.05
-                mesh.position.set(px, ry + paneH / 2, o.z + t * o.d)
+                px = face === "west" ? o.x - 0.05 : o.x + o.w + 0.05
+                pz = o.z + t * o.d
               }
-              mesh.castShadow = false
-              scene.add(mesh)
+              const bucket = horizontal
+                ? lit
+                  ? winInst.litH
+                  : winInst.dimH
+                : lit
+                  ? winInst.litV
+                  : winInst.dimV
+              bucket.push(px, py, pz)
             }
           }
         }
@@ -4937,6 +4954,35 @@ export default function ThreeWorld({
         bldMat: concreteMat,
         roofMat: concreteRoofMat,
       })
+
+      // Block A perf: bake all accumulated window panes into four InstancedMeshes
+      // (lit/dim × horizontal/vertical) — replaces hundreds of per-pane draws.
+      {
+        const winDummy = new THREE.Object3D()
+        const flushWindowInst = (
+          flat: number[],
+          geo: THREE.BufferGeometry,
+          mat: THREE.Material,
+        ) => {
+          const n = flat.length / 3
+          if (n === 0) return
+          const im = new THREE.InstancedMesh(geo, mat, n)
+          im.castShadow = false
+          im.receiveShadow = false
+          im.frustumCulled = false
+          for (let i = 0; i < n; i++) {
+            winDummy.position.set(flat[i * 3] ?? 0, flat[i * 3 + 1] ?? 0, flat[i * 3 + 2] ?? 0)
+            winDummy.updateMatrix()
+            im.setMatrixAt(i, winDummy.matrix)
+          }
+          im.instanceMatrix.needsUpdate = true
+          scene.add(im)
+        }
+        flushWindowInst(winInst.litH, winGeoH, litWindowMat)
+        flushWindowInst(winInst.litV, winGeoV, litWindowMat)
+        flushWindowInst(winInst.dimH, winGeoH, windowMat)
+        flushWindowInst(winInst.dimV, winGeoV, windowMat)
+      }
 
       // ── Landmark observation tower (Tokyo-Tower-style lattice) ──────────────
       // A tall splayed lattice tower with an observation deck you ride an
