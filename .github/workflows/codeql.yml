@@ -35,3 +35,24 @@ jobs:
         uses: github/codeql-action/analyze@v3
         with:
           category: "/language:javascript-typescript"
+
+      # ── Discord notification ─────────────────────────────────────────────────
+      # The detailed alert counts land in the GitHub Security tab; here we just
+      # announce whether the scan itself completed or failed.
+      - name: Notify Discord — scan complete
+        if: success()
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          NOTIFY_TITLE: "🔒 セキュリティスキャン完了: 成功"
+          NOTIFY_DESC: "${{ github.head_ref || github.ref_name }} — CodeQL 解析が完了しました（詳細は Security タブ）"
+          NOTIFY_COLOR: "3447003" # blue
+        run: bash .github/scripts/notify-discord.sh
+
+      - name: Notify Discord — scan failed
+        if: failure()
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          NOTIFY_TITLE: "🔒 セキュリティスキャン完了: 失敗"
+          NOTIFY_DESC: "${{ github.head_ref || github.ref_name }} — CodeQL 解析が失敗しました"
+          NOTIFY_COLOR: "15158332" # red
+        run: bash .github/scripts/notify-discord.sh

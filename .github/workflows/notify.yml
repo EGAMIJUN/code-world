@@ -1,0 +1,62 @@
+name: Notify
+
+# Repository lifecycle notifications to Discord. CI / CodeQL post their own
+# pass/fail from ci.yml / codeql.yml; this workflow covers PR + deploy events.
+#
+# Security: every dynamic value (PR title, commit message, branch) is passed
+# through `env:` and consumed as data by .github/scripts/notify-discord.sh —
+# never inlined into a `run:` shell line — so it can't be shell-injected. The
+# webhook is a repo secret; on fork PRs GitHub withholds secrets, so the script
+# simply skips (we never expose the webhook to untrusted fork code).
+
+on:
+  pull_request:
+    types: [opened, closed]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  pr-opened:
+    name: PR opened
+    if: github.event_name == 'pull_request' && github.event.action == 'opened'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Notify Discord
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          NOTIFY_TITLE: "📝 新しいPR: ${{ github.event.pull_request.title }}"
+          NOTIFY_DESC: "#${{ github.event.pull_request.number }} by ${{ github.event.pull_request.user.login }} → ${{ github.event.pull_request.base.ref }}\n${{ github.event.pull_request.html_url }}"
+          NOTIFY_COLOR: "3447003" # blue (info)
+        run: bash .github/scripts/notify-discord.sh
+
+  pr-merged:
+    name: PR merged
+    if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Notify Discord
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          NOTIFY_TITLE: "🔀 マージ完了: ${{ github.event.pull_request.title }}"
+          NOTIFY_DESC: "#${{ github.event.pull_request.number }} → ${{ github.event.pull_request.base.ref }}\n${{ github.event.pull_request.html_url }}"
+          NOTIFY_COLOR: "3066993" # green (success)
+        run: bash .github/scripts/notify-discord.sh
+
+  deploy-start:
+    name: Deploy start (main push)
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Notify Discord
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          NOTIFY_TITLE: "🚀 本番デプロイ開始: main"
+          NOTIFY_DESC: ${{ github.event.head_commit.message }}
+          NOTIFY_COLOR: "3447003" # blue (info)
+        run: bash .github/scripts/notify-discord.sh
