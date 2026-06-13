@@ -3040,6 +3040,11 @@ export default function ThreeWorld({
       // bright sky over the existing world (which reads as the distant terrain).
       const isSky = mapId === "sky"
       const isHunt = modeRef.current === "hunt"
+      // Block A: the urban map is now a night city (neon + street lamps + glowing
+      // windows). Gated so desert/snow/sky keep their daylight themes and the
+      // invasion mode keeps its red-sky override. Drives the dim night lighting
+      // below plus all the urban-only night props.
+      const isUrbanNight = !isHunt && !isSky && mapId === "urban" && modeRef.current !== "invasion"
       // Phones/tablets: trim GPU + CPU cost aggressively (pixel ratio, no AA,
       // shorter draw distance, lighter fog, half-rate secondary AI, fewer
       // enemies/particles). UA-based so it's available synchronously at scene
@@ -3066,7 +3071,11 @@ export default function ThreeWorld({
               ? { sky: 0xf0c887, fog: 0xe6c89a, ambient: 0xffe9c0, sun: 0xffd58a }
               : mapId === "snow"
                 ? { sky: 0xdce8f0, fog: 0xeaf2f8, ambient: 0xeef5ff, sun: 0xffffff }
-                : { sky: 0x87ceeb, fog: 0xc0d8f0, ambient: 0xd4e8ff, sun: 0xfff4cc }
+                : isUrbanNight
+                  ? // Block A night city: deep blue-black sky, near-black fog, dim
+                    // cool ambient, faint moonlight key (props supply the glow).
+                    { sky: 0x0a0a18, fog: 0x0a0a1a, ambient: 0x111122, sun: 0x5a6a9a }
+                  : { sky: 0x87ceeb, fog: 0xc0d8f0, ambient: 0xd4e8ff, sun: 0xfff4cc }
       scene.background = new THREE.Color(theme.sky)
       // Snow gets a tighter fog band ("軽いフォグ" — slightly hazy whiteout
       // without crushing visibility); desert/urban keep the long open draw.
@@ -3084,7 +3093,11 @@ export default function ThreeWorld({
             new THREE.Fog(theme.fog, isMobileDevice ? 450 : 900, isMobileDevice ? 1500 : 3000)
           : mapId === "snow"
             ? new THREE.Fog(theme.fog, isMobileDevice ? 40 : 80, isMobileDevice ? 210 : 420)
-            : new THREE.Fog(theme.fog, isMobileDevice ? 70 : 140, isMobileDevice ? 340 : 680)
+            : isUrbanNight
+              ? // Night city: pull the haze in so the lit core reads against a
+                // dark, fading skyline (also trims far draws for perf).
+                new THREE.Fog(theme.fog, isMobileDevice ? 45 : 60, isMobileDevice ? 150 : 230)
+              : new THREE.Fog(theme.fog, isMobileDevice ? 70 : 140, isMobileDevice ? 340 : 680)
 
       // ── Per-map material palette ───────────────────────────────────────────
       // The collision footprints (ALL_AABBS / floors / climb zones) are shared
@@ -3248,17 +3261,20 @@ export default function ThreeWorld({
         ? // HUNT: full-white ambient so the night arena stays clearly legible
           // (visibility is prioritised over mood — it was rendering black).
           new THREE.AmbientLight(0xffffff, 1.0)
-        : new THREE.AmbientLight(theme.ambient, 0.45)
+        : new THREE.AmbientLight(theme.ambient, isUrbanNight ? 0.3 : 0.45)
       scene.add(worldAmbient)
       const hemi = new THREE.HemisphereLight(
-        isHunt ? 0x556688 : theme.sky,
-        0x4a4030,
-        isHunt ? 0.45 : 0.55,
+        isHunt ? 0x556688 : isUrbanNight ? 0x2a3a5a : theme.sky,
+        isUrbanNight ? 0x14141c : 0x4a4030,
+        isHunt ? 0.45 : isUrbanNight ? 0.8 : 0.55,
       )
       hemi.position.set(0, 50, 0)
       scene.add(hemi)
       // HUNT: a strong white key from high up so the arena is fully visible.
-      const sun = new THREE.DirectionalLight(isHunt ? 0xffffff : theme.sun, isHunt ? 1.5 : 2.8)
+      const sun = new THREE.DirectionalLight(
+        isHunt ? 0xffffff : theme.sun,
+        isHunt ? 1.5 : isUrbanNight ? 0.5 : 2.8,
+      )
       sun.position.set(isHunt ? 100 : 60, isHunt ? 200 : 80, isHunt ? 100 : 40)
       sun.castShadow = true
       // Shadow map 1024 (was 2048) — quarter the memory + sampling cost.
@@ -3277,7 +3293,10 @@ export default function ThreeWorld({
       sun.shadow.radius = 2
       scene.add(sun)
       // Fill light from opposite side (gentle bounce-light proxy)
-      const fillLight = new THREE.DirectionalLight(0xb0c8ff, isHunt ? 0.3 : 0.45)
+      const fillLight = new THREE.DirectionalLight(
+        0xb0c8ff,
+        isHunt ? 0.3 : isUrbanNight ? 0.2 : 0.45,
+      )
       fillLight.position.set(-40, 30, -20)
       scene.add(fillLight)
 
@@ -5462,29 +5481,87 @@ export default function ThreeWorld({
         roughness: 0.4,
         metalness: 0,
       })
-      // Doubled spacing (12→18) — 24 lamps was overkill and dominated the
-      // PointLight per-pixel cost. No more castShadow (thin posts barely
-      // showed shadow anyway) and no more PointLights (emissive on the
-      // head already glows; sun + hemisphere handle the lit pixels).
-      // AABB also dropped — bullets at eye-height were getting eaten by
-      // the lamp's 5m-tall stop-volume; lamps are now pure decoration.
       // Avenue fixtures change per map: urban street lamps, desert lattice
       // radio/power towers (no power-lit lamps in a ruined base), snow
-      // perimeter fence posts. Same alternating-sides cadence as the lamps so
-      // the avenue stays legible as a "road" from a distance on every map.
+      // perimeter fence posts. Same alternating-sides cadence so the avenue
+      // stays legible as a "road" from a distance on every map.
       if (mapId === "urban") {
-        for (let lx = 12; lx <= 90; lx += 18) {
-          for (const lz of [44, 56]) {
-            const post = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.12, 5, 6), lampPostMat)
-            post.position.set(lx, 2.5, lz)
-            scene.add(post)
-            const arm = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.08, 0.08), lampPostMat)
-            arm.position.set(lx + (lz < 50 ? 0.5 : -0.5), 4.8, lz)
-            scene.add(arm)
-            const head = new THREE.Mesh(new THREE.SphereGeometry(0.22, 8, 6), lampHeadMat)
-            head.position.set(lx + (lz < 50 ? 1.0 : -1.0), 4.65, lz)
-            scene.add(head)
-          }
+        // Block A night-city lamps: poles+arms in one InstancedMesh, glowing
+        // heads in a second, and an emissive ground-glow disc per lamp in a
+        // third — 20 lamps for 3 instanced draws (down from 30 individual
+        // meshes). Only the four intersections get a real PointLight; every
+        // other lamp reads purely by emissive + additive glow.
+        const lampSlots: { x: number; z: number; side: number }[] = []
+        for (let lx = 8; lx <= 92; lx += 9.3) {
+          const x = Math.round(lx)
+          for (const z of [44, 56]) lampSlots.push({ x, z, side: z < 50 ? 1 : -1 })
+        }
+        const lampDummy = new THREE.Object3D()
+        // Pole + arm baked into one geometry (arm overhangs +Z); north-row
+        // instances spin 180° so the arm always reaches over the avenue.
+        const poleGeo = new THREE.CylinderGeometry(0.08, 0.12, 5, 6).translate(0, 2.5, 0)
+        const armGeo = new THREE.BoxGeometry(0.08, 0.08, 1.0).translate(0, 4.78, 0.5)
+        const postGeo = mergeGeometries([poleGeo, armGeo], false) ?? poleGeo
+        const postInst = new THREE.InstancedMesh(postGeo, lampPostMat, lampSlots.length)
+        postInst.castShadow = false
+        postInst.receiveShadow = false
+        const headInst = new THREE.InstancedMesh(
+          new THREE.SphereGeometry(0.22, 8, 6),
+          lampHeadMat,
+          lampSlots.length,
+        )
+        headInst.frustumCulled = false
+        // Radial ground-glow disc texture (bright centre → transparent), additive.
+        const glowCanvas = document.createElement("canvas")
+        glowCanvas.width = 64
+        glowCanvas.height = 64
+        const gctx = glowCanvas.getContext("2d")
+        if (gctx) {
+          const grad = gctx.createRadialGradient(32, 32, 0, 32, 32, 32)
+          grad.addColorStop(0, "rgba(255,226,165,0.5)")
+          grad.addColorStop(0.5, "rgba(255,210,140,0.16)")
+          grad.addColorStop(1, "rgba(255,200,120,0)")
+          gctx.fillStyle = grad
+          gctx.fillRect(0, 0, 64, 64)
+        }
+        const glowMat = new THREE.MeshBasicMaterial({
+          map: new THREE.CanvasTexture(glowCanvas),
+          transparent: true,
+          depthWrite: false,
+          blending: THREE.AdditiveBlending,
+        })
+        const glowInst = new THREE.InstancedMesh(
+          new THREE.PlaneGeometry(6, 6).rotateX(-Math.PI / 2),
+          glowMat,
+          lampSlots.length,
+        )
+        glowInst.frustumCulled = false
+        lampSlots.forEach((s, i) => {
+          lampDummy.scale.setScalar(1)
+          lampDummy.position.set(s.x, 0, s.z)
+          lampDummy.rotation.set(0, s.side > 0 ? 0 : Math.PI, 0)
+          lampDummy.updateMatrix()
+          postInst.setMatrixAt(i, lampDummy.matrix)
+          const hz = s.z + s.side * 0.95
+          lampDummy.rotation.set(0, 0, 0)
+          lampDummy.position.set(s.x, 4.65, hz)
+          lampDummy.updateMatrix()
+          headInst.setMatrixAt(i, lampDummy.matrix)
+          lampDummy.position.set(s.x, 0.02, hz)
+          lampDummy.updateMatrix()
+          glowInst.setMatrixAt(i, lampDummy.matrix)
+        })
+        postInst.instanceMatrix.needsUpdate = true
+        headInst.instanceMatrix.needsUpdate = true
+        glowInst.instanceMatrix.needsUpdate = true
+        scene.add(postInst)
+        scene.add(headInst)
+        scene.add(glowInst)
+        // The only real lights on the map: four warm lamps at the intersections.
+        for (const ix of [12, 31, 60, 84]) {
+          const pl = new THREE.PointLight(0xffd9a0, 1.5, 18)
+          pl.position.set(ix, 6, 50)
+          scene.add(pl)
         }
       } else if (mapId === "desert") {
         // Steel lattice towers — a tapering post with two cross-braces and a
