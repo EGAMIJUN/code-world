@@ -65,3 +65,25 @@ jobs:
           BETTER_AUTH_SECRET: ci-dummy-secret-at-least-32-characters-long
           BETTER_AUTH_URL: http://localhost:3001
           NEXT_PUBLIC_API_URL: http://localhost:3001
+
+      # ── Discord notifications ────────────────────────────────────────────────
+      # Dynamic values flow through `env:` (never inline ${{ }} in run:) so a
+      # crafted commit message / branch name can't be shell-injected. The webhook
+      # is a repo secret; notify-discord.sh skips quietly if it isn't configured.
+      - name: Notify Discord — CI passed
+        if: success()
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          NOTIFY_TITLE: "✅ CI パス: ${{ github.head_ref || github.ref_name }}"
+          NOTIFY_DESC: ${{ github.event.head_commit.message || github.event.pull_request.title }}
+          NOTIFY_COLOR: "3066993" # green
+        run: bash .github/scripts/notify-discord.sh
+
+      - name: Notify Discord — CI failed
+        if: failure()
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          NOTIFY_TITLE: "❌ CI 失敗: ${{ github.head_ref || github.ref_name }}"
+          NOTIFY_DESC: ${{ github.event.head_commit.message || github.event.pull_request.title }}
+          NOTIFY_COLOR: "15158332" # red
+        run: bash .github/scripts/notify-discord.sh

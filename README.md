@@ -203,6 +203,40 @@ bun run test    # Vitest (全パッケージ)
 
 ---
 
+## 🔔 Discord 通知（CI/CD）
+
+開発・運用イベントを Discord に通知する。GitHub Actions 側は以下のイベントで Discord embed を送る:
+
+| ワークフロー | イベント | 通知 |
+|---|---|---|
+| `ci.yml` | CI 成功 / 失敗 | ✅ CI パス / ❌ CI 失敗（ブランチ + コミットメッセージ） |
+| `codeql.yml` | セキュリティスキャン完了 | 🔒 スキャン完了（成功 / 失敗） |
+| `notify.yml` | PR 作成 / マージ / main への push | 📝 新しいPR / 🔀 マージ完了 / 🚀 本番デプロイ開始 |
+
+### セットアップ: `DISCORD_WEBHOOK` を GitHub Secrets に登録
+
+Webhook URL は**コードに直接書かず必ず Secrets 経由**で参照する（`${{ secrets.DISCORD_WEBHOOK }}`）。
+
+1. **Discord 側**: 通知したいチャンネル → 「連携サービス」→「ウェブフックを作成」→ URL をコピー。
+2. **GitHub 側**: リポジトリ → **Settings → Secrets and variables → Actions → New repository secret**
+   - **Name**: `DISCORD_WEBHOOK`
+   - **Secret**: コピーした Webhook URL
+   - 「Add secret」で保存。
+3. 以降、`main` への push / PR / CI / CodeQL で自動通知される。
+
+> Secret が未設定の場合（フォーク PR では GitHub が secret を渡さない等）、通知スクリプト
+> [`.github/scripts/notify-discord.sh`](.github/scripts/notify-discord.sh) は**静かにスキップ**し CI は失敗しない。
+> コミットメッセージや PR タイトル等の動的値はすべて `env:` 経由でスクリプトに渡し、`run:` への
+> インライン展開を避けている（シェルインジェクション対策）。
+
+### （任意）ローカル Claude Code の通知
+
+ローカルの作業完了 / ツールエラーも Discord に流す場合は、`~/.claude/settings.json` の `hooks`
+（`Stop` / `PostToolUse`）から通知スクリプトを呼ぶ。**Webhook URL は `~/.claude/.discord-webhook`
+（パーミッション 600・リポジトリ外）に置き**、スクリプト・設定ファイルには URL を書かない。
+
+---
+
 ## 📜 ライセンス
 
 private (内部開発)
