@@ -12417,6 +12417,10 @@ export default function ThreeWorld({
       }[] = []
       const osakaRainDummy = new THREE.Object3D()
       const osakaSwayDummy = new THREE.Object3D()
+      // Block O perf: reusable scratch vectors for updateOsakaBoss's per-frame
+      // boss position / aim (consumed read-only or .clone()'d, never retained).
+      const osakaBossPosScratch = new THREE.Vector3()
+      const osakaAimScratch = new THREE.Vector3()
       // Frame counter so updateOsakaMap can throttle the purely-cosmetic oscillators
       // (neon flicker, sway, water shimmer) to every other frame and the distance
       // cull to a coarse cadence.
@@ -13705,8 +13709,9 @@ export default function ThreeWorld({
           ob.group.position.z += (toZ / dist) * moveSpeed * dt
         }
         const safeToHit = now > spawnInvulnUntilRef.current
-        const bossPos = new THREE.Vector3(ob.group.position.x, 2, ob.group.position.z)
-        const aim = new THREE.Vector3(toX, 0, toZ)
+        // Block O perf: reuse scratch vectors instead of allocating every frame.
+        const bossPos = osakaBossPosScratch.set(ob.group.position.x, 2, ob.group.position.z)
+        const aim = osakaAimScratch.set(toX, 0, toZ)
         // Reset the periodic sub-attack timers when the form changes.
         if (ob.phase !== osakaPhaseSeen) {
           osakaPhaseSeen = ob.phase
@@ -16475,11 +16480,13 @@ export default function ThreeWorld({
             w.obj.position.x = w.baseX + Math.sin(t * w.spd + w.phase) * 0.6
             w.mat.emissiveIntensity = 0.6 + 0.4 * Math.sin(t * w.spd * 1.3 + w.phase)
           }
-        }
-        if (a.towerOrbMat && a.towerLight) {
-          const hue = (t * 0.04) % 1
-          a.towerOrbMat.emissive.setHSL(hue, 1, 0.5)
-          a.towerLight.color.setHSL(hue, 1, 0.6)
+          // Block O perf: throttle the tower-orb hue into the half-rate cosmetic
+          // block (a ~25 s color cycle reads identically at 30 Hz).
+          if (a.towerOrbMat && a.towerLight) {
+            const hue = (t * 0.04) % 1
+            a.towerOrbMat.emissive.setHSL(hue, 1, 0.5)
+            a.towerLight.color.setHSL(hue, 1, 0.6)
+          }
         }
         // Scrolling LED marquee: the offset advances every frame (smooth scroll),
         // but the canvas redraw + texture upload — the costly part — only fires every
