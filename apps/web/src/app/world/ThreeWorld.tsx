@@ -11193,7 +11193,8 @@ export default function ThreeWorld({
           for (const ex of [-0.14, 0.14]) {
             eyeGeos.push(huntEyeGeo.clone().scale(0.07, 0.07, 0.07).translate(ex, 0.82, -0.44))
           }
-          group.add(new THREE.Mesh(mergeGeometries(eyeGeos, false), eyeMat))
+          const mergedEye = mergeGeometries(eyeGeos, false) ?? huntEyeGeo
+          group.add(new THREE.Mesh(mergedEye, eyeMat))
           // Two dark horns merged into one mesh for an oni silhouette.
           const hornGeos: THREE.BufferGeometry[] = []
           for (const s of [-1, 1]) {
@@ -11205,7 +11206,8 @@ export default function ThreeWorld({
                 .translate(s * 0.17, 1.18, -0.04),
             )
           }
-          group.add(new THREE.Mesh(mergeGeometries(hornGeos, false), darkMat))
+          const mergedHorn = mergeGeometries(hornGeos, false) ?? huntConeGeo
+          group.add(new THREE.Mesh(mergedHorn, darkMat))
         } else {
           // A four-legged beast with three independent heads on long necks.
           const trunk = new THREE.Mesh(huntBlobGeo, bodyMat)
