@@ -1096,6 +1096,45 @@ const ALL_AABBS: WallAABB[] = WALL_AABBS
 // "no wall collision while OSAKA" is correct and matches the open-field design.
 // Module-scoped like ALL_AABBS, so it's reset on each mount (see the scene init).
 let osakaSuppressBaseCollision = false
+// OSAKA's OWN collision list. The base-map AABBs are suppressed during OSAKA
+// (above), but a hand-picked set of *major* structures — perimeter walls, sign
+// buildings, the tower legs, Shinsekai shops, the castle base, the castle-gate
+// pillars — are registered here by buildOsakaMap so they read as solid while the
+// open field stays freely walkable. Same WallAABB format (world coords) as
+// ALL_AABBS, so the exact radius/height sweep below is reused. Cleared on each
+// (re)build and on mission teardown. Module-scoped because the collision helpers
+// are module-level (collidesWithWall can't reach a component ref).
+const OSAKA_AABBS: WallAABB[] = []
+
+// Shared per-AABB tests (so the OSAKA path and the base-map path stay identical).
+function aabbBlocksMover(
+  w: WallAABB,
+  px: number,
+  pz: number,
+  radius: number,
+  feetY: number,
+): boolean {
+  return (
+    !w.disabled &&
+    px + radius > w.x1 &&
+    px - radius < w.x2 &&
+    pz + radius > w.z1 &&
+    pz - radius < w.z2 &&
+    w.h > feetY + STEP_UP_MAX &&
+    (w.y0 ?? 0) <= feetY + STEP_UP_MAX
+  )
+}
+function pointInAABB(w: WallAABB, px: number, py: number, pz: number): boolean {
+  return (
+    !w.disabled &&
+    px > w.x1 &&
+    px < w.x2 &&
+    pz > w.z1 &&
+    pz < w.z2 &&
+    py >= (w.y0 ?? 0) &&
+    py <= w.h
+  )
+}
 
 // Height-aware AABB sweep. `feetY` is the mover's foot altitude (default 0 =
 // ground). A wall only blocks if its top rises more than a step above the
@@ -1104,10 +1143,13 @@ let osakaSuppressBaseCollision = false
 // movers (enemies, spawn search) pass feetY=0 and, since every wall here is
 // ≥0.6m tall (> STEP_UP_MAX), behave exactly as the old 2D check did.
 function collidesWithWall(px: number, pz: number, radius: number, feetY = 0): boolean {
-  // OSAKA: the base city map (collision + world bounds) is suppressed so the
-  // player/enemies don't hit the now-hidden urban buildings, and the secret
-  // rooms (outside the normal world bounds) stay reachable.
-  if (osakaSuppressBaseCollision) return false
+  // OSAKA: skip the base city map + world bounds (hidden / suppressed; the
+  // secret rooms live outside the bounds) and instead test only the hand-picked
+  // OSAKA structures. An empty list = the old free-field behaviour.
+  if (osakaSuppressBaseCollision) {
+    for (const w of OSAKA_AABBS) if (aabbBlocksMover(w, px, pz, radius, feetY)) return true
+    return false
+  }
   if (
     px - radius < WORLD_MIN ||
     px + radius > WORLD_MAX ||
@@ -1115,31 +1157,19 @@ function collidesWithWall(px: number, pz: number, radius: number, feetY = 0): bo
     pz + radius > WORLD_MAX
   )
     return true
-  for (const w of ALL_AABBS) {
-    if (w.disabled) continue
-    if (
-      px + radius > w.x1 &&
-      px - radius < w.x2 &&
-      pz + radius > w.z1 &&
-      pz - radius < w.z2 &&
-      w.h > feetY + STEP_UP_MAX &&
-      (w.y0 ?? 0) <= feetY + STEP_UP_MAX
-    )
-      return true
-  }
+  for (const w of ALL_AABBS) if (aabbBlocksMover(w, px, pz, radius, feetY)) return true
   return false
 }
 
 // True if a point is inside *any* wall's 3D AABB. Used for bullet-vs-wall:
 // y is checked so a barricade doesn't stop a shot flying over it at eye height.
 function pointInsideWall(px: number, py: number, pz: number): boolean {
-  // OSAKA: no base-map walls (see collidesWithWall) → bullets fly free.
-  if (osakaSuppressBaseCollision) return false
-  for (const w of ALL_AABBS) {
-    if (w.disabled) continue
-    if (px > w.x1 && px < w.x2 && pz > w.z1 && pz < w.z2 && py >= (w.y0 ?? 0) && py <= w.h)
-      return true
+  // OSAKA: bullets are stopped only by the registered OSAKA structures.
+  if (osakaSuppressBaseCollision) {
+    for (const w of OSAKA_AABBS) if (pointInAABB(w, px, py, pz)) return true
+    return false
   }
+  for (const w of ALL_AABBS) if (pointInAABB(w, px, py, pz)) return true
   return false
 }
 
@@ -2999,6 +3029,7 @@ export default function ThreeWorld({
       // into the next mount (walls/shots passing through phantom rubble).
       for (const w of ALL_AABBS) w.disabled = false
       osakaSuppressBaseCollision = false // reset the module flag on each mount
+      OSAKA_AABBS.length = 0 // drop any OSAKA collision boxes from a prior mount
       // SKY: a dedicated aerial-combat arena — you fight enemy jets in a high,
       // bright sky over the existing world (which reads as the distant terrain).
       const isSky = mapId === "sky"
@@ -12930,13 +12961,12 @@ export default function ThreeWorld({
           focalPoint.z = Math.max(cz2 - hh, Math.min(cz2 + hh, focalPoint.z))
           focalPoint.y = 0
         } else {
-          // Main field (audit fix): OSAKA registers no wall collision and base-map
-          // collision is suppressed, so the visual 180×180 perimeter walls don't
-          // actually stop anyone — without this clamp the player can walk straight
-          // through them off the floor into the void. Soft-clamp to just inside the
-          // walls (local ±90 → world HUNT_ARENA ±88). All play positions (areas,
-          // spawn, the two secret entrances) sit well inside this.
-          const fb = 88
+          // Main field: the perimeter walls now have real collision (OSAKA_AABBS),
+          // so they stop the player ~1m short of the wall — this clamp is just a
+          // last-ditch backstop at the wall's outer face (local ±91) in case a
+          // hitbox is ever wrong, so no one can wander into the void. It never
+          // binds in normal play (the wall collision halts movement first).
+          const fb = 91
           focalPoint.x = Math.max(ax - fb, Math.min(ax + fb, focalPoint.x))
           focalPoint.z = Math.max(az - fb, Math.min(az + fb, focalPoint.z))
         }
@@ -14894,6 +14924,31 @@ export default function ThreeWorld({
         const group = new THREE.Group()
         group.position.set(HUNT_ARENA.x, 0, HUNT_ARENA.z)
         const add = (m: THREE.Object3D) => group.add(m)
+        // ── OSAKA collision registry ───────────────────────────────────────────
+        // Only the MAJOR structures get a hitbox (see addOsakaAABB calls below) so
+        // the open field stays freely walkable; small props (lanterns/signs/noren/
+        // sakura/wires, tower upper deck, keep upper tiers, bridge floor) stay
+        // pass-through. Geometry here is group-local; collidesWithWall works in
+        // world space, so this offsets by HUNT_ARENA. (cx,cz)=local centre,
+        // (hw,hd)=half-extents, top=h, bottom=y0 (0=ground → blocks a walker).
+        OSAKA_AABBS.length = 0 // fresh list each (re)build
+        const addOsakaAABB = (
+          cx: number,
+          cz: number,
+          hw: number,
+          hd: number,
+          h: number,
+          y0 = 0,
+        ) => {
+          OSAKA_AABBS.push({
+            x1: HUNT_ARENA.x + cx - hw,
+            x2: HUNT_ARENA.x + cx + hw,
+            z1: HUNT_ARENA.z + cz - hd,
+            z2: HUNT_ARENA.z + cz + hd,
+            h,
+            y0,
+          })
+        }
         // ── Static-geometry merger (the big draw-call killer) ──────────────────
         // Every static (non-animated, non-collapsing) mesh is funnelled through
         // mAdd, which bakes its world transform into a cloned geometry and buckets
@@ -15072,6 +15127,9 @@ export default function ThreeWorld({
           const wall = new THREE.Mesh(new THREE.BoxGeometry(w, 8, d), wallMat)
           wall.position.set(x, 4, z)
           mAdd(wall)
+          // Perimeter wall hitbox — the closed rectangle that physically keeps the
+          // player/enemies on the 180×180 floor (no more walking off into the void).
+          addOsakaAABB(x, z, w / 2, d / 2, 8)
         }
         // Main street linking the three areas (a touch lighter than the asphalt).
         const street = new THREE.Mesh(
@@ -15194,6 +15252,10 @@ export default function ThreeWorld({
             const rail = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.18, 24), bridgeMat)
             rail.position.set(bx + side * 4.6, 1.5, 75)
             mAdd(rail)
+            // Railing hitbox — a thin waist-high wall down each bridge edge so you
+            // can cross the deck but not stroll off the side. (The deck floor stays
+            // walk-through; the canal sits under the continuous field floor.)
+            addOsakaAABB(bx + side * 4.6, 75, 0.2, 12, 1.5)
           }
           // Two street lamps per bridge — emissive bulbs only (the PointLights that
           // used to back these are dropped; the bulb glow alone reads at night).
@@ -15247,6 +15309,10 @@ export default function ThreeWorld({
           const z = northBank ? 62 : 88
           const facing = northBank ? 1 : -1 // sign faces the canal
           bldgXf.push({ pos: [x, bh / 2, z], scl: [bw, bh, bd] })
+          // Sign-building hitbox (solid box) — the two banks of buildings are now
+          // real obstacles, not pass-through. Decorative panels/blinkers above stay
+          // open. Mobile only spawns dn(14)=7 of them; the AABB list follows suit.
+          addOsakaAABB(x, z, bw / 2, bd / 2, bh)
           // Big emissive sign panel.
           const tex = makeOsakaSign(
             sign.lines,
@@ -15428,6 +15494,10 @@ export default function ThreeWorld({
           leg.rotation.x = (lz / 5) * 0.12
           leg.rotation.z = (-lx / 5) * 0.12
           mAdd(leg)
+          // Tower-leg hitbox (×4). Only the four splayed feet are solid; the gap
+          // between them (the tower centre) stays walk-through, as does everything
+          // up on the decks/spire.
+          addOsakaAABB(lx, lz, 1.2, 1.2, 6)
         }
         // First observation deck.
         const deck1 = new THREE.Mesh(new THREE.CylinderGeometry(7, 7, 2.5, 8), towerMat)
@@ -15522,6 +15592,9 @@ export default function ThreeWorld({
           const bx = Math.cos(ang) * rad
           const bz = Math.sin(ang) * rad * 0.7
           shopXf.push({ pos: [bx, bh / 2, bz], scl: [bw, bh, bd] })
+          // Shinsekai shop hitbox — the ring of buildings around the tower is now
+          // solid (the noren curtain in front stays a pass-through decoration).
+          addOsakaAABB(bx, bz, bw / 2, bd / 2, bh)
           // Storefront noren curtain facing the tower, gently swaying.
           const ncol = norenCol[i % 2] ?? 0xcc3333
           const ntex = makeOsakaSign(["のれん"], ncol, "#ffffff")
@@ -15702,6 +15775,11 @@ export default function ThreeWorld({
           base.position.set(0, yb + h / 2, cz)
           mAdd(base)
         }
+        // Castle stone-base hitbox — the whole 30×30 ishigaki + the parapet walls
+        // and 5-tier keep stacked on it become one solid block (you walk *around*
+        // the castle, not through it). One AABB (h=8) covers the base; everything
+        // above sits on it, so the upper tiers need no separate box.
+        addOsakaAABB(0, cz, 15, 15, 8)
         const seamGeo = new THREE.BoxGeometry(2.4, 1.6, 0.3)
         const seamXf: Xf[] = []
         for (let i = 0; i < dn(40); i++) {
@@ -15825,6 +15903,9 @@ export default function ThreeWorld({
           const pillar = new THREE.Mesh(new THREE.BoxGeometry(1.2, 7, 1.2), woodMat)
           pillar.position.set(gx, 3.5, gz)
           mAdd(pillar)
+          // Ote-mon gate pillar hitbox (×2). The cross-beam overhead stays clear so
+          // you can walk through the gateway between the two posts.
+          addOsakaAABB(gx, gz, 0.6, 0.6, 7)
         }
         const beam = new THREE.Mesh(new THREE.BoxGeometry(8.4, 1, 1.4), woodMat)
         beam.position.set(0, 7, gz)
@@ -16251,6 +16332,7 @@ export default function ThreeWorld({
           })
         }
         osakaMapMeshesRef.current = []
+        OSAKA_AABBS.length = 0 // drop the OSAKA collision boxes on teardown
         osakaAnim = null // scenery handles die with the disposed meshes
         osakaSkylineInst = null
         osakaCull.length = 0 // drop references to the now-disposed detail instances
