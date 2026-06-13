@@ -596,6 +596,9 @@ type HuntCreatureKind =
   | "fleshball"
   | "tall"
   | "multihead"
+  // Block O perf: a deliberately cheap OSAKA fodder yokai (~3 draw calls) so a
+  // full castle swarm stays inside the draw-call budget. OSAKA-only.
+  | "yokai_lite"
   // PR boss-designs: dedicated original boss shapes (one per HUNT level).
   | "multihead_boss"
   | "splitskin_boss"
@@ -748,7 +751,7 @@ const OSAKA_BEST_KEY = "osaka_best_score" // 大阪編の自己ベストスコ�
 // ── 鬼モード (FINAL-H) ───────────────────────────────────────────────────────
 const OSAKA_ONI_CLEAR_KEY = "osaka_oni_clear" // 称号「大阪の鬼」解放フラグ
 const OSAKA_ONI_GUARD_NAME = "鬼衆" // 隠し武器を守る強敵
-const OSAKA_ONI_ZAKO_MULT = 1.5
+const OSAKA_ONI_ZAKO_MULT = 1.3
 const OSAKA_ONI_MIDBOSS_HP_MULT = 2
 const OSAKA_ONI_MIDBOSS_CD_MULT = 1 / 1.5 // 攻撃頻度1.5倍 = クールダウン÷1.5
 const OSAKA_ONI_BOSS_HP_MULT = 1.5
@@ -867,8 +870,11 @@ type OsakaMidBoss = {
   iris: THREE.Mesh[] // glowing eyes
 }
 // Per-area fodder counts (mobile halved-ish) + mid-boss HP.
-const OSAKA_AREA_ZAKO = { dotonbori: 15, tsutenkaku: 20, castle: 25 } as const
-const OSAKA_AREA_ZAKO_MOBILE = { dotonbori: 8, tsutenkaku: 12, castle: 15 } as const
+// Block O perf: trimmed from 15/20/25 (PC) and 8/12/15 (mobile). With the
+// lightweight "yokai_lite" zako (~3 draw calls each) the peak castle swarm now
+// costs well under the draw-call budget even in oni mode.
+const OSAKA_AREA_ZAKO = { dotonbori: 12, tsutenkaku: 14, castle: 16 } as const
+const OSAKA_AREA_ZAKO_MOBILE = { dotonbori: 6, tsutenkaku: 8, castle: 10 } as const
 const OSAKA_TENGU_HP = 2500
 const OSAKA_YAMAYA_HP = 4000
 // ── OSAKA secret routes (FINAL-A) ────────────────────────────────────────────
@@ -3034,6 +3040,11 @@ export default function ThreeWorld({
       // bright sky over the existing world (which reads as the distant terrain).
       const isSky = mapId === "sky"
       const isHunt = modeRef.current === "hunt"
+      // Block A: the urban map is now a night city (neon + street lamps + glowing
+      // windows). Gated so desert/snow/sky keep their daylight themes and the
+      // invasion mode keeps its red-sky override. Drives the dim night lighting
+      // below plus all the urban-only night props.
+      const isUrbanNight = !isHunt && !isSky && mapId === "urban" && modeRef.current !== "invasion"
       // Phones/tablets: trim GPU + CPU cost aggressively (pixel ratio, no AA,
       // shorter draw distance, lighter fog, half-rate secondary AI, fewer
       // enemies/particles). UA-based so it's available synchronously at scene
@@ -3060,7 +3071,11 @@ export default function ThreeWorld({
               ? { sky: 0xf0c887, fog: 0xe6c89a, ambient: 0xffe9c0, sun: 0xffd58a }
               : mapId === "snow"
                 ? { sky: 0xdce8f0, fog: 0xeaf2f8, ambient: 0xeef5ff, sun: 0xffffff }
-                : { sky: 0x87ceeb, fog: 0xc0d8f0, ambient: 0xd4e8ff, sun: 0xfff4cc }
+                : isUrbanNight
+                  ? // Block A night city: deep blue-black sky, near-black fog, dim
+                    // cool ambient, faint moonlight key (props supply the glow).
+                    { sky: 0x0a0a18, fog: 0x0a0a1a, ambient: 0x111122, sun: 0x5a6a9a }
+                  : { sky: 0x87ceeb, fog: 0xc0d8f0, ambient: 0xd4e8ff, sun: 0xfff4cc }
       scene.background = new THREE.Color(theme.sky)
       // Snow gets a tighter fog band ("軽いフォグ" — slightly hazy whiteout
       // without crushing visibility); desert/urban keep the long open draw.
@@ -3078,7 +3093,11 @@ export default function ThreeWorld({
             new THREE.Fog(theme.fog, isMobileDevice ? 450 : 900, isMobileDevice ? 1500 : 3000)
           : mapId === "snow"
             ? new THREE.Fog(theme.fog, isMobileDevice ? 40 : 80, isMobileDevice ? 210 : 420)
-            : new THREE.Fog(theme.fog, isMobileDevice ? 70 : 140, isMobileDevice ? 340 : 680)
+            : isUrbanNight
+              ? // Night city: pull the haze in so the lit core reads against a
+                // dark, fading skyline (also trims far draws for perf).
+                new THREE.Fog(theme.fog, isMobileDevice ? 45 : 60, isMobileDevice ? 150 : 230)
+              : new THREE.Fog(theme.fog, isMobileDevice ? 70 : 140, isMobileDevice ? 340 : 680)
 
       // ── Per-map material palette ───────────────────────────────────────────
       // The collision footprints (ALL_AABBS / floors / climb zones) are shared
@@ -3242,17 +3261,20 @@ export default function ThreeWorld({
         ? // HUNT: full-white ambient so the night arena stays clearly legible
           // (visibility is prioritised over mood — it was rendering black).
           new THREE.AmbientLight(0xffffff, 1.0)
-        : new THREE.AmbientLight(theme.ambient, 0.45)
+        : new THREE.AmbientLight(theme.ambient, isUrbanNight ? 0.3 : 0.45)
       scene.add(worldAmbient)
       const hemi = new THREE.HemisphereLight(
-        isHunt ? 0x556688 : theme.sky,
-        0x4a4030,
-        isHunt ? 0.45 : 0.55,
+        isHunt ? 0x556688 : isUrbanNight ? 0x2a3a5a : theme.sky,
+        isUrbanNight ? 0x14141c : 0x4a4030,
+        isHunt ? 0.45 : isUrbanNight ? 0.8 : 0.55,
       )
       hemi.position.set(0, 50, 0)
       scene.add(hemi)
       // HUNT: a strong white key from high up so the arena is fully visible.
-      const sun = new THREE.DirectionalLight(isHunt ? 0xffffff : theme.sun, isHunt ? 1.5 : 2.8)
+      const sun = new THREE.DirectionalLight(
+        isHunt ? 0xffffff : theme.sun,
+        isHunt ? 1.5 : isUrbanNight ? 0.5 : 2.8,
+      )
       sun.position.set(isHunt ? 100 : 60, isHunt ? 200 : 80, isHunt ? 100 : 40)
       sun.castShadow = true
       // Shadow map 1024 (was 2048) — quarter the memory + sampling cost.
@@ -3271,7 +3293,10 @@ export default function ThreeWorld({
       sun.shadow.radius = 2
       scene.add(sun)
       // Fill light from opposite side (gentle bounce-light proxy)
-      const fillLight = new THREE.DirectionalLight(0xb0c8ff, isHunt ? 0.3 : 0.45)
+      const fillLight = new THREE.DirectionalLight(
+        0xb0c8ff,
+        isHunt ? 0.3 : isUrbanNight ? 0.2 : 0.45,
+      )
       fillLight.position.set(-40, 30, -20)
       scene.add(fillLight)
 
@@ -4189,6 +4214,16 @@ export default function ThreeWorld({
       // Shared window-pane geometries (same size for every pane → one buffer).
       const winGeoH = new THREE.BoxGeometry(1.0, 1.0, 0.08) // north / south faces
       const winGeoV = new THREE.BoxGeometry(0.08, 1.0, 1.0) // east / west faces
+      // Block A perf: every window pane used to be its own scene.add() mesh
+      // (~500-900 draws across the city). They're now accumulated here as flat
+      // [x,y,z] runs, split by lit/dim × horizontal/vertical, and baked into
+      // four InstancedMeshes by flushWindowInst() once every builder has run.
+      const winInst = {
+        litH: [] as number[],
+        litV: [] as number[],
+        dimH: [] as number[],
+        dimV: [] as number[],
+      }
 
       // Lay a grid of windows over the requested faces of a footprint between
       // yStart and yTop. Visual only (no collision, no shadows). A deterministic
@@ -4218,44 +4253,45 @@ export default function ThreeWorld({
             const t = (c + 0.5) / cols
             for (const ry of rows) {
               const lit = idx++ % litEvery === 0
-              const mat = lit ? litWindowMat : windowMat
-              const mesh = new THREE.Mesh(horizontal ? winGeoH : winGeoV, mat)
+              const py = ry + paneH / 2
+              let px: number
+              let pz: number
               if (horizontal) {
-                const pz = face === "north" ? o.z - 0.05 : o.z + o.d + 0.05
-                mesh.position.set(o.x + t * o.w, ry + paneH / 2, pz)
+                px = o.x + t * o.w
+                pz = face === "north" ? o.z - 0.05 : o.z + o.d + 0.05
               } else {
-                const px = face === "west" ? o.x - 0.05 : o.x + o.w + 0.05
-                mesh.position.set(px, ry + paneH / 2, o.z + t * o.d)
+                px = face === "west" ? o.x - 0.05 : o.x + o.w + 0.05
+                pz = o.z + t * o.d
               }
-              mesh.castShadow = false
-              scene.add(mesh)
+              const bucket = horizontal
+                ? lit
+                  ? winInst.litH
+                  : winInst.dimH
+                : lit
+                  ? winInst.litV
+                  : winInst.dimV
+              bucket.push(px, py, pz)
             }
           }
         }
       }
 
       // A rooftop water tank (cylinder) or AC vent (box), placed at the given
-      // roof-top Y. Kept simple — these read fine from the street and add
-      // city silhouette without any extra lights.
+      // roof-top Y. Kept simple — these read fine from the street and add city
+      // silhouette without any extra lights. Block A perf: accumulated as flat
+      // [x,y,z] runs and baked into three InstancedMeshes by flushRoofInst().
+      const roofInst = { tank: [] as number[], leg: [] as number[], vent: [] as number[] }
       function addRoofUnit(cx: number, topY: number, cz: number, kind: "tank" | "vent") {
         if (kind === "tank") {
-          const tank = new THREE.Mesh(new THREE.CylinderGeometry(0.7, 0.8, 1.4, 12), tankMat)
-          tank.position.set(cx, topY + 0.7, cz)
-          tank.castShadow = true
-          scene.add(tank)
+          roofInst.tank.push(cx, topY + 0.7, cz)
           // Four stubby legs so it reads as a raised water tank.
           for (const sx of [-1, 1]) {
             for (const sz of [-1, 1]) {
-              const leg = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.5, 0.12), railMatM)
-              leg.position.set(cx + sx * 0.5, topY + 0.25, cz + sz * 0.5)
-              scene.add(leg)
+              roofInst.leg.push(cx + sx * 0.5, topY + 0.25, cz + sz * 0.5)
             }
           }
         } else {
-          const vent = new THREE.Mesh(new THREE.BoxGeometry(1.3, 0.8, 1.0), acUnitMat)
-          vent.position.set(cx, topY + 0.4, cz)
-          vent.castShadow = true
-          scene.add(vent)
+          roofInst.vent.push(cx, topY + 0.4, cz)
         }
       }
 
@@ -4913,6 +4949,40 @@ export default function ThreeWorld({
         roofMat: concreteRoofMat,
       })
 
+      // Block A perf: bake the accumulated window panes + rooftop props into a
+      // handful of InstancedMeshes (lit/dim × horizontal/vertical windows, plus
+      // tank / leg / vent) — replaces many hundreds of per-mesh draws.
+      {
+        const instDummy = new THREE.Object3D()
+        const flushPosInst = (
+          flat: number[],
+          geo: THREE.BufferGeometry,
+          mat: THREE.Material,
+          shadow = false,
+        ) => {
+          const n = flat.length / 3
+          if (n === 0) return
+          const im = new THREE.InstancedMesh(geo, mat, n)
+          im.castShadow = shadow
+          im.receiveShadow = false
+          im.frustumCulled = false
+          for (let i = 0; i < n; i++) {
+            instDummy.position.set(flat[i * 3] ?? 0, flat[i * 3 + 1] ?? 0, flat[i * 3 + 2] ?? 0)
+            instDummy.updateMatrix()
+            im.setMatrixAt(i, instDummy.matrix)
+          }
+          im.instanceMatrix.needsUpdate = true
+          scene.add(im)
+        }
+        flushPosInst(winInst.litH, winGeoH, litWindowMat)
+        flushPosInst(winInst.litV, winGeoV, litWindowMat)
+        flushPosInst(winInst.dimH, winGeoH, windowMat)
+        flushPosInst(winInst.dimV, winGeoV, windowMat)
+        flushPosInst(roofInst.tank, new THREE.CylinderGeometry(0.7, 0.8, 1.4, 12), tankMat, true)
+        flushPosInst(roofInst.leg, new THREE.BoxGeometry(0.12, 0.5, 0.12), railMatM, true)
+        flushPosInst(roofInst.vent, new THREE.BoxGeometry(1.3, 0.8, 1.0), acUnitMat, true)
+      }
+
       // ── Landmark observation tower (Tokyo-Tower-style lattice) ──────────────
       // A tall splayed lattice tower with an observation deck you ride an
       // elevator up to (reuses the floor + climb-zone lift). Legs are decorative
@@ -5352,7 +5422,10 @@ export default function ThreeWorld({
           const neonMat = new THREE.MeshStandardMaterial({
             color: n.color,
             emissive: n.color,
-            emissiveIntensity: 1.4,
+            // Block A: brighter for the night city, and the per-sign PointLight
+            // is dropped — emissive under ACESFilmic carries the glow and the
+            // four intersection lamps are the map's only real lights.
+            emissiveIntensity: 2.0,
             roughness: 0.4,
             metalness: 0.2,
           })
@@ -5360,11 +5433,6 @@ export default function ThreeWorld({
           sign.position.set(n.x, 3.2, n.z)
           sign.rotation.y = n.rot
           scene.add(sign)
-          // Add a small point light so the neon casts a colored wash on the
-          // nearby wall (subtle but adds the "wet street" cyberpunk feel).
-          const pl = new THREE.PointLight(n.color, 0.55, 8)
-          pl.position.set(n.x, 3.5, n.z + 0.3)
-          scene.add(pl)
         }
       }
 
@@ -5456,29 +5524,87 @@ export default function ThreeWorld({
         roughness: 0.4,
         metalness: 0,
       })
-      // Doubled spacing (12→18) — 24 lamps was overkill and dominated the
-      // PointLight per-pixel cost. No more castShadow (thin posts barely
-      // showed shadow anyway) and no more PointLights (emissive on the
-      // head already glows; sun + hemisphere handle the lit pixels).
-      // AABB also dropped — bullets at eye-height were getting eaten by
-      // the lamp's 5m-tall stop-volume; lamps are now pure decoration.
       // Avenue fixtures change per map: urban street lamps, desert lattice
       // radio/power towers (no power-lit lamps in a ruined base), snow
-      // perimeter fence posts. Same alternating-sides cadence as the lamps so
-      // the avenue stays legible as a "road" from a distance on every map.
+      // perimeter fence posts. Same alternating-sides cadence so the avenue
+      // stays legible as a "road" from a distance on every map.
       if (mapId === "urban") {
-        for (let lx = 12; lx <= 90; lx += 18) {
-          for (const lz of [44, 56]) {
-            const post = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.12, 5, 6), lampPostMat)
-            post.position.set(lx, 2.5, lz)
-            scene.add(post)
-            const arm = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.08, 0.08), lampPostMat)
-            arm.position.set(lx + (lz < 50 ? 0.5 : -0.5), 4.8, lz)
-            scene.add(arm)
-            const head = new THREE.Mesh(new THREE.SphereGeometry(0.22, 8, 6), lampHeadMat)
-            head.position.set(lx + (lz < 50 ? 1.0 : -1.0), 4.65, lz)
-            scene.add(head)
-          }
+        // Block A night-city lamps: poles+arms in one InstancedMesh, glowing
+        // heads in a second, and an emissive ground-glow disc per lamp in a
+        // third — 20 lamps for 3 instanced draws (down from 30 individual
+        // meshes). Only the four intersections get a real PointLight; every
+        // other lamp reads purely by emissive + additive glow.
+        const lampSlots: { x: number; z: number; side: number }[] = []
+        for (let lx = 8; lx <= 92; lx += 9.3) {
+          const x = Math.round(lx)
+          for (const z of [44, 56]) lampSlots.push({ x, z, side: z < 50 ? 1 : -1 })
+        }
+        const lampDummy = new THREE.Object3D()
+        // Pole + arm baked into one geometry (arm overhangs +Z); north-row
+        // instances spin 180° so the arm always reaches over the avenue.
+        const poleGeo = new THREE.CylinderGeometry(0.08, 0.12, 5, 6).translate(0, 2.5, 0)
+        const armGeo = new THREE.BoxGeometry(0.08, 0.08, 1.0).translate(0, 4.78, 0.5)
+        const postGeo = mergeGeometries([poleGeo, armGeo], false) ?? poleGeo
+        const postInst = new THREE.InstancedMesh(postGeo, lampPostMat, lampSlots.length)
+        postInst.castShadow = false
+        postInst.receiveShadow = false
+        const headInst = new THREE.InstancedMesh(
+          new THREE.SphereGeometry(0.22, 8, 6),
+          lampHeadMat,
+          lampSlots.length,
+        )
+        headInst.frustumCulled = false
+        // Radial ground-glow disc texture (bright centre → transparent), additive.
+        const glowCanvas = document.createElement("canvas")
+        glowCanvas.width = 64
+        glowCanvas.height = 64
+        const gctx = glowCanvas.getContext("2d")
+        if (gctx) {
+          const grad = gctx.createRadialGradient(32, 32, 0, 32, 32, 32)
+          grad.addColorStop(0, "rgba(255,226,165,0.5)")
+          grad.addColorStop(0.5, "rgba(255,210,140,0.16)")
+          grad.addColorStop(1, "rgba(255,200,120,0)")
+          gctx.fillStyle = grad
+          gctx.fillRect(0, 0, 64, 64)
+        }
+        const glowMat = new THREE.MeshBasicMaterial({
+          map: new THREE.CanvasTexture(glowCanvas),
+          transparent: true,
+          depthWrite: false,
+          blending: THREE.AdditiveBlending,
+        })
+        const glowInst = new THREE.InstancedMesh(
+          new THREE.PlaneGeometry(6, 6).rotateX(-Math.PI / 2),
+          glowMat,
+          lampSlots.length,
+        )
+        glowInst.frustumCulled = false
+        lampSlots.forEach((s, i) => {
+          lampDummy.scale.setScalar(1)
+          lampDummy.position.set(s.x, 0, s.z)
+          lampDummy.rotation.set(0, s.side > 0 ? 0 : Math.PI, 0)
+          lampDummy.updateMatrix()
+          postInst.setMatrixAt(i, lampDummy.matrix)
+          const hz = s.z + s.side * 0.95
+          lampDummy.rotation.set(0, 0, 0)
+          lampDummy.position.set(s.x, 4.65, hz)
+          lampDummy.updateMatrix()
+          headInst.setMatrixAt(i, lampDummy.matrix)
+          lampDummy.position.set(s.x, 0.02, hz)
+          lampDummy.updateMatrix()
+          glowInst.setMatrixAt(i, lampDummy.matrix)
+        })
+        postInst.instanceMatrix.needsUpdate = true
+        headInst.instanceMatrix.needsUpdate = true
+        glowInst.instanceMatrix.needsUpdate = true
+        scene.add(postInst)
+        scene.add(headInst)
+        scene.add(glowInst)
+        // The only real lights on the map: four warm lamps at the intersections.
+        for (const ix of [12, 31, 60, 84]) {
+          const pl = new THREE.PointLight(0xffd9a0, 1.5, 18)
+          pl.position.set(ix, 6, 50)
+          scene.add(pl)
         }
       } else if (mapId === "desert") {
         // Steel lattice towers — a tapering post with two cross-braces and a
@@ -11051,6 +11177,37 @@ export default function ThreeWorld({
             arms,
             armBaseY,
           }
+        } else if (kind === "yokai_lite") {
+          // Block O perf fodder: one hunched body, a pair of merged glowing eyes,
+          // and two merged horns — 3 draw calls total, so a full castle swarm stays
+          // inside the draw-call budget. Eyes ride eyeMat (pulse via
+          // updateHuntCreatures); the body is registered to twitch.
+          const body = new THREE.Mesh(huntBlobGeo, bodyMat)
+          body.position.y = 0.72
+          body.scale.set(0.52, 0.64, 0.48)
+          group.add(body)
+          twitch.push(body)
+          // Two glowing eyes merged into a single emissive mesh (clones are
+          // never rendered, so they need no dispose — GC reclaims them).
+          const eyeGeos: THREE.BufferGeometry[] = []
+          for (const ex of [-0.14, 0.14]) {
+            eyeGeos.push(huntEyeGeo.clone().scale(0.07, 0.07, 0.07).translate(ex, 0.82, -0.44))
+          }
+          const mergedEye = mergeGeometries(eyeGeos, false) ?? huntEyeGeo
+          group.add(new THREE.Mesh(mergedEye, eyeMat))
+          // Two dark horns merged into one mesh for an oni silhouette.
+          const hornGeos: THREE.BufferGeometry[] = []
+          for (const s of [-1, 1]) {
+            hornGeos.push(
+              huntConeGeo
+                .clone()
+                .scale(0.08, 0.36, 0.08)
+                .rotateZ(s * 0.34)
+                .translate(s * 0.17, 1.18, -0.04),
+            )
+          }
+          const mergedHorn = mergeGeometries(hornGeos, false) ?? huntConeGeo
+          group.add(new THREE.Mesh(mergedHorn, darkMat))
         } else {
           // A four-legged beast with three independent heads on long necks.
           const trunk = new THREE.Mesh(huntBlobGeo, bodyMat)
@@ -11950,7 +12107,7 @@ export default function ThreeWorld({
             leek ? 2.6 : 1.8,
             false,
             OSAKA_ZAKO_NAME,
-            leek ? "leek" : "multihead",
+            "yokai_lite",
           )
         }
       }
@@ -12382,6 +12539,10 @@ export default function ThreeWorld({
       }[] = []
       const osakaRainDummy = new THREE.Object3D()
       const osakaSwayDummy = new THREE.Object3D()
+      // Block O perf: reusable scratch vectors for updateOsakaBoss's per-frame
+      // boss position / aim (consumed read-only or .clone()'d, never retained).
+      const osakaBossPosScratch = new THREE.Vector3()
+      const osakaAimScratch = new THREE.Vector3()
       // Frame counter so updateOsakaMap can throttle the purely-cosmetic oscillators
       // (neon flicker, sway, water shimmer) to every other frame and the distance
       // cull to a coarse cadence.
@@ -13670,8 +13831,9 @@ export default function ThreeWorld({
           ob.group.position.z += (toZ / dist) * moveSpeed * dt
         }
         const safeToHit = now > spawnInvulnUntilRef.current
-        const bossPos = new THREE.Vector3(ob.group.position.x, 2, ob.group.position.z)
-        const aim = new THREE.Vector3(toX, 0, toZ)
+        // Block O perf: reuse scratch vectors instead of allocating every frame.
+        const bossPos = osakaBossPosScratch.set(ob.group.position.x, 2, ob.group.position.z)
+        const aim = osakaAimScratch.set(toX, 0, toZ)
         // Reset the periodic sub-attack timers when the form changes.
         if (ob.phase !== osakaPhaseSeen) {
           osakaPhaseSeen = ob.phase
@@ -13942,7 +14104,7 @@ export default function ThreeWorld({
             leek ? 2.6 : 1.8,
             false,
             OSAKA_ZAKO_NAME,
-            leek ? "leek" : "multihead",
+            "yokai_lite",
           )
         }
       }
@@ -16440,11 +16602,13 @@ export default function ThreeWorld({
             w.obj.position.x = w.baseX + Math.sin(t * w.spd + w.phase) * 0.6
             w.mat.emissiveIntensity = 0.6 + 0.4 * Math.sin(t * w.spd * 1.3 + w.phase)
           }
-        }
-        if (a.towerOrbMat && a.towerLight) {
-          const hue = (t * 0.04) % 1
-          a.towerOrbMat.emissive.setHSL(hue, 1, 0.5)
-          a.towerLight.color.setHSL(hue, 1, 0.6)
+          // Block O perf: throttle the tower-orb hue into the half-rate cosmetic
+          // block (a ~25 s color cycle reads identically at 30 Hz).
+          if (a.towerOrbMat && a.towerLight) {
+            const hue = (t * 0.04) % 1
+            a.towerOrbMat.emissive.setHSL(hue, 1, 0.5)
+            a.towerLight.color.setHSL(hue, 1, 0.6)
+          }
         }
         // Scrolling LED marquee: the offset advances every frame (smooth scroll),
         // but the canvas redraw + texture upload — the costly part — only fires every
