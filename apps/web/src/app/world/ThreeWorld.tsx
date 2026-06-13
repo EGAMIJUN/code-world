@@ -596,6 +596,9 @@ type HuntCreatureKind =
   | "fleshball"
   | "tall"
   | "multihead"
+  // Block O perf: a deliberately cheap OSAKA fodder yokai (~3 draw calls) so a
+  // full castle swarm stays inside the draw-call budget. OSAKA-only.
+  | "yokai_lite"
   // PR boss-designs: dedicated original boss shapes (one per HUNT level).
   | "multihead_boss"
   | "splitskin_boss"
@@ -748,7 +751,7 @@ const OSAKA_BEST_KEY = "osaka_best_score" // 大阪編の自己ベストスコ�
 // ── 鬼モード (FINAL-H) ───────────────────────────────────────────────────────
 const OSAKA_ONI_CLEAR_KEY = "osaka_oni_clear" // 称号「大阪の鬼」解放フラグ
 const OSAKA_ONI_GUARD_NAME = "鬼衆" // 隠し武器を守る強敵
-const OSAKA_ONI_ZAKO_MULT = 1.5
+const OSAKA_ONI_ZAKO_MULT = 1.3
 const OSAKA_ONI_MIDBOSS_HP_MULT = 2
 const OSAKA_ONI_MIDBOSS_CD_MULT = 1 / 1.5 // 攻撃頻度1.5倍 = クールダウン÷1.5
 const OSAKA_ONI_BOSS_HP_MULT = 1.5
@@ -867,8 +870,11 @@ type OsakaMidBoss = {
   iris: THREE.Mesh[] // glowing eyes
 }
 // Per-area fodder counts (mobile halved-ish) + mid-boss HP.
-const OSAKA_AREA_ZAKO = { dotonbori: 15, tsutenkaku: 20, castle: 25 } as const
-const OSAKA_AREA_ZAKO_MOBILE = { dotonbori: 8, tsutenkaku: 12, castle: 15 } as const
+// Block O perf: trimmed from 15/20/25 (PC) and 8/12/15 (mobile). With the
+// lightweight "yokai_lite" zako (~3 draw calls each) the peak castle swarm now
+// costs well under the draw-call budget even in oni mode.
+const OSAKA_AREA_ZAKO = { dotonbori: 12, tsutenkaku: 14, castle: 16 } as const
+const OSAKA_AREA_ZAKO_MOBILE = { dotonbori: 6, tsutenkaku: 8, castle: 10 } as const
 const OSAKA_TENGU_HP = 2500
 const OSAKA_YAMAYA_HP = 4000
 // ── OSAKA secret routes (FINAL-A) ────────────────────────────────────────────
@@ -11051,6 +11057,35 @@ export default function ThreeWorld({
             arms,
             armBaseY,
           }
+        } else if (kind === "yokai_lite") {
+          // Block O perf fodder: one hunched body, a pair of merged glowing eyes,
+          // and two merged horns — 3 draw calls total, so a full castle swarm stays
+          // inside the draw-call budget. Eyes ride eyeMat (pulse via
+          // updateHuntCreatures); the body is registered to twitch.
+          const body = new THREE.Mesh(huntBlobGeo, bodyMat)
+          body.position.y = 0.72
+          body.scale.set(0.52, 0.64, 0.48)
+          group.add(body)
+          twitch.push(body)
+          // Two glowing eyes merged into a single emissive mesh (clones are
+          // never rendered, so they need no dispose — GC reclaims them).
+          const eyeGeos: THREE.BufferGeometry[] = []
+          for (const ex of [-0.14, 0.14]) {
+            eyeGeos.push(huntEyeGeo.clone().scale(0.07, 0.07, 0.07).translate(ex, 0.82, -0.44))
+          }
+          group.add(new THREE.Mesh(mergeGeometries(eyeGeos, false), eyeMat))
+          // Two dark horns merged into one mesh for an oni silhouette.
+          const hornGeos: THREE.BufferGeometry[] = []
+          for (const s of [-1, 1]) {
+            hornGeos.push(
+              huntConeGeo
+                .clone()
+                .scale(0.08, 0.36, 0.08)
+                .rotateZ(s * 0.34)
+                .translate(s * 0.17, 1.18, -0.04),
+            )
+          }
+          group.add(new THREE.Mesh(mergeGeometries(hornGeos, false), darkMat))
         } else {
           // A four-legged beast with three independent heads on long necks.
           const trunk = new THREE.Mesh(huntBlobGeo, bodyMat)
@@ -11950,7 +11985,7 @@ export default function ThreeWorld({
             leek ? 2.6 : 1.8,
             false,
             OSAKA_ZAKO_NAME,
-            leek ? "leek" : "multihead",
+            "yokai_lite",
           )
         }
       }
@@ -13942,7 +13977,7 @@ export default function ThreeWorld({
             leek ? 2.6 : 1.8,
             false,
             OSAKA_ZAKO_NAME,
-            leek ? "leek" : "multihead",
+            "yokai_lite",
           )
         }
       }
