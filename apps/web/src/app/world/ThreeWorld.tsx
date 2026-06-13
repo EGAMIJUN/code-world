@@ -12929,6 +12929,16 @@ export default function ThreeWorld({
           focalPoint.x = Math.max(cx - hh, Math.min(cx + hh, focalPoint.x))
           focalPoint.z = Math.max(cz2 - hh, Math.min(cz2 + hh, focalPoint.z))
           focalPoint.y = 0
+        } else {
+          // Main field (audit fix): OSAKA registers no wall collision and base-map
+          // collision is suppressed, so the visual 180×180 perimeter walls don't
+          // actually stop anyone — without this clamp the player can walk straight
+          // through them off the floor into the void. Soft-clamp to just inside the
+          // walls (local ±90 → world HUNT_ARENA ±88). All play positions (areas,
+          // spawn, the two secret entrances) sit well inside this.
+          const fb = 88
+          focalPoint.x = Math.max(ax - fb, Math.min(ax + fb, focalPoint.x))
+          focalPoint.z = Math.max(az - fb, Math.min(az + fb, focalPoint.z))
         }
         // ── 投擲槍の飛翔 (表示のみ) ──
         for (let i = osakaSpears.length - 1; i >= 0; i--) {
@@ -16197,6 +16207,21 @@ export default function ThreeWorld({
         osakaFill.castShadow = false
         osakaFill.position.set(-30, 40, -20)
         add(osakaFill)
+        // Ground-level fill lights along the central spine (audit fix). The named
+        // area lights (Dotonbori neon / Tsutenkaku beacon high at y≈47 / castle
+        // floods) leave the long inter-area street and the off-centre stretches
+        // dimmer than the rest. A few warm fills at walking height lift them. They
+        // live under `group`, so clearOsakaMap disposes them with the map.
+        for (const [fx, fy, fz, fi, fr] of [
+          [0, 8, 42, 3.0, 56], // Dotonbori ↔ Tsutenkaku transition (world z≈92)
+          [0, 7, 0, 2.6, 50], // Shinsekai street (beacon is high overhead)
+          [0, 8, -40, 3.0, 56], // Tsutenkaku ↔ Castle transition (world z≈10)
+        ] as const) {
+          const fill = new THREE.PointLight(0xffe6cc, fi, fr)
+          fill.castShadow = false
+          fill.position.set(fx, fy, fz)
+          add(fill)
+        }
         huntStageFogSaved = scene.fog
         huntStageFogWasSaved = true
         scene.fog = new THREE.Fog(0x333355, 150, 400) // thinner haze → see further
