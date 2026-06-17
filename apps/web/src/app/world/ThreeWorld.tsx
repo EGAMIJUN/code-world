@@ -2841,6 +2841,9 @@ export default function ThreeWorld({
   const tetsurinDistRef = useRef(0)
   const tetsurinBossRiddenRef = useRef(false)
   const tetsurinDashOniOwnedRef = useRef(false)
+  // Block F — high-speed motion-blur CSS overlay flag (pushed on change only).
+  const [tetsurinFast, setTetsurinFast] = useState(false)
+  const tetsurinFastRef = useRef(false)
   // Set by the E key / mobile board-exit button; consumed once in the loop.
   const vehicleActionRef = useRef(false)
   // ── PR-G1: mounted AA gun state ─────────────────────────────────────────────
@@ -6770,6 +6773,7 @@ export default function ThreeWorld({
       // here so clearOsakaMap can dispose it on map leave. HP is nominal — it is
       // never damaged (the gatling-fire path skips the bike fire branch).
       let osakaTetsurin: Vehicle | null = null
+      let tetsurinFxFrame = 0 // throttles the tyre-spark cadence (Block F)
       function spawnTetsurin(x: number, z: number, heading: number): Vehicle {
         const safe = findSafeSpawnNear(x, z, VEHICLE_BIKE_RADIUS)
         const built = makeTetsurin(TETSURIN_PLAYER_PALETTE)
@@ -7362,6 +7366,8 @@ export default function ThreeWorld({
           tetsurinBoostRef.current = false
           setTetsurinDash(0)
           setTetsurinBoost(false)
+          tetsurinFastRef.current = false
+          setTetsurinFast(false)
         }
         gunGroup.visible = true
         hidePlayerAvatar()
@@ -9114,6 +9120,20 @@ export default function ThreeWorld({
             tetsurinBoostRef.current = boostOn
             setTetsurinDash(bucket / 20)
             setTetsurinBoost(boostOn)
+          }
+          // ── Block F: tyre sparks at speed + motion-blur flag ─────────────────
+          const fastFrac = sp / maxs
+          tetsurinFxFrame++
+          if (fastFrac > 0.6 && tetsurinFxFrame % 4 === 0) {
+            // Spark kicked out behind the wheel (reuses the spark particle).
+            const bx = v.x + Math.sin(v.heading) * 0.25
+            const bz = v.z + Math.cos(v.heading) * 0.25
+            spawnExplosion(new THREE.Vector3(bx, 0.12, bz), true)
+          }
+          const fast = fastFrac > 0.7
+          if (fast !== tetsurinFastRef.current) {
+            tetsurinFastRef.current = fast
+            setTetsurinFast(fast)
           }
         }
 
@@ -20238,12 +20258,22 @@ export default function ThreeWorld({
         // ADS FOV interpolation. Base FOV bumped 75 → 80 — wider field of
         // view trades a touch of zoom for less peripheral motion-shear
         // when the player rotates quickly. No ADS zoom while driving.
-        const targetFov =
+        let targetFov =
           isAimingRef.current && !drivingRef.current
             ? currentWeaponIdxRef.current === 2
               ? 28
               : 50
             : 80
+        // Block F — 鉄輪 nitro: the FOV widens with speed (and again during the
+        // dash boost) for a sense of rush. No new meshes; FOV-only.
+        const fovBike = activeVehicle
+        if (drivingRef.current && fovBike?.tetsurin) {
+          const frac = Math.min(
+            1,
+            Math.abs(fovBike.speed) / (VEHICLE_BIKE_MAX_SPEED * TETSURIN_SPEED_MULT),
+          )
+          targetFov = 80 + frac * 14 + ((fovBike.tBoost ?? 0) > 0 ? 8 : 0)
+        }
         if (Math.abs(camera.fov - targetFov) > 0.3) {
           camera.fov += (targetFov - camera.fov) * Math.min(1, dt * 12)
           camera.updateProjectionMatrix()
@@ -24741,6 +24771,24 @@ export default function ThreeWorld({
               {"@keyframes tetsurinBoostPulse { 0%,100% { opacity: 0.7; } 50% { opacity: 1; } }"}
             </style>
           </div>
+        )}
+
+        {/* 鉄輪 高速走行モーションブラー (Block F) — edge vignette + blur, no mesh. */}
+        {inTetsurin && tetsurinFast && gamePhase === "playing" && (
+          <div
+            style={{
+              position: "absolute",
+              inset: 0,
+              pointerEvents: "none",
+              zIndex: 6,
+              background:
+                "radial-gradient(ellipse 62% 62% at center, transparent 55%, rgba(0,0,0,0.5) 100%)",
+              backdropFilter: "blur(2px)",
+              WebkitMaskImage:
+                "radial-gradient(ellipse 60% 60% at center, transparent 52%, #000 92%)",
+              maskImage: "radial-gradient(ellipse 60% 60% at center, transparent 52%, #000 92%)",
+            }}
+          />
         )}
 
         {/* AA gun mount / exit prompt (desktop) — PR-G1 */}
