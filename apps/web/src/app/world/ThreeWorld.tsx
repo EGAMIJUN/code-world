@@ -765,6 +765,11 @@ const OSAKA_CLONE_NAME = "五変化の分身"
 const OSAKA_CLONE_TINTS = [0xc8c0b0, 0x1a1a2a, 0xe8e0d0, 0x8b4040] as const
 const OSAKA_TRUE_CLEAR_KEY = "osaka_true_clear" // 真エンディング到達フラグ
 const OSAKA_BEST_KEY = "osaka_best_score" // 大阪編の自己ベストスコア (FINAL-E)
+// ── 鉄輪 実績・称号 (Block E) ────────────────────────────────────────────────
+const OSAKA_DASH_ONI_KEY = "osaka_dash_oni" // 実績「疾走の鬼」: 鉄輪で規定距離走破
+const OSAKA_TETSURIN_CHAMPION_KEY = "osaka_tetsurin_champion" // 称号「鉄輪の覇者」
+const TETSURIN_DIST_GOAL = 1500 // 「疾走の鬼」解放までの累計走破距離 (m)
+const TETSURIN_BIKE_KILL_BONUS = 40 // 鉄輪搭乗中の撃破ごとの追加スコア
 // ── 鬼モード (FINAL-H) ───────────────────────────────────────────────────────
 const OSAKA_ONI_CLEAR_KEY = "osaka_oni_clear" // 称号「大阪の鬼」解放フラグ
 const OSAKA_ONI_GUARD_NAME = "鬼衆" // 隠し武器を守る強敵
@@ -2559,6 +2564,7 @@ export default function ThreeWorld({
     newBest: boolean
     oni: boolean // 鬼モードでのクリアか (FINAL-H)
     titleNew: boolean // 今回のクリアで称号「大阪の鬼」を新規獲得したか
+    tetsurinChampion: boolean // 鉄輪に乗ったまま真ボスを討った → 称号「鉄輪の覇者」(Block E)
   }
   const [osakaEnding, setOsakaEnding] = useState<OsakaEndingState | null>(null)
   const osakaEndingRef = useRef<OsakaEndingState | null>(null)
@@ -2830,6 +2836,11 @@ export default function ThreeWorld({
   const [tetsurinBoost, setTetsurinBoost] = useState(false)
   const tetsurinDashBucketRef = useRef(-1)
   const tetsurinBoostRef = useRef(false)
+  // Block E — achievement tracking: cumulative ride distance (per run), whether
+  // the player rode the 鉄輪 during the phase-6 fight, and the dash-oni unlock.
+  const tetsurinDistRef = useRef(0)
+  const tetsurinBossRiddenRef = useRef(false)
+  const tetsurinDashOniOwnedRef = useRef(false)
   // Set by the E key / mobile board-exit button; consumed once in the loop.
   const vehicleActionRef = useRef(false)
   // ── PR-G1: mounted AA gun state ─────────────────────────────────────────────
@@ -9068,6 +9079,18 @@ export default function ThreeWorld({
               fireTetsurinGatling()
             }
           }
+          // ── 走破距離・ボス搭乗の実績トラッキング (Block E) ─────────────────────
+          tetsurinDistRef.current += Math.abs(v.speed) * dt
+          if (!tetsurinDashOniOwnedRef.current && tetsurinDistRef.current >= TETSURIN_DIST_GOAL) {
+            tetsurinDashOniOwnedRef.current = true
+            try {
+              localStorage.setItem(OSAKA_DASH_ONI_KEY, "1")
+            } catch {
+              /* ignore */
+            }
+            showNotification("実績『疾走の鬼』解放 — 鉄輪で駆け抜けた")
+          }
+          if (osakaBossRef.current?.phase === 6) tetsurinBossRiddenRef.current = true
           // ── 疾走ゲージ (Block D): sustained speed charges it; full → boost ─────
           const sp = Math.abs(v.speed)
           if ((v.tBoost ?? 0) > 0) {
@@ -13794,6 +13817,15 @@ export default function ThreeWorld({
       let osakaEndingGen = 0
       function osakaRunReset() {
         osakaRunRef.current = { start: Date.now(), kills: 0, dmg: 0, shots: 0, hits: 0 }
+        // Block E: reset per-run 鉄輪 trackers; seed the dash-oni flag from storage
+        // so an already-unlocked achievement never re-notifies.
+        tetsurinDistRef.current = 0
+        tetsurinBossRiddenRef.current = false
+        try {
+          tetsurinDashOniOwnedRef.current = localStorage.getItem(OSAKA_DASH_ONI_KEY) === "1"
+        } catch {
+          tetsurinDashOniOwnedRef.current = false
+        }
       }
       function osakaRunIsLive(): boolean {
         return (
@@ -13996,6 +14028,17 @@ export default function ThreeWorld({
           oniTitleOwnedRef.current = true
           setOniTitleOwned(true)
         }
+        // 称号「鉄輪の覇者」(Block E): 真ボスを鉄輪に乗ったまま討つと解放 + 永続化。
+        let tetsurinChampion = false
+        if (kind === "true" && tetsurinBossRiddenRef.current) {
+          try {
+            tetsurinChampion = localStorage.getItem(OSAKA_TETSURIN_CHAMPION_KEY) !== "1"
+            localStorage.setItem(OSAKA_TETSURIN_CHAMPION_KEY, "1")
+          } catch {
+            /* ignore */
+          }
+          if (tetsurinChampion) showNotification("特別称号『鉄輪の覇者』獲得！")
+        }
         scoreRef.current += bonus
         setScore(scoreRef.current)
         // 自己ベスト (localStorage) — 更新なら保存して result でバッジ表示。
@@ -14048,6 +14091,7 @@ export default function ThreeWorld({
           newBest,
           oni,
           titleNew,
+          tetsurinChampion,
         }
         huntClearEnemies() // 静かな暗転のために残存雑魚を掃く
         huntInputLockRef.current = true
@@ -18933,6 +18977,15 @@ export default function ThreeWorld({
         killsRef.current += 1
         setKills(killsRef.current)
         scoreRef.current += hitEnemy.config.score
+        // Block E — バイクキル: extra score for any kill made while riding the 鉄輪
+        // (gatling, run-over, grenade — anything counts as long as you're mounted).
+        if (activeVehicle?.tetsurin) {
+          scoreRef.current += TETSURIN_BIKE_KILL_BONUS
+          if (modeRef.current === "hunt") {
+            huntScoreRef.current += TETSURIN_BIKE_KILL_BONUS
+            setHuntScore(huntScoreRef.current)
+          }
+        }
         setScore(scoreRef.current)
         // HUNT: route points to the mission + cumulative tallies and log the kill
         // for the post-mission scoring screen.
@@ -23913,6 +23966,20 @@ export default function ThreeWorld({
                         }}
                       >
                         👹 称号『大阪の鬼』獲得！
+                      </div>
+                    )}
+                    {osakaEnding.tetsurinChampion && (
+                      <div
+                        style={{
+                          marginTop: "0.6rem",
+                          padding: "0.5rem",
+                          border: "1px solid #33ddff",
+                          color: "#7fe0ff",
+                          fontSize: "0.8rem",
+                          letterSpacing: "0.15em",
+                        }}
+                      >
+                        ⚙ 称号『鉄輪の覇者』獲得！
                       </div>
                     )}
                     <div
