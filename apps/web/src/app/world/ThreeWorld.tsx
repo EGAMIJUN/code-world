@@ -90,6 +90,17 @@ const BIKE_PLAYER_FAR = 50 // …but only when the player is at least this far o
 const BIKE_RIDER_RAM_DMG = 22 // per swarm bike (low; the threat is volume)
 const BIKE_RIDER_SEAT_Y = 0.9 // rider mesh sits this high on the bike
 const BIKE_RESPAWN_MS = 20000 // a taken / destroyed bike refills its slot after this
+// ── 鉄輪 (Tetsurin) — original mono-wheel war-cycle, OSAKA only ──────────────
+// A heavy single-wheel machine with a nose gatling. Rides on the existing bike
+// vehicle path (kind:"bike" + a `tetsurin` flag) but is 2.5x faster and can't be
+// destroyed — it just parks where the player dismounts. Reuses the bullet system.
+const TETSURIN_SPEED_MULT = 2.5 // multiplies the bike accel + top speed
+const TETSURIN_GATLING_INTERVAL = 100 // ms between gatling rounds (10/s)
+const TETSURIN_GATLING_DAMAGE = 24 // per round
+const TETSURIN_GATLING_RANGE = 95 // hitscan reach (m)
+const TETSURIN_GATLING_ASSIST = 1.7 // ground aim-assist sphere radius (m)
+const TETSURIN_WHEEL_SPIN = 1.6 // wheel spin rad per m travelled
+const TETSURIN_LEAN_MAX = 0.5 // max lean (rad) into a hard turn
 // Small-arms (bullets / claws) only chip the tank; explosives hit full.
 // Bumped from 0.12 → 0.25 so sustained enemy fire actually wears it down.
 const TANK_ARMOR_BULLET = 0.25
@@ -2802,6 +2813,11 @@ export default function ThreeWorld({
   // True while on foot next to a boardable car (shows the "乗る" prompt).
   const [nearVehicle, setNearVehicle] = useState(false)
   const prevNearVehicleRef = useRef(false)
+  // 鉄輪 (Tetsurin) variants of the above so the prompt reads "鉄輪に乗る/降りる"
+  // and the dash-gauge HUD (Block D) only shows on the mono-wheel. (Block A.)
+  const [inTetsurin, setInTetsurin] = useState(false)
+  const [nearTetsurin, setNearTetsurin] = useState(false)
+  const prevNearTetsurinRef = useRef(false)
   // Set by the E key / mobile board-exit button; consumed once in the loop.
   const vehicleActionRef = useRef(false)
   // ── PR-G1: mounted AA gun state ─────────────────────────────────────────────
@@ -6256,6 +6272,15 @@ export default function ThreeWorld({
         // ── Jet flight state (jet only) ──
         y?: number // altitude (m); cars/tanks stay at 0
         airborne?: boolean // true once the jet has rotated off the runway
+        // ── 鉄輪 (Tetsurin) state — mono-wheel war-cycle (rides the bike path) ──
+        tetsurin?: boolean // true → 2.5x speed + nose gatling, indestructible
+        tWheel?: THREE.Object3D // the big single wheel (spins with travel)
+        tGun?: THREE.Object3D // gatling barrel cluster (spins while firing)
+        tNextGatling?: number // next allowed gatling shot (ms timestamp)
+        tLean?: number // current smoothed lean angle (rad)
+        // Block D — 疾走 (dash) state: charges while holding speed, empties on hit.
+        tDash?: number // 0..1 dash gauge fill
+        tBoost?: number // >0 → boosted-fire window remaining (s)
       }
       const vehicles: Vehicle[] = []
       let activeVehicle: Vehicle | null = null
@@ -6553,6 +6578,209 @@ export default function ThreeWorld({
         hl.position.set(0, 0.7, -0.62)
         g.add(hl)
         return g
+      }
+
+      // ── 鉄輪 (Tetsurin) — original mono-wheel war-cycle ──────────────────────
+      // A giant single wheel with a straddling engine body, side exhaust pipes,
+      // twin nose gatlings and a faint neon accent. Each sub-assembly is merged
+      // to ONE geometry so the whole machine is ≤5 draw calls:
+      //   1 wheel(+spokes+hub)  2 body(+fairings+seat+handle)  3 pipes
+      //   4 twin gatlings (one merged spinning unit)  5 emissive accent
+      // Returns the spinning wheel + gun handles so updateVehicle can roll the
+      // wheel and spin the barrels. Forward = -z (car/bike convention).
+      type TetsurinPalette = {
+        wheel: number
+        body: number
+        pipe: number
+        gun: number
+        accent: number
+      }
+      const TETSURIN_PLAYER_PALETTE: TetsurinPalette = {
+        wheel: 0x1a1a1a,
+        body: 0x2a2a2a,
+        pipe: 0x3a3a3a,
+        gun: 0x444444,
+        accent: 0x33ddff,
+      }
+      function makeTetsurin(pal: TetsurinPalette): {
+        group: THREE.Group
+        wheel: THREE.Object3D
+        gun: THREE.Object3D
+      } {
+        const g = new THREE.Group()
+        const wheelMat = new THREE.MeshStandardMaterial({
+          color: pal.wheel,
+          roughness: 0.5,
+          metalness: 0.8,
+        })
+        const bodyMat = new THREE.MeshStandardMaterial({
+          color: pal.body,
+          roughness: 0.45,
+          metalness: 0.75,
+        })
+        const pipeMat = new THREE.MeshStandardMaterial({
+          color: pal.pipe,
+          roughness: 0.4,
+          metalness: 0.85,
+        })
+        const gunMat = new THREE.MeshStandardMaterial({
+          color: pal.gun,
+          roughness: 0.55,
+          metalness: 0.7,
+        })
+        const accentMat = new THREE.MeshStandardMaterial({
+          color: pal.accent,
+          emissive: pal.accent,
+          emissiveIntensity: 0.9,
+          roughness: 0.3,
+          metalness: 0.4,
+        })
+
+        // 1) Wheel — torus rim + 8 radial spokes + hub, merged. The geometry is
+        // baked with a 90° Y-turn so the hole points along X (the axle); the mesh
+        // then rolls forward by spinning about its local X.
+        const wheelGeos: THREE.BufferGeometry[] = []
+        const rim = new THREE.TorusGeometry(1.4, 0.35, 8, 16)
+        wheelGeos.push(rim)
+        for (let i = 0; i < 8; i++) {
+          const spoke = new THREE.BoxGeometry(0.12, 1.5, 0.12)
+          spoke.translate(0, 0.72, 0)
+          spoke.rotateZ((i / 8) * Math.PI * 2)
+          wheelGeos.push(spoke)
+        }
+        const hub = new THREE.CylinderGeometry(0.3, 0.3, 0.55, 10)
+        hub.rotateX(Math.PI / 2) // axle along Z (→ X after the bake)
+        wheelGeos.push(hub)
+        const wheelGeo = mergeGeometries(wheelGeos, false) ?? rim
+        wheelGeo.rotateY(Math.PI / 2) // hole Z→X: the wheel rolls along -Z
+        const wheel = new THREE.Mesh(wheelGeo, wheelMat)
+        wheel.position.set(0, 1.75, 0)
+        wheel.castShadow = true
+        g.add(wheel)
+
+        // 2) Body — engine block straddling the wheel + side fairings + seat +
+        // handlebar column/bar, merged.
+        const bodyGeos: THREE.BufferGeometry[] = []
+        const engine = new THREE.BoxGeometry(1.0, 0.8, 1.4)
+        engine.translate(0, 1.55, 0.15)
+        bodyGeos.push(engine)
+        for (const sx of [-0.62, 0.62]) {
+          const fair = new THREE.BoxGeometry(0.18, 1.05, 1.9)
+          fair.translate(sx, 1.4, 0.1)
+          bodyGeos.push(fair)
+        }
+        const seat = new THREE.BoxGeometry(0.52, 0.2, 0.75)
+        seat.translate(0, 1.98, 0.72)
+        bodyGeos.push(seat)
+        const rest = new THREE.BoxGeometry(0.5, 0.4, 0.14)
+        rest.translate(0, 2.18, 1.05)
+        bodyGeos.push(rest)
+        const col = new THREE.BoxGeometry(0.16, 0.75, 0.16)
+        col.rotateX(0.5)
+        col.translate(0, 1.78, -0.9)
+        bodyGeos.push(col)
+        const bar = new THREE.BoxGeometry(0.95, 0.1, 0.1)
+        bar.translate(0, 2.05, -1.05)
+        bodyGeos.push(bar)
+        const bodyGeo = mergeGeometries(bodyGeos, false) ?? engine
+        const body = new THREE.Mesh(bodyGeo, bodyMat)
+        body.castShadow = true
+        g.add(body)
+
+        // 3) Pipes — twin side exhausts (#3a3a3a), merged.
+        const pipeGeos: THREE.BufferGeometry[] = []
+        const pipe0 = new THREE.CylinderGeometry(0.1, 0.1, 1.7, 8)
+        pipe0.rotateX(Math.PI / 2) // lie along Z
+        pipe0.translate(-0.72, 1.05, 0.5)
+        pipeGeos.push(pipe0)
+        const pipeR = new THREE.CylinderGeometry(0.1, 0.1, 1.7, 8)
+        pipeR.rotateX(Math.PI / 2)
+        pipeR.translate(0.72, 1.05, 0.5)
+        pipeGeos.push(pipeR)
+        for (const sx of [-0.72, 0.72]) {
+          const tip = new THREE.CylinderGeometry(0.15, 0.1, 0.28, 8)
+          tip.rotateX(Math.PI / 2)
+          tip.translate(sx, 1.05, 1.45)
+          pipeGeos.push(tip)
+        }
+        const pipeGeo = mergeGeometries(pipeGeos, false) ?? pipe0
+        const pipes = new THREE.Mesh(pipeGeo, pipeMat)
+        g.add(pipes)
+
+        // 4) Gatlings — twin 6-barrel bundles on the nose sides, merged into one
+        // spinning unit (rotates about its local Z while firing).
+        const gunGeos: THREE.BufferGeometry[] = []
+        const gun0 = new THREE.CylinderGeometry(0.16, 0.16, 0.5, 10)
+        gun0.rotateX(Math.PI / 2)
+        gun0.translate(0, 1.4, -0.7) // central housing
+        gunGeos.push(gun0)
+        for (const sx of [-0.7, 0.7]) {
+          for (let b = 0; b < 6; b++) {
+            const a = (b / 6) * Math.PI * 2
+            const barrel = new THREE.CylinderGeometry(0.05, 0.05, 1.2, 6)
+            barrel.rotateX(Math.PI / 2) // point forward (-Z)
+            barrel.translate(sx + Math.cos(a) * 0.13, 1.4 + Math.sin(a) * 0.13, -1.2)
+            gunGeos.push(barrel)
+          }
+        }
+        const gunGeo = mergeGeometries(gunGeos, false) ?? gun0
+        const gun = new THREE.Mesh(gunGeo, gunMat)
+        gun.castShadow = true
+        g.add(gun)
+
+        // 5) Accent — a faint emissive nose ring + spine strip (no extra light).
+        const accentGeos: THREE.BufferGeometry[] = []
+        const ring = new THREE.TorusGeometry(0.55, 0.05, 6, 14)
+        ring.translate(0, 1.4, -0.62)
+        accentGeos.push(ring)
+        const strip = new THREE.BoxGeometry(0.1, 0.06, 1.5)
+        strip.translate(0, 2.0, 0.1)
+        accentGeos.push(strip)
+        const accentGeo = mergeGeometries(accentGeos, false) ?? ring
+        g.add(new THREE.Mesh(accentGeo, accentMat))
+
+        return { group: g, wheel, gun }
+      }
+
+      // Spawn the player's 鉄輪 into the world and register it as a (bike-kind)
+      // vehicle so the whole enter/drive/exit pipeline works unchanged. Tracked
+      // here so clearOsakaMap can dispose it on map leave. HP is nominal — it is
+      // never damaged (the gatling-fire path skips the bike fire branch).
+      let osakaTetsurin: Vehicle | null = null
+      function spawnTetsurin(x: number, z: number, heading: number): Vehicle {
+        const safe = findSafeSpawnNear(x, z, VEHICLE_BIKE_RADIUS)
+        const built = makeTetsurin(TETSURIN_PLAYER_PALETTE)
+        built.group.position.set(safe.x, 0, safe.z)
+        built.group.rotation.y = heading
+        scene.add(built.group)
+        const v: Vehicle = {
+          group: built.group,
+          x: safe.x,
+          z: safe.z,
+          heading,
+          speed: 0,
+          hp: 1,
+          maxHp: 1,
+          dead: false,
+          kind: "bike",
+          turret: undefined,
+          barrelPivot: undefined,
+          aiDriver: null,
+          riderEnemy: null,
+          aiNextCannon: 0,
+          aiNextRam: 0,
+          y: 0,
+          airborne: false,
+          tetsurin: true,
+          tWheel: built.wheel,
+          tGun: built.gun,
+          tNextGatling: 0,
+          tLean: 0,
+          tDash: 0,
+          tBoost: 0,
+        }
+        vehicles.push(v)
+        return v
       }
 
       // Build a tank: hull + two treads + a yawing turret carrying a pitching
@@ -7027,8 +7255,11 @@ export default function ThreeWorld({
         activeVehicle = v
         drivingRef.current = true
         setInVehicle(true)
+        setInTetsurin(v.tetsurin === true)
         setNearVehicle(false)
+        setNearTetsurin(false)
         prevNearVehicleRef.current = false
+        prevNearTetsurinRef.current = false
         // Drop any climb prompt — the vertical/climb block is skipped while
         // driving, so clear it now or it could stay stuck on screen.
         setNearClimb(false)
@@ -7099,6 +7330,7 @@ export default function ThreeWorld({
         const v = activeVehicle
         drivingRef.current = false
         setInVehicle(false)
+        setInTetsurin(false)
         gunGroup.visible = true
         hidePlayerAvatar()
         if (v) {
@@ -8391,6 +8623,122 @@ export default function ThreeWorld({
         SOUNDS.pistol()
       }
 
+      // 鉄輪 gatling — a single hitscan round fired from the nose along the aim.
+      // Modelled on fireJetGun (tracer + ground aim-assist + wall occlusion) but
+      // tuned for the bike: short range, high cadence (driven from updateVehicle).
+      // Reuses the existing bullet / particle / muzzle-flash systems — no new
+      // effect pipelines. A "bike kill" (E) tags the killfeed via applyEnemyKill.
+      function fireTetsurinGatling() {
+        const v = activeVehicle
+        if (!v || !v.tetsurin || v.dead) return
+        const yaw = camState.yaw
+        const pitch = camState.pitch
+        const ch = Math.cos(pitch)
+        const fwd = new THREE.Vector3(-Math.sin(yaw) * ch, Math.sin(pitch), -Math.cos(yaw) * ch)
+        // Alternate the muzzle between the two nose gatlings for a twin-gun look.
+        const side = (v.tNextGatling ?? 0) % 2 === 0 ? -0.7 : 0.7
+        const right = new THREE.Vector3(Math.cos(yaw), 0, -Math.sin(yaw))
+        const nose = new THREE.Vector3(
+          v.x + fwd.x * 2.4 + right.x * side,
+          1.4 + fwd.y * 2.4,
+          v.z + fwd.z * 2.4 + right.z * side,
+        )
+        raycaster.set(nose, fwd)
+        const prevFar = raycaster.far
+        raycaster.far = TETSURIN_GATLING_RANGE
+        const parts: THREE.Object3D[] = []
+        for (const e of enemies) {
+          if (e.hp > 0 && !e.aiDriving) {
+            e.mesh.traverse((c) => {
+              if (c instanceof THREE.Mesh && c.userData.enemyId) parts.push(c)
+            })
+          }
+        }
+        const enemyHit = raycaster.intersectObjects(parts, false)[0]
+        const wallHit = raycaster.intersectObjects(wallMeshes, false)[0]
+        const cands = collectHardTargets(raycaster, TETSURIN_GATLING_DAMAGE, {
+          jetAssistR: 0,
+          groundAssistR: TETSURIN_GATLING_ASSIST,
+          jetRange: TETSURIN_GATLING_RANGE,
+        })
+        raycaster.far = prevFar
+        // Ground enemies: exact mesh first, then a forgiving sphere assist so the
+        // fast-moving bike still lands rounds on small figures.
+        let enemyCand: { dist: number; point: THREE.Vector3; en: CombatEnemy } | null = null
+        if (enemyHit) {
+          const id = enemyHit.object.userData.enemyId as string | undefined
+          const en = enemies.find((e) => e.id === id)
+          if (en) enemyCand = { dist: enemyHit.distance, point: enemyHit.point.clone(), en }
+        }
+        if (!enemyCand) {
+          const ray = raycaster.ray
+          let bestT = Number.POSITIVE_INFINITY
+          for (const e of enemies) {
+            if (e.hp <= 0 || e.aiDriving) continue
+            const ex = e.mesh.position.x
+            const ey = e.mesh.position.y
+            const ez = e.mesh.position.z
+            const ox = ex - ray.origin.x
+            const oy = ey - ray.origin.y
+            const oz = ez - ray.origin.z
+            const t = ox * ray.direction.x + oy * ray.direction.y + oz * ray.direction.z
+            if (t <= 0 || t > TETSURIN_GATLING_RANGE || t >= bestT) continue
+            const px = ray.origin.x + ray.direction.x * t
+            const py = ray.origin.y + ray.direction.y * t
+            const pz = ray.origin.z + ray.direction.z * t
+            if (
+              Math.hypot(ex - px, ey - py, ez - pz) >
+              TETSURIN_GATLING_ASSIST + e.config.bodyH * 0.5
+            )
+              continue
+            bestT = t
+            enemyCand = { dist: t, point: new THREE.Vector3(px, py, pz), en: e }
+          }
+        }
+        if (enemyCand) {
+          const { en, point } = enemyCand
+          cands.push({
+            dist: enemyCand.dist,
+            point,
+            apply: () => {
+              en.hp -= TETSURIN_GATLING_DAMAGE
+              spawnBlood(point)
+              scoreRef.current += TETSURIN_GATLING_DAMAGE * 8
+              setScore(scoreRef.current)
+              if (en.hp <= 0) applyEnemyKill(en, "tetsurin")
+            },
+          })
+        }
+        cands.sort((a, b) => a.dist - b.dist)
+        const best = cands[0]
+        const wallDist = wallHit ? wallHit.distance : Number.POSITIVE_INFINITY
+        let impact: THREE.Vector3 | null = null
+        if (best && best.dist < wallDist) {
+          best.apply()
+          impact = best.point.clone()
+        } else if (wallHit) {
+          impact = wallHit.point.clone()
+        }
+        // Tracer streak from the nose (reuses the jet tracer material + bullet pool).
+        const tracer = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.06, 1.8), jetTracerMat)
+        tracer.position.copy(nose)
+        tracer.lookAt(nose.clone().add(fwd))
+        tracer.renderOrder = 998
+        scene.add(tracer)
+        bullets.push({
+          mesh: tracer,
+          velocity: fwd.clone().multiplyScalar(160),
+          life: 0.3,
+          isEnemy: false,
+          damage: 0,
+        })
+        // Impact dust (existing spark/explosion particles — no new pipeline).
+        if (impact) spawnExplosion(impact, true)
+        // Muzzle flash (reuses the shared muzzle light) + light shake.
+        muzzleFlashTimerRef.current = MUZZLE_FLASH_DURATION
+        SOUNDS.pistol()
+      }
+
       // Missile: 3s-cooldown explosive that flies forward and AOE-detonates on
       // impact (reuses the grenade detonation → damages enemies in range).
       function fireJetMissile() {
@@ -8628,16 +8976,19 @@ export default function ThreeWorld({
             : VEHICLE_REVERSE_SPEED
         const TURN = isTank ? VEHICLE_TANK_TURN : isBike ? VEHICLE_BIKE_TURN : VEHICLE_TURN_RATE
         const RADIUS = isTank ? VEHICLE_TANK_RADIUS : isBike ? VEHICLE_BIKE_RADIUS : VEHICLE_RADIUS
+        // 鉄輪: 2.5x the bike's accel + top speed (it's a high-speed war-cycle).
+        const accel = v.tetsurin ? ACCEL * TETSURIN_SPEED_MULT : ACCEL
+        const maxs = v.tetsurin ? MAXS * TETSURIN_SPEED_MULT : MAXS
 
         // Longitudinal dynamics (accel under throttle, engine-brake when coasting).
         if (Math.abs(throttle) > 0.01) {
-          v.speed += throttle * ACCEL * dt
+          v.speed += throttle * accel * dt
         } else {
           const decel = VEHICLE_BRAKE_DRAG * dt * (Math.abs(v.speed) + 1)
           if (v.speed > 0) v.speed = Math.max(0, v.speed - decel)
           else if (v.speed < 0) v.speed = Math.min(0, v.speed + decel)
         }
-        v.speed = Math.max(-REVS, Math.min(MAXS, v.speed))
+        v.speed = Math.max(-REVS, Math.min(maxs, v.speed))
 
         // Steering scales with speed and flips in reverse (like a real car).
         // Note the leading minus: with forward = (-sin h, -cos h), a *positive*
@@ -8672,6 +9023,31 @@ export default function ThreeWorld({
         focalPoint.x = v.x
         focalPoint.z = v.z
         focalPoint.y = 0
+
+        // ── 鉄輪 motion + gatling (mono-wheel war-cycle) ───────────────────────
+        if (v.tetsurin) {
+          // Roll the big wheel with travel; spin the gatling bundle while firing.
+          if (v.tWheel) v.tWheel.rotation.x -= v.speed * dt * TETSURIN_WHEEL_SPIN
+          const firing = mouseDownRef.current && gamePhaseRef.current === "playing"
+          if (v.tGun && firing) v.tGun.rotation.z += dt * 32
+          // Lean into the turn (visual bank on the group's roll axis), scaled by speed.
+          const targetLean =
+            Math.max(-1, Math.min(1, steer)) *
+            TETSURIN_LEAN_MAX *
+            Math.min(1, Math.abs(v.speed) / 8)
+          v.tLean = (v.tLean ?? 0) + (targetLean - (v.tLean ?? 0)) * (1 - Math.exp(-dt * 6))
+          v.group.rotation.z = -v.tLean
+          // Gatling cadence — held-fire drives this (boosted = 2x rate; Block D).
+          if (firing) {
+            const now = Date.now()
+            const interval =
+              (v.tBoost ?? 0) > 0 ? TETSURIN_GATLING_INTERVAL / 2 : TETSURIN_GATLING_INTERVAL
+            if (now >= (v.tNextGatling ?? 0)) {
+              v.tNextGatling = now + interval
+              fireTetsurinGatling()
+            }
+          }
+        }
 
         // Tank turret + barrel track the aim (turret yaw is relative to the
         // hull; barrel pitches with the aim, clamped to a sane gun arc).
@@ -16471,6 +16847,10 @@ export default function ThreeWorld({
         scene.add(group)
         osakaMapMeshesRef.current.push(group)
         buildOsakaRain() // OSAKA-only rain field (disposed with the map)
+        // 鉄輪 (Tetsurin): one mono-wheel war-cycle parked beside the Dotonbori
+        // spawn point. Registered as a bike-kind vehicle; disposed in
+        // clearOsakaMap. (Block A.)
+        osakaTetsurin = spawnTetsurin(HUNT_ARENA.x + 5, HUNT_ARENA.z + 56, 0)
       }
       // Dispose the OSAKA map + restore the prior fog (called from huntClearStage).
       // Disposes geometry, materials AND the sign CanvasTextures (material.dispose
@@ -16501,6 +16881,23 @@ export default function ThreeWorld({
         // Environment teardown: rain handle (mesh disposed above via the ref),
         // any live ripples, and the bridge-collapse list.
         osakaRain = null
+        // 鉄輪 teardown (Block A): dismount if the player is riding it, drop it
+        // from the vehicle list, dispose its merged geometries + materials.
+        if (osakaTetsurin) {
+          if (activeVehicle === osakaTetsurin) exitVehicle()
+          const ti = vehicles.indexOf(osakaTetsurin)
+          if (ti >= 0) vehicles.splice(ti, 1)
+          scene.remove(osakaTetsurin.group)
+          osakaTetsurin.group.traverse((o) => {
+            if (o instanceof THREE.Mesh) {
+              o.geometry.dispose()
+              const m = o.material
+              if (Array.isArray(m)) for (const mm of m) mm.dispose()
+              else m.dispose()
+            }
+          })
+          osakaTetsurin = null
+        }
         for (const r of osakaRipples) disposeFxMesh(r.mesh)
         osakaRipples.length = 0
         osakaBridges.length = 0
@@ -19002,6 +19399,9 @@ export default function ThreeWorld({
         // In the jet, the nose MG is fired continuously from updateJet while
         // the button is held (mouseDownRef) — nothing to do here.
         if (drivingRef.current && activeVehicle?.kind === "jet") return
+        // On the 鉄輪, the gatling is fired continuously from updateVehicle while
+        // the button is held — so swallow the handheld-weapon fire path here.
+        if (drivingRef.current && activeVehicle?.tetsurin) return
         // Manning an AA gun: shells fire on their own cadence in updateMountedAA.
         if (aaMountedRef.current) return
         // Brief lock right after dismounting a vehicle (exposure window).
@@ -19599,6 +19999,12 @@ export default function ThreeWorld({
               prevNearVehicleRef.current = nowNear
               setNearVehicle(nowNear)
             }
+            // 鉄輪 prompt variant (only flips state on boundary changes).
+            const nowNearT = nv?.tetsurin === true
+            if (nowNearT !== prevNearTetsurinRef.current) {
+              prevNearTetsurinRef.current = nowNearT
+              setNearTetsurin(nowNearT)
+            }
             if (wantAction && nv) {
               // Consume the E press so boarding doesn't also trigger a climb.
               climbRequestRef.current = false
@@ -20110,10 +20516,17 @@ export default function ThreeWorld({
           }
         }
 
-        // Muzzle flash
+        // Muzzle flash. On the 鉄輪 the camera is third-person, so park the flash
+        // at the bike nose instead of at the camera (otherwise it washes the view).
         if (muzzleFlashTimerRef.current > 0) {
-          refs.muzzleLight.intensity = 6
-          refs.muzzleLight.position.copy(camera.position).addScaledVector(fwd3, 0.6)
+          const tv = activeVehicle
+          if (tv?.tetsurin) {
+            refs.muzzleLight.intensity = 4
+            refs.muzzleLight.position.set(tv.x + fwd3.x * 2.2, 1.5, tv.z + fwd3.z * 2.2)
+          } else {
+            refs.muzzleLight.intensity = 6
+            refs.muzzleLight.position.copy(camera.position).addScaledVector(fwd3, 0.6)
+          }
           muzzleFlashTimerRef.current -= dt
         } else {
           refs.muzzleLight.intensity = 0
@@ -23920,7 +24333,13 @@ export default function ThreeWorld({
                 borderRadius: "2px",
               }}
             >
-              {inVehicle ? "[E] 降りる" : "[E] 車に乗る"}
+              {inVehicle
+                ? inTetsurin
+                  ? "[E] 鉄輪を降りる"
+                  : "[E] 降りる"
+                : nearTetsurin
+                  ? "[E] 鉄輪に乗る"
+                  : "[E] 車に乗る"}
             </div>
           )}
 
