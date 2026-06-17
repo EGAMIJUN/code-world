@@ -22612,12 +22612,16 @@ export default function ThreeWorld({
             const mapDC = countRenderables(osakaMapMeshesRef.current[0])
             let enemyDC = 0
             for (const e of enemies) if (e.hp > 0) enemyDC += countRenderables(e.mesh)
+            // 鉄輪 + 敵バイク draw-call contribution (Block G): verify ≤5 per bike.
+            let bikeDC = countRenderables(osakaTetsurin?.group)
+            for (const b of osakaEnemyBikes) bikeDC += countRenderables(b.group)
             perfHud.textContent =
               `FPS        ${perfFps}\n` +
               `draw calls ${info.render.calls}\n` +
               `  boss     ${bossDC}\n` +
               `  osakaMap ${mapDC}\n` +
               `  enemies  ${enemyDC}\n` +
+              `  bikes    ${bikeDC}\n` +
               `triangles  ${info.render.triangles.toLocaleString()}\n` +
               `geometries ${info.memory.geometries}\n` +
               `textures   ${info.memory.textures}\n` +
