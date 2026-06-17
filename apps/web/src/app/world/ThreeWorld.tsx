@@ -14730,6 +14730,7 @@ export default function ThreeWorld({
           osakaEventDotonbori() // 橋の全崩落 +「道頓堀は終わった」(FINAL-I)
           osakaBanner("通天閣へ進め")
           osakaSpawnAreaZako("tsutenkaku")
+          spawnOsakaBikeSquad() // 鉄輪部隊 襲来 (Block B): bike set-piece on the approach
         } else {
           p.area = "castle"
           osakaEventTsutenkaku() // ネオン赤化 + 頂上灯爆発 (FINAL-I)
@@ -14827,6 +14828,134 @@ export default function ThreeWorld({
           }
           for (const fl of mb.flash) fl.intensity = Math.max(0, fl.intensity - dt * 12)
         }
+      }
+      // ── 敵バイク部隊「鉄輪兵」(Block B) ─────────────────────────────────────
+      // A squad of up to 4 fast troopers that ride red 鉄輪 (the player's mesh,
+      // colour-swapped). Each is a normal CombatEnemy (grunt base) so all the
+      // existing AI / chase / shooting / hit-detection / death / score plumbing
+      // is reused for free — the only addition is a red 鉄輪 mesh tracking each
+      // rider + a squad-clear bonus. Spawned once when the Tsutenkaku approach
+      // opens up; disposed in clearOsakaMap.
+      const OSAKA_BIKE_PALETTE: TetsurinPalette = {
+        wheel: 0x2a0a0a,
+        body: 0x3a1a1a,
+        pipe: 0x2a1010,
+        gun: 0x441111,
+        accent: 0xff3322,
+      }
+      const OSAKA_BIKE_SCORE = 300 // per kill
+      const OSAKA_BIKE_CLEAR_BONUS = 1500 // squad wiped
+      const OSAKA_BIKE_HP = 140
+      const OSAKA_BIKE_SPEED = 9 // fast chase (a grunt walks at ~2)
+      const OSAKA_BIKE_CULL = 130 // hide the mesh past this range (draw-call cull)
+      let osakaBikeSquadSpawned = false
+      let osakaBikeBonusDone = false
+      let osakaBikeFrame = 0
+      const osakaEnemyBikes: {
+        enemy: CombatEnemy
+        group: THREE.Group
+        wheel: THREE.Object3D
+        gun: THREE.Object3D
+      }[] = []
+      function disposeTetsurinGroup(group: THREE.Object3D) {
+        group.traverse((o) => {
+          if (o instanceof THREE.Mesh) {
+            o.geometry.dispose()
+            const m = o.material
+            if (Array.isArray(m)) for (const mm of m) mm.dispose()
+            else m.dispose()
+          }
+        })
+      }
+      function spawnOsakaBikeSquad() {
+        if (osakaBikeSquadSpawned) return
+        osakaBikeSquadSpawned = true
+        const c = osakaAreaCenter("tsutenkaku")
+        const count = isMobileDevice ? 3 : 4 // fewer on mobile (draw-call budget)
+        for (let i = 0; i < count; i++) {
+          const ang = (i / count) * Math.PI * 2
+          const safe = findSafeSpawnNear(
+            c.x + Math.cos(ang) * 42,
+            c.z + Math.sin(ang) * 42,
+            ENEMY_RADIUS,
+          )
+          const e = makeEnemy("grunt", safe.x, safe.z, false, 1.0)
+          e.config = {
+            ...e.config,
+            hp: OSAKA_BIKE_HP,
+            score: OSAKA_BIKE_SCORE,
+            speed: OSAKA_BIKE_SPEED,
+            sightRange: 130,
+          }
+          e.hp = OSAKA_BIKE_HP
+          e.maxHp = OSAKA_BIKE_HP
+          e.huntPoints = OSAKA_BIKE_SCORE
+          e.huntName = "鉄輪兵"
+          huntTint(e.mesh, 0x661111, 0.6) // red-black rider
+          enemies.push(e)
+          const built = makeTetsurin(OSAKA_BIKE_PALETTE)
+          built.group.position.set(safe.x, 0, safe.z)
+          scene.add(built.group)
+          osakaEnemyBikes.push({
+            enemy: e,
+            group: built.group,
+            wheel: built.wheel,
+            gun: built.gun,
+          })
+        }
+        osakaBanner("鉄輪部隊 襲来 — 撃破せよ")
+      }
+      // Per-frame: track each rider with its bike mesh, retire dead bikes, and
+      // award the squad-clear bonus. AI cosmetics (wheel spin) run every 2nd frame
+      // and the whole mesh is culled past OSAKA_BIKE_CULL to protect draw calls.
+      function updateOsakaBikes(dt: number) {
+        if (osakaEnemyBikes.length === 0) {
+          if (osakaBikeSquadSpawned && !osakaBikeBonusDone) {
+            osakaBikeBonusDone = true
+            huntScoreRef.current += OSAKA_BIKE_CLEAR_BONUS
+            setHuntScore(huntScoreRef.current)
+            scoreRef.current += OSAKA_BIKE_CLEAR_BONUS
+            setScore(scoreRef.current)
+            osakaBanner(`鉄輪部隊 全滅 +${OSAKA_BIKE_CLEAR_BONUS}`)
+          }
+          return
+        }
+        osakaBikeFrame++
+        const half = osakaBikeFrame % 2 === 0
+        for (let i = osakaEnemyBikes.length - 1; i >= 0; i--) {
+          const b = osakaEnemyBikes[i]
+          if (!b) continue
+          const e = b.enemy
+          // Dead/dying rider → detonate the bike, dispose its mesh, drop it.
+          if (e.hp <= 0 || e.dyingTimer >= 0) {
+            spawnExplosion(new THREE.Vector3(b.group.position.x, 1.0, b.group.position.z))
+            scene.remove(b.group)
+            disposeTetsurinGroup(b.group)
+            osakaEnemyBikes.splice(i, 1)
+            continue
+          }
+          const ex = e.mesh.position.x
+          const ez = e.mesh.position.z
+          // Distance-cull the mesh (the rider stays as the hittable target).
+          const far = Math.hypot(ex - camera.position.x, ez - camera.position.z) > OSAKA_BIKE_CULL
+          b.group.visible = !far
+          if (far) continue
+          b.group.position.set(ex, 0, ez)
+          const sp2 = e.velocity.x * e.velocity.x + e.velocity.z * e.velocity.z
+          if (sp2 > 0.04) b.group.rotation.y = Math.atan2(-e.velocity.x, -e.velocity.z)
+          e.mesh.position.y = 1.4 // seat the rider on the machine
+          if (half) b.wheel.rotation.x -= Math.sqrt(sp2) * dt * 2 * TETSURIN_WHEEL_SPIN
+        }
+      }
+      // Dispose any live enemy bikes + reset the squad flags (clearOsakaMap).
+      function clearOsakaBikes() {
+        for (const b of osakaEnemyBikes) {
+          scene.remove(b.group)
+          disposeTetsurinGroup(b.group)
+        }
+        osakaEnemyBikes.length = 0
+        osakaBikeSquadSpawned = false
+        osakaBikeBonusDone = false
       }
       // Per-frame area-progression check: clear the wave → drop the area's boss.
       function updateOsakaProgress() {
@@ -16898,6 +17027,7 @@ export default function ThreeWorld({
           })
           osakaTetsurin = null
         }
+        clearOsakaBikes() // 鉄輪部隊 (Block B): dispose live enemy bikes + reset flags
         for (const r of osakaRipples) disposeFxMesh(r.mesh)
         osakaRipples.length = 0
         osakaBridges.length = 0
@@ -20053,6 +20183,7 @@ export default function ThreeWorld({
           }
           updateOsakaBoss(dt) // OSAKA 五変化 boss
           updateOsakaMidBoss(dt) // OSAKA mid-boss (Tengu / Yamaya)
+          updateOsakaBikes(dt) // 鉄輪部隊 (Block B): track riders + squad-clear bonus
           updateOsakaMap(dt) // OSAKA scenery animation (neon, lanterns, marquee…)
           updateOsakaFx(dt) // OSAKA boss hazards (telegraphs, pools, splitters…)
           updateOsakaRain(dt) // OSAKA rain streaks + ground ripples
