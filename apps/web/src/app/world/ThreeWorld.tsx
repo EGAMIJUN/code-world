@@ -16925,6 +16925,102 @@ export default function ThreeWorld({
           }
           osakaSecretRef.current = osakaSecretFresh()
         }
+        // ── 高速道路 (Block C) — an elevated overpass over a ground speedway ────
+        // A straight night highway running the central spine (Dotonbori → past
+        // Tsutenkaku). The DRIVABLE route is the open ground lane between the
+        // guardrails; an elevated deck on pillars passes overhead (高架の下を走る).
+        // Everything is funnelled through mAdd/instAdd so it collapses to a handful
+        // of draw calls and disposes with the map group. group-local coords.
+        {
+          const HW_Z0 = 6 // south end (stops just short of the Tsutenkaku tower at z≈0)
+          const HW_Z1 = 60 // north end (toward 道頓堀)
+          const HW_LEN = HW_Z1 - HW_Z0
+          const HW_CZ = (HW_Z0 + HW_Z1) / 2
+          const HW_HALF = 8 // road half-width (16 wide lane)
+          const asphaltMat = new THREE.MeshStandardMaterial({
+            color: 0x15151c,
+            roughness: 0.95,
+            metalness: 0.0,
+          })
+          const railMat = new THREE.MeshStandardMaterial({
+            color: 0x3a3a46,
+            roughness: 0.5,
+            metalness: 0.6,
+          })
+          const pillarMat = new THREE.MeshStandardMaterial({
+            color: 0x24242c,
+            roughness: 0.8,
+            metalness: 0.2,
+          })
+          const deckMat = new THREE.MeshStandardMaterial({
+            color: 0x1c1c24,
+            roughness: 0.85,
+            metalness: 0.15,
+          })
+          const lineMat = new THREE.MeshStandardMaterial({
+            color: 0xffcc44,
+            emissive: 0xffcc44,
+            emissiveIntensity: 0.7,
+            roughness: 0.5,
+            metalness: 0.1,
+          })
+          const lampHeadMat = new THREE.MeshStandardMaterial({
+            color: 0xfff2b0,
+            emissive: 0xffe070,
+            emissiveIntensity: 1.1,
+            roughness: 0.4,
+            metalness: 0.2,
+          })
+          // Road deck (a thin raised slab) + dashed centre line (emissive).
+          const road = new THREE.Mesh(new THREE.BoxGeometry(HW_HALF * 2, 0.12, HW_LEN), asphaltMat)
+          road.position.set(0, 0.06, HW_CZ)
+          mAdd(road)
+          for (let z = HW_Z0 + 3; z < HW_Z1; z += 6) {
+            const dash = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.04, 2.4), lineMat)
+            dash.position.set(0, 0.14, z)
+            mAdd(dash)
+          }
+          // Side guardrails (low) — merged + a blocking AABB each so the lane funnels.
+          for (const sx of [-1, 1]) {
+            const rail = new THREE.Mesh(new THREE.BoxGeometry(0.3, 1.0, HW_LEN), railMat)
+            rail.position.set(sx * (HW_HALF + 0.2), 0.6, HW_CZ)
+            mAdd(rail)
+            addOsakaAABB(sx * (HW_HALF + 0.2), HW_CZ, 0.45, HW_LEN / 2, 1.2)
+          }
+          // Pillars (outside the lane) + elevated overpass deck overhead. Pillars
+          // get a hitbox; the deck is pure overhead scenery (vehicles pass beneath).
+          const pillarStep = 14
+          for (let z = HW_Z0 + 4; z <= HW_Z1 - 4; z += pillarStep) {
+            for (const sx of [-1, 1]) {
+              const px = sx * 10.5
+              const pillar = new THREE.Mesh(new THREE.BoxGeometry(1.4, 7, 1.4), pillarMat)
+              pillar.position.set(px, 3.5, z)
+              mAdd(pillar)
+              addOsakaAABB(px, z, 0.85, 0.85, 7)
+            }
+          }
+          const deck = new THREE.Mesh(new THREE.BoxGeometry(25, 0.7, HW_LEN), deckMat)
+          deck.position.set(0, 7.3, HW_CZ)
+          mAdd(deck)
+          for (const sx of [-1, 1]) {
+            const parapet = new THREE.Mesh(new THREE.BoxGeometry(0.5, 1.0, HW_LEN), railMat)
+            parapet.position.set(sx * 12.0, 8.0, HW_CZ)
+            mAdd(parapet)
+          }
+          // Street lamps down both verges — instanced poles + emissive heads.
+          const lampXf: Xf[] = []
+          const lampHeadXf: Xf[] = []
+          const lampStep = fullLights ? 10 : 16
+          for (let z = HW_Z0 + 5; z < HW_Z1; z += lampStep) {
+            for (const sx of [-1, 1]) {
+              const lx = sx * (HW_HALF - 0.4)
+              lampXf.push({ pos: [lx, 2.0, z] })
+              lampHeadXf.push({ pos: [lx, 4.1, z] })
+            }
+          }
+          instAdd(new THREE.CylinderGeometry(0.09, 0.12, 4.0, 6), railMat, lampXf)
+          instAdd(new THREE.BoxGeometry(0.5, 0.18, 0.3), lampHeadMat, lampHeadXf)
+        }
         // Collapse every static mesh funnelled through mAdd into one merged mesh per
         // material — the bulk of the draw-call reduction happens here.
         flushMerges()
