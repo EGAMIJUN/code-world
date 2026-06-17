@@ -101,6 +101,12 @@ const TETSURIN_GATLING_RANGE = 95 // hitscan reach (m)
 const TETSURIN_GATLING_ASSIST = 1.7 // ground aim-assist sphere radius (m)
 const TETSURIN_WHEEL_SPIN = 1.6 // wheel spin rad per m travelled
 const TETSURIN_LEAN_MAX = 0.5 // max lean (rad) into a hard turn
+// Block D — 疾走 (dash) gauge: fills while holding ≥70% top speed, and when full
+// auto-unleashes a boosted-fire window (gatling cadence doubles). Drains when slow.
+const TETSURIN_DASH_FILL = 0.16 // gauge/sec while holding speed (~6.3s to fill)
+const TETSURIN_DASH_DRAIN = 0.1 // gauge/sec lost when below the speed threshold
+const TETSURIN_DASH_SPEED_FRAC = 0.7 // fraction of top speed needed to charge
+const TETSURIN_BOOST_TIME = 5 // seconds of 2x-cadence fire per full gauge
 // Small-arms (bullets / claws) only chip the tank; explosives hit full.
 // Bumped from 0.12 → 0.25 so sustained enemy fire actually wears it down.
 const TANK_ARMOR_BULLET = 0.25
@@ -2818,6 +2824,12 @@ export default function ThreeWorld({
   const [inTetsurin, setInTetsurin] = useState(false)
   const [nearTetsurin, setNearTetsurin] = useState(false)
   const prevNearTetsurinRef = useRef(false)
+  // Block D — 疾走ゲージ HUD (0..1 fill + boost flag). Pushed from the loop only
+  // when the value changes bucket, so it never spams React.
+  const [tetsurinDash, setTetsurinDash] = useState(0)
+  const [tetsurinBoost, setTetsurinBoost] = useState(false)
+  const tetsurinDashBucketRef = useRef(-1)
+  const tetsurinBoostRef = useRef(false)
   // Set by the E key / mobile board-exit button; consumed once in the loop.
   const vehicleActionRef = useRef(false)
   // ── PR-G1: mounted AA gun state ─────────────────────────────────────────────
@@ -7331,6 +7343,15 @@ export default function ThreeWorld({
         drivingRef.current = false
         setInVehicle(false)
         setInTetsurin(false)
+        // Clear the 疾走ゲージ HUD (Block D).
+        if (v?.tetsurin) {
+          v.tDash = 0
+          v.tBoost = 0
+          tetsurinDashBucketRef.current = -1
+          tetsurinBoostRef.current = false
+          setTetsurinDash(0)
+          setTetsurinBoost(false)
+        }
         gunGroup.visible = true
         hidePlayerAvatar()
         if (v) {
@@ -9046,6 +9067,30 @@ export default function ThreeWorld({
               v.tNextGatling = now + interval
               fireTetsurinGatling()
             }
+          }
+          // ── 疾走ゲージ (Block D): sustained speed charges it; full → boost ─────
+          const sp = Math.abs(v.speed)
+          if ((v.tBoost ?? 0) > 0) {
+            v.tBoost = Math.max(0, (v.tBoost ?? 0) - dt)
+          } else if (sp > maxs * TETSURIN_DASH_SPEED_FRAC) {
+            v.tDash = Math.min(1, (v.tDash ?? 0) + dt * TETSURIN_DASH_FILL)
+            if ((v.tDash ?? 0) >= 1) {
+              // Gauge full → unleash a 2x-cadence fire window; reset the gauge.
+              v.tBoost = TETSURIN_BOOST_TIME
+              v.tDash = 0
+              showNotification("疾走全開 — ガトリング強化")
+            }
+          } else {
+            v.tDash = Math.max(0, (v.tDash ?? 0) - dt * TETSURIN_DASH_DRAIN)
+          }
+          // Throttled HUD push (only when a 1/20th bucket or the boost flag flips).
+          const bucket = Math.round((v.tDash ?? 0) * 20)
+          const boostOn = (v.tBoost ?? 0) > 0
+          if (bucket !== tetsurinDashBucketRef.current || boostOn !== tetsurinBoostRef.current) {
+            tetsurinDashBucketRef.current = bucket
+            tetsurinBoostRef.current = boostOn
+            setTetsurinDash(bucket / 20)
+            setTetsurinBoost(boostOn)
           }
         }
 
@@ -12618,6 +12663,12 @@ export default function ThreeWorld({
             osakaApplyTrueLighting()
             osakaShowCutin("真・五変化 顕現", OSAKA_FORM_QUOTES[6], "true")
             showNotification("☠ 第六形態 — 五つのコアは常に剥き出し、だが速い")
+            // Block D: nudge the player to fight the true form on the 鉄輪 —
+            // its speed is the only way to outrun the full-screen waves.
+            window.setTimeout(() => {
+              if (osakaBossRef.current?.phase === 6)
+                showNotification("鉄輪で全画面攻撃を駆け抜けろ — 疾走でガトリング強化")
+            }, 3400)
           } else {
             osakaShowCutin(OSAKA_FORM_NAMES[np], OSAKA_FORM_QUOTES[np], "form")
           }
@@ -24569,6 +24620,61 @@ export default function ThreeWorld({
                   : "[E] 車に乗る"}
             </div>
           )}
+
+        {/* 鉄輪 疾走ゲージ (Block D) — pure CSS overlay, no mesh. */}
+        {inTetsurin && !isLoading && !error && gamePhase === "playing" && (
+          <div
+            style={{
+              position: "absolute",
+              bottom: isMobile ? "8.6rem" : "5.2rem",
+              left: "50%",
+              transform: "translateX(-50%)",
+              zIndex: 24,
+              pointerEvents: "none",
+              width: "220px",
+              textAlign: "center",
+              fontFamily: "monospace",
+            }}
+          >
+            <div
+              style={{
+                fontSize: "0.6rem",
+                letterSpacing: "0.18em",
+                color: tetsurinBoost ? "#ff7733" : "#33ddff",
+                textShadow: "0 0 6px rgba(0,0,0,0.9)",
+                marginBottom: "2px",
+              }}
+            >
+              {tetsurinBoost ? "疾走全開 — ガトリング強化" : "疾走ゲージ"}
+            </div>
+            <div
+              style={{
+                height: "8px",
+                background: "rgba(0,0,0,0.8)",
+                border: `1px solid ${tetsurinBoost ? "#ff7733" : "#33ddff"}`,
+                borderRadius: "2px",
+                overflow: "hidden",
+              }}
+            >
+              <div
+                style={{
+                  height: "100%",
+                  width: `${Math.round((tetsurinBoost ? 1 : tetsurinDash) * 100)}%`,
+                  background: tetsurinBoost
+                    ? "linear-gradient(90deg,#ff3311,#ffcc44)"
+                    : "linear-gradient(90deg,#1a6a8a,#7fe0ff)",
+                  transition: "width 0.15s",
+                  animation: tetsurinBoost
+                    ? "tetsurinBoostPulse 0.5s ease-in-out infinite"
+                    : "none",
+                }}
+              />
+            </div>
+            <style>
+              {"@keyframes tetsurinBoostPulse { 0%,100% { opacity: 0.7; } 50% { opacity: 1; } }"}
+            </style>
+          </div>
+        )}
 
         {/* AA gun mount / exit prompt (desktop) — PR-G1 */}
         {(nearAAGun || inAAGun) && !isLoading && !error && !isMobile && gamePhase === "playing" && (
