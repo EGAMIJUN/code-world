@@ -6657,6 +6657,15 @@ export default function ThreeWorld({
         gun: 0x444444,
         accent: 0x33ddff,
       }
+      // 災厄仕様 (Block E): 終焉モード専用の色替え (新規メッシュなし) — 黒鉄に深紅の
+      // 差し色で「終末を駆ける戦車」に見せる。makeTetsurin の色を差し替えるだけ。
+      const TETSURIN_CATACLYSM_PALETTE: TetsurinPalette = {
+        wheel: 0x140405,
+        body: 0x2a0608,
+        pipe: 0x3a0a0c,
+        gun: 0x550a0a,
+        accent: 0xff2a2a,
+      }
       function makeTetsurin(pal: TetsurinPalette): {
         group: THREE.Group
         wheel: THREE.Object3D
@@ -6805,7 +6814,9 @@ export default function ThreeWorld({
       let tetsurinFxFrame = 0 // throttles the tyre-spark cadence (Block F)
       function spawnTetsurin(x: number, z: number, heading: number): Vehicle {
         const safe = findSafeSpawnNear(x, z, VEHICLE_BIKE_RADIUS)
-        const built = makeTetsurin(TETSURIN_PLAYER_PALETTE)
+        const built = makeTetsurin(
+          osakaCataclysm() ? TETSURIN_CATACLYSM_PALETTE : TETSURIN_PLAYER_PALETTE,
+        )
         built.group.position.set(safe.x, 0, safe.z)
         built.group.rotation.y = heading
         scene.add(built.group)
@@ -8786,6 +8797,35 @@ export default function ThreeWorld({
             },
           })
         }
+        // 大魔 cores (Block E): the 鉄輪 gatling can break the spread cores while
+        // driving past — the core loop of the 終焉 fight. Routes ×3 like handheld and
+        // competes in the same nearest-candidate sort (wall-occluded).
+        const dmGat = osakaDaima
+        if (dmGat && !dmGat.defeated) {
+          const dParts: THREE.Object3D[] = []
+          dmGat.group.traverse((c) => {
+            if (c instanceof THREE.Mesh && c.visible && typeof c.userData.daimaCore === "number") {
+              dParts.push(c)
+            }
+          })
+          const prevFar2 = raycaster.far
+          raycaster.far = TETSURIN_GATLING_RANGE
+          const dHit = raycaster.intersectObjects(dParts, false)[0]
+          raycaster.far = prevFar2
+          if (dHit) {
+            const idx = dHit.object.userData.daimaCore as number
+            const pt = dHit.point.clone()
+            cands.push({
+              dist: dHit.distance,
+              point: pt,
+              apply: () => {
+                daimaHitCore(idx, TETSURIN_GATLING_DAMAGE * OSAKA_CORE_MULT)
+                scoreRef.current += TETSURIN_GATLING_DAMAGE * 8
+                setScore(scoreRef.current)
+              },
+            })
+          }
+        }
         cands.sort((a, b) => a.dist - b.dist)
         const best = cands[0]
         const wallDist = wallHit ? wallHit.distance : Number.POSITIVE_INFINITY
@@ -9117,8 +9157,11 @@ export default function ThreeWorld({
           // Gatling cadence — held-fire drives this (boosted = 2x rate; Block D).
           if (firing) {
             const now = Date.now()
+            // 災厄仕様 (Block E): 終焉では疾走ゲージ無しでも常時 2倍 cadence。
             const interval =
-              (v.tBoost ?? 0) > 0 ? TETSURIN_GATLING_INTERVAL / 2 : TETSURIN_GATLING_INTERVAL
+              osakaCataclysm() || (v.tBoost ?? 0) > 0
+                ? TETSURIN_GATLING_INTERVAL / 2
+                : TETSURIN_GATLING_INTERVAL
             if (now >= (v.tNextGatling ?? 0)) {
               v.tNextGatling = now + interval
               fireTetsurinGatling()
