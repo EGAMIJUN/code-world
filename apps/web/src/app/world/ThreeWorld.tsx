@@ -825,7 +825,7 @@ const OSAKA_BODY_MULT = 0.2 // body hits are 80% reduced
 const DAIMA_HP = 25000 // 過去最大の総HP (7コアに等分)
 const DAIMA_CORES = 7
 const OSAKA_CATACLYSM_CLEAR_KEY = "osaka_cataclysm_clear" // 称号「終焉を超えし者」解放フラグ
-// (最終災厄しきい値 DAIMA_FINAL_FRAC は Block B-2 の更新ループで導入)
+const DAIMA_FINAL_FRAC = 0.1 // 総HP10%以下で「最終災厄」(全攻撃が高速化)
 // 7基のコアのマップ展開位置 (HUNT_ARENA からの local オフセット)。中央 + 外周6基で
 // 180m級フィールド全体に散らす → 広範囲移動 (鉄輪) が必須になる。
 const DAIMA_CORE_OFFSETS: readonly (readonly [number, number])[] = [
@@ -14512,6 +14512,110 @@ export default function ThreeWorld({
           huntReturnToRoom("clear")
         }
       }
+      // Per-frame 大魔 driver (Block B-2): instanced tentacle sway + eye/core pulse,
+      // and four map-scale attacks on independent timers. All hazards reuse the
+      // existing osakaTelegraph (ground-warning → delayed radial damage) + explosion
+      // systems — no new particle systems. Damage lands on the player wherever they
+      // stand, so the 鉄輪 is dodged-with-speed, not tanked.
+      function updateDaima(dt: number) {
+        const d = osakaDaima
+        if (!d || d.defeated) return
+        d.frame++
+        const now = Date.now()
+        const px = focalPoint.x
+        const pz = focalPoint.z
+        // Slow ominous rotation + shared eye-material pulse.
+        d.group.rotation.y += dt * 0.15
+        if (d.eyeMat) d.eyeMat.emissiveIntensity = 1.4 + Math.sin(now * 0.005) * 0.6
+        // Tentacle sway — rebuild instance matrices every other frame (throttle).
+        if (d.armInst && (d.frame & 1) === 0) {
+          const t = now * 0.001
+          for (let i = 0; i < d.armData.length; i++) {
+            const ad = d.armData[i]
+            if (!ad) continue
+            const sway = Math.sin(t * 1.3 + ad.phase) * 0.25
+            osakaDaimaArmDummy.position.set(Math.cos(ad.ang) * ad.r, ad.y, Math.sin(ad.ang) * ad.r)
+            osakaDaimaArmDummy.rotation.set(
+              -Math.sin(ad.ang) * (ad.tilt + sway),
+              sway,
+              Math.cos(ad.ang) * (ad.tilt + sway),
+            )
+            osakaDaimaArmDummy.updateMatrix()
+            d.armInst.setMatrixAt(i, osakaDaimaArmDummy.matrix)
+          }
+          d.armInst.instanceMatrix.needsUpdate = true
+        }
+        // Live cores breathe + spin so they read as "alive" weak points.
+        for (const co of d.cores) {
+          if (co.dead) continue
+          co.mesh.scale.setScalar(3 + Math.sin(now * 0.004 + co.wx) * 0.4)
+          co.mesh.rotation.y += dt * 1.2
+        }
+        // 最終災厄: ≤10% aggregate HP → red frenzy overlay + faster cadences.
+        if (!d.finalPhase && d.hp / d.maxHp <= DAIMA_FINAL_FRAC) {
+          d.finalPhase = true
+          setOsakaFrenzy(true)
+          osakaShowCutin("最終災厄", "大魔、総力をもって大阪を喰らう", "true")
+        }
+        // ── 隕石落下: telegraphed impacts around the player (影 → explosion). ──
+        d.meteorTimer -= dt
+        if (d.meteorTimer <= 0) {
+          d.meteorTimer = (d.finalPhase ? 2.2 : 4.0) * (0.8 + Math.random() * 0.5)
+          const drops = d.finalPhase ? 4 : 2
+          for (let i = 0; i < drops; i++) {
+            const a = Math.random() * Math.PI * 2
+            const rr = 6 + Math.random() * 26
+            const mx = px + Math.cos(a) * rr
+            const mz = pz + Math.sin(a) * rr
+            osakaTelegraph(mx, mz, 4.5, 1100, 34, 0xff5522)
+            window.setTimeout(() => {
+              if (osakaDaima) spawnExplosion(new THREE.Vector3(mx, 1.2, mz))
+            }, 1100)
+          }
+          SOUNDS.huntWarn()
+        }
+        // ── 都市破壊光線: a wide beam lane telegraphed from the body across the ──
+        // field. Stand clear (drive the 鉄輪) before it sears.
+        d.beamTimer -= dt
+        if (d.beamTimer <= 0) {
+          d.beamTimer = (d.finalPhase ? 5 : 9) * (0.85 + Math.random() * 0.4)
+          const a = Math.random() * Math.PI * 2
+          const ox = d.group.position.x
+          const oz = d.group.position.z
+          for (let s = 1; s <= 9; s++) {
+            osakaTelegraph(
+              ox + Math.cos(a) * s * 9,
+              oz + Math.sin(a) * s * 9,
+              6,
+              1500,
+              48,
+              0xff2200,
+            )
+          }
+          SOUNDS.collapse()
+        }
+        // ── 触手叩きつけ: several tentacles slam spots near the player (shockwave). ──
+        d.slamTimer -= dt
+        if (d.slamTimer <= 0) {
+          d.slamTimer = (d.finalPhase ? 2.5 : 4.5) * (0.8 + Math.random() * 0.5)
+          const slams = d.finalPhase ? 3 : 2
+          for (let i = 0; i < slams; i++) {
+            const a = Math.random() * Math.PI * 2
+            const rr = 4 + Math.random() * 18
+            osakaTelegraph(px + Math.cos(a) * rr, pz + Math.sin(a) * rr, 5, 650, 28, 0x9922ff)
+          }
+        }
+        // ── 全コア同時攻撃 (final phase): each LIVE core fires a telegraphed strike ──
+        // at the player on its own cadence.
+        if (d.finalPhase) {
+          for (const co of d.cores) {
+            if (co.dead || now < co.beamAt) continue
+            co.beamAt = now + 2600 + Math.random() * 1500
+            osakaTelegraph(px, pz, 4, 900, 26, 0xffaa00)
+          }
+        }
+        if ((d.frame & 7) === 0) setBossHpPct(Math.round((d.hp / d.maxHp) * 100))
+      }
       // Per-frame boss driver: core pulse/reveal, limb sway, stalk, fodder top-up
       // and the form-specific attack on the attackTimer (1.5× cadence while raging).
       function updateOsakaBoss(dt: number) {
@@ -20850,6 +20954,7 @@ export default function ThreeWorld({
             if (huntPhaseRef.current === "mission" && !osakaBossRef.current) spawnOsakaBoss()
           }
           updateOsakaBoss(dt) // OSAKA 五変化 boss
+          updateDaima(dt) // 大魔 final boss (Block B, 終焉 only — no-op when absent)
           updateOsakaMidBoss(dt) // OSAKA mid-boss (Tengu / Yamaya)
           updateOsakaBikes(dt) // 鉄輪部隊 (Block B): track riders + squad-clear bonus
           updateOsakaMap(dt) // OSAKA scenery animation (neon, lanterns, marquee…)
