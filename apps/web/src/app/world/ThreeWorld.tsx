@@ -601,11 +601,13 @@ interface HuntLevel {
 // stage = arena dressing (outdoor day vs. indoor green-lit hall);
 // difficulty = which HUNT_LEVELS entry a fresh run starts at (1/2/3).
 type HuntMissionConfig = {
-  stage: "outdoor" | "indoor" | "osaka" | "osaka_oni"
+  stage: "outdoor" | "indoor" | "osaka" | "osaka_oni" | "osaka_cataclysm"
   difficulty: 1 | 2 | 3
 }
-// OSAKA 鬼モード (FINAL-H): マップ/進行は OSAKA と共通、倍率と守衛だけが変わる。
-const isOsakaStage = (s: HuntMissionConfig["stage"]): boolean => s === "osaka" || s === "osaka_oni"
+// OSAKA 鬼モード (FINAL-H) / 終焉モード (Cataclysm): マップ/進行は OSAKA と共通、
+// 倍率と守衛、そして終焉だけの大魔・崩壊演出が上乗せされる。
+const isOsakaStage = (s: HuntMissionConfig["stage"]): boolean =>
+  s === "osaka" || s === "osaka_oni" || s === "osaka_cataclysm"
 // Per-theme minion spec — reuse an existing enemy model with a colour/scale
 // tweak. base = model, tint = body recolour, eyes = eye-glow colour.
 type HuntCreatureKind =
@@ -778,6 +780,11 @@ const OSAKA_ONI_MIDBOSS_HP_MULT = 2
 const OSAKA_ONI_MIDBOSS_CD_MULT = 1 / 1.5 // 攻撃頻度1.5倍 = クールダウン÷1.5
 const OSAKA_ONI_BOSS_HP_MULT = 1.5
 const OSAKA_ONI_CLEAR_BONUS = 3000
+// ── 終焉モード (Cataclysm) ── 鬼の上位、最高難度。鬼モードクリアで解放される。
+// 全雑魚/中ボス/ボスの HP・攻撃頻度を鬼モードの OSAKA_CATACLYSM_MULT 倍にし、
+// さらに超巨大最終ボス「大魔」と都市崩壊・災害環境を被せる (Block B〜D)。
+const OSAKA_CATACLYSM_MULT = 1.2 // 鬼モード比 1.2倍
+// (称号キー OSAKA_CATACLYSM_CLEAR_KEY / クリアボーナスは Block F で導入)
 // ── 演出強化 (FINAL-F): 形態名/決め台詞/フォーム色 (全て創作オリジナル) ──────
 const OSAKA_FORM_NAMES: Record<OsakaBossPhase, string> = {
   1: "第一形態『老翁』",
@@ -12612,8 +12619,8 @@ export default function ThreeWorld({
         osakaBossRef.current = {
           group: built.group,
           phase: 1,
-          phaseHp: Math.round(OSAKA_PHASE_HP[1] * (osakaOni() ? OSAKA_ONI_BOSS_HP_MULT : 1)),
-          phaseMaxHp: Math.round(OSAKA_PHASE_HP[1] * (osakaOni() ? OSAKA_ONI_BOSS_HP_MULT : 1)),
+          phaseHp: Math.round(OSAKA_PHASE_HP[1] * osakaBossHpMult()),
+          phaseMaxHp: Math.round(OSAKA_PHASE_HP[1] * osakaBossHpMult()),
           core: primary,
           cores: built.cores,
           coreExposed: true,
@@ -12712,8 +12719,8 @@ export default function ThreeWorld({
           osakaBossRef.current = {
             group: built.group,
             phase: np,
-            phaseHp: Math.round(OSAKA_PHASE_HP[np] * (osakaOni() ? OSAKA_ONI_BOSS_HP_MULT : 1)),
-            phaseMaxHp: Math.round(OSAKA_PHASE_HP[np] * (osakaOni() ? OSAKA_ONI_BOSS_HP_MULT : 1)),
+            phaseHp: Math.round(OSAKA_PHASE_HP[np] * osakaBossHpMult()),
+            phaseMaxHp: Math.round(OSAKA_PHASE_HP[np] * osakaBossHpMult()),
             core: primary,
             cores: built.cores,
             coreExposed: true,
@@ -13882,6 +13889,37 @@ export default function ThreeWorld({
       function osakaOni(): boolean {
         return huntMissionConfigRef.current.stage === "osaka_oni"
       }
+      // 終焉モード判定 (Cataclysm)。鬼の上位 — 最高難度。
+      function osakaCataclysm(): boolean {
+        return huntMissionConfigRef.current.stage === "osaka_cataclysm"
+      }
+      // 鬼以上 (鬼 or 終焉): 守衛配置と上位倍率を適用する高難度帯か。
+      function osakaHardMode(): boolean {
+        return osakaOni() || osakaCataclysm()
+      }
+      // 鬼の各倍率を、終焉ではさらに OSAKA_CATACLYSM_MULT 倍する単一窓口。
+      const osakaCataMul = (): number => (osakaCataclysm() ? OSAKA_CATACLYSM_MULT : 1)
+      function osakaZakoMult(): number {
+        return osakaHardMode() ? OSAKA_ONI_ZAKO_MULT * osakaCataMul() : 1
+      }
+      function osakaMidbossHpMult(): number {
+        return osakaHardMode() ? OSAKA_ONI_MIDBOSS_HP_MULT * osakaCataMul() : 1
+      }
+      function osakaBossHpMult(): number {
+        return osakaHardMode() ? OSAKA_ONI_BOSS_HP_MULT * osakaCataMul() : 1
+      }
+      function osakaMidbossCdMult(): number {
+        // 攻撃頻度: 鬼で1.5倍、終焉はさらに速い → クールダウンを割り込む。
+        return osakaHardMode() ? OSAKA_ONI_MIDBOSS_CD_MULT / osakaCataMul() : 1
+      }
+      // 終焉モードのアンロック判定: 鬼モードをクリア済みか (OSAKA_ONI_CLEAR_KEY)。
+      function osakaCataclysmUnlocked(): boolean {
+        try {
+          return localStorage.getItem(OSAKA_ONI_CLEAR_KEY) === "1"
+        } catch {
+          return false
+        }
+      }
       // 鬼モードの守衛 (FINAL-H): 隠し武器への道を強敵「鬼衆」が固める。
       // 格子戸/ひび壁の前に1体ずつ + 地下通路/隠し部屋の中に1体ずつ。
       function osakaSpawnOniGuards() {
@@ -14601,9 +14639,10 @@ export default function ThreeWorld({
       // Spawn a fixed fodder wave for an area (mobile counts are roughly halved).
       function osakaSpawnAreaZako(area: "dotonbori" | "tsutenkaku" | "castle") {
         const counts = isMobileDevice ? OSAKA_AREA_ZAKO_MOBILE : OSAKA_AREA_ZAKO
-        // 鬼モード (FINAL-H): 雑魚 1.3倍。Clamp AFTER the multiplier so the oni
-        // boost can never push the live population past OSAKA_ENEMY_CAP (perf).
-        const want = Math.ceil(counts[area] * (osakaOni() ? OSAKA_ONI_ZAKO_MULT : 1))
+        // 鬼/終焉: 雑魚倍率 (osakaZakoMult)。Clamp AFTER the multiplier so neither
+        // the oni 1.3× nor the cataclysm 1.2× boost can push the live population
+        // past OSAKA_ENEMY_CAP (perf — see fix/osaka-enemy-cap-and-bike).
+        const want = Math.ceil(counts[area] * osakaZakoMult())
         const n = Math.max(0, Math.min(want, OSAKA_ENEMY_CAP - osakaLiveEnemyCount()))
         if (n <= 0) return
         const c = osakaAreaCenter(area)
@@ -14712,8 +14751,8 @@ export default function ThreeWorld({
         osakaMidBossRef.current = {
           kind: "tengu",
           group: g,
-          hp: OSAKA_TENGU_HP * (osakaOni() ? OSAKA_ONI_MIDBOSS_HP_MULT : 1),
-          maxHp: OSAKA_TENGU_HP * (osakaOni() ? OSAKA_ONI_MIDBOSS_HP_MULT : 1),
+          hp: OSAKA_TENGU_HP * osakaMidbossHpMult(),
+          maxHp: OSAKA_TENGU_HP * osakaMidbossHpMult(),
           baseY: 5.5,
           hover: 0,
           diveCd: 5,
@@ -14806,8 +14845,8 @@ export default function ThreeWorld({
         osakaMidBossRef.current = {
           kind: "yamaya",
           group: g,
-          hp: OSAKA_YAMAYA_HP * (osakaOni() ? OSAKA_ONI_MIDBOSS_HP_MULT : 1),
-          maxHp: OSAKA_YAMAYA_HP * (osakaOni() ? OSAKA_ONI_MIDBOSS_HP_MULT : 1),
+          hp: OSAKA_YAMAYA_HP * osakaMidbossHpMult(),
+          maxHp: OSAKA_YAMAYA_HP * osakaMidbossHpMult(),
           baseY: 0,
           hover: 0,
           diveCd: 0,
@@ -14892,7 +14931,7 @@ export default function ThreeWorld({
         }
         const now = Date.now()
         const safeToHit = now > spawnInvulnUntilRef.current
-        const oniCd = osakaOni() ? OSAKA_ONI_MIDBOSS_CD_MULT : 1 // 鬼: 攻撃頻度1.5倍
+        const oniCd = osakaMidbossCdMult() // 鬼:1.5倍 / 終焉:さらに速い 攻撃頻度
         const px = focalPoint.x
         const pz = focalPoint.z
         const toX = px - mb.group.position.x
@@ -15162,10 +15201,11 @@ export default function ThreeWorld({
       let huntPanelClickAt = 0 // throttle held-fire so one tap = one selection
       // Clickable regions in normalised canvas space (top-left origin).
       type HuntPanelHit =
-        | { kind: "stage"; value: "outdoor" | "indoor" | "osaka" | "osaka_oni" }
+        | { kind: "stage"; value: "outdoor" | "indoor" | "osaka" | "osaka_oni" | "osaka_cataclysm" }
         | { kind: "difficulty"; value: 1 | 2 | 3 }
         | { kind: "deploy" }
-      // 4段目に「OSAKA 鬼」(FINAL-H) が入ったぶん、ステージ行は少し詰めてある。
+      // 5段目に「OSAKA 終焉」(Cataclysm) が入ったぶん、ステージ行はさらに詰めてある
+      // (0.21〜0.725 を5等分)。難度列は右側 (x≥0.54) なので干渉しない。
       const HUNT_PANEL_REGIONS: {
         x0: number
         y0: number
@@ -15173,10 +15213,17 @@ export default function ThreeWorld({
         y1: number
         hit: HuntPanelHit
       }[] = [
-        { x0: 0.05, y0: 0.22, x1: 0.46, y1: 0.33, hit: { kind: "stage", value: "outdoor" } },
-        { x0: 0.05, y0: 0.345, x1: 0.46, y1: 0.455, hit: { kind: "stage", value: "indoor" } },
-        { x0: 0.05, y0: 0.47, x1: 0.46, y1: 0.58, hit: { kind: "stage", value: "osaka" } },
-        { x0: 0.05, y0: 0.595, x1: 0.46, y1: 0.705, hit: { kind: "stage", value: "osaka_oni" } },
+        { x0: 0.05, y0: 0.21, x1: 0.46, y1: 0.305, hit: { kind: "stage", value: "outdoor" } },
+        { x0: 0.05, y0: 0.315, x1: 0.46, y1: 0.41, hit: { kind: "stage", value: "indoor" } },
+        { x0: 0.05, y0: 0.42, x1: 0.46, y1: 0.515, hit: { kind: "stage", value: "osaka" } },
+        { x0: 0.05, y0: 0.525, x1: 0.46, y1: 0.62, hit: { kind: "stage", value: "osaka_oni" } },
+        {
+          x0: 0.05,
+          y0: 0.63,
+          x1: 0.46,
+          y1: 0.725,
+          hit: { kind: "stage", value: "osaka_cataclysm" },
+        },
         { x0: 0.54, y0: 0.24, x1: 0.95, y1: 0.36, hit: { kind: "difficulty", value: 1 } },
         { x0: 0.54, y0: 0.38, x1: 0.95, y1: 0.5, hit: { kind: "difficulty", value: 2 } },
         { x0: 0.54, y0: 0.52, x1: 0.95, y1: 0.64, hit: { kind: "difficulty", value: 3 } },
@@ -15576,12 +15623,23 @@ export default function ThreeWorld({
         ctx.fillText("STAGE", W * 0.255, H * 0.18)
         // OSAKA is a fixed max-difficulty stage → the difficulty column is hidden.
         if (osaka) {
-          ctx.fillStyle = "#ff4444"
+          ctx.fillStyle = cfg.stage === "osaka_cataclysm" ? "#ff2255" : "#ff4444"
           ctx.fillText(
-            cfg.stage === "osaka_oni" ? "OSAKA 鬼 — 全てが上回る" : "OSAKA — 固定 / 最高難度",
+            cfg.stage === "osaka_cataclysm"
+              ? "OSAKA 終焉 — 世界災厄"
+              : cfg.stage === "osaka_oni"
+                ? "OSAKA 鬼 — 全てが上回る"
+                : "OSAKA — 固定 / 最高難度",
             W * 0.745,
             H * 0.42,
           )
+          if (cfg.stage === "osaka_cataclysm") {
+            ctx.fillStyle = "#ffaacc"
+            ctx.font = "bold 17px monospace"
+            ctx.fillText("大魔 — 都市を覆う最終災厄", W * 0.745, H * 0.5)
+            ctx.fillText("鉄輪で駆け、7つの核を撃て", W * 0.745, H * 0.56)
+            ctx.font = "bold 22px monospace"
+          }
         } else {
           ctx.fillText("DIFFICULTY", W * 0.745, H * 0.18)
         }
@@ -15597,7 +15655,18 @@ export default function ThreeWorld({
           // 鬼 (FINAL-H) はさらに毒々しい赤紫で「上がいる」ことを示す。
           const isOsakaRow = r.hit.kind === "stage" && isOsakaStage(r.hit.value)
           const isOniRow = r.hit.kind === "stage" && r.hit.value === "osaka_oni"
-          const accent = isOniRow ? "#ff2266" : isOsakaRow ? "#ff4444" : "#00ff88"
+          const isCataRow = r.hit.kind === "stage" && r.hit.value === "osaka_cataclysm"
+          // 終焉は鬼モードクリア前はロック表示 (灰色 + 鍵)。
+          const cataLocked = isCataRow && !osakaCataclysmUnlocked()
+          const accent = cataLocked
+            ? "#555555"
+            : isCataRow
+              ? "#ff0044"
+              : isOniRow
+                ? "#ff2266"
+                : isOsakaRow
+                  ? "#ff4444"
+                  : "#00ff88"
           const x = r.x0 * W
           const y = r.y0 * H
           const w = (r.x1 - r.x0) * W
@@ -15606,20 +15675,40 @@ export default function ThreeWorld({
             ? accent
             : deploy
               ? "#103a26"
-              : isOsakaRow
-                ? "#2a0e0e"
-                : "#181818"
+              : cataLocked
+                ? "#141414"
+                : isCataRow
+                  ? "#240016"
+                  : isOsakaRow
+                    ? "#2a0e0e"
+                    : "#181818"
           ctx.fillRect(x, y, w, h)
           ctx.strokeStyle = accent
           ctx.lineWidth = deploy ? 3 : 2
           ctx.strokeRect(x, y, w, h)
-          ctx.fillStyle = selected ? "#0a0a0a" : isOsakaRow ? "#ff4444" : "#e6e6e6"
-          ctx.font = deploy ? "bold 30px monospace" : "bold 26px monospace"
+          ctx.fillStyle = cataLocked
+            ? "#777777"
+            : selected
+              ? "#0a0a0a"
+              : isCataRow
+                ? "#ff5588"
+                : isOsakaRow
+                  ? "#ff4444"
+                  : "#e6e6e6"
+          ctx.font = deploy
+            ? "bold 30px monospace"
+            : isCataRow
+              ? "bold 23px monospace"
+              : "bold 26px monospace"
           const label =
             r.hit.kind === "stage"
-              ? r.hit.value === "osaka_oni"
-                ? "OSAKA 鬼"
-                : r.hit.value.toUpperCase()
+              ? r.hit.value === "osaka_cataclysm"
+                ? cataLocked
+                  ? "🔒 OSAKA 終焉"
+                  : "OSAKA 終焉"
+                : r.hit.value === "osaka_oni"
+                  ? "OSAKA 鬼"
+                  : r.hit.value.toUpperCase()
               : r.hit.kind === "difficulty"
                 ? `LV${r.hit.value}`
                 : "[ DEPLOY ]"
@@ -15655,6 +15744,12 @@ export default function ThreeWorld({
         const action = huntPanelHitAt(hit.uv.x, hit.uv.y)
         if (!action) return true // looking at the panel but a dead zone — still consume
         if (action.kind === "stage") {
+          // 終焉モードは鬼モードをクリアするまでロック。
+          if (action.value === "osaka_cataclysm" && !osakaCataclysmUnlocked()) {
+            SOUNDS.huntWarn()
+            showNotification("終焉モードは封印されている — まず鬼モードを制覇せよ")
+            return true
+          }
           huntMissionConfigRef.current.stage = action.value
           SOUNDS.huntTally()
           huntDrawPanel()
@@ -17213,6 +17308,17 @@ export default function ThreeWorld({
         huntStageFogSaved = scene.fog
         huntStageFogWasSaved = true
         scene.fog = new THREE.Fog(0x333355, 150, 400) // thinner haze → see further
+        // 終焉モード (Block A): 開始時から空が赤黒い。OSAKA の青夜照明と靄だけを
+        // 災厄カラーへ上書きする — fog は huntStageFogSaved 経由で、各ライトは group
+        // 同梱で破棄/復元されるので追加の後始末や新規ライトは不要 (perf)。
+        if (osakaCataclysm()) {
+          scene.fog = new THREE.Fog(0x1a0305, 90, 340) // 赤黒い終末の靄
+          osakaAmbient.color.setHex(0x3a1414)
+          osakaHemi.color.setHex(0x4a1a1a)
+          osakaHemi.groundColor.setHex(0x180808)
+          moonlight.color.setHex(0xff5a44)
+          osakaFill.color.setHex(0xff7766)
+        }
         scene.add(group)
         osakaMapMeshesRef.current.push(group)
         buildOsakaRain() // OSAKA-only rain field (disposed with the map)
@@ -17757,7 +17863,7 @@ export default function ThreeWorld({
           // instead of the generic minion ring + single HUNT boss.
           osakaRunReset() // リザルト用のラン戦績 (タイム/キル/命中率/被ダメ) を起動
           osakaInitProgression()
-          if (osakaOni()) osakaSpawnOniGuards() // 鬼: 隠し武器への道に守衛 (FINAL-H)
+          if (osakaHardMode()) osakaSpawnOniGuards() // 鬼/終焉: 隠し武器への道に守衛
         } else {
           // Minions ring the arena centre.
           for (let i = 0; i < lv.zakoCount; i++) {
