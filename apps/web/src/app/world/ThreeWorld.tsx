@@ -13064,6 +13064,12 @@ export default function ThreeWorld({
       let osakaCollapseStart = 0 // ms: 終焉マップ生成時にセット (0 = 非稼働)
       let osakaCollapseStage = 0 // 既に発火した段階数
       let osakaNextQuakeAt = 0 // 次の余震 (アフターショック) 時刻
+      // 災害環境ギミック (Block D): 火災 (既存の樽パーティクル流用) / 落雷 (PointLight
+      // フラッシュ1基)。黒い雨は buildOsakaRain で色替え、地震は崩壊の余震で流用。
+      const osakaFirePts: { x: number; z: number }[] = []
+      let osakaFireFrame = 0
+      let osakaLightning: THREE.PointLight | null = null
+      let osakaNextBoltAt = 0
       const osakaRainDummy = new THREE.Object3D()
       const osakaSwayDummy = new THREE.Object3D()
       // Block O perf: reusable scratch vectors for updateOsakaBoss's per-frame
@@ -13078,10 +13084,12 @@ export default function ThreeWorld({
       function buildOsakaRain() {
         const count = isMobileDevice ? 80 : 400
         const geo = new THREE.BoxGeometry(0.025, 1.3, 0.025)
+        // 終焉モード (Block D): 黒い雨 — 既存の雨をそのまま流用し、色だけ漆黒に染める。
+        const cata = osakaCataclysm()
         const mat = new THREE.MeshBasicMaterial({
-          color: 0x9fc4ff,
+          color: cata ? 0x1a1a22 : 0x9fc4ff,
           transparent: true,
-          opacity: 0.5,
+          opacity: cata ? 0.62 : 0.5,
           depthWrite: false,
         })
         const mesh = new THREE.InstancedMesh(geo, mat, count)
@@ -13248,6 +13256,31 @@ export default function ThreeWorld({
               false,
               false,
             )
+          }
+          // 火災 (Block D): re-emit reused barrel-fire particles at each fire site
+          // every ~6th frame (1 fire + an occasional smoke) — keeps them burning
+          // without a new particle system or per-frame flood.
+          osakaFireFrame++
+          if ((osakaFireFrame & 7) === 0) {
+            for (const fp of osakaFirePts) {
+              spawnBarrelParticle(new THREE.Vector3(fp.x, 0.4, fp.z), "fire")
+              if ((osakaFireFrame & 15) === 0) {
+                spawnBarrelParticle(new THREE.Vector3(fp.x, 0.9, fp.z), "smoke")
+              }
+            }
+          }
+          // 落雷 (Block D): periodic lightning — flash the single bolt light + a
+          // brief sky-white tint, then decay. No mesh added.
+          if (osakaLightning) {
+            if (now >= osakaNextBoltAt) {
+              osakaNextBoltAt = now + 4000 + Math.random() * 6000
+              osakaLightning.intensity = 7 + Math.random() * 3
+              SOUNDS.collapse()
+            } else if (osakaLightning.intensity > 0.02) {
+              osakaLightning.intensity *= 0.82
+            } else {
+              osakaLightning.intensity = 0
+            }
           }
         }
       }
@@ -17792,8 +17825,30 @@ export default function ThreeWorld({
           osakaCollapseStart = Date.now()
           osakaCollapseStage = 0
           osakaNextQuakeAt = Date.now() + 8000
+          // 火災 (Block D): a few fixed fire sites that re-emit reused barrel-fire
+          // particles each frame in updateOsakaEnv (counts deliberately small).
+          osakaFirePts.length = 0
+          const fireN = isMobileDevice ? 3 : 6
+          for (let i = 0; i < fireN; i++) {
+            const a = (i / fireN) * Math.PI * 2 + 0.5
+            const r = 26 + (i % 3) * 18
+            osakaFirePts.push({
+              x: HUNT_ARENA.x + Math.cos(a) * r,
+              z: HUNT_ARENA.z + Math.sin(a) * r,
+            })
+          }
+          osakaFireFrame = 0
+          // 落雷 (Block D): ONE point light (no mesh), flashed periodically in
+          // updateOsakaEnv. Lives under group → removed with the map.
+          const bolt = new THREE.PointLight(0xbfcfff, 0, 240)
+          bolt.position.set(0, 70, 0)
+          add(bolt)
+          osakaLightning = bolt
+          osakaNextBoltAt = Date.now() + 4000
         } else {
           osakaCollapseStart = 0
+          osakaFirePts.length = 0
+          osakaLightning = null
         }
         scene.add(group)
         osakaMapMeshesRef.current.push(group)
@@ -17838,6 +17893,11 @@ export default function ThreeWorld({
           disposeDaima()
           osakaClearTrueLighting()
         }
+        // 災害環境 teardown (Block D): drop handles (the bolt light + crack decal are
+        // children of the disposed map group; just release references + timers).
+        osakaLightning = null
+        osakaFirePts.length = 0
+        osakaCollapseStart = 0
         // 鉄輪 teardown (Block A): dismount if the player is riding it, drop it
         // from the vehicle list, dispose its merged geometries + materials.
         if (osakaTetsurin) {
