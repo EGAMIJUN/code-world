@@ -14553,7 +14553,8 @@ export default function ThreeWorld({
           core.scale.setScalar(3)
           core.position.set(lx, 7, lz)
           core.userData.daimaCore = i
-          if (!isMobileDevice) core.add(new THREE.PointLight(0xffcc22, 2.0, 18))
+          // No per-core point light (Block H perf): the osakaCore() mesh is already
+          // emissive, so it glows without adding 7 lights to the scene.
           group.add(core)
           const beaconGeo = new THREE.CylinderGeometry(0.3, 0.3, 60, 5)
           beaconGeo.translate(0, 30, 0)
@@ -23404,6 +23405,9 @@ export default function ThreeWorld({
             }
             const bossDC = countRenderables(osakaBossRef.current?.group)
             const mapDC = countRenderables(osakaMapMeshesRef.current[0])
+            // 大魔 draw-call contribution (Block H): body + tentacle/eye InstancedMesh
+            // (1 each) + live cores + beacons. Verify ≤40 added vs the budget.
+            const daimaDC = countRenderables(osakaDaima?.group)
             let enemyDC = 0
             for (const e of enemies) if (e.hp > 0) enemyDC += countRenderables(e.mesh)
             // 鉄輪 + 敵バイク draw-call contribution (Block G): verify ≤5 per bike.
@@ -23413,6 +23417,7 @@ export default function ThreeWorld({
               `FPS        ${perfFps}\n` +
               `draw calls ${info.render.calls}\n` +
               `  boss     ${bossDC}\n` +
+              `  daima    ${daimaDC}\n` +
               `  osakaMap ${mapDC}\n` +
               `  enemies  ${enemyDC}\n` +
               `  bikes    ${bikeDC}\n` +
