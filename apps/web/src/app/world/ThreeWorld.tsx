@@ -818,6 +818,25 @@ const KISHIN_DMG_CUT = 0.8 // 被ダメ 20% 減 (HUNT_SUIT_CUT と違い耐久�
 const KISHIN_MELEE_MULT = 1.5
 const OSAKA_CORE_MULT = 3.0 // core hits hurt triple
 const OSAKA_BODY_MULT = 0.2 // body hits are 80% reduced
+// ── 大魔 (Daima) — 終焉モードの超巨大最終ボス (Block B, 全て創作オリジナル) ─────
+// 真・五変化撃破後、終焉モードでのみ顕現する高さ約60mの肉塊。弱点コア7基がマップ
+// 各所に展開し、プレイヤーは鉄輪で駆けて各コアを破壊する。本体は装飾 (触手/目は
+// InstancedMesh 各1ドローコール)。追加ドローコールは最大40に収める設計。
+const DAIMA_HP = 25000 // 過去最大の総HP (7コアに等分)
+const DAIMA_CORES = 7
+const OSAKA_CATACLYSM_CLEAR_KEY = "osaka_cataclysm_clear" // 称号「終焉を超えし者」解放フラグ
+// (最終災厄しきい値 DAIMA_FINAL_FRAC は Block B-2 の更新ループで導入)
+// 7基のコアのマップ展開位置 (HUNT_ARENA からの local オフセット)。中央 + 外周6基で
+// 180m級フィールド全体に散らす → 広範囲移動 (鉄輪) が必須になる。
+const DAIMA_CORE_OFFSETS: readonly (readonly [number, number])[] = [
+  [0, 0],
+  [0, 60],
+  [52, 30],
+  [52, -30],
+  [0, -60],
+  [-52, -30],
+  [-52, 30],
+] as const
 const OSAKA_ZAKO_NAME = "下級妖怪" // tag distinguishing infinite-spawn fodder
 const OSAKA_ESCORT_NAME = "鬼火衆" // the two flanking escorts
 const OSAKA_ZAKO_CAP = 12 // hard cap on simultaneous fodder
@@ -13857,7 +13876,13 @@ export default function ThreeWorld({
         if (obPos6) osakaDefeatBlast(obPos6) // 撃破大爆発 (FINAL-F)
         disposeOsakaBoss()
         SOUNDS.clear()
-        if (isOsakaStage(huntMissionConfigRef.current.stage)) {
+        if (osakaCataclysm()) {
+          // 終焉モード: 真・五変化撃破では終わらない。間を置いて大魔が顕現する
+          // (爆発と称号解放の演出を見せてから降臨させる)。
+          window.setTimeout(() => {
+            if (osakaCataclysm() && osakaRunIsLive() && !osakaDaima) spawnDaima()
+          }, 2600)
+        } else if (isOsakaStage(huntMissionConfigRef.current.stage)) {
           osakaProgressRef.current.area = "clear"
           osakaBeginEndingSoon("true")
         } else {
@@ -14249,6 +14274,243 @@ export default function ThreeWorld({
         cameraShakeRef.current.intensity = 10
         SOUNDS.rpg()
         SOUNDS.collapse()
+      }
+      // ══ 大魔 (Daima) — 終焉モードの超巨大最終ボス (Block B) ══════════════════════
+      type DaimaCore = {
+        mesh: THREE.Mesh
+        beacon: THREE.Mesh
+        hp: number
+        maxHp: number
+        wx: number
+        wz: number
+        dead: boolean
+        beamAt: number
+      }
+      type Daima = {
+        group: THREE.Group
+        cores: DaimaCore[]
+        hp: number
+        maxHp: number
+        armInst: THREE.InstancedMesh | null
+        armData: { ang: number; y: number; r: number; tilt: number; phase: number }[]
+        eyeMat: THREE.MeshLambertMaterial | null
+        head: THREE.Mesh | null
+        attackTimer: number
+        meteorTimer: number
+        beamTimer: number
+        slamTimer: number
+        frame: number
+        finalPhase: boolean
+        defeated: boolean
+        born: number
+      }
+      let osakaDaima: Daima | null = null
+      const osakaDaimaArmDummy = new THREE.Object3D()
+      // Build the towering 大魔 body (decorative) + 7 weak-point cores spread across
+      // the map. Tentacles + eyes are each ONE InstancedMesh; the 7 cores are 7
+      // small meshes (+ beacons). All geometry is original.
+      function buildDaima(): Daima {
+        const arena = new THREE.Vector3(HUNT_ARENA.x, 0, HUNT_ARENA.z)
+        const armN = isMobileDevice ? 50 : 100
+        const eyeN = isMobileDevice ? 40 : 80
+        const group = new THREE.Group()
+        group.position.copy(arena)
+        // ── Central flesh mass (≈60m tall): tapering trunk + bulbous head, merged
+        // to one mesh. Tagged daimaBody — decorative, not a weak point.
+        const bodyMat = new THREE.MeshLambertMaterial({
+          color: 0x3a0a12,
+          emissive: 0x2a0408,
+          emissiveIntensity: 0.6,
+        })
+        const trunkGeo = new THREE.CylinderGeometry(5.5, 9, 38, 10)
+        trunkGeo.translate(0, 25, 0)
+        const headGeo = new THREE.SphereGeometry(9, 14, 12)
+        headGeo.translate(0, 46, 0)
+        const bodyMerged = mergeGeometries([trunkGeo, headGeo], false) ?? trunkGeo
+        trunkGeo.dispose()
+        headGeo.dispose()
+        const head = new THREE.Mesh(bodyMerged, bodyMat)
+        head.userData.daimaBody = true
+        head.frustumCulled = false
+        group.add(head)
+        // ── Tentacles → ONE InstancedMesh. Big radial cylinders updateDaima sways.
+        const armGeo = new THREE.CylinderGeometry(0.4, 0.9, 14, 5)
+        armGeo.translate(0, 7, 0)
+        const armMat = new THREE.MeshLambertMaterial({
+          color: 0x1a0610,
+          emissive: 0x12030a,
+          emissiveIntensity: 0.4,
+        })
+        const armInst = new THREE.InstancedMesh(armGeo, armMat, armN)
+        armInst.userData.daimaBody = true
+        armInst.frustumCulled = false
+        const armData: { ang: number; y: number; r: number; tilt: number; phase: number }[] = []
+        for (let i = 0; i < armN; i++) {
+          const a = (i / armN) * Math.PI * 2 + Math.random() * 0.4
+          const y = 6 + Math.random() * 34
+          const r = 6 + Math.random() * 4
+          const ad = {
+            ang: a,
+            y,
+            r,
+            tilt: 0.8 + Math.random() * 0.7,
+            phase: Math.random() * Math.PI * 2,
+          }
+          armData.push(ad)
+          osakaDaimaArmDummy.position.set(Math.cos(a) * r, y, Math.sin(a) * r)
+          osakaDaimaArmDummy.rotation.set(-Math.sin(a) * ad.tilt, 0, Math.cos(a) * ad.tilt)
+          osakaDaimaArmDummy.updateMatrix()
+          armInst.setMatrixAt(i, osakaDaimaArmDummy.matrix)
+        }
+        armInst.instanceMatrix.needsUpdate = true
+        group.add(armInst)
+        // ── Eyes → ONE InstancedMesh of emissive spheres (shared material pulse).
+        const eyeGeo = new THREE.SphereGeometry(0.5, 6, 6)
+        const eyeMat = new THREE.MeshLambertMaterial({
+          color: 0xff2a00,
+          emissive: 0xff1400,
+          emissiveIntensity: 1.8,
+        })
+        const eyeInst = new THREE.InstancedMesh(eyeGeo, eyeMat, eyeN)
+        eyeInst.frustumCulled = false
+        for (let i = 0; i < eyeN; i++) {
+          const a = Math.random() * Math.PI * 2
+          const y = 10 + Math.random() * 38
+          const r = 5.5 + Math.random() * 4.5
+          osakaDaimaArmDummy.position.set(Math.cos(a) * r, y, Math.sin(a) * r)
+          osakaDaimaArmDummy.rotation.set(0, 0, 0)
+          osakaDaimaArmDummy.scale.setScalar(0.7 + Math.random() * 1.3)
+          osakaDaimaArmDummy.updateMatrix()
+          eyeInst.setMatrixAt(i, osakaDaimaArmDummy.matrix)
+        }
+        osakaDaimaArmDummy.scale.setScalar(1)
+        eyeInst.instanceMatrix.needsUpdate = true
+        group.add(eyeInst)
+        // ── 7 weak-point cores spread across the field. Each: a glowing orb (×3
+        // damage, daimaCore tag = its index) + a tall thin beacon spotted from afar
+        // + (PC only) a point light. The player drives the 鉄輪 between them.
+        const perCore = Math.round(DAIMA_HP / DAIMA_CORES)
+        const cores: DaimaCore[] = []
+        for (let i = 0; i < DAIMA_CORES; i++) {
+          const off = DAIMA_CORE_OFFSETS[i] ?? [0, 0]
+          const lx = off[0]
+          const lz = off[1]
+          const core = osakaCore()
+          core.scale.setScalar(3)
+          core.position.set(lx, 7, lz)
+          core.userData.daimaCore = i
+          if (!isMobileDevice) core.add(new THREE.PointLight(0xffcc22, 2.0, 18))
+          group.add(core)
+          const beaconGeo = new THREE.CylinderGeometry(0.3, 0.3, 60, 5)
+          beaconGeo.translate(0, 30, 0)
+          const beacon = new THREE.Mesh(
+            beaconGeo,
+            new THREE.MeshBasicMaterial({ color: 0xffbb22, transparent: true, opacity: 0.35 }),
+          )
+          beacon.position.set(lx, 0, lz)
+          beacon.frustumCulled = false
+          group.add(beacon)
+          cores.push({
+            mesh: core,
+            beacon,
+            hp: perCore,
+            maxHp: perCore,
+            wx: arena.x + lx,
+            wz: arena.z + lz,
+            dead: false,
+            beamAt: 0,
+          })
+        }
+        return {
+          group,
+          cores,
+          hp: DAIMA_HP,
+          maxHp: DAIMA_HP,
+          armInst,
+          armData,
+          eyeMat,
+          head,
+          attackTimer: 4,
+          meteorTimer: 6,
+          beamTimer: 9,
+          slamTimer: 5,
+          frame: 0,
+          finalPhase: false,
+          defeated: false,
+          born: Date.now(),
+        }
+      }
+      // Spawn the 大魔 (from osakaTrueDefeat in 終焉 mode). Re-applies the red-black
+      // decisive lighting and shows the 「大魔 降臨」 cut-in.
+      function spawnDaima() {
+        if (osakaDaima) return
+        const d = buildDaima()
+        scene.add(d.group)
+        osakaDaima = d
+        osakaApplyTrueLighting()
+        osakaShowCutin("大魔 降臨", "終焉の大阪 — 世界を喰らう肉塊", "true")
+        SOUNDS.collapse()
+        setBossHpPct(100)
+        cameraShakeRef.current.intensity = 12
+      }
+      // Tear the 大魔 down (defeat or map exit). Disposes geometry + materials.
+      function disposeDaima() {
+        const d = osakaDaima
+        if (!d) return
+        scene.remove(d.group)
+        d.group.traverse((o) => {
+          if (o instanceof THREE.Mesh || o instanceof THREE.InstancedMesh) {
+            o.geometry.dispose()
+            const m = o.material
+            if (Array.isArray(m)) for (const mm of m) mm.dispose()
+            else m.dispose()
+          }
+        })
+        osakaDaima = null
+      }
+      // Route a weapon hit onto core #idx (×3 like the 五変化 weak point). A dead
+      // core hides its orb + beacon; clearing all 7 wins the fight.
+      function daimaHitCore(idx: number, dmg: number) {
+        const d = osakaDaima
+        if (!d || d.defeated) return
+        const co = d.cores[idx]
+        if (!co || co.dead) return
+        co.hp -= dmg
+        d.hp = d.cores.reduce((s, c) => s + Math.max(0, c.hp), 0)
+        if (co.hp <= 0) {
+          co.dead = true
+          co.mesh.visible = false
+          co.beacon.visible = false
+          spawnExplosion(new THREE.Vector3(co.wx, 7, co.wz))
+          osakaShowCutin("コア破壊", `残り ${d.cores.filter((c) => !c.dead).length} 基`, "form")
+          SOUNDS.rpg()
+          cameraShakeRef.current.intensity = 8
+        }
+        setBossHpPct(Math.round((d.hp / d.maxHp) * 100))
+        if (d.cores.every((c) => c.dead)) daimaDefeat()
+      }
+      // 大魔 撃破 → 終焉専用クリアへ (エンディング演出は Block F で本実装)。
+      function daimaDefeat() {
+        const d = osakaDaima
+        if (!d || d.defeated) return
+        d.defeated = true
+        const c = d.group.position.clone()
+        c.y = 20
+        osakaDefeatBlast(c)
+        osakaShowCutin("大魔 撃破", "終焉を超えて", "true")
+        disposeDaima()
+        osakaClearTrueLighting()
+        try {
+          localStorage.setItem(OSAKA_CATACLYSM_CLEAR_KEY, "1")
+        } catch {
+          /* ignore */
+        }
+        if (isOsakaStage(huntMissionConfigRef.current.stage)) {
+          osakaProgressRef.current.area = "clear"
+          osakaBeginEndingSoon("true")
+        } else {
+          huntReturnToRoom("clear")
+        }
       }
       // Per-frame boss driver: core pulse/reveal, limb sway, stalk, fodder top-up
       // and the form-specific attack on the attackTimer (1.5× cadence while raging).
@@ -17356,6 +17618,12 @@ export default function ThreeWorld({
         // Environment teardown: rain handle (mesh disposed above via the ref),
         // any live ripples, and the bridge-collapse list.
         osakaRain = null
+        // 大魔 teardown (Block B): dispose the boss + clear its decisive lighting on
+        // any map exit mid-fight (disposeDaima is null-safe).
+        if (osakaDaima) {
+          disposeDaima()
+          osakaClearTrueLighting()
+        }
         // 鉄輪 teardown (Block A): dismount if the player is riding it, drop it
         // from the vehicle list, dispose its merged geometries + materials.
         if (osakaTetsurin) {
@@ -20061,6 +20329,41 @@ export default function ThreeWorld({
               spawnBlood(obHit.point)
               osakaRunHit()
               osakaDamage(weapon.hitDamage * (isCore ? OSAKA_CORE_MULT : OSAKA_BODY_MULT))
+              enemyHits = []
+              shotConsumed = true
+            }
+          }
+        }
+
+        // 大魔 (Block B): 7 weak-point cores spread across the map. A core hit deals
+        // ×3 to that core; body (trunk/tentacles) hits only splash blood. Cores win
+        // over body when colinear, same as the 五変化 weak-point rule.
+        const daimaT = osakaDaima
+        if (!shotConsumed && daimaT && !daimaT.defeated) {
+          const dCores: THREE.Object3D[] = []
+          const dBody: THREE.Object3D[] = []
+          daimaT.group.traverse((c) => {
+            if ((c instanceof THREE.Mesh || c instanceof THREE.InstancedMesh) && c.visible) {
+              if (typeof c.userData.daimaCore === "number") dCores.push(c)
+              else if (c.userData.daimaBody) dBody.push(c)
+            }
+          })
+          const cHit = raycaster.intersectObjects(dCores, false)[0]
+          const bHit = raycaster.intersectObjects(dBody, false)[0]
+          const dHit = cHit ?? bHit
+          if (dHit) {
+            const blockedByWall = !!(nearestWall && nearestWall.distance < dHit.distance)
+            const blockedByEnemy = !!(enemyHits[0] && enemyHits[0].distance < dHit.distance)
+            if (!blockedByWall && !blockedByEnemy) {
+              SOUNDS.hit()
+              spawnBlood(dHit.point)
+              osakaRunHit()
+              if (dHit === cHit) {
+                daimaHitCore(
+                  cHit.object.userData.daimaCore as number,
+                  weapon.hitDamage * OSAKA_CORE_MULT,
+                )
+              }
               enemyHits = []
               shotConsumed = true
             }
