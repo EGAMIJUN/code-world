@@ -825,6 +825,8 @@ const OSAKA_BODY_MULT = 0.2 // body hits are 80% reduced
 const DAIMA_HP = 25000 // 過去最大の総HP (7コアに等分)
 const DAIMA_CORES = 7
 const OSAKA_CATACLYSM_CLEAR_KEY = "osaka_cataclysm_clear" // 称号「終焉を超えし者」解放フラグ
+const OSAKA_CATACLYSM_SUIT_KEY = "osaka_shuen_suit" // 専用スーツ「終焉」解放フラグ
+const OSAKA_CATACLYSM_CLEAR_BONUS = 30000 // 終焉クリアの最高スコアボーナス
 const DAIMA_FINAL_FRAC = 0.1 // 総HP10%以下で「最終災厄」(全攻撃が高速化)
 // 7基のコアのマップ展開位置 (HUNT_ARENA からの local オフセット)。中央 + 外周6基で
 // 180m級フィールド全体に散らす → 広範囲移動 (鉄輪) が必須になる。
@@ -2594,6 +2596,8 @@ export default function ThreeWorld({
     oni: boolean // 鬼モードでのクリアか (FINAL-H)
     titleNew: boolean // 今回のクリアで称号「大阪の鬼」を新規獲得したか
     tetsurinChampion: boolean // 鉄輪に乗ったまま真ボスを討った → 称号「鉄輪の覇者」(Block E)
+    cataclysm: boolean // 終焉モード (大魔撃破) でのクリアか (Block F)
+    cataTitleNew: boolean // 今回のクリアで称号「終焉を超えし者」を新規獲得したか (Block F)
   }
   const [osakaEnding, setOsakaEnding] = useState<OsakaEndingState | null>(null)
   const osakaEndingRef = useRef<OsakaEndingState | null>(null)
@@ -14252,11 +14256,25 @@ export default function ThreeWorld({
         // ── スコアボーナス (FINAL-E): クリア + 隠し武器発見 + ノーダメ ──
         const sst = osakaSecretRef.current
         const oni = osakaOni()
+        const cata = osakaCataclysm()
         let bonus = kind === "true" ? 15000 : 5000
         if (sst.bladeTaken) bonus += 2000
         if (sst.spearTaken) bonus += 2000
         if (run.dmg === 0) bonus += 10000 // ノーダメクリア
         if (oni) bonus += OSAKA_ONI_CLEAR_BONUS // 鬼モード (FINAL-H)
+        if (cata) bonus += OSAKA_CATACLYSM_CLEAR_BONUS // 終焉モード — 最高ボーナス (Block F)
+        // 称号「終焉を超えし者」+ 専用スーツ「終焉」: 大魔撃破 (終焉クリア) で解放 + 永続化。
+        let cataTitleNew = false
+        if (cata) {
+          try {
+            cataTitleNew = localStorage.getItem(OSAKA_CATACLYSM_CLEAR_KEY) !== "1"
+            localStorage.setItem(OSAKA_CATACLYSM_CLEAR_KEY, "1")
+            localStorage.setItem(OSAKA_CATACLYSM_SUIT_KEY, "1")
+          } catch {
+            /* ignore */
+          }
+          if (cataTitleNew) showNotification("称号『終焉を超えし者』+ 専用スーツ『終焉』解放！")
+        }
         // 称号「大阪の鬼」: 鬼モードクリアで解放 + 永続化。
         let titleNew = false
         if (oni) {
@@ -14333,6 +14351,8 @@ export default function ThreeWorld({
           oni,
           titleNew,
           tetsurinChampion,
+          cataclysm: cata,
+          cataTitleNew,
         }
         huntClearEnemies() // 静かな暗転のために残存雑魚を掃く
         huntInputLockRef.current = true
@@ -14631,12 +14651,9 @@ export default function ThreeWorld({
         osakaDefeatBlast(c)
         osakaShowCutin("大魔 撃破", "終焉を超えて", "true")
         disposeDaima()
+        // 赤黒い災厄ライティングを剥がす → OSAKA の夜景照明が戻り「光が差す/再生」を表現。
         osakaClearTrueLighting()
-        try {
-          localStorage.setItem(OSAKA_CATACLYSM_CLEAR_KEY, "1")
-        } catch {
-          /* ignore */
-        }
+        // (称号「終焉を超えし者」+ スーツ解放はエンディング集計 osakaStartEnding が担う。)
         if (isOsakaStage(huntMissionConfigRef.current.stage)) {
           osakaProgressRef.current.area = "clear"
           osakaBeginEndingSoon("true")
@@ -24647,7 +24664,11 @@ export default function ThreeWorld({
                             : "0 0 26px rgba(255,210,74,0.5)",
                       }}
                     >
-                      {osakaEnding.kind === "true" ? "真・大阪編 制覇" : "大阪編 クリア"}
+                      {osakaEnding.cataclysm
+                        ? "終焉を超えて"
+                        : osakaEnding.kind === "true"
+                          ? "真・大阪編 制覇"
+                          : "大阪編 クリア"}
                     </div>
                     {osakaEnding.kind === "true" && (
                       <div
@@ -24658,7 +24679,9 @@ export default function ThreeWorld({
                           letterSpacing: "0.45em",
                         }}
                       >
-                        六つ目の貌は、もう何処にも居ない
+                        {osakaEnding.cataclysm
+                          ? "大魔は崩れ、赤黒い空に光が差す"
+                          : "六つ目の貌は、もう何処にも居ない"}
                       </div>
                     )}
                   </div>
@@ -24687,8 +24710,12 @@ export default function ThreeWorld({
                         color: osakaEnding.kind === "true" ? "#ff5566" : "#ffd24a",
                       }}
                     >
-                      {osakaEnding.kind === "true" ? "真・大阪編 制覇" : "大阪編 クリア"}
-                      {osakaEnding.oni ? " 👹鬼" : ""}
+                      {osakaEnding.cataclysm
+                        ? "終焉 制覇"
+                        : osakaEnding.kind === "true"
+                          ? "真・大阪編 制覇"
+                          : "大阪編 クリア"}
+                      {osakaEnding.cataclysm ? " 🔥終焉" : osakaEnding.oni ? " 👹鬼" : ""}
                     </div>
                     <div
                       style={{
@@ -24770,6 +24797,34 @@ export default function ThreeWorld({
                         }}
                       >
                         👹 称号『大阪の鬼』獲得！
+                      </div>
+                    )}
+                    {osakaEnding.cataclysm && (
+                      <div
+                        style={{
+                          marginTop: "0.6rem",
+                          padding: "0.5rem",
+                          border: "1px solid #ff5a2a",
+                          color: "#ffb070",
+                          fontSize: "0.8rem",
+                          letterSpacing: "0.15em",
+                        }}
+                      >
+                        🔥 専用スーツ『終焉』解放！
+                      </div>
+                    )}
+                    {osakaEnding.cataTitleNew && (
+                      <div
+                        style={{
+                          marginTop: "0.6rem",
+                          padding: "0.5rem",
+                          border: "1px solid #ff3322",
+                          color: "#ff9966",
+                          fontSize: "0.8rem",
+                          letterSpacing: "0.15em",
+                        }}
+                      >
+                        🔥 称号『終焉を超えし者』獲得！
                       </div>
                     )}
                     {osakaEnding.tetsurinChampion && (
