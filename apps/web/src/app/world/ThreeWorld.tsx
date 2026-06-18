@@ -2468,6 +2468,8 @@ export default function ThreeWorld({
   const bossDoneRef = useRef(false) // boss defeated → no respawn
   const [bossActive, setBossActive] = useState(false) // drives the HUD HP bar
   const [bossHpPct, setBossHpPct] = useState(100)
+  // 大魔 終末HUD (Block G): 7基のコア個別HP割合 (0..1)。null = 大魔 非出現。
+  const [daimaCoreHud, setDaimaCoreHud] = useState<number[] | null>(null)
   const [bossRageUi, setBossRageUi] = useState(false)
   const [bossDefeated, setBossDefeated] = useState(false) // victory overlay
   const [bossPoison, setBossPoison] = useState(false) // green poison vignette
@@ -14603,6 +14605,7 @@ export default function ThreeWorld({
         osakaShowCutin("大魔 降臨", "終焉の大阪 — 世界を喰らう肉塊", "true")
         SOUNDS.collapse()
         setBossHpPct(100)
+        setDaimaCoreHud(d.cores.map(() => 1)) // 終末HUD: 7コア満タンで点灯 (Block G)
         cameraShakeRef.current.intensity = 12
       }
       // Tear the 大魔 down (defeat or map exit). Disposes geometry + materials.
@@ -14619,6 +14622,7 @@ export default function ThreeWorld({
           }
         })
         osakaDaima = null
+        setDaimaCoreHud(null) // 終末HUD を畳む (Block G)
       }
       // Route a weapon hit onto core #idx (×3 like the 五変化 weak point). A dead
       // core hides its orb + beacon; clearing all 7 wins the fight.
@@ -14763,7 +14767,10 @@ export default function ThreeWorld({
             osakaTelegraph(px, pz, 4, 900, 26, 0xffaa00)
           }
         }
-        if ((d.frame & 7) === 0) setBossHpPct(Math.round((d.hp / d.maxHp) * 100))
+        if ((d.frame & 7) === 0) {
+          setBossHpPct(Math.round((d.hp / d.maxHp) * 100))
+          setDaimaCoreHud(d.cores.map((c) => (c.dead ? 0 : Math.max(0, c.hp / c.maxHp))))
+        }
       }
       // Per-frame boss driver: core pulse/reveal, limb sway, stalk, fodder top-up
       // and the form-specific attack on the attackTimer (1.5× cadence while raging).
@@ -24306,6 +24313,67 @@ export default function ThreeWorld({
             <style>
               {"@keyframes osakaFrenzyPulse { 0%,100% { opacity: 0.35; } 50% { opacity: 0.9; } }"}
             </style>
+          </div>
+        )}
+
+        {/* 大魔 終末HPバー (Block G): 7基のコアを個別表示。CSS オーバーレイのみ。 */}
+        {daimaCoreHud && (
+          <div
+            style={{
+              position: "absolute",
+              top: "10px",
+              left: "50%",
+              transform: "translateX(-50%)",
+              zIndex: 6,
+              pointerEvents: "none",
+              textAlign: "center",
+              fontFamily: "'Hiragino Mincho ProN','Yu Mincho',serif",
+            }}
+          >
+            <div
+              style={{
+                color: "#ff4466",
+                fontSize: "1.1rem",
+                fontWeight: "bold",
+                letterSpacing: "0.4em",
+                textShadow: "0 0 14px rgba(255,30,60,0.8)",
+                marginBottom: "4px",
+              }}
+            >
+              大魔 — 終末核 {daimaCoreHud.filter((f) => f > 0).length}/{daimaCoreHud.length}
+            </div>
+            <div style={{ display: "flex", gap: "6px", justifyContent: "center" }}>
+              {DAIMA_CORE_OFFSETS.map((off, i) => {
+                const f = daimaCoreHud[i] ?? 0
+                return (
+                  <div
+                    key={`${off[0]}_${off[1]}`}
+                    style={{
+                      width: "44px",
+                      height: "12px",
+                      border: `1px solid ${f > 0 ? "#ff3355" : "#442228"}`,
+                      background: "rgba(20,0,4,0.7)",
+                      boxShadow: f > 0 ? "0 0 8px rgba(255,40,70,0.5)" : "none",
+                      overflow: "hidden",
+                    }}
+                  >
+                    <div
+                      style={{
+                        width: `${Math.round(f * 100)}%`,
+                        height: "100%",
+                        background:
+                          f > 0.5
+                            ? "linear-gradient(90deg,#ffcc33,#ff4422)"
+                            : f > 0
+                              ? "#ff2200"
+                              : "transparent",
+                        transition: "width 0.2s linear",
+                      }}
+                    />
+                  </div>
+                )
+              })}
+            </div>
           </div>
         )}
 
