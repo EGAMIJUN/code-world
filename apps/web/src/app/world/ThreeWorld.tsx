@@ -814,6 +814,9 @@ const OSAKA_BODY_MULT = 0.2 // body hits are 80% reduced
 const OSAKA_ZAKO_NAME = "下級妖怪" // tag distinguishing infinite-spawn fodder
 const OSAKA_ESCORT_NAME = "鬼火衆" // the two flanking escorts
 const OSAKA_ZAKO_CAP = 12 // hard cap on simultaneous fodder
+// Distant OSAKA fodder freezes (skips AI) beyond this range — keeps per-frame AI
+// cost proportional to the enemies actually near the player, not the whole field.
+const OSAKA_AI_CULL_DIST = 40 // m
 const OSAKA_ZAKO_INTERVAL = 5000 // ms between fodder top-ups
 // ── OSAKA area progression (Phase 2b) ────────────────────────────────────────
 // Dotonbori → Tsutenkaku → Castle → five-change boss. Each area: clear the
@@ -6786,8 +6789,10 @@ export default function ThreeWorld({
           z: safe.z,
           heading,
           speed: 0,
-          hp: 1,
-          maxHp: 1,
+          // Sentinel HP so any incidental hp/maxHp read reports "full"; the real
+          // invincibility is enforced in damage/destroyActiveVehicle (tetsurin guard).
+          hp: 99999,
+          maxHp: 99999,
           dead: false,
           kind: "bike",
           turret: undefined,
@@ -7412,6 +7417,11 @@ export default function ThreeWorld({
       function damageActiveVehicle(dmg: number, type: "bullet" | "explosive" = "bullet") {
         const v = activeVehicle
         if (!v || v.dead || dmg <= 0) return
+        // 鉄輪 (player Tetsurin) is completely indestructible — it soaks every hit
+        // (bullets / explosions / contact / crashes) without losing HP. This single
+        // chokepoint neutralises all damage callers; without it the bike spawns at
+        // hp:1 and the first stray bullet destroyed it on mount.
+        if (v.tetsurin) return
         const applied = v.kind === "tank" && type !== "explosive" ? dmg * TANK_ARMOR_BULLET : dmg
         v.hp = Math.max(0, v.hp - applied)
         setVehicleHp(Math.round(v.hp))
@@ -7430,6 +7440,9 @@ export default function ThreeWorld({
       function destroyActiveVehicle() {
         const v = activeVehicle
         if (!v) return
+        // 鉄輪 never blows up — guards the crash/ram path that sets hp=0 then calls
+        // here directly (bypassing damageActiveVehicle's short-circuit).
+        if (v.tetsurin) return
         v.dead = true
         const burst = new THREE.Vector3(v.x, 1.0, v.z)
         spawnExplosion(burst)
@@ -12547,9 +12560,22 @@ export default function ThreeWorld({
       }
       // Infinite fodder: top up to OSAKA_ZAKO_CAP live zako, reusing leek/multihead
       // creatures recoloured wa-style.
+      // ── OSAKA enemy population cap (perf) ────────────────────────────────────
+      // Per-area spawns + the 5s fodder top-up + the oni 1.3× multiplier could
+      // otherwise stack 50-70 live humanoids; per-frame AI over that many tanks
+      // the CPU (draw calls stay fine — the cost is JS-side). Hard-cap the number
+      // of SIMULTANEOUS live enemies so the field is a "replenish on kill" trickle
+      // (dead enemies free up slots as the player clears them).
+      const OSAKA_ENEMY_CAP = isMobileDevice ? 20 : 40
+      function osakaLiveEnemyCount(): number {
+        let c = 0
+        for (const e of enemies) if (e.hp > 0) c++
+        return c
+      }
       function osakaSpawnZako(n: number) {
         const live = enemies.filter((e) => e.hp > 0 && e.huntName === OSAKA_ZAKO_NAME).length
-        const room = Math.min(n, OSAKA_ZAKO_CAP - live)
+        // Respect BOTH the fodder cap and the global live-enemy cap.
+        const room = Math.min(n, OSAKA_ZAKO_CAP - live, OSAKA_ENEMY_CAP - osakaLiveEnemyCount())
         for (let i = 0; i < room; i++) {
           const a = Math.random() * Math.PI * 2
           const r = 14 + Math.random() * 16
@@ -14575,8 +14601,11 @@ export default function ThreeWorld({
       // Spawn a fixed fodder wave for an area (mobile counts are roughly halved).
       function osakaSpawnAreaZako(area: "dotonbori" | "tsutenkaku" | "castle") {
         const counts = isMobileDevice ? OSAKA_AREA_ZAKO_MOBILE : OSAKA_AREA_ZAKO
-        // 鬼モード (FINAL-H): 雑魚 1.5倍。
-        const n = Math.ceil(counts[area] * (osakaOni() ? OSAKA_ONI_ZAKO_MULT : 1))
+        // 鬼モード (FINAL-H): 雑魚 1.3倍。Clamp AFTER the multiplier so the oni
+        // boost can never push the live population past OSAKA_ENEMY_CAP (perf).
+        const want = Math.ceil(counts[area] * (osakaOni() ? OSAKA_ONI_ZAKO_MULT : 1))
+        const n = Math.max(0, Math.min(want, OSAKA_ENEMY_CAP - osakaLiveEnemyCount()))
+        if (n <= 0) return
         const c = osakaAreaCenter(area)
         for (let i = 0; i < n; i++) {
           const a = Math.random() * Math.PI * 2
@@ -21176,7 +21205,12 @@ export default function ThreeWorld({
           }
           let elevatorCommits = 0
           for (const e of refs.enemies) if (e.climb) elevatorCommits++
+          // OSAKA perf (Fix 2): distance-cull + alternate-frame AI throttle. Only
+          // OSAKA stages run a large fodder horde, so the throttle is scoped to them.
+          const osakaPerf = isOsakaStage(huntMissionConfigRef.current.stage)
+          let aiIdx = -1
           for (const enemy of refs.enemies) {
+            aiIdx++
             // Skip enemies currently driving a vehicle — updateEnemyVehicle
             // owns them (their mesh is hidden + parked at the vehicle). On
             // death the vehicle clears aiDriving so the corpse anim runs here.
@@ -21330,6 +21364,15 @@ export default function ThreeWorld({
             const toPx = fp.x - ex
             const toPz = fp.z - ez
             const distToPlayer = Math.sqrt(toPx * toPx + toPz * toPz)
+
+            // ── OSAKA perf (Fix 2): throttle + distance-cull the fodder horde ──
+            // Terraformers are exempt so the 鉄輪兵 bike squad still forms / seeks
+            // bikes at long range; everything else freezes when far and updates on
+            // alternate, index-staggered frames (spreads the work across 2 frames).
+            if (osakaPerf && enemy.type !== "terraformer") {
+              if (distToPlayer > OSAKA_AI_CULL_DIST) continue
+              if (((frameCount + aiIdx) & 1) === 1) continue
+            }
 
             // ── PR motorcycle: terraformer bike-charge ───────────────────────
             // Riders are driven by updateBikeRiders — skip their on-foot AI.
