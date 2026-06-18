@@ -13059,6 +13059,11 @@ export default function ThreeWorld({
         state: "idle" | "shaking" | "falling"
         baseY: number
       }[] = []
+      // 終焉モード 都市崩壊 (Block C): 時間経過でマップが段階的に崩れる。新規メッシュは
+      // 地割れ decal 1枚のみ、あとは既存システム (橋崩落 / カメラ揺れ / 爆発) の流用。
+      let osakaCollapseStart = 0 // ms: 終焉マップ生成時にセット (0 = 非稼働)
+      let osakaCollapseStage = 0 // 既に発火した段階数
+      let osakaNextQuakeAt = 0 // 次の余震 (アフターショック) 時刻
       const osakaRainDummy = new THREE.Object3D()
       const osakaSwayDummy = new THREE.Object3D()
       // Block O perf: reusable scratch vectors for updateOsakaBoss's per-frame
@@ -13192,6 +13197,57 @@ export default function ThreeWorld({
               ;(b.mesh.material as THREE.Material).dispose()
               osakaBridges.splice(i, 1)
             }
+          }
+        }
+        // ── 終焉モード 都市崩壊シーケンサ (Block C) ───────────────────────────────
+        // Escalating ambient collapse while the 終焉 run is live: staged beats reuse
+        // existing systems (bridge fall, quake, explosion) and a one-off crack decal
+        // is laid at map build. No per-frame mesh creation; rubble counts are capped.
+        if (osakaCollapseStart > 0 && osakaCataclysm() && osakaRunIsLive()) {
+          const el = now - osakaCollapseStart
+          if (osakaCollapseStage < 1 && el > 11000) {
+            osakaCollapseStage = 1
+            for (const b of osakaBridges) if (b.state !== "falling") b.state = "falling" // 橋崩落
+            osakaQuake(5, 900)
+            SOUNDS.collapse()
+          } else if (osakaCollapseStage < 2 && el > 26000) {
+            osakaCollapseStage = 2
+            // 通天閣 倒壊の見せ場 — 中央ランドマーク基部に瓦礫煙 (本体は merged のため
+            // 既存の爆発演出で「崩れ落ちる」を表現)。
+            osakaQuake(7, 1200)
+            SOUNDS.collapse()
+            for (let i = 0; i < 4; i++) {
+              const a = (i / 4) * Math.PI * 2
+              spawnExplosion(
+                new THREE.Vector3(
+                  HUNT_ARENA.x + Math.cos(a) * 6,
+                  4 + i * 3,
+                  HUNT_ARENA.z + Math.sin(a) * 6,
+                ),
+                false,
+                false,
+              )
+            }
+          } else if (osakaCollapseStage < 3 && el > 44000) {
+            osakaCollapseStage = 3
+            osakaQuake(8, 1600)
+            SOUNDS.collapse()
+          }
+          // 余震 + 瓦礫: 一定間隔で軽い揺れ + フィールド各所に少数の瓦礫煙 (数を絞る)。
+          if (now >= osakaNextQuakeAt) {
+            osakaNextQuakeAt = now + 5500 + Math.random() * 4500
+            osakaQuake(osakaCollapseStage >= 2 ? 4 : 3, 500)
+            const a = Math.random() * Math.PI * 2
+            const r = 18 + Math.random() * 56
+            spawnExplosion(
+              new THREE.Vector3(
+                HUNT_ARENA.x + Math.cos(a) * r,
+                0.6,
+                HUNT_ARENA.z + Math.sin(a) * r,
+              ),
+              false,
+              false,
+            )
           }
         }
       }
@@ -17684,6 +17740,60 @@ export default function ThreeWorld({
           osakaHemi.groundColor.setHex(0x180808)
           moonlight.color.setHex(0xff5a44)
           osakaFill.color.setHex(0xff7766)
+          // 地割れ (Block C): a single painted CanvasTexture plane over the field —
+          // one extra draw call, disposed with the map group. Branching cracks from
+          // the centre out, drawn once.
+          const crackCv = document.createElement("canvas")
+          crackCv.width = 512
+          crackCv.height = 512
+          const cc = crackCv.getContext("2d")
+          if (cc) {
+            cc.clearRect(0, 0, 512, 512)
+            cc.strokeStyle = "rgba(10,2,4,0.85)"
+            cc.lineCap = "round"
+            let cseed = 1337
+            const crnd = () => {
+              cseed = (cseed * 1103515245 + 12345) & 0x7fffffff
+              return cseed / 0x7fffffff
+            }
+            for (let k = 0; k < 14; k++) {
+              const a = (k / 14) * Math.PI * 2 + crnd() * 0.4
+              let x = 256
+              let y = 256
+              cc.lineWidth = 5 - (k % 3)
+              cc.beginPath()
+              cc.moveTo(x, y)
+              const steps = 7 + Math.floor(crnd() * 5)
+              let ang = a
+              for (let s = 0; s < steps; s++) {
+                ang += (crnd() - 0.5) * 0.8
+                x += Math.cos(ang) * (18 + crnd() * 16)
+                y += Math.sin(ang) * (18 + crnd() * 16)
+                cc.lineTo(x, y)
+              }
+              cc.stroke()
+            }
+          }
+          const crackTex = new THREE.CanvasTexture(crackCv)
+          const crackMesh = new THREE.Mesh(
+            new THREE.PlaneGeometry(180, 180),
+            new THREE.MeshBasicMaterial({
+              map: crackTex,
+              transparent: true,
+              opacity: 0.9,
+              depthWrite: false,
+            }),
+          )
+          crackMesh.rotation.x = -Math.PI / 2
+          crackMesh.position.set(0, 0.04, 0)
+          crackMesh.frustumCulled = false
+          add(crackMesh)
+          // Start the collapse sequencer clock (reset its staged beats).
+          osakaCollapseStart = Date.now()
+          osakaCollapseStage = 0
+          osakaNextQuakeAt = Date.now() + 8000
+        } else {
+          osakaCollapseStart = 0
         }
         scene.add(group)
         osakaMapMeshesRef.current.push(group)
