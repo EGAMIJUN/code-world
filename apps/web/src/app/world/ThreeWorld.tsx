@@ -926,8 +926,10 @@ type OsakaMidBoss = {
 // Block O perf: trimmed from 15/20/25 (PC) and 8/12/15 (mobile). With the
 // lightweight "yokai_lite" zako (~3 draw calls each) the peak castle swarm now
 // costs well under the draw-call budget even in oni mode.
-const OSAKA_AREA_ZAKO = { dotonbori: 12, tsutenkaku: 14, castle: 16 } as const
-const OSAKA_AREA_ZAKO_MOBILE = { dotonbori: 6, tsutenkaku: 8, castle: 10 } as const
+// Phase B: 通天閣 (central spine) is the heaviest area — its zako count is halved
+// (14→7 PC, 8→4 mobile) to lighten the draw-call + AI load on the main road.
+const OSAKA_AREA_ZAKO = { dotonbori: 12, tsutenkaku: 7, castle: 16 } as const
+const OSAKA_AREA_ZAKO_MOBILE = { dotonbori: 6, tsutenkaku: 4, castle: 10 } as const
 const OSAKA_TENGU_HP = 2500
 const OSAKA_YAMAYA_HP = 4000
 // ── OSAKA secret routes (FINAL-A) ────────────────────────────────────────────
@@ -12701,7 +12703,7 @@ export default function ThreeWorld({
       // the CPU (draw calls stay fine — the cost is JS-side). Hard-cap the number
       // of SIMULTANEOUS live enemies so the field is a "replenish on kill" trickle
       // (dead enemies free up slots as the player clears them).
-      const OSAKA_ENEMY_CAP = isMobileDevice ? 20 : 28
+      const OSAKA_ENEMY_CAP = isMobileDevice ? 15 : 20 // Phase B: trimmed (was 20/28) — lighter central spine
       function osakaLiveEnemyCount(): number {
         let c = 0
         for (const e of enemies) if (e.hp > 0) c++
@@ -17144,6 +17146,11 @@ export default function ThreeWorld({
           // Shinsekai shop hitbox — the ring of buildings around the tower is now
           // solid (the noren curtain in front stays a pass-through decoration).
           addOsakaAABB(bx, bz, bw / 2, bd / 2, bh)
+          // Phase B: hang a noren on only half the shops. The noren are the
+          // heaviest un-merged (one mesh + one generated texture each) decoration
+          // on the central spine, so this halves their draw calls + textures. The
+          // shop ring and its hitboxes are unchanged.
+          if (i % 2 !== 0) continue
           // Storefront noren curtain facing the tower, gently swaying.
           const ncol = norenCol[i % 2] ?? 0xcc3333
           const ntex = makeOsakaSign(["のれん"], ncol, "#ffffff")
