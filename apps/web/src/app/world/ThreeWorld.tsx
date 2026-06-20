@@ -2546,6 +2546,8 @@ export default function ThreeWorld({
   const osakaGenRef = useRef(0)
   // Final-madness (Phase 5, HP ≤20%): drives a persistent red screen flash.
   const [osakaFrenzy, setOsakaFrenzy] = useState(false)
+  // 終焉モードで稼働中か (Phase 2): 常時HUDバッジ表示用。マップ生成/破棄で切替。
+  const [osakaCataActive, setOsakaCataActive] = useState(false)
   const osakaFrenzyRef = useRef(false)
   // OSAKA stage map (Dotonbori / Tsutenkaku / Osaka Castle). Top-level objects
   // built by buildOsakaMap, disposed on mission return.
@@ -10191,6 +10193,11 @@ export default function ThreeWorld({
 
       // ── Wave / mission spawner ─────────────────────────────────────────────
       const enemies: CombatEnemy[] = []
+      // Fully-faded OSAKA mission corpses queued for removal (Phase 1): the death
+      // finalize scene.removes + disposes the mesh immediately (safe mid-loop) and
+      // pushes here; the array splice is drained at the loop prologue next frame so
+      // we never mutate `enemies` while a for…of is iterating it.
+      const osakaReapQueue: CombatEnemy[] = []
       const goalMarkers: GoalMarker[] = []
 
       function clearEnemies() {
@@ -12808,9 +12815,10 @@ export default function ThreeWorld({
             return
           }
           if (nextNum === 6) {
-            // 第六形態は隠し武器2種を両方携えた者の前にだけ顕現する。
+            // 第六形態は隠し武器2種を両方携えた者の前にだけ顕現する。ただし終焉モード
+            // では大魔が本編なので、隠し武器を問わず必ず第六形態→大魔へ到達させる。
             const sst = osakaSecretRef.current
-            if (!(sst.bladeTaken && sst.spearTaken)) {
+            if (!osakaCataclysm() && !(sst.bladeTaken && sst.spearTaken)) {
               osakaBossDefeat()
               return
             }
@@ -14504,49 +14512,102 @@ export default function ThreeWorld({
       // small meshes (+ beacons). All geometry is original.
       function buildDaima(): Daima {
         const arena = new THREE.Vector3(HUNT_ARENA.x, 0, HUNT_ARENA.z)
-        const armN = isMobileDevice ? 50 : 100
+        const armN = isMobileDevice ? 24 : 44 // 背中の放射状の棘の本数 (Phase 3)
         const eyeN = isMobileDevice ? 40 : 80
         const group = new THREE.Group()
         group.position.copy(arena)
-        // ── Central flesh mass (≈60m tall): tapering trunk + bulbous head, merged
-        // to one mesh. Tagged daimaBody — decorative, not a weak point.
-        const bodyMat = new THREE.MeshLambertMaterial({
-          color: 0x3a0a12,
-          emissive: 0x2a0408,
-          emissiveIntensity: 0.6,
+        // ── Gaunt humanoid body (≈60m): tall ribbed torso + crowned skull + thin
+        // splayed legs + long hanging arms, ALL baked into one merged bone-coloured
+        // mesh (1 draw call). Tagged daimaBody — decorative, not a weak point. Fully
+        // original silhouette. (Phase 3 remake.)
+        const boneMat = new THREE.MeshLambertMaterial({
+          color: 0x6a6a55,
+          emissive: 0x161208,
+          emissiveIntensity: 0.35,
         })
-        const trunkGeo = new THREE.CylinderGeometry(5.5, 9, 38, 10)
-        trunkGeo.translate(0, 25, 0)
-        const headGeo = new THREE.SphereGeometry(9, 14, 12)
-        headGeo.translate(0, 46, 0)
-        const bodyMerged = mergeGeometries([trunkGeo, headGeo], false) ?? trunkGeo
-        trunkGeo.dispose()
-        headGeo.dispose()
-        const head = new THREE.Mesh(bodyMerged, bodyMat)
+        const boneGeos: THREE.BufferGeometry[] = []
+        const torso = new THREE.CylinderGeometry(3.2, 4.4, 26, 8)
+        torso.translate(0, 32, 0)
+        boneGeos.push(torso)
+        // Ribcage hints — thin horizontal ridges across the chest.
+        for (let i = 0; i < 4; i++) {
+          const rib = new THREE.CylinderGeometry(0.35, 0.35, 6.6 - i * 0.5, 6)
+          rib.rotateZ(Math.PI / 2)
+          rib.translate(0, 28 + i * 3, -0.4)
+          boneGeos.push(rib)
+        }
+        const pelvis = new THREE.CylinderGeometry(3.6, 2.6, 5, 8)
+        pelvis.translate(0, 17, 0)
+        boneGeos.push(pelvis)
+        const neck = new THREE.CylinderGeometry(1.3, 1.8, 4, 6)
+        neck.translate(0, 47, 0)
+        boneGeos.push(neck)
+        const skull = new THREE.SphereGeometry(4.2, 12, 10)
+        skull.scale(1, 1.18, 1.1)
+        skull.translate(0, 51.5, 0)
+        boneGeos.push(skull)
+        const jaw = new THREE.BoxGeometry(3, 1.5, 2.8)
+        jaw.translate(0, 48.6, 0.7)
+        boneGeos.push(jaw)
+        // Crown of horns radiating from the top of the skull.
+        for (let i = 0; i < 10; i++) {
+          const a = (i / 10) * Math.PI * 2
+          const horn = new THREE.ConeGeometry(0.55, 4.6, 5)
+          horn.translate(0, 2.3, 0)
+          horn.rotateZ(Math.cos(a) * 0.55)
+          horn.rotateX(-Math.sin(a) * 0.55)
+          horn.translate(Math.cos(a) * 2.1, 54.5, Math.sin(a) * 2.1)
+          boneGeos.push(horn)
+        }
+        // Thin splayed legs + long hanging arms.
+        for (const s of [-1, 1]) {
+          const thigh = new THREE.CylinderGeometry(1.2, 0.9, 13, 6)
+          thigh.translate(s * 1.7, 11.5, 0)
+          boneGeos.push(thigh)
+          const shin = new THREE.CylinderGeometry(0.8, 0.5, 11, 6)
+          shin.translate(s * 2.1, 1.5, 0.2)
+          boneGeos.push(shin)
+          const arm = new THREE.CylinderGeometry(0.85, 0.55, 24, 6)
+          arm.rotateZ(s * 0.18)
+          arm.translate(s * 4.6, 31, 0.4)
+          boneGeos.push(arm)
+        }
+        // CodeRabbit (#108): when the merge succeeds the source geos are dead and
+        // disposed; when it returns null we fall back to `torso`, which must NOT be
+        // disposed (it stays live as the mesh geometry).
+        const bodyMerged = mergeGeometries(boneGeos, false)
+        if (bodyMerged) {
+          for (const g of boneGeos) g.dispose()
+        } else {
+          for (const g of boneGeos) if (g !== torso) g.dispose()
+        }
+        const head = new THREE.Mesh(bodyMerged ?? torso, boneMat)
         head.userData.daimaBody = true
         head.frustumCulled = false
         group.add(head)
-        // ── Tentacles → ONE InstancedMesh. Big radial cylinders updateDaima sways.
-        const armGeo = new THREE.CylinderGeometry(0.4, 0.9, 14, 5)
-        armGeo.translate(0, 7, 0)
+        // ── Radial back spikes → ONE InstancedMesh (the showpiece). Long pointed
+        // cones fanning from the upper back; updateDaima sways them. Greenish-bone.
+        const armGeo = new THREE.ConeGeometry(0.45, 16, 5)
+        armGeo.translate(0, 8, 0) // base at origin, tip out at +16
         const armMat = new THREE.MeshLambertMaterial({
-          color: 0x1a0610,
-          emissive: 0x12030a,
-          emissiveIntensity: 0.4,
+          color: 0x3a4a30,
+          emissive: 0x0a1206,
+          emissiveIntensity: 0.5,
         })
         const armInst = new THREE.InstancedMesh(armGeo, armMat, armN)
         armInst.userData.daimaBody = true
         armInst.frustumCulled = false
         const armData: { ang: number; y: number; r: number; tilt: number; phase: number }[] = []
         for (let i = 0; i < armN; i++) {
-          const a = (i / armN) * Math.PI * 2 + Math.random() * 0.4
-          const y = 6 + Math.random() * 34
-          const r = 6 + Math.random() * 4
+          // Back-weighted fan (ang biased toward -z), high on the upper back.
+          const a = Math.PI + (Math.random() - 0.5) * Math.PI * 1.35
+          const y = 28 + Math.random() * 22
+          const r = 3 + Math.random() * 2.2
           const ad = {
             ang: a,
             y,
             r,
-            tilt: 0.8 + Math.random() * 0.7,
+            tilt: 1.05 + Math.random() * 0.85,
             phase: Math.random() * Math.PI * 2,
           }
           armData.push(ad)
@@ -14568,11 +14629,12 @@ export default function ThreeWorld({
         eyeInst.frustumCulled = false
         for (let i = 0; i < eyeN; i++) {
           const a = Math.random() * Math.PI * 2
-          const y = 10 + Math.random() * 38
-          const r = 5.5 + Math.random() * 4.5
+          // Clustered on the gaunt torso + skull (thinner body than the old blob).
+          const y = 26 + Math.random() * 28
+          const r = 3 + Math.random() * 1.8
           osakaDaimaArmDummy.position.set(Math.cos(a) * r, y, Math.sin(a) * r)
           osakaDaimaArmDummy.rotation.set(0, 0, 0)
-          osakaDaimaArmDummy.scale.setScalar(0.7 + Math.random() * 1.3)
+          osakaDaimaArmDummy.scale.setScalar(0.6 + Math.random() * 1.0)
           osakaDaimaArmDummy.updateMatrix()
           eyeInst.setMatrixAt(i, osakaDaimaArmDummy.matrix)
         }
@@ -17876,6 +17938,7 @@ export default function ThreeWorld({
         // 終焉モード (Block A): 開始時から空が赤黒い。OSAKA の青夜照明と靄だけを
         // 災厄カラーへ上書きする — fog は huntStageFogSaved 経由で、各ライトは group
         // 同梱で破棄/復元されるので追加の後始末や新規ライトは不要 (perf)。
+        setOsakaCataActive(osakaCataclysm()) // 終焉HUDバッジの常時表示フラグ (Phase 2)
         if (osakaCataclysm()) {
           scene.fog = new THREE.Fog(0x1a0305, 90, 340) // 赤黒い終末の靄
           osakaAmbient.color.setHex(0x3a1414)
@@ -17972,6 +18035,7 @@ export default function ThreeWorld({
       // Disposes geometry, materials AND the sign CanvasTextures (material.dispose
       // alone leaves textures resident, so they're released explicitly here).
       function clearOsakaMap() {
+        setOsakaCataActive(false) // 終焉HUDバッジを畳む (Phase 2)
         const disposeMat = (m: THREE.Material) => {
           const sm = m as THREE.MeshStandardMaterial
           sm.map?.dispose()
@@ -21997,6 +22061,16 @@ export default function ThreeWorld({
               }
             }
           }
+          // Phase 1: drain last frame's reaped OSAKA corpses out of `enemies` now
+          // (outside any for…of over the array). Their meshes were already detached
+          // + disposed in the finalize.
+          if (osakaReapQueue.length > 0) {
+            for (const c of osakaReapQueue) {
+              const ri = refs.enemies.indexOf(c)
+              if (ri >= 0) refs.enemies.splice(ri, 1)
+            }
+            osakaReapQueue.length = 0
+          }
           let elevatorCommits = 0
           for (const e of refs.enemies) if (e.climb) elevatorCommits++
           // OSAKA perf (Fix 2): distance-cull + alternate-frame AI throttle. Only
@@ -22107,6 +22181,26 @@ export default function ThreeWorld({
                   enemy.respawnTimer = enemy.isBot
                     ? (enemy.botRespawnMs ?? 4000) / 1000
                     : ENEMY_NO_RESPAWN
+                  // Phase 1: reap fully-faded OSAKA mission corpses so they stop
+                  // bloating `enemies` + the scene graph (they were invisible but
+                  // walked by every per-frame loop). Bots are kept for respawn. The
+                  // mesh is detached + disposed now; the array splice is deferred.
+                  if (
+                    !enemy.isBot &&
+                    isOsakaStage(huntMissionConfigRef.current.stage) &&
+                    !enemy.isHuntBoss
+                  ) {
+                    refs.scene.remove(enemy.mesh)
+                    enemy.mesh.traverse((child) => {
+                      if (child instanceof THREE.Mesh || child instanceof THREE.InstancedMesh) {
+                        child.geometry.dispose()
+                        const mm = child.material
+                        if (Array.isArray(mm)) for (const m of mm) m.dispose()
+                        else mm.dispose()
+                      }
+                    })
+                    osakaReapQueue.push(enemy)
+                  }
                 }
               } else if (
                 enemy.isBot &&
@@ -23436,16 +23530,22 @@ export default function ThreeWorld({
             // Per-group renderable breakdown (≈1 draw call per visible renderable)
             // so the HUD pinpoints what's costing draw calls. Cheap: only a few
             // small sub-trees are walked, refreshed 1/4 frames.
+            // Phase 1-2: count only ACTUALLY-RENDERED renderables. A plain
+            // traverse() descends into invisible subtrees, so it over-counted the
+            // hidden humanoid rig under each creature-swapped enemy (its top-level
+            // children are visible=false but the deep meshes keep visible=true).
+            // Walk manually and prune any invisible branch (the renderer does the
+            // same), so the HUD figure matches real draw calls.
             const countRenderables = (root: THREE.Object3D | null | undefined): number => {
-              if (!root) return 0
+              if (!root || !root.visible) return 0
               let c = 0
-              root.traverse((o) => {
-                if (
-                  o.visible &&
-                  (o instanceof THREE.Mesh || o instanceof THREE.Points || o instanceof THREE.Line)
-                )
-                  c++
-              })
+              if (
+                root instanceof THREE.Mesh ||
+                root instanceof THREE.Points ||
+                root instanceof THREE.Line
+              )
+                c++
+              for (const child of root.children) c += countRenderables(child)
               return c
             }
             const bossDC = countRenderables(osakaBossRef.current?.group)
@@ -24631,6 +24731,28 @@ export default function ThreeWorld({
                 }}
               >
                 👹 大阪の鬼
+              </div>
+            )}
+
+            {/* ── 終焉モード 常時バッジ (Phase 2): 終焉中だと一目で分かるように ── */}
+            {osakaCataActive && gamePhase === "playing" && (
+              <div
+                style={{
+                  position: "absolute",
+                  top: oniTitleOwned ? "1.7rem" : "0.5rem",
+                  left: "0.6rem",
+                  zIndex: 26,
+                  fontFamily: "'Hiragino Mincho ProN','Yu Mincho',serif",
+                  fontWeight: "bold",
+                  color: "#ff5a2a",
+                  fontSize: "0.8rem",
+                  letterSpacing: "0.3em",
+                  pointerEvents: "none",
+                  textShadow: "0 0 10px rgba(255,60,20,0.9)",
+                  animation: "osakaFrenzyPulse 1.8s ease-in-out infinite",
+                }}
+              >
+                🔥 終焉
               </div>
             )}
 
