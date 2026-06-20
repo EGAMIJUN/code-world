@@ -832,6 +832,7 @@ const DAIMA_FINAL_FRAC = 0.1 // 総HP10%以下で「最終災厄」(全攻撃が
 // DAIMA_RISE_MS かけて地上 (y=0) までせり上げる (updateDaima が駆動)。
 const DAIMA_RISE_MS = 3600
 const DAIMA_RISE_DEPTH = 64 // 本体 ~60m + 余裕 → 完全に地中から始める深さ
+const OSAKA_CORE_PULSE_R = 28 // Phase E: この距離内に大魔コアがあると画面が鼓動する
 // 7基のコアのマップ展開位置 (HUNT_ARENA からの local オフセット)。中央 + 外周6基で
 // 180m級フィールド全体に散らす → 広範囲移動 (鉄輪) が必須になる。
 const DAIMA_CORE_OFFSETS: readonly (readonly [number, number])[] = [
@@ -2559,6 +2560,10 @@ export default function ThreeWorld({
   const osakaGenRef = useRef(0)
   // Final-madness (Phase 5, HP ≤20%): drives a persistent red screen flash.
   const [osakaFrenzy, setOsakaFrenzy] = useState(false)
+  // Phase E — 終焉 恐怖演出。osakaDreadFlash は不定期の赤いビネット閃光、osakaCorePulse
+  // は大魔コアの近さ (0..1) で画面の鼓動強度を決める。どちらも中心はクリア (視界は確保)。
+  const [osakaDreadFlash, setOsakaDreadFlash] = useState(false)
+  const [osakaCorePulse, setOsakaCorePulse] = useState(0)
   // 終焉モードで稼働中か (Phase 2): 常時HUDバッジ表示用。マップ生成/破棄で切替。
   const [osakaCataActive, setOsakaCataActive] = useState(false)
   const osakaFrenzyRef = useRef(false)
@@ -13189,6 +13194,7 @@ export default function ThreeWorld({
       let osakaCollapseStart = 0 // ms: 終焉マップ生成時にセット (0 = 非稼働)
       let osakaCollapseStage = 0 // 既に発火した段階数
       let osakaNextQuakeAt = 0 // 次の余震 (アフターショック) 時刻
+      let osakaNextDreadAt = 0 // Phase E: 次の恐怖演出 (フラッシュ + 遠い唸り) 時刻
       // 災害環境ギミック (Block D): 火災 (既存の樽パーティクル流用) / 落雷 (PointLight
       // フラッシュ1基)。黒い雨は buildOsakaRain で色替え、地震は崩壊の余震で流用。
       const osakaFirePts: { x: number; z: number }[] = []
@@ -13406,6 +13412,15 @@ export default function ThreeWorld({
             } else {
               osakaLightning.intensity = 0
             }
+          }
+          // ── Phase E 恐怖演出: 不定期に画面端を赤くフラッシュ + 遠くで不気味な唸り。
+          // 大魔降臨の静寂ビート中は鳴らさない。中心は常にクリアなので視界は奪わない。
+          if (now >= osakaNextDreadAt && now >= osakaHushUntilRef.current) {
+            osakaNextDreadAt = now + 9000 + Math.random() * 11000
+            setOsakaDreadFlash(true)
+            window.setTimeout(() => setOsakaDreadFlash(false), 620)
+            if (Math.random() < 0.6) SOUNDS.zombieGroan()
+            else SOUNDS.bossRoar()
           }
         }
       }
@@ -14491,6 +14506,7 @@ export default function ThreeWorld({
       // Phase C: throttle state for the 中ボス HP gauge (push every 5 frames on change).
       let osakaMidHudFrame = 0
       let osakaMidHudLastPct = -1
+      let osakaCorePulseLast = -1 // Phase E: 大魔コア鼓動 state のスロットル
       // 撃破大爆発: 炎の環 + 白フラッシュ + ヒットストップ + 大シェイク。
       function osakaDefeatBlast(center: THREE.Vector3) {
         const n = isMobileDevice ? 7 : 14
@@ -14816,6 +14832,9 @@ export default function ThreeWorld({
         setDaimaBlackout(0)
         setDaimaFlash(false)
         osakaHushUntilRef.current = 0
+        // Phase E: コア脈動も畳む。
+        setOsakaCorePulse(0)
+        osakaCorePulseLast = -1
       }
       // Route a weapon hit onto core #idx (×3 like the 五変化 weak point). A dead
       // core hides its orb + beacon; clearing all 7 wins the fight.
@@ -14908,10 +14927,13 @@ export default function ThreeWorld({
           d.armInst.instanceMatrix.needsUpdate = true
         }
         // Live cores breathe + spin so they read as "alive" weak points.
+        let nearestCore = Number.POSITIVE_INFINITY // Phase E: 最寄りの生存コアまでの距離
         for (const co of d.cores) {
           if (co.dead) continue
           co.mesh.scale.setScalar(3 + Math.sin(now * 0.004 + co.wx) * 0.4)
           co.mesh.rotation.y += dt * 1.2
+          const cd = Math.hypot(co.wx - px, co.wz - pz)
+          if (cd < nearestCore) nearestCore = cd
         }
         // 最終災厄: ≤10% aggregate HP → red frenzy overlay + faster cadences.
         if (!d.finalPhase && d.hp / d.maxHp <= DAIMA_FINAL_FRAC) {
@@ -14979,6 +15001,13 @@ export default function ThreeWorld({
         if ((d.frame & 7) === 0) {
           setBossHpPct(Math.round((d.hp / d.maxHp) * 100))
           setDaimaCoreHud(d.cores.map((c) => (c.dead ? 0 : Math.max(0, c.hp / c.maxHp))))
+          // Phase E: コアが近いほど画面が脈動する (心臓の鼓動)。半径内で 0→1、変化が小
+          // さい時は state を更新しない。
+          const cp = nearestCore < OSAKA_CORE_PULSE_R ? 1 - nearestCore / OSAKA_CORE_PULSE_R : 0
+          if (Math.abs(cp - osakaCorePulseLast) > 0.03) {
+            osakaCorePulseLast = cp
+            setOsakaCorePulse(cp)
+          }
         }
       }
       // Per-frame boss driver: core pulse/reveal, limb sway, stalk, fodder top-up
@@ -18065,7 +18094,7 @@ export default function ThreeWorld({
         // 同梱で破棄/復元されるので追加の後始末や新規ライトは不要 (perf)。
         setOsakaCataActive(osakaCataclysm()) // 終焉HUDバッジの常時表示フラグ (Phase 2)
         if (osakaCataclysm()) {
-          scene.fog = new THREE.Fog(0x1a0305, 90, 340) // 赤黒い終末の靄
+          scene.fog = new THREE.Fog(0x1a0305, 70, 220) // Phase E: 赤黒い終末の靄を狭め「何かいる」恐怖 (旧 90/340)
           osakaAmbient.color.setHex(0x3a1414)
           osakaHemi.color.setHex(0x4a1a1a)
           osakaHemi.groundColor.setHex(0x180808)
@@ -18161,6 +18190,11 @@ export default function ThreeWorld({
       // alone leaves textures resident, so they're released explicitly here).
       function clearOsakaMap() {
         setOsakaCataActive(false) // 終焉HUDバッジを畳む (Phase 2)
+        // Phase E: 恐怖演出 state を全て OFF に戻す (離脱・死亡・クリアいずれもここを通る)。
+        setOsakaDreadFlash(false)
+        setOsakaCorePulse(0)
+        osakaCorePulseLast = -1
+        osakaNextDreadAt = 0
         const disposeMat = (m: THREE.Material) => {
           const sm = m as THREE.MeshStandardMaterial
           sm.map?.dispose()
@@ -24607,6 +24641,58 @@ export default function ThreeWorld({
             <style>
               {"@keyframes osakaFrenzyPulse { 0%,100% { opacity: 0.35; } 50% { opacity: 0.9; } }"}
             </style>
+          </div>
+        )}
+
+        {/* Phase E: 終焉 恐怖演出 — 不定期の赤いビネット閃光 (中心はクリア) */}
+        {osakaDreadFlash && (
+          <div
+            aria-hidden="true"
+            style={{
+              position: "absolute",
+              inset: 0,
+              background:
+                "radial-gradient(ellipse at center, transparent 45%, rgba(150,0,0,0.5) 100%)",
+              pointerEvents: "none",
+              zIndex: 5,
+              animation: "osakaDreadPulse 0.62s ease-in-out forwards",
+            }}
+          >
+            <style>
+              {
+                "@keyframes osakaDreadPulse { 0% { opacity: 0; } 35% { opacity: 1; } 100% { opacity: 0; } }"
+              }
+            </style>
+          </div>
+        )}
+
+        {/* Phase E: 大魔コアが近いと心臓の鼓動のように赤く脈動 (近さ=強度・中心はクリア) */}
+        {osakaCorePulse > 0.02 && (
+          <div
+            aria-hidden="true"
+            style={{
+              position: "absolute",
+              inset: 0,
+              opacity: osakaCorePulse,
+              pointerEvents: "none",
+              zIndex: 4,
+            }}
+          >
+            <div
+              style={{
+                position: "absolute",
+                inset: 0,
+                background:
+                  "radial-gradient(ellipse at center, transparent 40%, rgba(200,0,0,0.6) 100%)",
+                animation: "osakaHeartbeat 1.15s ease-in-out infinite",
+              }}
+            >
+              <style>
+                {
+                  "@keyframes osakaHeartbeat { 0% { opacity: 0.2; } 10% { opacity: 0.8; } 22% { opacity: 0.35; } 32% { opacity: 0.65; } 45% { opacity: 0.2; } 100% { opacity: 0.2; } }"
+                }
+              </style>
+            </div>
           </div>
         )}
 
