@@ -2546,6 +2546,8 @@ export default function ThreeWorld({
   const osakaGenRef = useRef(0)
   // Final-madness (Phase 5, HP ≤20%): drives a persistent red screen flash.
   const [osakaFrenzy, setOsakaFrenzy] = useState(false)
+  // 終焉モードで稼働中か (Phase 2): 常時HUDバッジ表示用。マップ生成/破棄で切替。
+  const [osakaCataActive, setOsakaCataActive] = useState(false)
   const osakaFrenzyRef = useRef(false)
   // OSAKA stage map (Dotonbori / Tsutenkaku / Osaka Castle). Top-level objects
   // built by buildOsakaMap, disposed on mission return.
@@ -12813,9 +12815,10 @@ export default function ThreeWorld({
             return
           }
           if (nextNum === 6) {
-            // 第六形態は隠し武器2種を両方携えた者の前にだけ顕現する。
+            // 第六形態は隠し武器2種を両方携えた者の前にだけ顕現する。ただし終焉モード
+            // では大魔が本編なので、隠し武器を問わず必ず第六形態→大魔へ到達させる。
             const sst = osakaSecretRef.current
-            if (!(sst.bladeTaken && sst.spearTaken)) {
+            if (!osakaCataclysm() && !(sst.bladeTaken && sst.spearTaken)) {
               osakaBossDefeat()
               return
             }
@@ -17881,6 +17884,7 @@ export default function ThreeWorld({
         // 終焉モード (Block A): 開始時から空が赤黒い。OSAKA の青夜照明と靄だけを
         // 災厄カラーへ上書きする — fog は huntStageFogSaved 経由で、各ライトは group
         // 同梱で破棄/復元されるので追加の後始末や新規ライトは不要 (perf)。
+        setOsakaCataActive(osakaCataclysm()) // 終焉HUDバッジの常時表示フラグ (Phase 2)
         if (osakaCataclysm()) {
           scene.fog = new THREE.Fog(0x1a0305, 90, 340) // 赤黒い終末の靄
           osakaAmbient.color.setHex(0x3a1414)
@@ -17977,6 +17981,7 @@ export default function ThreeWorld({
       // Disposes geometry, materials AND the sign CanvasTextures (material.dispose
       // alone leaves textures resident, so they're released explicitly here).
       function clearOsakaMap() {
+        setOsakaCataActive(false) // 終焉HUDバッジを畳む (Phase 2)
         const disposeMat = (m: THREE.Material) => {
           const sm = m as THREE.MeshStandardMaterial
           sm.map?.dispose()
@@ -24672,6 +24677,28 @@ export default function ThreeWorld({
                 }}
               >
                 👹 大阪の鬼
+              </div>
+            )}
+
+            {/* ── 終焉モード 常時バッジ (Phase 2): 終焉中だと一目で分かるように ── */}
+            {osakaCataActive && gamePhase === "playing" && (
+              <div
+                style={{
+                  position: "absolute",
+                  top: oniTitleOwned ? "1.7rem" : "0.5rem",
+                  left: "0.6rem",
+                  zIndex: 26,
+                  fontFamily: "'Hiragino Mincho ProN','Yu Mincho',serif",
+                  fontWeight: "bold",
+                  color: "#ff5a2a",
+                  fontSize: "0.8rem",
+                  letterSpacing: "0.3em",
+                  pointerEvents: "none",
+                  textShadow: "0 0 10px rgba(255,60,20,0.9)",
+                  animation: "osakaFrenzyPulse 1.8s ease-in-out infinite",
+                }}
+              >
+                🔥 終焉
               </div>
             )}
 
