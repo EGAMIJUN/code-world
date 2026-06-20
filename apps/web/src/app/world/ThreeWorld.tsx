@@ -14512,49 +14512,95 @@ export default function ThreeWorld({
       // small meshes (+ beacons). All geometry is original.
       function buildDaima(): Daima {
         const arena = new THREE.Vector3(HUNT_ARENA.x, 0, HUNT_ARENA.z)
-        const armN = isMobileDevice ? 50 : 100
+        const armN = isMobileDevice ? 24 : 44 // 背中の放射状の棘の本数 (Phase 3)
         const eyeN = isMobileDevice ? 40 : 80
         const group = new THREE.Group()
         group.position.copy(arena)
-        // ── Central flesh mass (≈60m tall): tapering trunk + bulbous head, merged
-        // to one mesh. Tagged daimaBody — decorative, not a weak point.
-        const bodyMat = new THREE.MeshLambertMaterial({
-          color: 0x3a0a12,
-          emissive: 0x2a0408,
-          emissiveIntensity: 0.6,
+        // ── Gaunt humanoid body (≈60m): tall ribbed torso + crowned skull + thin
+        // splayed legs + long hanging arms, ALL baked into one merged bone-coloured
+        // mesh (1 draw call). Tagged daimaBody — decorative, not a weak point. Fully
+        // original silhouette. (Phase 3 remake.)
+        const boneMat = new THREE.MeshLambertMaterial({
+          color: 0x6a6a55,
+          emissive: 0x161208,
+          emissiveIntensity: 0.35,
         })
-        const trunkGeo = new THREE.CylinderGeometry(5.5, 9, 38, 10)
-        trunkGeo.translate(0, 25, 0)
-        const headGeo = new THREE.SphereGeometry(9, 14, 12)
-        headGeo.translate(0, 46, 0)
-        const bodyMerged = mergeGeometries([trunkGeo, headGeo], false) ?? trunkGeo
-        trunkGeo.dispose()
-        headGeo.dispose()
-        const head = new THREE.Mesh(bodyMerged, bodyMat)
+        const boneGeos: THREE.BufferGeometry[] = []
+        const torso = new THREE.CylinderGeometry(3.2, 4.4, 26, 8)
+        torso.translate(0, 32, 0)
+        boneGeos.push(torso)
+        // Ribcage hints — thin horizontal ridges across the chest.
+        for (let i = 0; i < 4; i++) {
+          const rib = new THREE.CylinderGeometry(0.35, 0.35, 6.6 - i * 0.5, 6)
+          rib.rotateZ(Math.PI / 2)
+          rib.translate(0, 28 + i * 3, -0.4)
+          boneGeos.push(rib)
+        }
+        const pelvis = new THREE.CylinderGeometry(3.6, 2.6, 5, 8)
+        pelvis.translate(0, 17, 0)
+        boneGeos.push(pelvis)
+        const neck = new THREE.CylinderGeometry(1.3, 1.8, 4, 6)
+        neck.translate(0, 47, 0)
+        boneGeos.push(neck)
+        const skull = new THREE.SphereGeometry(4.2, 12, 10)
+        skull.scale(1, 1.18, 1.1)
+        skull.translate(0, 51.5, 0)
+        boneGeos.push(skull)
+        const jaw = new THREE.BoxGeometry(3, 1.5, 2.8)
+        jaw.translate(0, 48.6, 0.7)
+        boneGeos.push(jaw)
+        // Crown of horns radiating from the top of the skull.
+        for (let i = 0; i < 10; i++) {
+          const a = (i / 10) * Math.PI * 2
+          const horn = new THREE.ConeGeometry(0.55, 4.6, 5)
+          horn.translate(0, 2.3, 0)
+          horn.rotateZ(Math.cos(a) * 0.55)
+          horn.rotateX(-Math.sin(a) * 0.55)
+          horn.translate(Math.cos(a) * 2.1, 54.5, Math.sin(a) * 2.1)
+          boneGeos.push(horn)
+        }
+        // Thin splayed legs + long hanging arms.
+        for (const s of [-1, 1]) {
+          const thigh = new THREE.CylinderGeometry(1.2, 0.9, 13, 6)
+          thigh.translate(s * 1.7, 11.5, 0)
+          boneGeos.push(thigh)
+          const shin = new THREE.CylinderGeometry(0.8, 0.5, 11, 6)
+          shin.translate(s * 2.1, 1.5, 0.2)
+          boneGeos.push(shin)
+          const arm = new THREE.CylinderGeometry(0.85, 0.55, 24, 6)
+          arm.rotateZ(s * 0.18)
+          arm.translate(s * 4.6, 31, 0.4)
+          boneGeos.push(arm)
+        }
+        const bodyMerged = mergeGeometries(boneGeos, false) ?? torso
+        for (const g of boneGeos) g.dispose()
+        const head = new THREE.Mesh(bodyMerged, boneMat)
         head.userData.daimaBody = true
         head.frustumCulled = false
         group.add(head)
-        // ── Tentacles → ONE InstancedMesh. Big radial cylinders updateDaima sways.
-        const armGeo = new THREE.CylinderGeometry(0.4, 0.9, 14, 5)
-        armGeo.translate(0, 7, 0)
+        // ── Radial back spikes → ONE InstancedMesh (the showpiece). Long pointed
+        // cones fanning from the upper back; updateDaima sways them. Greenish-bone.
+        const armGeo = new THREE.ConeGeometry(0.45, 16, 5)
+        armGeo.translate(0, 8, 0) // base at origin, tip out at +16
         const armMat = new THREE.MeshLambertMaterial({
-          color: 0x1a0610,
-          emissive: 0x12030a,
-          emissiveIntensity: 0.4,
+          color: 0x3a4a30,
+          emissive: 0x0a1206,
+          emissiveIntensity: 0.5,
         })
         const armInst = new THREE.InstancedMesh(armGeo, armMat, armN)
         armInst.userData.daimaBody = true
         armInst.frustumCulled = false
         const armData: { ang: number; y: number; r: number; tilt: number; phase: number }[] = []
         for (let i = 0; i < armN; i++) {
-          const a = (i / armN) * Math.PI * 2 + Math.random() * 0.4
-          const y = 6 + Math.random() * 34
-          const r = 6 + Math.random() * 4
+          // Back-weighted fan (ang biased toward -z), high on the upper back.
+          const a = Math.PI + (Math.random() - 0.5) * Math.PI * 1.35
+          const y = 28 + Math.random() * 22
+          const r = 3 + Math.random() * 2.2
           const ad = {
             ang: a,
             y,
             r,
-            tilt: 0.8 + Math.random() * 0.7,
+            tilt: 1.05 + Math.random() * 0.85,
             phase: Math.random() * Math.PI * 2,
           }
           armData.push(ad)
@@ -14576,11 +14622,12 @@ export default function ThreeWorld({
         eyeInst.frustumCulled = false
         for (let i = 0; i < eyeN; i++) {
           const a = Math.random() * Math.PI * 2
-          const y = 10 + Math.random() * 38
-          const r = 5.5 + Math.random() * 4.5
+          // Clustered on the gaunt torso + skull (thinner body than the old blob).
+          const y = 26 + Math.random() * 28
+          const r = 3 + Math.random() * 1.8
           osakaDaimaArmDummy.position.set(Math.cos(a) * r, y, Math.sin(a) * r)
           osakaDaimaArmDummy.rotation.set(0, 0, 0)
-          osakaDaimaArmDummy.scale.setScalar(0.7 + Math.random() * 1.3)
+          osakaDaimaArmDummy.scale.setScalar(0.6 + Math.random() * 1.0)
           osakaDaimaArmDummy.updateMatrix()
           eyeInst.setMatrixAt(i, osakaDaimaArmDummy.matrix)
         }
