@@ -44,6 +44,29 @@ function countryFlag(code: string | null): string {
   return String.fromCodePoint(A + a) + String.fromCodePoint(A + b)
 }
 
+// Phase F: OSAKA の称号・スーツ・実績。各フラグは ThreeWorld.tsx の OSAKA クリア処理が
+// localStorage に "1" で書き込む (device-local)。ここはクライアント側で読み出して表示
+// するだけ (サーバ送信は今回スコープ外)。
+const OSAKA_ACHIEVEMENTS: { key: string; kind: string; name: string; desc: string }[] = [
+  { key: "osaka_oni_clear", kind: "称号", name: "大阪の鬼", desc: "大阪 鬼モードを制覇" },
+  { key: "osaka_true_clear", kind: "実績", name: "真・五変化 撃破", desc: "真・五変化を討つ" },
+  {
+    key: "osaka_tetsurin_champion",
+    kind: "称号",
+    name: "鉄輪の覇者",
+    desc: "鉄輪のまま真ボスを討つ",
+  },
+  { key: "osaka_dash_oni", kind: "実績", name: "疾走の鬼", desc: "鉄輪で規定距離を走破" },
+  {
+    key: "osaka_cataclysm_clear",
+    kind: "称号",
+    name: "終焉を超えし者",
+    desc: "終焉モードを生き抜く",
+  },
+  { key: "osaka_shuen_suit", kind: "スーツ", name: "終焉", desc: "終焉クリアで専用スーツ解放" },
+]
+const OSAKA_BEST_KEY = "osaka_best_score"
+
 export default function ProfilePage() {
   const router = useRouter()
   const { t } = useI18n()
@@ -51,6 +74,9 @@ export default function ProfilePage() {
   const [matches, setMatches] = useState<MatchEntry[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  // Phase F: OSAKA 称号・スーツ・実績 (device-local localStorage フラグ) + ベストスコア。
+  const [earned, setEarned] = useState<Record<string, boolean>>({})
+  const [osakaBest, setOsakaBest] = useState<number | null>(null)
 
   const handleLogout = async () => {
     await logout()
@@ -80,6 +106,21 @@ export default function ProfilePage() {
       }
     }
     load()
+  }, [])
+
+  // Phase F: read the OSAKA achievement flags from localStorage (client-only).
+  useEffect(() => {
+    if (typeof window === "undefined") return
+    try {
+      const e: Record<string, boolean> = {}
+      for (const a of OSAKA_ACHIEVEMENTS) e[a.key] = localStorage.getItem(a.key) === "1"
+      setEarned(e)
+      const best = localStorage.getItem(OSAKA_BEST_KEY)
+      const bn = best ? Number.parseInt(best, 10) : Number.NaN
+      setOsakaBest(Number.isFinite(bn) ? bn : null)
+    } catch {
+      /* private mode / storage disabled — leave achievements empty */
+    }
   }, [])
 
   if (loading) {
@@ -201,6 +242,61 @@ export default function ProfilePage() {
             highlight
           />
         </div>
+
+        {/* Phase F: 称号・スーツ (OSAKA) — 獲得済みは点灯、未獲得はロック/グレーアウト */}
+        <div style={{ fontSize: "0.75rem", color: "#00aa2a", letterSpacing: "0.2em" }}>
+          称号・スーツ / TITLES &amp; SUITS
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: "0.5rem" }}>
+          {OSAKA_ACHIEVEMENTS.map((a) => {
+            const got = earned[a.key] ?? false
+            const accent =
+              a.kind === "スーツ" ? "#c060ff" : a.kind === "実績" ? "#ffb347" : "#ffd700"
+            return (
+              <div
+                key={a.key}
+                style={{
+                  border: `1px solid ${got ? accent : "#003300"}`,
+                  padding: "0.55rem 0.8rem",
+                  background: got ? "rgba(30,20,0,0.5)" : "rgba(0,8,0,0.5)",
+                  opacity: got ? 1 : 0.45,
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: "0.2rem",
+                }}
+              >
+                <span
+                  style={{
+                    color: got ? accent : "#557755",
+                    fontWeight: "bold",
+                    letterSpacing: "0.08em",
+                    fontSize: "0.8rem",
+                    textShadow: got ? `0 0 8px ${accent}` : "none",
+                  }}
+                >
+                  {got ? "★" : "🔒"} {a.kind}「{a.name}」
+                </span>
+                <span
+                  style={{
+                    color: got ? "#cc9900" : "#335533",
+                    fontSize: "0.6rem",
+                    letterSpacing: "0.04em",
+                  }}
+                >
+                  {got ? a.desc : `未獲得 — ${a.desc}`}
+                </span>
+              </div>
+            )
+          })}
+        </div>
+        {osakaBest !== null && (
+          <div style={{ fontSize: "0.65rem", color: "#00aa2a", letterSpacing: "0.1em" }}>
+            大阪編 ベストスコア:{" "}
+            <span style={{ color: "#ffd700", fontWeight: "bold" }}>
+              {osakaBest.toLocaleString()}
+            </span>
+          </div>
+        )}
 
         {weapons.length > 0 && (
           <>
