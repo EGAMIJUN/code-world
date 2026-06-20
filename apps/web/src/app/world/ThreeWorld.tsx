@@ -8832,6 +8832,42 @@ export default function ThreeWorld({
             })
           }
         }
+        // 五変化ボス (perf/gatling fix): handheld fire() has a boss path but the
+        // gatling did not, so 鉄輪 rounds never damaged the boss. Collect the weak-
+        // point cores (×3) and the bulk body (×0.2) separately — a core always wins
+        // over a body hit when colinear — and route through osakaDamage so phase
+        // transitions / clear logic stay identical to the handheld path.
+        const obGat = osakaBossRef.current
+        if (obGat && !obGat.transitioning) {
+          const obCores: THREE.Object3D[] = []
+          const obBody: THREE.Object3D[] = []
+          obGat.group.traverse((c) => {
+            if (c instanceof THREE.Mesh && c.visible) {
+              if (c.userData.osakaCore) obCores.push(c)
+              else if (c.userData.osakaBody) obBody.push(c)
+            }
+          })
+          const prevFar3 = raycaster.far
+          raycaster.far = TETSURIN_GATLING_RANGE
+          const obCoreHit = raycaster.intersectObjects(obCores, false)[0]
+          const obBodyHit = raycaster.intersectObjects(obBody, false)[0]
+          raycaster.far = prevFar3
+          const obHit = obCoreHit ?? obBodyHit
+          if (obHit) {
+            const isCore = obHit === obCoreHit
+            const pt = obHit.point.clone()
+            cands.push({
+              dist: obHit.distance,
+              point: pt,
+              apply: () => {
+                osakaDamage(TETSURIN_GATLING_DAMAGE * (isCore ? OSAKA_CORE_MULT : OSAKA_BODY_MULT))
+                spawnBlood(pt)
+                scoreRef.current += TETSURIN_GATLING_DAMAGE * 8
+                setScore(scoreRef.current)
+              },
+            })
+          }
+        }
         cands.sort((a, b) => a.dist - b.dist)
         const best = cands[0]
         const wallDist = wallHit ? wallHit.distance : Number.POSITIVE_INFINITY
@@ -12618,6 +12654,7 @@ export default function ThreeWorld({
       // Mid-size escort yokai: a re-tinted, scaled "tall" creature on the normal
       // enemy AI, killable on its own (HP 800), flanking the boss.
       function spawnOsakaEscort(x: number, z: number) {
+        if (osakaLiveEnemyCount() >= OSAKA_ENEMY_CAP) return // 上限合算 (perf)
         huntMakeEnemy(
           "terraformer",
           x,
@@ -12641,7 +12678,7 @@ export default function ThreeWorld({
       // the CPU (draw calls stay fine — the cost is JS-side). Hard-cap the number
       // of SIMULTANEOUS live enemies so the field is a "replenish on kill" trickle
       // (dead enemies free up slots as the player clears them).
-      const OSAKA_ENEMY_CAP = isMobileDevice ? 20 : 40
+      const OSAKA_ENEMY_CAP = isMobileDevice ? 20 : 28
       function osakaLiveEnemyCount(): number {
         let c = 0
         for (const e of enemies) if (e.hp > 0) c++
@@ -13880,7 +13917,8 @@ export default function ThreeWorld({
         const ob = osakaBossRef.current
         if (!ob) return
         const live = enemies.filter((e) => e.hp > 0 && e.huntName === OSAKA_CLONE_NAME).length
-        const room = Math.min(4 - live, 4)
+        // 分身上限(4) と全体上限 OSAKA_ENEMY_CAP の両方を尊重 (perf)。
+        const room = Math.min(4 - live, 4, OSAKA_ENEMY_CAP - osakaLiveEnemyCount())
         if (room <= 0) return
         for (let i = 0; i < room; i++) {
           const a = (i / room) * Math.PI * 2 + Math.random()
@@ -14095,6 +14133,7 @@ export default function ThreeWorld({
           [ax + OSAKA_HIDDEN.x, az + OSAKA_HIDDEN.z + 1.2], // 隠し部屋の中
         ]
         for (const [gx, gz] of posts) {
+          if (osakaLiveEnemyCount() >= OSAKA_ENEMY_CAP) break // 上限合算 (perf)
           huntMakeEnemy(
             "terraformer",
             gx,
@@ -15435,8 +15474,9 @@ export default function ThreeWorld({
           p.area = "tsutenkaku"
           osakaEventDotonbori() // 橋の全崩落 +「道頓堀は終わった」(FINAL-I)
           osakaBanner("通天閣へ進め")
-          osakaSpawnAreaZako("tsutenkaku")
+          // 鉄輪部隊を先に出して set-piece を確保 → 残り枠を雑魚で埋める (上限 28)。
           spawnOsakaBikeSquad() // 鉄輪部隊 襲来 (Block B): bike set-piece on the approach
+          osakaSpawnAreaZako("tsutenkaku")
         } else {
           p.area = "castle"
           osakaEventTsutenkaku() // ネオン赤化 + 頂上灯爆発 (FINAL-I)
@@ -15579,6 +15619,8 @@ export default function ThreeWorld({
         const c = osakaAreaCenter("tsutenkaku")
         const count = isMobileDevice ? 3 : 4 // fewer on mobile (draw-call budget)
         for (let i = 0; i < count; i++) {
+          // 上限合算 (perf)。squad は area zako より先に呼ぶので通常は枠が空いている。
+          if (osakaLiveEnemyCount() >= OSAKA_ENEMY_CAP) break
           const ang = (i / count) * Math.PI * 2
           const safe = findSafeSpawnNear(
             c.x + Math.cos(ang) * 42,
@@ -22117,12 +22159,15 @@ export default function ThreeWorld({
             const toPz = fp.z - ez
             const distToPlayer = Math.sqrt(toPx * toPx + toPz * toPz)
 
-            // ── OSAKA perf (Fix 2): throttle + distance-cull the fodder horde ──
-            // Terraformers are exempt so the 鉄輪兵 bike squad still forms / seeks
-            // bikes at long range; everything else freezes when far and updates on
-            // alternate, index-staggered frames (spreads the work across 2 frames).
-            if (osakaPerf && enemy.type !== "terraformer") {
-              if (distToPlayer > OSAKA_AI_CULL_DIST) continue
+            // ── OSAKA perf: throttle + distance-cull the whole horde ──────────
+            // Everything (including the terraformer-type escorts / guards / clones /
+            // 鉄輪兵) updates on alternate, index-staggered frames. Only a terraformer
+            // FAR enough to be seeking a parked bike (> BIKE_PLAYER_FAR) is spared the
+            // distance freeze, so the bike-grab behaviour still works at range; the
+            // 2-frame throttle still applies to it (half-rate seek is fine).
+            if (osakaPerf) {
+              const bikeSeeker = enemy.type === "terraformer" && distToPlayer > BIKE_PLAYER_FAR
+              if (!bikeSeeker && distToPlayer > OSAKA_AI_CULL_DIST) continue
               if (((frameCount + aiIdx) & 1) === 1) continue
             }
 
@@ -23409,7 +23454,12 @@ export default function ThreeWorld({
             // (1 each) + live cores + beacons. Verify ≤40 added vs the budget.
             const daimaDC = countRenderables(osakaDaima?.group)
             let enemyDC = 0
-            for (const e of enemies) if (e.hp > 0) enemyDC += countRenderables(e.mesh)
+            let enemyBodies = 0 // 生存体数 (サブメッシュ数と区別するため併記)
+            for (const e of enemies)
+              if (e.hp > 0) {
+                enemyDC += countRenderables(e.mesh)
+                enemyBodies++
+              }
             // 鉄輪 + 敵バイク draw-call contribution (Block G): verify ≤5 per bike.
             let bikeDC = countRenderables(osakaTetsurin?.group)
             for (const b of osakaEnemyBikes) bikeDC += countRenderables(b.group)
@@ -23419,7 +23469,7 @@ export default function ThreeWorld({
               `  boss     ${bossDC}\n` +
               `  daima    ${daimaDC}\n` +
               `  osakaMap ${mapDC}\n` +
-              `  enemies  ${enemyDC}\n` +
+              `  enemies  ${enemyDC} (${enemyBodies})\n` +
               `  bikes    ${bikeDC}\n` +
               `triangles  ${info.render.triangles.toLocaleString()}\n` +
               `geometries ${info.memory.geometries}\n` +
