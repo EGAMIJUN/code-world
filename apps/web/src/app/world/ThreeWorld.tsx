@@ -10191,6 +10191,11 @@ export default function ThreeWorld({
 
       // ── Wave / mission spawner ─────────────────────────────────────────────
       const enemies: CombatEnemy[] = []
+      // Fully-faded OSAKA mission corpses queued for removal (Phase 1): the death
+      // finalize scene.removes + disposes the mesh immediately (safe mid-loop) and
+      // pushes here; the array splice is drained at the loop prologue next frame so
+      // we never mutate `enemies` while a for…of is iterating it.
+      const osakaReapQueue: CombatEnemy[] = []
       const goalMarkers: GoalMarker[] = []
 
       function clearEnemies() {
@@ -21997,6 +22002,16 @@ export default function ThreeWorld({
               }
             }
           }
+          // Phase 1: drain last frame's reaped OSAKA corpses out of `enemies` now
+          // (outside any for…of over the array). Their meshes were already detached
+          // + disposed in the finalize.
+          if (osakaReapQueue.length > 0) {
+            for (const c of osakaReapQueue) {
+              const ri = refs.enemies.indexOf(c)
+              if (ri >= 0) refs.enemies.splice(ri, 1)
+            }
+            osakaReapQueue.length = 0
+          }
           let elevatorCommits = 0
           for (const e of refs.enemies) if (e.climb) elevatorCommits++
           // OSAKA perf (Fix 2): distance-cull + alternate-frame AI throttle. Only
@@ -22107,6 +22122,26 @@ export default function ThreeWorld({
                   enemy.respawnTimer = enemy.isBot
                     ? (enemy.botRespawnMs ?? 4000) / 1000
                     : ENEMY_NO_RESPAWN
+                  // Phase 1: reap fully-faded OSAKA mission corpses so they stop
+                  // bloating `enemies` + the scene graph (they were invisible but
+                  // walked by every per-frame loop). Bots are kept for respawn. The
+                  // mesh is detached + disposed now; the array splice is deferred.
+                  if (
+                    !enemy.isBot &&
+                    isOsakaStage(huntMissionConfigRef.current.stage) &&
+                    !enemy.isHuntBoss
+                  ) {
+                    refs.scene.remove(enemy.mesh)
+                    enemy.mesh.traverse((child) => {
+                      if (child instanceof THREE.Mesh || child instanceof THREE.InstancedMesh) {
+                        child.geometry.dispose()
+                        const mm = child.material
+                        if (Array.isArray(mm)) for (const m of mm) m.dispose()
+                        else mm.dispose()
+                      }
+                    })
+                    osakaReapQueue.push(enemy)
+                  }
                 }
               } else if (
                 enemy.isBot &&
@@ -23436,16 +23471,22 @@ export default function ThreeWorld({
             // Per-group renderable breakdown (≈1 draw call per visible renderable)
             // so the HUD pinpoints what's costing draw calls. Cheap: only a few
             // small sub-trees are walked, refreshed 1/4 frames.
+            // Phase 1-2: count only ACTUALLY-RENDERED renderables. A plain
+            // traverse() descends into invisible subtrees, so it over-counted the
+            // hidden humanoid rig under each creature-swapped enemy (its top-level
+            // children are visible=false but the deep meshes keep visible=true).
+            // Walk manually and prune any invisible branch (the renderer does the
+            // same), so the HUD figure matches real draw calls.
             const countRenderables = (root: THREE.Object3D | null | undefined): number => {
-              if (!root) return 0
+              if (!root || !root.visible) return 0
               let c = 0
-              root.traverse((o) => {
-                if (
-                  o.visible &&
-                  (o instanceof THREE.Mesh || o instanceof THREE.Points || o instanceof THREE.Line)
-                )
-                  c++
-              })
+              if (
+                root instanceof THREE.Mesh ||
+                root instanceof THREE.Points ||
+                root instanceof THREE.Line
+              )
+                c++
+              for (const child of root.children) c += countRenderables(child)
               return c
             }
             const bossDC = countRenderables(osakaBossRef.current?.group)
