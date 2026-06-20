@@ -96,7 +96,7 @@ const BIKE_RESPAWN_MS = 20000 // a taken / destroyed bike refills its slot after
 // destroyed — it just parks where the player dismounts. Reuses the bullet system.
 const TETSURIN_SPEED_MULT = 2.5 // multiplies the bike accel + top speed
 const TETSURIN_GATLING_INTERVAL = 100 // ms between gatling rounds (10/s)
-const TETSURIN_GATLING_DAMAGE = 24 // per round
+const TETSURIN_GATLING_DAMAGE = 60 // per round (2.5x — clearly stronger than the pistol's 20)
 const TETSURIN_GATLING_RANGE = 95 // hitscan reach (m)
 const TETSURIN_GATLING_ASSIST = 1.7 // ground aim-assist sphere radius (m)
 const TETSURIN_WHEEL_SPIN = 1.6 // wheel spin rad per m travelled
@@ -2442,6 +2442,13 @@ export default function ThreeWorld({
   const killsRef = useRef(0)
   const deathsRef = useRef(0)
   const muzzleFlashTimerRef = useRef(0)
+  // Phase A — 鉄輪 gatling hit feedback. hitMarkerElRef points at the crosshair
+  // hit-marker DOM node; its opacity/scale are driven each frame in animate (no
+  // re-render). The *Time refs are expiry/throttle stamps (ms) for the marker
+  // and the hit-confirm tone.
+  const hitMarkerElRef = useRef<HTMLDivElement | null>(null)
+  const hitMarkerTimeRef = useRef(0)
+  const tetsurinHitSfxRef = useRef(0)
   const mouseDownRef = useRef(false)
   const lastFireTimeRef = useRef(0)
   // Explosive barrels live for the lifetime of the current map (disposed on
@@ -8877,6 +8884,15 @@ export default function ThreeWorld({
         if (best && best.dist < wallDist) {
           best.apply()
           impact = best.point.clone()
+          // Phase A: confirm the hit so the gatling feels like it connects — a
+          // throttled hit tone (≤1 per 110ms; the gun rattle covers the rest)
+          // plus a brief crosshair hit marker (driven in the animate loop).
+          const nowHit = Date.now()
+          if (nowHit >= tetsurinHitSfxRef.current) {
+            SOUNDS.hit()
+            tetsurinHitSfxRef.current = nowHit + 110
+          }
+          hitMarkerTimeRef.current = nowHit + 140
         } else if (wallHit) {
           impact = wallHit.point.clone()
         }
@@ -21780,6 +21796,20 @@ export default function ThreeWorld({
           refs.muzzleLight.intensity = 0
         }
 
+        // Phase A: drive the 鉄輪 gatling hit marker — opacity/scale only, set
+        // straight on the DOM node so a 10/s weapon never triggers a re-render.
+        const gatHm = hitMarkerElRef.current
+        if (gatHm) {
+          const gatHmRem = hitMarkerTimeRef.current - Date.now()
+          if (gatHmRem > 0) {
+            const gatHmK = gatHmRem / 140 // 1 → 0 across the marker's life
+            gatHm.style.opacity = String(Math.min(1, gatHmK * 1.3))
+            gatHm.style.transform = `translate(-50%, -50%) scale(${1 + gatHmK * 0.3})`
+          } else if (gatHm.style.opacity !== "0") {
+            gatHm.style.opacity = "0"
+          }
+        }
+
         // Continuous fire
         if (mouseDownRef.current && gamePhaseRef.current === "playing") fire()
 
@@ -26083,6 +26113,38 @@ export default function ThreeWorld({
               strokeWidth="1.5"
             />
           </svg>
+        )}
+
+        {/* Phase A: 鉄輪 gatling hit marker — opacity/scale driven in animate() */}
+        {!isLoading && !error && gamePhase === "playing" && (
+          <div
+            ref={hitMarkerElRef}
+            aria-hidden="true"
+            style={{
+              position: "absolute",
+              top: "50%",
+              left: "50%",
+              transform: "translate(-50%, -50%)",
+              opacity: 0,
+              pointerEvents: "none",
+              zIndex: 31,
+              willChange: "opacity, transform",
+            }}
+          >
+            <svg width="30" height="30" viewBox="0 0 30 30" aria-hidden="true">
+              <g
+                stroke="#ffffff"
+                strokeWidth="2.4"
+                strokeLinecap="round"
+                style={{ filter: "drop-shadow(0 0 2px rgba(0,0,0,0.9))" }}
+              >
+                <line x1="5" y1="5" x2="11" y2="11" />
+                <line x1="25" y1="5" x2="19" y2="11" />
+                <line x1="5" y1="25" x2="11" y2="19" />
+                <line x1="25" y1="25" x2="19" y2="19" />
+              </g>
+            </svg>
+          </div>
         )}
 
         {/* ── Mobile top HUD: HP · SCORE · AMMO ────────────────────────── */}
