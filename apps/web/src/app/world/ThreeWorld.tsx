@@ -14572,9 +14572,16 @@ export default function ThreeWorld({
           arm.translate(s * 4.6, 31, 0.4)
           boneGeos.push(arm)
         }
-        const bodyMerged = mergeGeometries(boneGeos, false) ?? torso
-        for (const g of boneGeos) g.dispose()
-        const head = new THREE.Mesh(bodyMerged, boneMat)
+        // CodeRabbit (#108): when the merge succeeds the source geos are dead and
+        // disposed; when it returns null we fall back to `torso`, which must NOT be
+        // disposed (it stays live as the mesh geometry).
+        const bodyMerged = mergeGeometries(boneGeos, false)
+        if (bodyMerged) {
+          for (const g of boneGeos) g.dispose()
+        } else {
+          for (const g of boneGeos) if (g !== torso) g.dispose()
+        }
+        const head = new THREE.Mesh(bodyMerged ?? torso, boneMat)
         head.userData.daimaBody = true
         head.frustumCulled = false
         group.add(head)
