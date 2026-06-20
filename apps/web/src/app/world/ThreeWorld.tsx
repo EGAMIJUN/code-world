@@ -2632,6 +2632,8 @@ export default function ThreeWorld({
     pct: number
     phase: OsakaBossPhase
   } | null>(null)
+  // Phase C: 中ボス (天狗/山谷) 専用 HP ゲージ。null = 中ボス 非戦闘中。
+  const [osakaMidHud, setOsakaMidHud] = useState<{ name: string; pct: number } | null>(null)
 
   // ── HUNT equipment (PR-Z2) ──────────────────────────────────────────────────
   // Equipment menu (opened at the rack in the room).
@@ -14472,6 +14474,9 @@ export default function ThreeWorld({
       let osakaHudFrame = 0
       let osakaHudLastPct = -1
       let osakaHudLastPhase = 0
+      // Phase C: throttle state for the 中ボス HP gauge (push every 5 frames on change).
+      let osakaMidHudFrame = 0
+      let osakaMidHudLastPct = -1
       // 撃破大爆発: 炎の環 + 白フラッシュ + ヒットストップ + 大シェイク。
       function osakaDefeatBlast(center: THREE.Vector3) {
         const n = isMobileDevice ? 7 : 14
@@ -15525,6 +15530,10 @@ export default function ThreeWorld({
         if (!mb) return
         disposeOsakaGroup(mb.group)
         osakaMidBossRef.current = null
+        // Phase C: fold the mid-boss HP gauge + reset its throttle so the next
+        // mid-boss re-pushes from full HP. Covers both defeat and map teardown.
+        setOsakaMidHud(null)
+        osakaMidHudLastPct = -1
       }
       // Mid-boss killed → blast, dispose, advance to the next area + its wave.
       function defeatOsakaMidBoss() {
@@ -15571,6 +15580,15 @@ export default function ThreeWorld({
         if (mb.hp <= 0) {
           defeatOsakaMidBoss()
           return
+        }
+        // Phase C: push the mid-boss HP gauge — every 5 frames, only on change.
+        osakaMidHudFrame++
+        if (osakaMidHudFrame % 5 === 0) {
+          const mhPct = Math.max(0, mb.hp / mb.maxHp)
+          if (Math.abs(mhPct - osakaMidHudLastPct) > 0.004) {
+            osakaMidHudLastPct = mhPct
+            setOsakaMidHud({ name: mb.kind === "tengu" ? "天狗" : "山谷", pct: mhPct })
+          }
         }
         const now = Date.now()
         const safeToHit = now > spawnInvulnUntilRef.current
@@ -24794,6 +24812,60 @@ export default function ThreeWorld({
             )}
 
             {/* ── OSAKA ボス専用HPバー (FINAL-F): 画面上部・形態ごとに色変化 ── */}
+            {/* ── Phase C: 中ボス (天狗/山谷) 専用 HP ゲージ ── */}
+            {osakaMidHud && gamePhase === "playing" && (
+              <div
+                style={{
+                  position: "absolute",
+                  top: "3.2rem",
+                  left: "50%",
+                  transform: "translateX(-50%)",
+                  width: "min(60vw, 560px)",
+                  zIndex: 28,
+                  pointerEvents: "none",
+                  fontFamily: "monospace",
+                }}
+              >
+                <div
+                  style={{ display: "flex", justifyContent: "space-between", marginBottom: "3px" }}
+                >
+                  <span
+                    style={{
+                      color: "#ffb347",
+                      fontSize: "0.85rem",
+                      fontWeight: "bold",
+                      letterSpacing: "0.2em",
+                      textShadow: "0 0 8px rgba(255,140,40,0.7)",
+                      fontFamily: "'Hiragino Mincho ProN','Yu Mincho',serif",
+                    }}
+                  >
+                    中ボス · {osakaMidHud.name}
+                  </span>
+                  <span style={{ color: "#ffe0b0", fontSize: "0.7rem" }}>
+                    {Math.ceil(osakaMidHud.pct * 100)}%
+                  </span>
+                </div>
+                <div
+                  style={{
+                    height: "12px",
+                    background: "rgba(0,0,0,0.75)",
+                    border: "1px solid #ffb347",
+                    boxShadow: "0 0 12px rgba(0,0,0,0.6)",
+                    overflow: "hidden",
+                  }}
+                >
+                  <div
+                    style={{
+                      height: "100%",
+                      width: `${osakaMidHud.pct * 100}%`,
+                      background: "linear-gradient(90deg, #3a1a00, #ff8c1a)",
+                      transition: "width 0.18s",
+                    }}
+                  />
+                </div>
+              </div>
+            )}
+
             {osakaBossHud && gamePhase === "playing" && (
               <div
                 style={{
