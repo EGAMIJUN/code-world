@@ -14504,49 +14504,144 @@ export default function ThreeWorld({
       // small meshes (+ beacons). All geometry is original.
       function buildDaima(): Daima {
         const arena = new THREE.Vector3(HUNT_ARENA.x, 0, HUNT_ARENA.z)
-        const armN = isMobileDevice ? 50 : 100
-        const eyeN = isMobileDevice ? 40 : 80
+        const armN = isMobileDevice ? 24 : 40 // 背中の放射状の棘の本数 (visual redesign)
         const group = new THREE.Group()
         group.position.copy(arena)
-        // ── Central flesh mass (≈60m tall): tapering trunk + bulbous head, merged
-        // to one mesh. Tagged daimaBody — decorative, not a weak point.
-        const bodyMat = new THREE.MeshLambertMaterial({
-          color: 0x3a0a12,
-          emissive: 0x2a0408,
-          emissiveIntensity: 0.6,
+        // ── Skeletal humanoid (≈60m, gaunt: width ≈ 1/5 of height). Original
+        // silhouette built from primitives. The bone-coloured parts (head + crown +
+        // torso + pelvis + arms + claws + legs) bake into ONE merged mesh; the front
+        // ribcage plates merge into a second, darker mesh. Both tagged daimaBody.
+        const boneMat = new THREE.MeshLambertMaterial({
+          color: 0x9a9070,
+          emissive: 0x1a1610,
+          emissiveIntensity: 0.25,
         })
-        const trunkGeo = new THREE.CylinderGeometry(5.5, 9, 38, 10)
-        trunkGeo.translate(0, 25, 0)
-        const headGeo = new THREE.SphereGeometry(9, 14, 12)
-        headGeo.translate(0, 46, 0)
-        const bodyMerged = mergeGeometries([trunkGeo, headGeo], false) ?? trunkGeo
-        trunkGeo.dispose()
-        headGeo.dispose()
-        const head = new THREE.Mesh(bodyMerged, bodyMat)
+        const boneGeos: THREE.BufferGeometry[] = []
+        // Head — ovoid skull with a radiating crown of 8 jaw-bone horns.
+        const skull = new THREE.SphereGeometry(4.4, 14, 12)
+        skull.scale(1, 1.12, 1.05)
+        skull.translate(0, 50, 0)
+        boneGeos.push(skull)
+        for (let i = 0; i < 8; i++) {
+          const a = (i / 8) * Math.PI * 2
+          const horn = new THREE.ConeGeometry(0.55, 5.2, 5)
+          horn.translate(0, 2.6, 0)
+          horn.rotateZ(Math.cos(a) * 0.6)
+          horn.rotateX(-Math.sin(a) * 0.6)
+          horn.translate(Math.cos(a) * 2.1, 53.5, Math.sin(a) * 2.1)
+          boneGeos.push(horn)
+        }
+        const neck = new THREE.CylinderGeometry(1.3, 1.7, 4, 6)
+        neck.translate(0, 45.5, 0)
+        boneGeos.push(neck)
+        // Torso — tall thin ovoid (scaleY large for the gaunt look).
+        const torso = new THREE.SphereGeometry(1, 12, 14)
+        torso.scale(5, 13, 3.1)
+        torso.translate(0, 32, 0)
+        boneGeos.push(torso)
+        const pelvis = new THREE.SphereGeometry(1, 10, 8)
+        pelvis.scale(4.2, 3, 3)
+        pelvis.translate(0, 21, 0)
+        boneGeos.push(pelvis)
+        // Arms — two-segment (elbow bend) with three pointed claws at each hand.
+        for (const s of [-1, 1]) {
+          const upper = new THREE.CylinderGeometry(0.95, 0.7, 13, 6)
+          upper.rotateZ(s * 0.5)
+          upper.translate(s * 7, 36, 1)
+          boneGeos.push(upper)
+          const fore = new THREE.CylinderGeometry(0.7, 0.45, 13, 6)
+          fore.rotateZ(s * 0.12)
+          fore.rotateX(-0.7)
+          fore.translate(s * 9.2, 26, 5)
+          boneGeos.push(fore)
+          for (let c = -1; c <= 1; c++) {
+            const claw = new THREE.ConeGeometry(0.26, 2.6, 4)
+            claw.rotateX(-1.45)
+            claw.translate(s * 9.2 + c * 0.7, 20.4, 9)
+            boneGeos.push(claw)
+          }
+        }
+        // Legs — reverse-jointed (bird-leg): thigh forward, shin kicked back, talon.
+        for (const s of [-1, 1]) {
+          const thigh = new THREE.CylinderGeometry(1.3, 1.0, 12, 6)
+          thigh.rotateX(0.38)
+          thigh.translate(s * 2.2, 15, 1.6)
+          boneGeos.push(thigh)
+          const shin = new THREE.CylinderGeometry(1.0, 0.55, 13, 6)
+          shin.rotateX(-0.55)
+          shin.translate(s * 2.6, 5, -1.2)
+          boneGeos.push(shin)
+          const talon = new THREE.ConeGeometry(0.5, 3, 4)
+          talon.rotateX(1.5)
+          talon.translate(s * 2.6, 0.4, 2.2)
+          boneGeos.push(talon)
+        }
+        const bodyMerged = mergeGeometries(boneGeos, false) ?? torso
+        for (const g of boneGeos) g.dispose()
+        const head = new THREE.Mesh(bodyMerged, boneMat)
         head.userData.daimaBody = true
         head.frustumCulled = false
         group.add(head)
-        // ── Tentacles → ONE InstancedMesh. Big radial cylinders updateDaima sways.
-        const armGeo = new THREE.CylinderGeometry(0.4, 0.9, 14, 5)
-        armGeo.translate(0, 7, 0)
+        // Ribcage — thin horizontal plates down the torso front + a sternum ridge.
+        const ribMat = new THREE.MeshLambertMaterial({
+          color: 0x7a7060,
+          emissive: 0x141008,
+          emissiveIntensity: 0.2,
+        })
+        const ribGeos: THREE.BufferGeometry[] = []
+        for (let i = 0; i < 6; i++) {
+          const rib = new THREE.BoxGeometry(7 - i * 0.55, 0.7, 1.1)
+          rib.translate(0, 39 - i * 3, 2.7)
+          ribGeos.push(rib)
+        }
+        const sternum = new THREE.BoxGeometry(0.9, 17, 1)
+        sternum.translate(0, 31, 3)
+        ribGeos.push(sternum)
+        const ribMerged = mergeGeometries(ribGeos, false) ?? new THREE.BoxGeometry(7, 0.7, 1.1)
+        for (const g of ribGeos) g.dispose()
+        const ribMesh = new THREE.Mesh(ribMerged, ribMat)
+        ribMesh.userData.daimaBody = true
+        ribMesh.frustumCulled = false
+        group.add(ribMesh)
+        // ── Back spikes → ONE InstancedMesh (the showpiece). Long sharp cones fanning
+        // radially from the upper-back centre. Fixed 24m length baked into the geometry
+        // (updateDaima re-bakes only position+rotation, so per-instance scale wouldn't
+        // survive); a vertex-colour gradient gives brown root → bright bone tip.
+        const armGeo = new THREE.ConeGeometry(1.6, 24, 5)
+        armGeo.translate(0, 12, 0) // base at origin, sharp tip out at +24
+        const sp = armGeo.attributes.position
+        if (sp) {
+          const spCol = new Float32Array(sp.count * 3)
+          const cRoot = new THREE.Color(0x8a7050)
+          const cTip = new THREE.Color(0xc0b080)
+          const cTmp = new THREE.Color()
+          for (let i = 0; i < sp.count; i++) {
+            const f = Math.min(1, Math.max(0, sp.getY(i) / 24))
+            cTmp.copy(cRoot).lerp(cTip, f)
+            spCol[i * 3] = cTmp.r
+            spCol[i * 3 + 1] = cTmp.g
+            spCol[i * 3 + 2] = cTmp.b
+          }
+          armGeo.setAttribute("color", new THREE.BufferAttribute(spCol, 3))
+        }
         const armMat = new THREE.MeshLambertMaterial({
-          color: 0x1a0610,
-          emissive: 0x12030a,
-          emissiveIntensity: 0.4,
+          vertexColors: true,
+          emissive: 0x3a2010,
+          emissiveIntensity: 0.5,
         })
         const armInst = new THREE.InstancedMesh(armGeo, armMat, armN)
         armInst.userData.daimaBody = true
         armInst.frustumCulled = false
         const armData: { ang: number; y: number; r: number; tilt: number; phase: number }[] = []
         for (let i = 0; i < armN; i++) {
-          const a = (i / armN) * Math.PI * 2 + Math.random() * 0.4
-          const y = 6 + Math.random() * 34
-          const r = 6 + Math.random() * 4
+          const a = Math.PI + (Math.random() - 0.5) * Math.PI * 1.15 // back-centred fan
+          const y = 30 + Math.random() * 16
+          const r = 2.4 + Math.random() * 1.8
           const ad = {
             ang: a,
             y,
             r,
-            tilt: 0.8 + Math.random() * 0.7,
+            tilt: 1.0 + Math.random() * 0.9,
             phase: Math.random() * Math.PI * 2,
           }
           armData.push(ad)
@@ -14557,28 +14652,20 @@ export default function ThreeWorld({
         }
         armInst.instanceMatrix.needsUpdate = true
         group.add(armInst)
-        // ── Eyes → ONE InstancedMesh of emissive spheres (shared material pulse).
-        const eyeGeo = new THREE.SphereGeometry(0.5, 6, 6)
+        // ── Eyes → two individual emissive spheres on the skull front (shared
+        // material so updateDaima can keep pulsing them via d.eyeMat).
         const eyeMat = new THREE.MeshLambertMaterial({
-          color: 0xff2a00,
-          emissive: 0xff1400,
+          color: 0xff2200,
+          emissive: 0xff2200,
           emissiveIntensity: 1.8,
         })
-        const eyeInst = new THREE.InstancedMesh(eyeGeo, eyeMat, eyeN)
-        eyeInst.frustumCulled = false
-        for (let i = 0; i < eyeN; i++) {
-          const a = Math.random() * Math.PI * 2
-          const y = 10 + Math.random() * 38
-          const r = 5.5 + Math.random() * 4.5
-          osakaDaimaArmDummy.position.set(Math.cos(a) * r, y, Math.sin(a) * r)
-          osakaDaimaArmDummy.rotation.set(0, 0, 0)
-          osakaDaimaArmDummy.scale.setScalar(0.7 + Math.random() * 1.3)
-          osakaDaimaArmDummy.updateMatrix()
-          eyeInst.setMatrixAt(i, osakaDaimaArmDummy.matrix)
+        const eyeGeo = new THREE.SphereGeometry(0.9, 10, 8)
+        for (const ex of [-1.9, 1.9]) {
+          const eye = new THREE.Mesh(eyeGeo, eyeMat)
+          eye.position.set(ex, 50.5, -4.1)
+          eye.frustumCulled = false
+          group.add(eye)
         }
-        osakaDaimaArmDummy.scale.setScalar(1)
-        eyeInst.instanceMatrix.needsUpdate = true
-        group.add(eyeInst)
         // ── 7 weak-point cores spread across the field. Each: a glowing orb (×3
         // damage, daimaCore tag = its index) + a tall thin beacon spotted from afar
         // + (PC only) a point light. The player drives the 鉄輪 between them.
