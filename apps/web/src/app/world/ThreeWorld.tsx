@@ -19381,24 +19381,58 @@ export default function ThreeWorld({
         const CG_WALL_H = 9 // shopfront-base height (Phase B stacks taller buildings behind)
         const cgLen = CG_X0 - CG_X1 // 122 units of straight street
         const cgMidX = (CG_X0 + CG_X1) / 2
-        // Anything inside this band is the lane — generic facade/zatkyo loops skip it so
-        // nothing spawns in the walkable corridor (consumed by sbBlocked + the ring).
-        const inCentergaiZone = (x: number, z: number) =>
-          x > CG_X1 - 6 && x < CG_X0 + 8 && z > CG_Z - 16 && z < CG_Z + 16
+        // Phase C alleys branch off the lane (side −1 = north, +1 = south). Each is a
+        // dead-end yokocho: a gap is left in the lane wall at its mouth, and it runs
+        // `len` units out from the lane on the flat core (all ends r<FLAT_R ⇒ y=0).
+        const cgAlleys = [
+          { x: -48, w: 6, side: -1, len: 26 },
+          { x: -78, w: 6, side: 1, len: 22 },
+          { x: -106, w: 5, side: -1, len: 22 },
+        ] as const
+        // Anything inside the lane band OR an alley footprint is walkable street — the
+        // generic facade/zatkyo loops skip it so nothing spawns in the walkable area.
+        const inCentergaiZone = (x: number, z: number) => {
+          if (x > CG_X1 - 6 && x < CG_X0 + 8 && z > CG_Z - 16 && z < CG_Z + 16) return true
+          for (const a of cgAlleys) {
+            const z0 = CG_Z + a.side * CG_HW
+            const z1 = z0 + a.side * (a.len + 4)
+            if (
+              x > a.x - a.w / 2 - 4 &&
+              x < a.x + a.w / 2 + 4 &&
+              z > Math.min(z0, z1) - 2 &&
+              z < Math.max(z0, z1) + 2
+            )
+              return true
+          }
+          return false
+        }
         // Lane pavement (rides the flat core; brighter than the asphalt deck).
         const cgRoad = new THREE.Mesh(new THREE.PlaneGeometry(cgLen, CG_HW * 2), roadMat)
         cgRoad.rotation.x = -Math.PI / 2
         cgRoad.position.set(cgMidX, 0.02, CG_Z)
         mAdd(cgRoad)
-        // Two continuous side walls (inner faces exactly at z = CG_Z ∓ CG_HW). Thickness
-        // 2, so the box centre sits one unit outside the walkable face → AABB half-depth
-        // 1 matches the mesh. They tuck into the west-wall gap ends, sealing the tube.
-        const cgWallGeo = new THREE.BoxGeometry(cgLen, CG_WALL_H, 2)
-        for (const zc of [CG_Z - CG_HW - 1, CG_Z + CG_HW + 1] as const) {
-          const w = new THREE.Mesh(cgWallGeo, concreteMat)
-          w.position.set(cgMidX, CG_WALL_H / 2, zc)
-          mAdd(w)
-          addShibuyaAABB(cgMidX, zc, cgLen / 2, 1, CG_WALL_H)
+        // Two side walls (inner faces exactly at z = CG_Z ∓ CG_HW; thickness 2 ⇒ AABB
+        // half-depth 1 matches the mesh), SEGMENTED to leave a gap at each alley mouth.
+        // They tuck into the west-wall gap ends, sealing the lane into a tube.
+        for (const side of [-1, 1] as const) {
+          const zc = CG_Z + side * (CG_HW + 1)
+          const cgWallSeg = (x0: number, x1: number) => {
+            if (x1 - x0 < 0.5) return
+            const w = new THREE.Mesh(new THREE.BoxGeometry(x1 - x0, CG_WALL_H, 2), concreteMat)
+            w.position.set((x0 + x1) / 2, CG_WALL_H / 2, zc)
+            mAdd(w)
+            addShibuyaAABB((x0 + x1) / 2, zc, (x1 - x0) / 2, 1, CG_WALL_H)
+          }
+          const mouths = cgAlleys
+            .filter((a) => a.side === side)
+            .map((a) => [a.x - a.w / 2, a.x + a.w / 2] as const)
+            .sort((p, q) => q[1] - p[1]) // east → west
+          let segE = CG_X0
+          for (const [m0, m1] of mouths) {
+            cgWallSeg(m1, segE) // wall segment east of this mouth
+            segE = m0
+          }
+          cgWallSeg(CG_X1, segE) // final westmost segment
         }
         // West dead-end cap (Phase D dresses it as a 工事中 barricade / shutter).
         const cgCap = new THREE.Mesh(
@@ -20274,6 +20308,57 @@ export default function ThreeWorld({
         instAdd(cgLampHeadGeo, cgLampHeadMat, cgLampHeadXf)
         instAdd(cgBikeFrameGeo, cgBikeMat, cgBikeFrameXf)
         instAdd(cgBikeWheelGeo, cgBikeMat, cgBikeWheelXf)
+        // ══ センター街 Phase C: 枝分かれの路地 (薄暗い横丁・行き止まり) ══════════════
+        // Each alley branches off the lane through the gap left in its wall, runs out to
+        // a dead-end cap, and is packed tighter + darker than the main street: small
+        // izakaya/bar boxes behind its walls, sparse signs on the walls, 提灯 strung
+        // overhead, noren over the doors, one warm spill light. The side walls + cap are
+        // the SINGLE collision source (AABBs match the thin meshes); shops sit behind
+        // them (no alley-side hitbox). Reuses the nonbei lantern/noren geo + materials.
+        const alLanternXf: Xf[] = []
+        const alNorenXf: Xf[] = []
+        for (const al of cgAlleys) {
+          const aw = al.w
+          const zMouth = CG_Z + al.side * CG_HW // lane-side end (-27 north / -17 south)
+          const zEnd = zMouth + al.side * al.len // dead-end
+          const zMid = (zMouth + zEnd) / 2
+          const fl = new THREE.Mesh(new THREE.PlaneGeometry(aw, al.len), roadMat)
+          fl.rotation.x = -Math.PI / 2
+          fl.position.set(al.x, 0.02, zMid)
+          mAdd(fl)
+          for (const xs of [-1, 1] as const) {
+            const xc = al.x + xs * (aw / 2 + 1) // wall centre (inner face at al.x ∓ aw/2)
+            const w = new THREE.Mesh(new THREE.BoxGeometry(2, CG_WALL_H, al.len), concreteMat)
+            w.position.set(xc, CG_WALL_H / 2, zMid)
+            mAdd(w)
+            addShibuyaAABB(xc, zMid, 1, al.len / 2, CG_WALL_H)
+            cladWall(al.x + xs * (aw / 2), zMid, -xs, 0, al.len * 0.9, CG_WALL_H, 2.0, 0.45)
+          }
+          const cap = new THREE.Mesh(new THREE.BoxGeometry(aw + 4, CG_WALL_H, 2), concreteMat)
+          cap.position.set(al.x, CG_WALL_H / 2, zEnd + al.side)
+          mAdd(cap)
+          addShibuyaAABB(al.x, zEnd + al.side, aw / 2 + 2, 1, CG_WALL_H)
+          for (let t = 3; t < al.len - 1; t += 4) {
+            const z = zMouth + al.side * t
+            for (const xs of [-1, 1] as const) {
+              const sh = 5 + rnd() * 4
+              const shop = new THREE.Mesh(new THREE.BoxGeometry(3.4, sh, 3), izaMat)
+              shop.position.set(al.x + xs * (aw / 2 + 2.5), sh / 2, z)
+              mAdd(shop) // behind the wall → no AABB
+              alNorenXf.push({
+                pos: [al.x + xs * (aw / 2 - 0.1), 1.5, z],
+                rotY: xs > 0 ? -Math.PI / 2 : Math.PI / 2,
+              })
+            }
+            alLanternXf.push({ pos: [al.x, 3.0, z], scl: 0.8 + rnd() * 0.4 })
+          }
+          const spill = new THREE.PointLight(0xffb066, 0.7, 26, 2)
+          spill.position.set(al.x, 5, zMouth + al.side * (al.len * 0.4))
+          spill.castShadow = false
+          add(spill)
+        }
+        instAdd(lanternGeo, lanternMat, alLanternXf)
+        instAdd(norenGeo, norenMat, alNorenXf)
         // Build all the sign InstancedMeshes (one draw call per sign texture).
         flatSpec.forEach((_s, i) => {
           const m = flatMats[i]
