@@ -14553,6 +14553,10 @@ export default function ThreeWorld({
         meteorTimer: number
         beamTimer: number
         slamTimer: number
+        radialTimer: number // Phase A: 放射光線 (rotating multi-beam sweep)
+        riftTimer: number // Phase A: 触手地裂 (chasing ground rift)
+        roarTimer: number // Phase A: 降臨咆哮 (fullscreen shockwave)
+        radialAngle: number // Phase A: 放射光線 の回転基準角
         frame: number
         finalPhase: boolean
         defeated: boolean
@@ -14745,6 +14749,10 @@ export default function ThreeWorld({
           meteorTimer: 6,
           beamTimer: 9,
           slamTimer: 5,
+          radialTimer: 7, // Phase A — staggered so the new attacks don't all open together
+          riftTimer: 11,
+          roarTimer: 14,
+          radialAngle: 0,
           frame: 0,
           finalPhase: false,
           defeated: false,
@@ -14997,6 +15005,77 @@ export default function ThreeWorld({
             co.beamAt = now + 2600 + Math.random() * 1500
             osakaTelegraph(px, pz, 4, 900, 26, 0xffaa00)
           }
+        }
+        // ── Phase A 放射光線: 本体から複数方向へ同時に薙ぐビーム (毎回少し回転)。spoke 状
+        // に telegraph を並べるだけ (既存リング流用)。混雑時 (tele が多い) はスキップして
+        // draw call スパイクを抑える。予兆 1.4s で理不尽回避。
+        d.radialTimer -= dt
+        if (d.radialTimer <= 0) {
+          d.radialTimer = (d.finalPhase ? 5.5 : 8.5) * (0.85 + Math.random() * 0.4)
+          if (osakaFx.tele.length < 38) {
+            const spokes = d.finalPhase ? 8 : 6
+            d.radialAngle += 0.6 // 毎回少し回す → 薙ぎ払う印象
+            const ox = d.group.position.x
+            const oz = d.group.position.z
+            for (let s = 0; s < spokes; s++) {
+              const a = d.radialAngle + (s / spokes) * Math.PI * 2
+              const dx = Math.cos(a)
+              const dz = Math.sin(a)
+              for (let r = 1; r <= 3; r++) {
+                osakaTelegraph(ox + dx * r * 13, oz + dz * r * 13, 6.5, 1400, 38, 0xff3344)
+              }
+            }
+            SOUNDS.collapse()
+          }
+        }
+        // ── Phase A 触手地裂: プレイヤーを貫く直線上に telegraph を時間差で走らせ「地割れが
+        // 追ってくる」。横へ回避させる。節ごとに +0.13s ずらして進行感を出す。
+        d.riftTimer -= dt
+        if (d.riftTimer <= 0) {
+          d.riftTimer = (d.finalPhase ? 4.5 : 7.0) * (0.85 + Math.random() * 0.4)
+          if (osakaFx.tele.length < 38) {
+            const rifts = d.finalPhase ? 2 : 1
+            for (let k = 0; k < rifts; k++) {
+              const a =
+                Math.atan2(pz - d.group.position.z, px - d.group.position.x) +
+                (k === 0 ? 0 : (Math.random() - 0.5) * 1.6)
+              const dx = Math.cos(a)
+              const dz = Math.sin(a)
+              const sx = px - dx * 8 // プレイヤーの少し手前 (本体側) から走り出す
+              const sz = pz - dz * 8
+              for (let i = 0; i < 8; i++) {
+                osakaTelegraph(
+                  sx + dx * i * 4.5,
+                  sz + dz * i * 4.5,
+                  3.5,
+                  600 + i * 130,
+                  30,
+                  0x9933ff,
+                )
+              }
+            }
+            SOUNDS.huntWarn()
+          }
+        }
+        // ── Phase A 降臨咆哮: 一定間隔で全画面ショックウェーブ。咆哮 + 軽い予兆 → 1.9s 後に
+        // 本体中心の広域 telegraph 着弾 + カメラシェイク強 + 画面フラッシュ (#110 daima フラッ
+        // シュ流用)。本体から離れれば回避可。telegraph は 1 枚だけなので draw call 負荷は無視可。
+        d.roarTimer -= dt
+        if (d.roarTimer <= 0) {
+          d.roarTimer = (d.finalPhase ? 9 : 13) * (0.9 + Math.random() * 0.3)
+          SOUNDS.bossRoar()
+          cameraShakeRef.current.intensity = Math.max(cameraShakeRef.current.intensity, 4)
+          const ox = d.group.position.x
+          const oz = d.group.position.z
+          osakaTelegraph(ox, oz, 42, 1900, 44, 0xff2200)
+          window.setTimeout(() => {
+            if (osakaDaima !== d) return
+            cameraShakeRef.current.intensity = Math.max(cameraShakeRef.current.intensity, 12)
+            setDaimaFlash(true)
+            window.setTimeout(() => {
+              if (osakaDaima === d) setDaimaFlash(false)
+            }, 500)
+          }, 1900)
         }
         if ((d.frame & 7) === 0) {
           setBossHpPct(Math.round((d.hp / d.maxHp) * 100))
