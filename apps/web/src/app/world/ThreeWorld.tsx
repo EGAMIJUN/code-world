@@ -19695,6 +19695,426 @@ export default function ThreeWorld({
         sealLight.castShadow = false
         add(sealLight)
 
+        // ══ Phase B (scramble-detail): 看板の洪水 + ビルのシルエット多様化 ═══════════
+        // 渋谷感の9割。交差点を囲むビル壁を看板で埋め尽くし、袖看板を林立させ、多様な
+        // シルエットのファサードで交差点を360度囲んで圧迫感を出す。実在名は不可 —— 構造
+        // と密度だけ真似て中身は全てオリジナル名。draw call 抑制: フラット看板も袖看板も
+        // 「テクスチャ種ごとに1 InstancedMesh」(種類は限定・枚数は大量)、ファサード躯体は
+        // 共有マテリアルで mAdd→flushMerges 統合 (既存 midMat / concreteMat バケツに相乗り)。
+        type SignKind = "board" | "box" | "tall"
+        type SignSpec = {
+          kind: SignKind
+          w: number // world width  (also drives canvas aspect)
+          h: number // world height (tall: this is the projecting blade height)
+          bg: string
+          t1: string
+          c1: string
+          t2?: string
+          c2?: string
+          bar?: string // accent bar across the top (board/box)
+        }
+        // One generic sign renderer (keeps 18 textures compact + consistent).
+        const drawSign = (c: CanvasRenderingContext2D, cw: number, ch: number, s: SignSpec) => {
+          c.fillStyle = s.bg
+          c.fillRect(0, 0, cw, ch)
+          c.strokeStyle = "rgba(255,255,255,0.22)"
+          c.lineWidth = Math.max(2, cw * 0.02)
+          c.strokeRect(2, 2, cw - 4, ch - 4)
+          c.textAlign = "center"
+          c.textBaseline = "middle"
+          if (s.kind === "tall") {
+            // vertical stacked-character blade (袖看板)
+            const chars = [...s.t1]
+            const slot = ch / (chars.length + 0.5)
+            c.font = `bold ${Math.min(cw * 0.74, slot * 0.9)}px sans-serif`
+            c.fillStyle = s.c1
+            chars.forEach((ch2, i) => c.fillText(ch2, cw / 2, (i + 0.75) * slot))
+          } else {
+            if (s.bar) {
+              c.fillStyle = s.bar
+              c.fillRect(0, 0, cw, ch * 0.17)
+            }
+            c.fillStyle = s.c1
+            c.font = `bold ${ch * (s.kind === "board" ? 0.44 : 0.34)}px sans-serif`
+            c.fillText(s.t1, cw / 2, s.t2 ? ch * 0.43 : ch * 0.55)
+            if (s.t2) {
+              c.fillStyle = s.c2 ?? "#ffffff"
+              c.font = `bold ${ch * 0.19}px sans-serif`
+              c.fillText(s.t2, cw / 2, ch * 0.79)
+            }
+          }
+        }
+        const makeSignTex = (s: SignSpec) => {
+          const cw = Math.max(48, Math.min(320, Math.round(s.w * 46)))
+          const ch = Math.max(48, Math.min(320, Math.round(s.h * 46)))
+          const cv = document.createElement("canvas")
+          cv.width = cw
+          cv.height = ch
+          const c = cv.getContext("2d")
+          if (c) drawSign(c, cw, ch, s)
+          const t = new THREE.CanvasTexture(cv)
+          t.colorSpace = THREE.SRGBColorSpace
+          t.anisotropy = maxAniso
+          return t
+        }
+        // ── 12 flat wall signs (boards + boxes), all fictional shop names ──────────
+        const flatSpec: SignSpec[] = [
+          {
+            kind: "board",
+            w: 5.6,
+            h: 2.0,
+            bg: "#a8122b",
+            t1: "酔虎",
+            c1: "#ffe24a",
+            t2: "IZAKAYA 酔虎",
+            c2: "#ffffff",
+            bar: "#5e0a18",
+          },
+          {
+            kind: "board",
+            w: 5.2,
+            h: 1.9,
+            bg: "#16021f",
+            t1: "NEON BOX",
+            c1: "#2ce6ff",
+            t2: "KARAOKE 24H",
+            c2: "#ff6cc0",
+          },
+          {
+            kind: "board",
+            w: 5.6,
+            h: 2.0,
+            bg: "#f4f4ee",
+            t1: "ウェルライフ",
+            c1: "#1b6fd0",
+            t2: "DRUG & COSME",
+            c2: "#e8731a",
+            bar: "#1b6fd0",
+          },
+          { kind: "box", w: 2.7, h: 2.7, bg: "#0a0a0a", t1: "F-NINE", c1: "#ff2d8e" },
+          {
+            kind: "box",
+            w: 2.7,
+            h: 2.6,
+            bg: "#3a2415",
+            t1: "BEANS",
+            c1: "#ffd9a0",
+            t2: "CAFE",
+            c2: "#c8a06a",
+          },
+          {
+            kind: "board",
+            w: 5.0,
+            h: 1.9,
+            bg: "#050505",
+            t1: "PLAY ZONE",
+            c1: "#ffe24a",
+            t2: "GAME ARCADE",
+            c2: "#39ff9e",
+          },
+          {
+            kind: "board",
+            w: 5.0,
+            h: 2.0,
+            bg: "#0c0c0c",
+            t1: "一番亭",
+            c1: "#ff3a2a",
+            t2: "RAMEN",
+            c2: "#ffd24a",
+            bar: "#7a0f08",
+          },
+          { kind: "box", w: 2.6, h: 2.7, bg: "#0b1430", t1: "月見堂", c1: "#ffd24a" },
+          {
+            kind: "box",
+            w: 2.7,
+            h: 2.6,
+            bg: "#ff8fc4",
+            t1: "SAKURA",
+            c1: "#ffffff",
+            t2: "SALON",
+            c2: "#7a1f4a",
+          },
+          {
+            kind: "board",
+            w: 5.0,
+            h: 1.8,
+            bg: "#ffd21a",
+            t1: "電気街",
+            c1: "#0a0a0a",
+            t2: "DENKI MART",
+            c2: "#222222",
+          },
+          {
+            kind: "board",
+            w: 4.6,
+            h: 1.7,
+            bg: "#050b08",
+            t1: "CYBER",
+            c1: "#39ff9e",
+            t2: "CLUB",
+            c2: "#2ce6ff",
+          },
+          { kind: "box", w: 2.6, h: 2.6, bg: "#0a0a0a", t1: "渋谷MODE", c1: "#ff2d8e" },
+        ]
+        // ── 6 vertical blade signs (袖看板) projecting from building faces ─────────
+        const bladeSpec: SignSpec[] = [
+          { kind: "tall", w: 1.3, h: 4.2, bg: "#1a0220", t1: "カラオケ", c1: "#ff6cc0" },
+          { kind: "tall", w: 1.3, h: 3.8, bg: "#7a0f08", t1: "居酒屋", c1: "#ffe24a" },
+          { kind: "tall", w: 1.2, h: 3.6, bg: "#0a0a0a", t1: "焼肉", c1: "#ff8a2a" },
+          { kind: "tall", w: 1.2, h: 4.0, bg: "#050b14", t1: "鍼灸院", c1: "#2ce6ff" },
+          { kind: "tall", w: 1.2, h: 3.4, bg: "#1c0a2a", t1: "占", c1: "#c79bff" },
+          { kind: "tall", w: 1.3, h: 3.8, bg: "#04130c", t1: "薬", c1: "#39ff9e" },
+        ]
+        const flatTex = flatSpec.map(makeSignTex)
+        const bladeTex = bladeSpec.map(makeSignTex)
+        const flatMats = flatTex.map(
+          (t) => new THREE.MeshBasicMaterial({ map: t, toneMapped: false }),
+        )
+        const bladeMats = bladeTex.map(
+          (t) => new THREE.MeshBasicMaterial({ map: t, toneMapped: false }),
+        )
+        const flatGeo = new THREE.PlaneGeometry(1, 1)
+        const bladeGeo = new THREE.BoxGeometry(1, 1, 1)
+        const flatXf: Xf[][] = flatSpec.map(() => [])
+        const bladeXf: Xf[][] = bladeSpec.map(() => [])
+        const boardIdx = flatSpec.map((s, i) => (s.kind === "board" ? i : -1)).filter((i) => i >= 0)
+        // Tile a wall face with signs: one big board across the top + a packed grid of
+        // medium/small signs below. nx,nz = outward normal (toward the crossing).
+        const cladWall = (
+          cx: number,
+          cz: number,
+          nx: number,
+          nz: number,
+          wallW: number,
+          wallH: number,
+          y0: number,
+          density = 1,
+        ) => {
+          const ax = -nz
+          const az = nx // along-wall (tangent) axis in XZ
+          const rotY = Math.atan2(nx, nz) // plane (+z normal) → faces (nx,nz)
+          const front = 0.25 // sit signs just in front of the wall
+          if (wallW >= 6 && wallH >= 8 && boardIdx.length) {
+            const bi = boardIdx[Math.floor(rnd() * boardIdx.length)] ?? 0
+            const bsp = flatSpec[bi]
+            if (bsp) {
+              const bw = wallW * 0.82
+              const bh = Math.min(wallH * 0.2, (bw * bsp.h) / bsp.w)
+              flatXf[bi]?.push({
+                pos: [cx + nx * (front + 0.05), wallH - bh * 0.7, cz + nz * (front + 0.05)],
+                rotY,
+                scl: [bw, bh, 1],
+              })
+            }
+          }
+          const stepH = 3.0
+          const stepV = 2.5
+          const cols = Math.max(1, Math.floor(wallW / stepH))
+          const top = wallH * 0.78
+          const rows = Math.max(1, Math.floor((top - y0) / stepV))
+          for (let r = 0; r < rows; r++) {
+            for (let cI = 0; cI < cols; cI++) {
+              if (rnd() > density) continue
+              if (rnd() < 0.14) continue // occasional gap (windows / wall show through)
+              const si = Math.floor(rnd() * flatSpec.length)
+              const sp = flatSpec[si]
+              if (!sp) continue
+              const hOff = (-0.5 + (cI + 0.5) / cols) * wallW
+              const vOff = y0 + (r + 0.5) * stepV
+              const fit =
+                Math.min((stepH * 0.92) / sp.w, (stepV * 0.92) / sp.h) * (0.85 + rnd() * 0.25)
+              flatXf[si]?.push({
+                pos: [
+                  cx + ax * hOff + nx * (front + rnd() * 0.1),
+                  vOff,
+                  cz + az * hOff + nz * (front + rnd() * 0.1),
+                ],
+                rotY,
+                scl: [sp.w * fit, sp.h * fit, 1],
+              })
+            }
+          }
+        }
+        // A vertical stack of projecting blade signs near a wall edge.
+        const addBladeStack = (cx: number, cz: number, nx: number, nz: number, count: number) => {
+          const rotY = Math.atan2(nx, nz) // box +z → normal (the projection direction)
+          let y = 3.4
+          for (let i = 0; i < count; i++) {
+            const bi = Math.floor(rnd() * bladeSpec.length)
+            const sp = bladeSpec[bi]
+            if (!sp) break
+            const h = sp.h * (0.8 + rnd() * 0.5)
+            const proj = sp.w
+            if (y + h > 28) break
+            bladeXf[bi]?.push({
+              pos: [cx + nx * (0.2 + proj / 2), y + h / 2, cz + nz * (0.2 + proj / 2)],
+              rotY,
+              scl: [0.28, h, proj],
+            })
+            y += h + 0.5
+          }
+        }
+        // ── Varied-silhouette facades (glass / rounded / stepped / box) ───────────
+        // Share the existing merge buckets (midMat / concreteMat) + one new glass mat
+        // so all the bodies still collapse to a handful of draw calls. Each facade
+        // clads its crossing-facing wall and sprouts blade stacks at its edges.
+        type FacadeShape = "glass" | "rounded" | "stepped" | "box"
+        const facadeShapes: FacadeShape[] = ["glass", "rounded", "stepped", "box"]
+        const facGlassWin = makeWindowTex(18, 46, 0xbfe0ff, 0.46)
+        facGlassWin.repeat.set(3, 9)
+        const facGlassMat = new THREE.MeshStandardMaterial({
+          color: 0x0e131e,
+          roughness: 0.4,
+          metalness: 0.35,
+          emissive: 0xffffff,
+          emissiveMap: facGlassWin,
+          emissiveIntensity: 0.6,
+        })
+        const matForShape = (shape: FacadeShape): THREE.Material =>
+          shape === "glass" ? facGlassMat : shape === "box" ? concreteMat : midMat
+        const makeFacade = (
+          cx: number,
+          cz: number,
+          w: number,
+          d: number,
+          h: number,
+          faceAng: number,
+          shape: FacadeShape,
+        ) => {
+          const nx = Math.cos(faceAng)
+          const nz = Math.sin(faceAng)
+          const rotY = Math.atan2(nx, nz)
+          const mat = matForShape(shape)
+          if (shape === "stepped") {
+            let yb = 0
+            let cw = w
+            let cd = d
+            for (let s = 0; s < 3; s++) {
+              const seg = h * (s === 0 ? 0.5 : s === 1 ? 0.32 : 0.18)
+              const b = new THREE.Mesh(new THREE.BoxGeometry(cw, seg, cd), mat)
+              b.position.set(cx, yb + seg / 2, cz)
+              b.rotation.y = rotY
+              mAdd(b)
+              yb += seg
+              cw *= 0.74
+              cd *= 0.74
+            }
+          } else if (shape === "rounded") {
+            const r = Math.max(w, d) / 2
+            const b = new THREE.Mesh(new THREE.CylinderGeometry(r, r, h, 16), mat)
+            b.position.set(cx, h / 2, cz)
+            mAdd(b)
+          } else {
+            const b = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat)
+            b.position.set(cx, h / 2, cz)
+            b.rotation.y = rotY
+            mAdd(b)
+            if (shape === "glass") {
+              const top = new THREE.Mesh(new THREE.BoxGeometry(w * 0.6, h * 0.18, d * 0.6), mat)
+              top.position.set(cx, h + h * 0.09, cz)
+              top.rotation.y = rotY
+              mAdd(top)
+            }
+          }
+          // Collision footprint: AABB bounding the rotated rectangle (loose is fine —
+          // the player stays in the open crossing; these line the perimeter).
+          const hw = Math.abs((w / 2) * Math.cos(rotY)) + Math.abs((d / 2) * Math.sin(rotY))
+          const hd = Math.abs((w / 2) * Math.sin(rotY)) + Math.abs((d / 2) * Math.cos(rotY))
+          addShibuyaAABB(cx, cz, hw, hd, h)
+          // Clad the crossing-facing wall + edge blade stacks.
+          const fwx = cx + nx * (d / 2)
+          const fwz = cz + nz * (d / 2)
+          cladWall(fwx, fwz, nx, nz, w * 0.96, h, 2.6, isMobileDevice ? 0.62 : 1)
+          const ax = -nz
+          const az = nx
+          for (const e of [-1, 1] as const) {
+            if (rnd() < 0.45) continue
+            addBladeStack(
+              fwx + ax * (w * 0.42) * e,
+              fwz + az * (w * 0.42) * e,
+              nx,
+              nz,
+              3 + Math.floor(rnd() * 3),
+            )
+          }
+        }
+        // Landmark anchors to keep clear (local coords): glass tower / 109 / big-vision
+        // / shrine grove / Hachiko pad / nonbei alley.
+        const sbAvoid: [number, number, number][] = [
+          [46, 30, 20],
+          [-42, 30, 22],
+          [4, -42, 24],
+          [58, -54, 26],
+          [-20, 22, 9],
+          [40, -28, 20],
+        ]
+        const sbBlocked = (x: number, z: number) =>
+          sbAvoid.some(([ax, az, ar]) => Math.hypot(x - ax, z - az) < ar)
+        // (1) Four corner clusters in the diagonal sectors (the road arms stay open).
+        for (let k = 0; k < 4; k++) {
+          const baseA = Math.PI / 4 + k * (Math.PI / 2)
+          for (let j = 0; j < dn(4); j++) {
+            const a = baseA + (rnd() - 0.5) * 0.7
+            const r = 30 + rnd() * 20
+            const cx = Math.cos(a) * r
+            const cz = Math.sin(a) * r
+            if (sbBlocked(cx, cz)) continue
+            const shape = facadeShapes[Math.floor(rnd() * facadeShapes.length)] ?? "box"
+            makeFacade(
+              cx,
+              cz,
+              10 + rnd() * 9,
+              9 + rnd() * 7,
+              16 + rnd() * 30,
+              Math.atan2(-cz, -cx),
+              shape,
+            )
+          }
+        }
+        // (2) Street frontage rows lining the four roads (set back ±16 from each
+        // centre-line), receding outward → the streets read as deep canyons of signs.
+        const frontStep = isMobileDevice ? 22 : 15
+        for (const [ax, az] of [
+          [1, 0],
+          [-1, 0],
+          [0, 1],
+          [0, -1],
+        ] as const) {
+          const px = -az
+          const pz = ax // perpendicular (offset) axis
+          for (let d = 24; d <= 84; d += frontStep) {
+            for (const side of [-1, 1] as const) {
+              const cx = ax * d + px * 16 * side
+              const cz = az * d + pz * 16 * side
+              if (sbBlocked(cx, cz)) continue
+              const shape = facadeShapes[Math.floor(rnd() * facadeShapes.length)] ?? "box"
+              makeFacade(
+                cx,
+                cz,
+                9 + rnd() * 7,
+                8 + rnd() * 5,
+                13 + rnd() * 22,
+                Math.atan2(-pz * side, -px * side),
+                shape,
+              )
+            }
+          }
+        }
+        // (3) Clad two existing landmark faces too (the glass tower's crossing-facing
+        // walls) so the named buildings join the sign flood.
+        cladWall(46, 30 - 12, 0, -1, 22, 60, 6, isMobileDevice ? 0.5 : 0.85) // SE tower −z face
+        cladWall(46 - 12, 30, -1, 0, 22, 60, 6, isMobileDevice ? 0.5 : 0.85) // SE tower −x face
+        addBladeStack(-42 + 6, 30 + 8, 0.5, 0.62, 4) // a stack on the 109 prow corner
+        // Build all the sign InstancedMeshes (one draw call per sign texture).
+        flatSpec.forEach((_s, i) => {
+          const m = flatMats[i]
+          if (m) instAdd(flatGeo, m, flatXf[i] ?? [])
+        })
+        bladeSpec.forEach((_s, i) => {
+          const m = bladeMats[i]
+          if (m) instAdd(bladeGeo, m, bladeXf[i] ?? [])
+        })
+
         // ══ Phase F: 渋谷の夜 — 環境・空気感 ════════════════════════════════════════
         // Night palette, distinct from OSAKA's warm/red. (Scramble-detail Phase A:
         // BRIGHTENED — the night must read as "夜だが街全体が見える", not a black void.
