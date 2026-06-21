@@ -19696,35 +19696,41 @@ export default function ThreeWorld({
         add(sealLight)
 
         // ══ Phase F: 渋谷の夜 — 環境・空気感 ════════════════════════════════════════
-        // Night palette, distinct from OSAKA's warm/red. Dim the base daylight rig
-        // (saved into the shared huntStageLightSaved → huntClearStage restores it),
-        // then light the city with a cool hemisphere + magenta/cyan neon spill at the
-        // scramble. Fog + sky saved/restored on teardown.
+        // Night palette, distinct from OSAKA's warm/red. (Scramble-detail Phase A:
+        // BRIGHTENED — the night must read as "夜だが街全体が見える", not a black void.
+        // The base daylight rig is dimmed but not crushed, and a strong cool night
+        // hemisphere lifts every surface so the ground / crosswalk / building bodies
+        // stay clearly visible; the emissive signs (Phase B+) ride on top.) Saved into
+        // the shared huntStageLightSaved → huntClearStage restores it. OSAKA untouched
+        // (this whole block only runs inside buildShibuyaMap).
         for (const light of [worldAmbient, hemi, sun, fillLight]) {
           huntStageLightSaved.push({ light, intensity: light.intensity })
         }
-        worldAmbient.intensity = 0.16
-        hemi.intensity = 0.22
-        sun.intensity = 0.12
-        fillLight.intensity = 0.1
-        const nightHemi = new THREE.HemisphereLight(0x1a2240, 0x06070c, 0.55)
+        worldAmbient.intensity = 0.46 // was 0.16 — lift the deep shadows off the deck
+        hemi.intensity = 0.55 // was 0.22
+        sun.intensity = 0.32 // was 0.12 — a soft cool key, still night
+        fillLight.intensity = 0.3 // was 0.1 — bounce so the far walls aren't black
+        // Strong cool night hemisphere: bluish sky term, near-black ground term, so
+        // the city is legible top-to-bottom without washing out the neon.
+        const nightHemi = new THREE.HemisphereLight(0x33426e, 0x0a0c14, 1.15)
         add(nightHemi)
-        const neonGlowMag = new THREE.PointLight(0xff2d8e, 0.8, 80, 2)
+        const neonGlowMag = new THREE.PointLight(0xff2d8e, 1.1, 92, 2)
         neonGlowMag.position.set(-16, 10, 8)
         neonGlowMag.castShadow = false
         add(neonGlowMag)
-        const neonGlowCyan = new THREE.PointLight(0x28e0ff, 0.8, 80, 2)
+        const neonGlowCyan = new THREE.PointLight(0x28e0ff, 1.1, 92, 2)
         neonGlowCyan.position.set(18, 10, -8)
         neonGlowCyan.castShadow = false
         add(neonGlowCyan)
-        // Fog: cool urban haze (reuse the shared save slot → clearOsakaMap restores).
+        // Fog: cool urban haze — lighter + pushed back so the surrounding skyline is
+        // visible (a too-dark/near fog hid the whole city). Reuses the shared save slot.
         huntStageFogSaved = scene.fog
         huntStageFogWasSaved = true
-        scene.fog = new THREE.Fog(0x0a0e1a, isMobileDevice ? 60 : 90, isMobileDevice ? 230 : 340)
+        scene.fog = new THREE.Fog(0x141b2e, isMobileDevice ? 75 : 115, isMobileDevice ? 260 : 380)
         // Night sky behind the skyline (saved here, restored in clearShibuyaMap).
         shibuyaBgSaved = scene.background
         shibuyaBgWasSaved = true
-        scene.background = new THREE.Color(0x080b14)
+        scene.background = new THREE.Color(0x10172a) // lifted from 0x080b14 (deep void)
 
         flushMerges() // collapse all static buckets → one mesh per material
         scene.add(group)
