@@ -16991,6 +16991,8 @@ export default function ThreeWorld({
         t: number
         frame: number
         adTex: THREE.Texture | null
+        // Phase C: every big-vision / round-vision screen scrolls its CanvasTexture.
+        screens: { tex: THREE.Texture; spd: number }[]
         seal: THREE.Mesh | null
         sealLight: THREE.PointLight | null
         neonMats: THREE.MeshStandardMaterial[]
@@ -19695,36 +19697,738 @@ export default function ThreeWorld({
         sealLight.castShadow = false
         add(sealLight)
 
+        // ══ Phase B (scramble-detail): 看板の洪水 + ビルのシルエット多様化 ═══════════
+        // 渋谷感の9割。交差点を囲むビル壁を看板で埋め尽くし、袖看板を林立させ、多様な
+        // シルエットのファサードで交差点を360度囲んで圧迫感を出す。実在名は不可 —— 構造
+        // と密度だけ真似て中身は全てオリジナル名。draw call 抑制: フラット看板も袖看板も
+        // 「テクスチャ種ごとに1 InstancedMesh」(種類は限定・枚数は大量)、ファサード躯体は
+        // 共有マテリアルで mAdd→flushMerges 統合 (既存 midMat / concreteMat バケツに相乗り)。
+        type SignKind = "board" | "box" | "tall"
+        type SignSpec = {
+          kind: SignKind
+          w: number // world width  (also drives canvas aspect)
+          h: number // world height (tall: this is the projecting blade height)
+          bg: string
+          t1: string
+          c1: string
+          t2?: string
+          c2?: string
+          bar?: string // accent bar across the top (board/box)
+        }
+        // One generic sign renderer (keeps 18 textures compact + consistent).
+        const drawSign = (c: CanvasRenderingContext2D, cw: number, ch: number, s: SignSpec) => {
+          c.fillStyle = s.bg
+          c.fillRect(0, 0, cw, ch)
+          c.strokeStyle = "rgba(255,255,255,0.22)"
+          c.lineWidth = Math.max(2, cw * 0.02)
+          c.strokeRect(2, 2, cw - 4, ch - 4)
+          c.textAlign = "center"
+          c.textBaseline = "middle"
+          if (s.kind === "tall") {
+            // vertical stacked-character blade (袖看板)
+            const chars = [...s.t1]
+            const slot = ch / (chars.length + 0.5)
+            c.font = `bold ${Math.min(cw * 0.74, slot * 0.9)}px sans-serif`
+            c.fillStyle = s.c1
+            chars.forEach((ch2, i) => c.fillText(ch2, cw / 2, (i + 0.75) * slot))
+          } else {
+            if (s.bar) {
+              c.fillStyle = s.bar
+              c.fillRect(0, 0, cw, ch * 0.17)
+            }
+            c.fillStyle = s.c1
+            c.font = `bold ${ch * (s.kind === "board" ? 0.44 : 0.34)}px sans-serif`
+            c.fillText(s.t1, cw / 2, s.t2 ? ch * 0.43 : ch * 0.55)
+            if (s.t2) {
+              c.fillStyle = s.c2 ?? "#ffffff"
+              c.font = `bold ${ch * 0.19}px sans-serif`
+              c.fillText(s.t2, cw / 2, ch * 0.79)
+            }
+          }
+        }
+        const makeSignTex = (s: SignSpec) => {
+          const cw = Math.max(48, Math.min(320, Math.round(s.w * 46)))
+          const ch = Math.max(48, Math.min(320, Math.round(s.h * 46)))
+          const cv = document.createElement("canvas")
+          cv.width = cw
+          cv.height = ch
+          const c = cv.getContext("2d")
+          if (c) drawSign(c, cw, ch, s)
+          const t = new THREE.CanvasTexture(cv)
+          t.colorSpace = THREE.SRGBColorSpace
+          t.anisotropy = maxAniso
+          return t
+        }
+        // ── 12 flat wall signs (boards + boxes), all fictional shop names ──────────
+        const flatSpec: SignSpec[] = [
+          {
+            kind: "board",
+            w: 5.6,
+            h: 2.0,
+            bg: "#a8122b",
+            t1: "酔虎",
+            c1: "#ffe24a",
+            t2: "IZAKAYA 酔虎",
+            c2: "#ffffff",
+            bar: "#5e0a18",
+          },
+          {
+            kind: "board",
+            w: 5.2,
+            h: 1.9,
+            bg: "#16021f",
+            t1: "NEON BOX",
+            c1: "#2ce6ff",
+            t2: "KARAOKE 24H",
+            c2: "#ff6cc0",
+          },
+          {
+            kind: "board",
+            w: 5.6,
+            h: 2.0,
+            bg: "#f4f4ee",
+            t1: "ウェルライフ",
+            c1: "#1b6fd0",
+            t2: "DRUG & COSME",
+            c2: "#e8731a",
+            bar: "#1b6fd0",
+          },
+          { kind: "box", w: 2.7, h: 2.7, bg: "#0a0a0a", t1: "F-NINE", c1: "#ff2d8e" },
+          {
+            kind: "box",
+            w: 2.7,
+            h: 2.6,
+            bg: "#3a2415",
+            t1: "BEANS",
+            c1: "#ffd9a0",
+            t2: "CAFE",
+            c2: "#c8a06a",
+          },
+          {
+            kind: "board",
+            w: 5.0,
+            h: 1.9,
+            bg: "#050505",
+            t1: "PLAY ZONE",
+            c1: "#ffe24a",
+            t2: "GAME ARCADE",
+            c2: "#39ff9e",
+          },
+          {
+            kind: "board",
+            w: 5.0,
+            h: 2.0,
+            bg: "#0c0c0c",
+            t1: "一番亭",
+            c1: "#ff3a2a",
+            t2: "RAMEN",
+            c2: "#ffd24a",
+            bar: "#7a0f08",
+          },
+          { kind: "box", w: 2.6, h: 2.7, bg: "#0b1430", t1: "月見堂", c1: "#ffd24a" },
+          {
+            kind: "box",
+            w: 2.7,
+            h: 2.6,
+            bg: "#ff8fc4",
+            t1: "SAKURA",
+            c1: "#ffffff",
+            t2: "SALON",
+            c2: "#7a1f4a",
+          },
+          {
+            kind: "board",
+            w: 5.0,
+            h: 1.8,
+            bg: "#ffd21a",
+            t1: "電気街",
+            c1: "#0a0a0a",
+            t2: "DENKI MART",
+            c2: "#222222",
+          },
+          {
+            kind: "board",
+            w: 4.6,
+            h: 1.7,
+            bg: "#050b08",
+            t1: "CYBER",
+            c1: "#39ff9e",
+            t2: "CLUB",
+            c2: "#2ce6ff",
+          },
+          { kind: "box", w: 2.6, h: 2.6, bg: "#0a0a0a", t1: "渋谷MODE", c1: "#ff2d8e" },
+        ]
+        // ── 6 vertical blade signs (袖看板) projecting from building faces ─────────
+        const bladeSpec: SignSpec[] = [
+          { kind: "tall", w: 1.3, h: 4.2, bg: "#1a0220", t1: "カラオケ", c1: "#ff6cc0" },
+          { kind: "tall", w: 1.3, h: 3.8, bg: "#7a0f08", t1: "居酒屋", c1: "#ffe24a" },
+          { kind: "tall", w: 1.2, h: 3.6, bg: "#0a0a0a", t1: "焼肉", c1: "#ff8a2a" },
+          { kind: "tall", w: 1.2, h: 4.0, bg: "#050b14", t1: "鍼灸院", c1: "#2ce6ff" },
+          { kind: "tall", w: 1.2, h: 3.4, bg: "#1c0a2a", t1: "占", c1: "#c79bff" },
+          { kind: "tall", w: 1.3, h: 3.8, bg: "#04130c", t1: "薬", c1: "#39ff9e" },
+        ]
+        const flatTex = flatSpec.map(makeSignTex)
+        const bladeTex = bladeSpec.map(makeSignTex)
+        const flatMats = flatTex.map(
+          (t) => new THREE.MeshBasicMaterial({ map: t, toneMapped: false }),
+        )
+        const bladeMats = bladeTex.map(
+          (t) => new THREE.MeshBasicMaterial({ map: t, toneMapped: false }),
+        )
+        const flatGeo = new THREE.PlaneGeometry(1, 1)
+        const bladeGeo = new THREE.BoxGeometry(1, 1, 1)
+        const flatXf: Xf[][] = flatSpec.map(() => [])
+        const bladeXf: Xf[][] = bladeSpec.map(() => [])
+        const boardIdx = flatSpec.map((s, i) => (s.kind === "board" ? i : -1)).filter((i) => i >= 0)
+        // Tile a wall face with signs: one big board across the top + a packed grid of
+        // medium/small signs below. nx,nz = outward normal (toward the crossing).
+        const cladWall = (
+          cx: number,
+          cz: number,
+          nx: number,
+          nz: number,
+          wallW: number,
+          wallH: number,
+          y0: number,
+          density = 1,
+        ) => {
+          const ax = -nz
+          const az = nx // along-wall (tangent) axis in XZ
+          const rotY = Math.atan2(nx, nz) // plane (+z normal) → faces (nx,nz)
+          const front = 0.25 // sit signs just in front of the wall
+          if (wallW >= 6 && wallH >= 8 && boardIdx.length) {
+            const bi = boardIdx[Math.floor(rnd() * boardIdx.length)] ?? 0
+            const bsp = flatSpec[bi]
+            if (bsp) {
+              const bw = wallW * 0.82
+              const bh = Math.min(wallH * 0.2, (bw * bsp.h) / bsp.w)
+              flatXf[bi]?.push({
+                pos: [cx + nx * (front + 0.05), wallH - bh * 0.7, cz + nz * (front + 0.05)],
+                rotY,
+                scl: [bw, bh, 1],
+              })
+            }
+          }
+          const stepH = 3.0
+          const stepV = 2.5
+          const cols = Math.max(1, Math.floor(wallW / stepH))
+          const top = wallH * 0.78
+          const rows = Math.max(1, Math.floor((top - y0) / stepV))
+          for (let r = 0; r < rows; r++) {
+            for (let cI = 0; cI < cols; cI++) {
+              if (rnd() > density) continue
+              if (rnd() < 0.14) continue // occasional gap (windows / wall show through)
+              const si = Math.floor(rnd() * flatSpec.length)
+              const sp = flatSpec[si]
+              if (!sp) continue
+              const hOff = (-0.5 + (cI + 0.5) / cols) * wallW
+              const vOff = y0 + (r + 0.5) * stepV
+              const fit =
+                Math.min((stepH * 0.92) / sp.w, (stepV * 0.92) / sp.h) * (0.85 + rnd() * 0.25)
+              flatXf[si]?.push({
+                pos: [
+                  cx + ax * hOff + nx * (front + rnd() * 0.1),
+                  vOff,
+                  cz + az * hOff + nz * (front + rnd() * 0.1),
+                ],
+                rotY,
+                scl: [sp.w * fit, sp.h * fit, 1],
+              })
+            }
+          }
+        }
+        // A vertical stack of projecting blade signs near a wall edge.
+        const addBladeStack = (cx: number, cz: number, nx: number, nz: number, count: number) => {
+          const rotY = Math.atan2(nx, nz) // box +z → normal (the projection direction)
+          let y = 3.4
+          for (let i = 0; i < count; i++) {
+            const bi = Math.floor(rnd() * bladeSpec.length)
+            const sp = bladeSpec[bi]
+            if (!sp) break
+            const h = sp.h * (0.8 + rnd() * 0.5)
+            const proj = sp.w
+            if (y + h > 28) break
+            bladeXf[bi]?.push({
+              pos: [cx + nx * (0.2 + proj / 2), y + h / 2, cz + nz * (0.2 + proj / 2)],
+              rotY,
+              scl: [0.28, h, proj],
+            })
+            y += h + 0.5
+          }
+        }
+        // ── Varied-silhouette facades (glass / rounded / stepped / box) ───────────
+        // Share the existing merge buckets (midMat / concreteMat) + one new glass mat
+        // so all the bodies still collapse to a handful of draw calls. Each facade
+        // clads its crossing-facing wall and sprouts blade stacks at its edges.
+        type FacadeShape = "glass" | "rounded" | "stepped" | "box"
+        const facadeShapes: FacadeShape[] = ["glass", "rounded", "stepped", "box"]
+        const facGlassWin = makeWindowTex(18, 46, 0xbfe0ff, 0.46)
+        facGlassWin.repeat.set(3, 9)
+        const facGlassMat = new THREE.MeshStandardMaterial({
+          color: 0x0e131e,
+          roughness: 0.4,
+          metalness: 0.35,
+          emissive: 0xffffff,
+          emissiveMap: facGlassWin,
+          emissiveIntensity: 0.6,
+        })
+        const matForShape = (shape: FacadeShape): THREE.Material =>
+          shape === "glass" ? facGlassMat : shape === "box" ? concreteMat : midMat
+        const makeFacade = (
+          cx: number,
+          cz: number,
+          w: number,
+          d: number,
+          h: number,
+          faceAng: number,
+          shape: FacadeShape,
+        ) => {
+          const nx = Math.cos(faceAng)
+          const nz = Math.sin(faceAng)
+          const rotY = Math.atan2(nx, nz)
+          const mat = matForShape(shape)
+          if (shape === "stepped") {
+            let yb = 0
+            let cw = w
+            let cd = d
+            for (let s = 0; s < 3; s++) {
+              const seg = h * (s === 0 ? 0.5 : s === 1 ? 0.32 : 0.18)
+              const b = new THREE.Mesh(new THREE.BoxGeometry(cw, seg, cd), mat)
+              b.position.set(cx, yb + seg / 2, cz)
+              b.rotation.y = rotY
+              mAdd(b)
+              yb += seg
+              cw *= 0.74
+              cd *= 0.74
+            }
+          } else if (shape === "rounded") {
+            const r = Math.max(w, d) / 2
+            const b = new THREE.Mesh(new THREE.CylinderGeometry(r, r, h, 16), mat)
+            b.position.set(cx, h / 2, cz)
+            mAdd(b)
+          } else {
+            const b = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat)
+            b.position.set(cx, h / 2, cz)
+            b.rotation.y = rotY
+            mAdd(b)
+            if (shape === "glass") {
+              const top = new THREE.Mesh(new THREE.BoxGeometry(w * 0.6, h * 0.18, d * 0.6), mat)
+              top.position.set(cx, h + h * 0.09, cz)
+              top.rotation.y = rotY
+              mAdd(top)
+            }
+          }
+          // Collision footprint: AABB bounding the rotated rectangle (loose is fine —
+          // the player stays in the open crossing; these line the perimeter).
+          const hw = Math.abs((w / 2) * Math.cos(rotY)) + Math.abs((d / 2) * Math.sin(rotY))
+          const hd = Math.abs((w / 2) * Math.sin(rotY)) + Math.abs((d / 2) * Math.cos(rotY))
+          addShibuyaAABB(cx, cz, hw, hd, h)
+          // Clad the crossing-facing wall + edge blade stacks.
+          const fwx = cx + nx * (d / 2)
+          const fwz = cz + nz * (d / 2)
+          cladWall(fwx, fwz, nx, nz, w * 0.96, h, 2.6, isMobileDevice ? 0.62 : 1)
+          const ax = -nz
+          const az = nx
+          for (const e of [-1, 1] as const) {
+            if (rnd() < 0.45) continue
+            addBladeStack(
+              fwx + ax * (w * 0.42) * e,
+              fwz + az * (w * 0.42) * e,
+              nx,
+              nz,
+              3 + Math.floor(rnd() * 3),
+            )
+          }
+        }
+        // Landmark anchors to keep clear (local coords): glass tower / 109 / big-vision
+        // / shrine grove / Hachiko pad / nonbei alley.
+        const sbAvoid: [number, number, number][] = [
+          [46, 30, 20],
+          [-42, 30, 22],
+          [4, -42, 24],
+          [58, -54, 26],
+          [-20, 22, 9],
+          [40, -28, 20],
+        ]
+        const sbBlocked = (x: number, z: number) =>
+          sbAvoid.some(([ax, az, ar]) => Math.hypot(x - ax, z - az) < ar)
+        // (1) Four corner clusters in the diagonal sectors (the road arms stay open).
+        for (let k = 0; k < 4; k++) {
+          const baseA = Math.PI / 4 + k * (Math.PI / 2)
+          for (let j = 0; j < dn(4); j++) {
+            const a = baseA + (rnd() - 0.5) * 0.7
+            const r = 30 + rnd() * 20
+            const cx = Math.cos(a) * r
+            const cz = Math.sin(a) * r
+            if (sbBlocked(cx, cz)) continue
+            const shape = facadeShapes[Math.floor(rnd() * facadeShapes.length)] ?? "box"
+            makeFacade(
+              cx,
+              cz,
+              10 + rnd() * 9,
+              9 + rnd() * 7,
+              16 + rnd() * 30,
+              Math.atan2(-cz, -cx),
+              shape,
+            )
+          }
+        }
+        // (2) Street frontage rows lining the four roads (set back ±16 from each
+        // centre-line), receding outward → the streets read as deep canyons of signs.
+        const frontStep = isMobileDevice ? 22 : 15
+        for (const [ax, az] of [
+          [1, 0],
+          [-1, 0],
+          [0, 1],
+          [0, -1],
+        ] as const) {
+          const px = -az
+          const pz = ax // perpendicular (offset) axis
+          for (let d = 24; d <= 84; d += frontStep) {
+            for (const side of [-1, 1] as const) {
+              const cx = ax * d + px * 16 * side
+              const cz = az * d + pz * 16 * side
+              if (sbBlocked(cx, cz)) continue
+              const shape = facadeShapes[Math.floor(rnd() * facadeShapes.length)] ?? "box"
+              makeFacade(
+                cx,
+                cz,
+                9 + rnd() * 7,
+                8 + rnd() * 5,
+                13 + rnd() * 22,
+                Math.atan2(-pz * side, -px * side),
+                shape,
+              )
+            }
+          }
+        }
+        // (3) Clad two existing landmark faces too (the glass tower's crossing-facing
+        // walls) so the named buildings join the sign flood.
+        cladWall(46, 30 - 12, 0, -1, 22, 60, 6, isMobileDevice ? 0.5 : 0.85) // SE tower −z face
+        cladWall(46 - 12, 30, -1, 0, 22, 60, 6, isMobileDevice ? 0.5 : 0.85) // SE tower −x face
+        addBladeStack(-42 + 6, 30 + 8, 0.5, 0.62, 4) // a stack on the 109 prow corner
+        // Build all the sign InstancedMeshes (one draw call per sign texture).
+        flatSpec.forEach((_s, i) => {
+          const m = flatMats[i]
+          if (m) instAdd(flatGeo, m, flatXf[i] ?? [])
+        })
+        bladeSpec.forEach((_s, i) => {
+          const m = bladeMats[i]
+          if (m) instAdd(bladeGeo, m, bladeXf[i] ?? [])
+        })
+
+        // ══ Phase C (scramble-detail): 大型ビジョン群 (駅前の顔) ════════════════════
+        // The 駅前 video-wall look: several giant fictional-ad screens facing the
+        // crossing + a round vision crowning the 渋谷MODE cylinder. Each screen is one
+        // standalone bright plane (MeshBasicMaterial, toneMapped off) whose CanvasTex
+        // scrolls in updateShibuyaMap. Collected here, published into shibuyaAnim.screens.
+        const bigVisionScreens: { tex: THREE.Texture; spd: number }[] = []
+        // The existing big-vision screen (Phase C-original) joins the scroll set.
+        bigVisionScreens.push({ tex: adTex, spd: 0.06 })
+        type AdSpec = {
+          bg: string
+          bands: { color: string; text: string; tc: string; f: number }[]
+        }
+        const makeAdTex = (s: AdSpec) => {
+          const cv = document.createElement("canvas")
+          cv.width = 256
+          cv.height = 192
+          const c = cv.getContext("2d")
+          if (c) {
+            c.fillStyle = s.bg
+            c.fillRect(0, 0, 256, 192)
+            c.textAlign = "center"
+            c.textBaseline = "middle"
+            const bh = 192 / s.bands.length
+            s.bands.forEach((b, i) => {
+              c.fillStyle = b.color
+              c.fillRect(10, i * bh + 6, 236, bh - 12)
+              c.fillStyle = b.tc
+              c.font = `bold ${b.f}px sans-serif`
+              c.fillText(b.text, 128, i * bh + bh / 2)
+            })
+          }
+          const t = new THREE.CanvasTexture(cv)
+          t.colorSpace = THREE.SRGBColorSpace
+          t.anisotropy = maxAniso
+          t.wrapT = THREE.RepeatWrapping
+          return t
+        }
+        const adFest = makeAdTex({
+          bg: "#0a0420",
+          bands: [
+            { color: "#ff2d8e", text: "夜光フェス", tc: "#ffffff", f: 34 },
+            { color: "#06303a", text: "NIGHT GLOW LIVE", tc: "#2ce6ff", f: 24 },
+            { color: "#1a1406", text: "24:00 OPEN", tc: "#ffe24a", f: 26 },
+          ],
+        })
+        const adGear = makeAdTex({
+          bg: "#160404",
+          bands: [
+            { color: "#7a0f08", text: "新作上陸", tc: "#ffe24a", f: 34 },
+            { color: "#101010", text: "SCRAMBLE GEAR", tc: "#ffffff", f: 22 },
+            { color: "#b88a14", text: "SALE 50%", tc: "#1a1a1a", f: 28 },
+          ],
+        })
+        const adWanted = makeAdTex({
+          bg: "#0a0006",
+          bands: [
+            { color: "#2a0008", text: "賞金首", tc: "#ff3a3a", f: 34 },
+            { color: "#120004", text: "大魔 — WANTED", tc: "#ff6a6a", f: 24 },
+            { color: "#0a0a0a", text: "懸賞金 ¥∞", tc: "#9a9a9a", f: 24 },
+          ],
+        })
+        const adRound = makeAdTex({
+          bg: "#03101a",
+          bands: [
+            { color: "#06303a", text: "渋谷", tc: "#2ce6ff", f: 40 },
+            { color: "#101820", text: "VISION", tc: "#ffffff", f: 30 },
+            { color: "#2a0820", text: "ON AIR", tc: "#ff2d8e", f: 28 },
+          ],
+        })
+        const bezMat = concreteMat // dark bezel rides the existing merge bucket
+        const makeBigVision = (
+          cx: number,
+          cy: number,
+          cz: number,
+          w: number,
+          h: number,
+          faceAng: number,
+          tex: THREE.Texture,
+          spd = 0.05,
+        ) => {
+          const nx = Math.cos(faceAng)
+          const nz = Math.sin(faceAng)
+          const rotY = Math.atan2(nx, nz)
+          const scr = new THREE.Mesh(
+            new THREE.PlaneGeometry(w, h),
+            new THREE.MeshBasicMaterial({ map: tex, toneMapped: false }),
+          )
+          scr.position.set(cx, cy, cz)
+          scr.rotation.y = rotY
+          add(scr)
+          const bez = new THREE.Mesh(new THREE.BoxGeometry(w + 0.7, h + 0.7, 0.3), bezMat)
+          bez.position.set(cx - nx * 0.25, cy, cz - nz * 0.25)
+          bez.rotation.y = rotY
+          mAdd(bez)
+          bigVisionScreens.push({ tex, spd })
+        }
+        // 駅前 video wall — all face +z (toward the crossing). A banner stacked over the
+        // existing big-vision building + two flanking screens on their own backing slabs.
+        const faceCross = Math.PI / 2 // normal (0,+1)
+        makeBigVision(bvX, bvH - 3, bvZ + bvD / 2 + 0.18, bvW * 0.8, 5.5, faceCross, adFest, 0.05)
+        for (const [sx, sz, sw, sh, tex] of [
+          [-18, -46, 13, 15, adGear],
+          [26, -44, 12, 14, adWanted],
+        ] as const) {
+          const slab = new THREE.Mesh(new THREE.BoxGeometry(sw + 3, sh + 9, 5), midMat)
+          slab.position.set(sx, (sh + 9) / 2, sz)
+          mAdd(slab)
+          addShibuyaAABB(sx, sz, (sw + 3) / 2, 2.5, sh + 9)
+          makeBigVision(sx, (sh + 9) * 0.6, sz + 2.7, sw, sh, faceCross, tex, 0.05)
+        }
+        // Round vision crowning the 渋谷MODE cylinder (faces the crossing centre).
+        const rda = Math.atan2(-cylZ, -cylX)
+        const roundScreen = new THREE.Mesh(
+          new THREE.CircleGeometry(6, 30),
+          new THREE.MeshBasicMaterial({ map: adRound, toneMapped: false }),
+        )
+        roundScreen.position.set(cylX + Math.cos(rda) * 2.2, 40, cylZ + Math.sin(rda) * 2.2)
+        roundScreen.rotation.y = Math.atan2(Math.cos(rda), Math.sin(rda))
+        add(roundScreen)
+        bigVisionScreens.push({ tex: adRound, spd: 0.03 })
+        // One soft spill light so the video wall throws colour onto the plaza.
+        const screenSpill = new THREE.PointLight(0x9fc8ff, 0.7, 72, 2)
+        screenSpill.position.set(4, 15, -28)
+        screenSpill.castShadow = false
+        add(screenSpill)
+
+        // ══ Phase D (scramble-detail): 交差点を囲む構造 + 足元 ═══════════════════════
+        // The station backdrop + a subway entrance + sign-light pooling on the wet
+        // asphalt + a little more street furniture, so the crossing reads as enclosed
+        // top-to-bottom. Bodies ride the existing merge buckets; pools/bollards are
+        // instanced. (makeSignTex / SignSpec from Phase B are reused for the signage.)
+        // ── 駅 (station) silhouette: a long low 横長 backdrop on the far 駅前 side. ──
+        const staZ = -90
+        const staBody = new THREE.Mesh(new THREE.BoxGeometry(70, 22, 14), midMat)
+        staBody.position.set(0, 11, staZ)
+        mAdd(staBody)
+        addShibuyaAABB(0, staZ, 35, 7, 22)
+        const staRoof = new THREE.Mesh(new THREE.BoxGeometry(74, 1.4, 18), roofMat)
+        staRoof.position.set(0, 22.4, staZ)
+        mAdd(staRoof)
+        // A long canopy over the platform front (faces the crossing, +z).
+        const staCanopy = new THREE.Mesh(new THREE.BoxGeometry(66, 0.6, 5), roofMat)
+        staCanopy.position.set(0, 8.5, staZ + 8.5)
+        mAdd(staCanopy)
+        for (const cxp of [-28, -10, 10, 28]) {
+          const col = new THREE.Mesh(new THREE.BoxGeometry(0.8, 8.5, 0.8), concreteMat)
+          col.position.set(cxp, 4.25, staZ + 10.6)
+          mAdd(col)
+        }
+        // Station name board on the face (original).
+        const staSignTex = makeSignTex({
+          kind: "board",
+          w: 10,
+          h: 1.8,
+          bg: "#08142e",
+          t1: "SHIBUYA STA.",
+          c1: "#9fd0ff",
+          t2: "渋谷駅",
+          c2: "#ffffff",
+          bar: "#123a78",
+        })
+        const staSign = new THREE.Mesh(
+          new THREE.PlaneGeometry(20, 3.6),
+          new THREE.MeshBasicMaterial({ map: staSignTex, toneMapped: false }),
+        )
+        staSign.position.set(0, 16.5, staZ + 7.05)
+        add(staSign)
+        // ── 地下鉄入口 (subway entrance): sunk stairwell + railings + signpost. ──
+        const subX = -13
+        const subZ = 9
+        // The dark sunk stairwell (stepped boxes descending — visual depth only).
+        for (let s = 0; s < 4; s++) {
+          const st = new THREE.Mesh(new THREE.BoxGeometry(3.4, 0.4, 1.1), wallMat)
+          st.position.set(subX, -0.2 - s * 0.34, subZ - 1.5 + s * 1.0)
+          mAdd(st)
+        }
+        const subHole = new THREE.Mesh(new THREE.BoxGeometry(3.6, 0.1, 5), wallMat)
+        subHole.position.set(subX, -1.6, subZ)
+        mAdd(subHole)
+        // Railings around three sides (instanced posts + a top rail box).
+        const subPostGeo = new THREE.CylinderGeometry(0.07, 0.07, 1.0, 6)
+        const subPostXf: Xf[] = []
+        for (let i = 0; i <= 5; i++) {
+          const z = subZ - 2.5 + i
+          subPostXf.push({ pos: [subX - 1.9, 0.5, z] })
+          subPostXf.push({ pos: [subX + 1.9, 0.5, z] })
+        }
+        for (const sxp of [-1.3, 0, 1.3]) subPostXf.push({ pos: [subX + sxp, 0.5, subZ + 2.6] })
+        instAdd(subPostGeo, railMat, subPostXf)
+        for (const rxp of [-1.9, 1.9]) {
+          const rail = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.08, 5.2), railMat)
+          rail.position.set(subX + rxp, 1.0, subZ)
+          mAdd(rail)
+        }
+        addShibuyaAABB(subX, subZ, 2.1, 2.8, 1.1) // keep the player out of the hole
+        // Signpost: two posts + a sign beam pointing down into the station.
+        for (const pxp of [subX - 1.6, subX + 1.6]) {
+          const p = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 3.2, 6), railMat)
+          p.position.set(pxp, 1.6, subZ + 2.7)
+          mAdd(p)
+        }
+        const subSignTex = makeSignTex({
+          kind: "board",
+          w: 5,
+          h: 1.4,
+          bg: "#0a1f10",
+          t1: "SHIBUYA STA.",
+          c1: "#5fe39a",
+          t2: "▼ METRO",
+          c2: "#ffffff",
+          bar: "#0c5a2e",
+        })
+        const subSign = new THREE.Mesh(
+          new THREE.PlaneGeometry(4.4, 1.3),
+          new THREE.MeshBasicMaterial({
+            map: subSignTex,
+            toneMapped: false,
+            side: THREE.DoubleSide,
+          }),
+        )
+        subSign.position.set(subX, 3.0, subZ + 2.7)
+        add(subSign)
+        // ── Sign-light pools on the wet asphalt (additive discs under the bright
+        // clusters — the neon flood "reflecting" on the deck). Two colour sets. ──
+        const poolGeo = new THREE.CircleGeometry(1, 18)
+        const poolBlueMat = new THREE.MeshBasicMaterial({
+          color: 0x6fa8ff,
+          transparent: true,
+          opacity: 0.16,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+        })
+        const poolMagMat = new THREE.MeshBasicMaterial({
+          color: 0xff5aa8,
+          transparent: true,
+          opacity: 0.14,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+        })
+        const poolBlueXf: Xf[] = []
+        const poolMagXf: Xf[] = []
+        // Under the 駅前 screens (blue), the 109 + corners (mixed).
+        for (const [px, pz, c, sc] of [
+          [4, -30, 0, 9],
+          [-18, -34, 0, 6],
+          [26, -32, 1, 6],
+          [-30, 22, 1, 7],
+          [22, 20, 0, 6],
+          [-22, -18, 1, 5],
+          [20, -16, 0, 5],
+          [0, 6, 0, 5],
+        ] as const) {
+          ;(c === 0 ? poolBlueXf : poolMagXf).push({
+            pos: [px, 0.05, pz],
+            rotX: -Math.PI / 2,
+            scl: sc,
+          })
+        }
+        instAdd(poolGeo, poolBlueMat, poolBlueXf)
+        instAdd(poolGeo, poolMagMat, poolMagXf)
+        // ── A ring of bollards around the central plaza (instanced short posts). ──
+        const bollGeo = new THREE.CylinderGeometry(0.12, 0.14, 0.8, 6)
+        const bollMat = new THREE.MeshStandardMaterial({
+          color: 0x2a2c34,
+          roughness: 0.5,
+          metalness: 0.4,
+          emissive: 0x223044,
+          emissiveIntensity: 0.5,
+        })
+        const bollXf: Xf[] = []
+        for (let i = 0; i < dn(20); i++) {
+          const a = (i / 20) * Math.PI * 2
+          bollXf.push({ pos: [Math.cos(a) * 13.5, 0.4, Math.sin(a) * 13.5] })
+        }
+        instAdd(bollGeo, bollMat, bollXf)
+
         // ══ Phase F: 渋谷の夜 — 環境・空気感 ════════════════════════════════════════
-        // Night palette, distinct from OSAKA's warm/red. Dim the base daylight rig
-        // (saved into the shared huntStageLightSaved → huntClearStage restores it),
-        // then light the city with a cool hemisphere + magenta/cyan neon spill at the
-        // scramble. Fog + sky saved/restored on teardown.
+        // Night palette, distinct from OSAKA's warm/red. (Scramble-detail Phase A:
+        // BRIGHTENED — the night must read as "夜だが街全体が見える", not a black void.
+        // The base daylight rig is dimmed but not crushed, and a strong cool night
+        // hemisphere lifts every surface so the ground / crosswalk / building bodies
+        // stay clearly visible; the emissive signs (Phase B+) ride on top.) Saved into
+        // the shared huntStageLightSaved → huntClearStage restores it. OSAKA untouched
+        // (this whole block only runs inside buildShibuyaMap).
         for (const light of [worldAmbient, hemi, sun, fillLight]) {
           huntStageLightSaved.push({ light, intensity: light.intensity })
         }
-        worldAmbient.intensity = 0.16
-        hemi.intensity = 0.22
-        sun.intensity = 0.12
-        fillLight.intensity = 0.1
-        const nightHemi = new THREE.HemisphereLight(0x1a2240, 0x06070c, 0.55)
+        worldAmbient.intensity = 0.46 // was 0.16 — lift the deep shadows off the deck
+        hemi.intensity = 0.55 // was 0.22
+        sun.intensity = 0.32 // was 0.12 — a soft cool key, still night
+        fillLight.intensity = 0.3 // was 0.1 — bounce so the far walls aren't black
+        // Strong cool night hemisphere: bluish sky term, near-black ground term, so
+        // the city is legible top-to-bottom without washing out the neon.
+        const nightHemi = new THREE.HemisphereLight(0x33426e, 0x0a0c14, 1.15)
         add(nightHemi)
-        const neonGlowMag = new THREE.PointLight(0xff2d8e, 0.8, 80, 2)
+        const neonGlowMag = new THREE.PointLight(0xff2d8e, 1.1, 92, 2)
         neonGlowMag.position.set(-16, 10, 8)
         neonGlowMag.castShadow = false
         add(neonGlowMag)
-        const neonGlowCyan = new THREE.PointLight(0x28e0ff, 0.8, 80, 2)
+        const neonGlowCyan = new THREE.PointLight(0x28e0ff, 1.1, 92, 2)
         neonGlowCyan.position.set(18, 10, -8)
         neonGlowCyan.castShadow = false
         add(neonGlowCyan)
-        // Fog: cool urban haze (reuse the shared save slot → clearOsakaMap restores).
+        // Fog: cool urban haze — lighter + pushed back so the surrounding skyline is
+        // visible (a too-dark/near fog hid the whole city). Reuses the shared save slot.
         huntStageFogSaved = scene.fog
         huntStageFogWasSaved = true
-        scene.fog = new THREE.Fog(0x0a0e1a, isMobileDevice ? 60 : 90, isMobileDevice ? 230 : 340)
+        scene.fog = new THREE.Fog(0x141b2e, isMobileDevice ? 75 : 115, isMobileDevice ? 260 : 380)
         // Night sky behind the skyline (saved here, restored in clearShibuyaMap).
         shibuyaBgSaved = scene.background
         shibuyaBgWasSaved = true
-        scene.background = new THREE.Color(0x080b14)
+        scene.background = new THREE.Color(0x10172a) // lifted from 0x080b14 (deep void)
 
         flushMerges() // collapse all static buckets → one mesh per material
         scene.add(group)
@@ -19735,6 +20439,7 @@ export default function ThreeWorld({
           t: 0,
           frame: 0,
           adTex,
+          screens: bigVisionScreens,
           seal,
           sealLight,
           neonMats: animNeon,
@@ -19794,8 +20499,9 @@ export default function ThreeWorld({
         a.t += dt
         a.frame++
         const t = a.t
-        // Big-vision ad scrolls upward and loops (wrapT set at build time).
-        if (a.adTex) a.adTex.offset.y = (a.adTex.offset.y - dt * 0.06 + 1) % 1
+        // Big-vision / round-vision screens scroll their ads upward and loop (wrapT
+        // set at build time). The original big-vision tex is included in this set.
+        for (const s of a.screens) s.tex.offset.y = (s.tex.offset.y - dt * s.spd + 1) % 1
         // Seal: slow magic-circle spin + opacity breathing; the sacred light pulses.
         if (a.seal) {
           const mat = a.seal.material as THREE.MeshBasicMaterial
