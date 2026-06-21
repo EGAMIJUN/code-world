@@ -21072,9 +21072,12 @@ export default function ThreeWorld({
           // array, so while it is active its escorts/fodder dying must NOT end the
           // mission — its own defeat path calls huntReturnToRoom instead. OSAKA
           // stage is fully driven by updateOsakaProgress (its empty waves between
-          // areas must never trip this generic clear).
+          // areas must never trip this generic clear). SHIBUYA (STEP1) is a
+          // zero-enemy exploration stage — enemies arrive in STEP2, so skip the
+          // generic clear to avoid an instant-clear on DEPLOY.
           if (
             !isOsakaStage(huntMissionConfigRef.current.stage) &&
+            !isShibuyaStage(huntMissionConfigRef.current.stage) &&
             !osakaBossRef.current &&
             enemies.filter((e) => e.hp > 0).length === 0
           ) {
