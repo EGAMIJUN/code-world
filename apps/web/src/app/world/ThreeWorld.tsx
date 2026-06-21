@@ -23,7 +23,7 @@ const WORLD_MAX = WORLD_CENTER + WORLD_HALF // 350
 const WORLD_SIZE = WORLD_HALF * 2 // 600
 // Area bands (north = -z INDUSTRIAL, center = CITY, south = +z HARBOR). The
 // city occupies z 0–100; the band thresholds sit just outside it.
-type AreaId = "INDUSTRIAL" | "CITY" | "HARBOR"
+type AreaId = "INDUSTRIAL" | "CITY" | "HARBOR" | "SHIBUYA"
 const AREA_NORTH_EDGE = -10 // z below this → INDUSTRIAL
 const AREA_SOUTH_EDGE = 110 // z above this → HARBOR
 function areaForPos(z: number): AreaId {
@@ -20018,11 +20018,19 @@ export default function ThreeWorld({
               mAdd(top)
             }
           }
-          // Collision footprint: AABB bounding the rotated rectangle (loose is fine —
-          // the player stays in the open crossing; these line the perimeter).
-          const hw = Math.abs((w / 2) * Math.cos(rotY)) + Math.abs((d / 2) * Math.sin(rotY))
-          const hd = Math.abs((w / 2) * Math.sin(rotY)) + Math.abs((d / 2) * Math.cos(rotY))
-          addShibuyaAABB(cx, cz, hw, hd, h)
+          // Collision footprint: cylinders use their actual radius; boxes/glass/stepped
+          // scale the rotation-expanded AABB by 0.87 so consecutive buildings 15 units
+          // apart leave a ~2-unit walkable gap instead of merging into a solid wall.
+          if (shape === "rounded") {
+            const r = Math.max(w, d) / 2
+            addShibuyaAABB(cx, cz, r, r, h)
+          } else {
+            const hw =
+              (Math.abs((w / 2) * Math.cos(rotY)) + Math.abs((d / 2) * Math.sin(rotY))) * 0.87
+            const hd =
+              (Math.abs((w / 2) * Math.sin(rotY)) + Math.abs((d / 2) * Math.cos(rotY))) * 0.87
+            addShibuyaAABB(cx, cz, hw, hd, h)
+          }
           // Clad the crossing-facing wall + edge blade stacks.
           const fwx = cx + nx * (d / 2)
           const fwz = cz + nz * (d / 2)
@@ -20311,7 +20319,14 @@ export default function ThreeWorld({
           rail.position.set(subX + rxp, 1.0, subZ)
           mAdd(rail)
         }
-        addShibuyaAABB(subX, subZ, 2.1, 2.8, 1.1) // keep the player out of the hole
+        // Iron grating seals the entrance (underground not yet built). Flush with the
+        // ground so the player walks straight over it with no awkward invisible block.
+        const grateMesh = new THREE.Mesh(
+          new THREE.BoxGeometry(3.2, 0.08, 4.4),
+          new THREE.MeshStandardMaterial({ color: 0x2a2c32, roughness: 0.45, metalness: 0.75 }),
+        )
+        grateMesh.position.set(subX, 0.04, subZ)
+        mAdd(grateMesh)
         // Signpost: two posts + a sign beam pointing down into the station.
         for (const pxp of [subX - 1.6, subX + 1.6]) {
           const p = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 3.2, 6), railMat)
@@ -20999,6 +21014,13 @@ export default function ThreeWorld({
           // SHIBUYA core PR: no minions/boss yet — just place the player at the
           // scramble. Outer-ring areas + enemies + the sealed boss land in later PRs.
           shibuyaInitProgression()
+          // Show "SHIBUYA" banner on stage entry (world-zone banner suppressed in HUNT).
+          areaRef.current = "SHIBUYA"
+          areaKeyRef.current += 1
+          setAreaBanner({ id: "SHIBUYA", key: areaKeyRef.current })
+          setAreaBannerVisible(true)
+          if (areaHideTimerRef.current) clearTimeout(areaHideTimerRef.current)
+          areaHideTimerRef.current = setTimeout(() => setAreaBannerVisible(false), 3200)
         } else {
           // Minions ring the arena centre.
           for (let i = 0; i < lv.zakoCount; i++) {
@@ -24019,7 +24041,9 @@ export default function ThreeWorld({
           // the nearest center makes every tower's elevator reliably engage.
           let nearClimbNow = false
           let atTopNow = false
-          {
+          // climbZones belong to the main-world landmark towers; skip in HUNT mode
+          // so no spurious "[E] CLIMB" prompt fires from hidden towers under the arena.
+          if (modeRef.current !== "hunt") {
             const zone = climbZoneAt(refs.focalPoint.x, refs.focalPoint.z)
             if (zone) {
               nearClimbNow = true
@@ -24040,7 +24064,7 @@ export default function ThreeWorld({
           // E-key climb (consumed once per press in the keydown handler).
           if (climbRequestRef.current) {
             climbRequestRef.current = false
-            if (Date.now() > climbCooldownUntilRef.current) {
+            if (modeRef.current !== "hunt" && Date.now() > climbCooldownUntilRef.current) {
               const zone = climbZoneAt(refs.focalPoint.x, refs.focalPoint.z)
               if (zone) {
                 // If already roughly at the top, descend back down; else
@@ -25841,7 +25865,10 @@ export default function ThreeWorld({
         // Fire the GTA-style area name whenever the player crosses into a new
         // district (and once on spawn, since areaRef starts null). It fades in
         // via the key change, then auto-hides after a few seconds.
-        {
+        // Skip in HUNT mode — the player overlaps the main-world zone grid and
+        // zone boundaries carry no meaning there. Each HUNT stage fires its own
+        // banner at mission start (e.g. shibuyaInitProgression → "SHIBUYA").
+        if (modeRef.current !== "hunt") {
           const area = areaForPos(refs.focalPoint.z)
           if (area !== areaRef.current) {
             areaRef.current = area
@@ -29860,7 +29887,9 @@ export default function ThreeWorld({
                 ? "DOWNTOWN"
                 : areaBanner.id === "HARBOR"
                   ? "SOUTH DOCKS"
-                  : "NORTH WORKS"}
+                  : areaBanner.id === "SHIBUYA"
+                    ? "スクランブル交差点"
+                    : "NORTH WORKS"}
             </div>
           </div>
         )}
