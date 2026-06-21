@@ -631,13 +631,54 @@ interface HuntLevel {
 // stage = arena dressing (outdoor day vs. indoor green-lit hall);
 // difficulty = which HUNT_LEVELS entry a fresh run starts at (1/2/3).
 type HuntMissionConfig = {
-  stage: "outdoor" | "indoor" | "osaka" | "osaka_oni" | "osaka_cataclysm"
+  stage: "outdoor" | "indoor" | "osaka" | "osaka_oni" | "osaka_cataclysm" | "shibuya"
   difficulty: 1 | 2 | 3
 }
 // OSAKA 鬼モード (FINAL-H) / 終焉モード (Cataclysm): マップ/進行は OSAKA と共通、
 // 倍率と守衛、そして終焉だけの大魔・崩壊演出が上乗せされる。
 const isOsakaStage = (s: HuntMissionConfig["stage"]): boolean =>
   s === "osaka" || s === "osaka_oni" || s === "osaka_cataclysm"
+// 渋谷編 (SHIBUYA): スリバチ地形の都市核 — スクランブル交差点を中心に独立した新ステージ。
+// OSAKA とは完全に別系統で、buildShibuyaMap / clearShibuyaMap が土台を組む。
+const isShibuyaStage = (s: HuntMissionConfig["stage"]): boolean => s === "shibuya"
+// ── 渋谷スリバチ地形 ──────────────────────────────────────────────────────
+// 谷地形 (スリバチ): 中心 (スクランブル) が最も低く y=0、外周に向かって緩やかに
+// せり上がる「すり鉢」。歩行可能なコアは平坦 (FLAT_R 以内は必ず y=0)、その外側 ——
+// 外周壁の向こう —— だけが RIM_H までせり上がる背景。プレイヤー Y は y=0 固定の
+// ままなので浮き/めり込みは一切起きない。外周エリア (道玄坂/宮益坂/公園通り) を
+// 歩けるようにするのは後続 PR (floors[] とクランプを足して拡張)。
+const SHIBUYA_MAP = 380 // 床メッシュ全体のサイズ (背景リム込み)
+const SHIBUYA_HALF = 100 // 外周壁の半幅 → 歩行可能 200×200 (大阪 180 よりやや大きめ)
+const SHIBUYA_FLAT_R = 144 // 平坦な谷底の半径 (壁の角 r≈141 を内包するので全可動域が平坦)
+const SHIBUYA_RIM_R = 188 // せり上がりが頂部に達する半径
+const SHIBUYA_RIM_H = 26 // リム (谷の縁) の高さ
+// ローカル座標 (グループ中心 = HUNT_ARENA からの相対) での地面の高さ。
+// 平坦コア内は 0、外周リングだけ smoothstep でせり上がる。床メッシュの頂点変位と
+// 背景プロップの接地の両方に使う純関数。
+const shibuyaGroundY = (lx: number, lz: number): number => {
+  const r = Math.hypot(lx, lz)
+  if (r <= SHIBUYA_FLAT_R) return 0
+  if (r >= SHIBUYA_RIM_R) return SHIBUYA_RIM_H
+  const t = (r - SHIBUYA_FLAT_R) / (SHIBUYA_RIM_R - SHIBUYA_FLAT_R)
+  return SHIBUYA_RIM_H * t * t * (3 - 2 * t) // smoothstep
+}
+// 渋谷エリア中心 (ワールド座標)。今回はコア (scramble) のみ使用するが、後続 PR の
+// 外周拡張 (道玄坂/宮益坂/公園通り/センター街/神社) を見越して方角の概念を持たせる。
+type ShibuyaArea = "scramble" | "dogenzaka" | "miyamasuzaka" | "koendori" | "centergai" | "shrine"
+const shibuyaAreaCenter = (area: ShibuyaArea): { x: number; z: number } => {
+  // ローカルオフセット → ワールド (HUNT_ARENA 基準)。方角: 道玄坂=南西, 宮益坂=東,
+  // 公園通り=北, センター街=北西, 神社=北東の杜。
+  const off: Record<ShibuyaArea, [number, number]> = {
+    scramble: [0, 0],
+    dogenzaka: [-52, 44],
+    miyamasuzaka: [62, -8],
+    koendori: [-6, -64],
+    centergai: [-46, -40],
+    shrine: [58, -54],
+  }
+  const [dx, dz] = off[area]
+  return { x: HUNT_ARENA.x + dx, z: HUNT_ARENA.z + dz }
+}
 // Per-theme minion spec — reuse an existing enemy model with a colour/scale
 // tweak. base = model, tint = body recolour, eyes = eye-glow colour.
 type HuntCreatureKind =
@@ -1205,6 +1246,11 @@ let osakaSuppressBaseCollision = false
 // (re)build and on mission teardown. Module-scoped because the collision helpers
 // are module-level (collidesWithWall can't reach a component ref).
 const OSAKA_AABBS: WallAABB[] = []
+// SHIBUYA's OWN collision list — same role as OSAKA_AABBS but for the 渋谷 stage
+// (perimeter walls + landmark footprints registered by buildShibuyaMap). Only one
+// hunt overlay stage is ever live, so when the base map is suppressed the sweep
+// tests OSAKA_AABBS *and* SHIBUYA_AABBS; the inactive stage's array is empty.
+const SHIBUYA_AABBS: WallAABB[] = []
 
 // Shared per-AABB tests (so the OSAKA path and the base-map path stay identical).
 function aabbBlocksMover(
@@ -1248,6 +1294,7 @@ function collidesWithWall(px: number, pz: number, radius: number, feetY = 0): bo
   // OSAKA structures. An empty list = the old free-field behaviour.
   if (osakaSuppressBaseCollision) {
     for (const w of OSAKA_AABBS) if (aabbBlocksMover(w, px, pz, radius, feetY)) return true
+    for (const w of SHIBUYA_AABBS) if (aabbBlocksMover(w, px, pz, radius, feetY)) return true
     return false
   }
   if (
@@ -1267,6 +1314,7 @@ function pointInsideWall(px: number, py: number, pz: number): boolean {
   // OSAKA: bullets are stopped only by the registered OSAKA structures.
   if (osakaSuppressBaseCollision) {
     for (const w of OSAKA_AABBS) if (pointInAABB(w, px, py, pz)) return true
+    for (const w of SHIBUYA_AABBS) if (pointInAABB(w, px, py, pz)) return true
     return false
   }
   for (const w of ALL_AABBS) if (pointInAABB(w, px, py, pz)) return true
@@ -2609,6 +2657,9 @@ export default function ThreeWorld({
   // OSAKA stage map (Dotonbori / Tsutenkaku / Osaka Castle). Top-level objects
   // built by buildOsakaMap, disposed on mission return.
   const osakaMapMeshesRef = useRef<THREE.Object3D[]>([])
+  // SHIBUYA stage map (scramble core + landmarks). Top-level objects built by
+  // buildShibuyaMap, disposed by clearShibuyaMap on mission return.
+  const shibuyaMapMeshesRef = useRef<THREE.Object3D[]>([])
   // OSAKA area-progression state + the active mid-boss (Tengu / Yamaya).
   const osakaProgressRef = useRef<OsakaProgressState>({
     area: "dotonbori",
@@ -16337,11 +16388,14 @@ export default function ThreeWorld({
       let huntPanelClickAt = 0 // throttle held-fire so one tap = one selection
       // Clickable regions in normalised canvas space (top-left origin).
       type HuntPanelHit =
-        | { kind: "stage"; value: "outdoor" | "indoor" | "osaka" | "osaka_oni" | "osaka_cataclysm" }
+        | {
+            kind: "stage"
+            value: "outdoor" | "indoor" | "osaka" | "osaka_oni" | "osaka_cataclysm" | "shibuya"
+          }
         | { kind: "difficulty"; value: 1 | 2 | 3 }
         | { kind: "deploy" }
-      // 5段目に「OSAKA 終焉」(Cataclysm) が入ったぶん、ステージ行はさらに詰めてある
-      // (0.21〜0.725 を5等分)。難度列は右側 (x≥0.54) なので干渉しない。
+      // ステージ行は 6 段 (outdoor / indoor / 渋谷 / OSAKA / 鬼 / 終焉) を 0.21〜0.725 に
+      // 等分。難度列は右側 (x≥0.54) なので干渉しない。
       const HUNT_PANEL_REGIONS: {
         x0: number
         y0: number
@@ -16349,15 +16403,16 @@ export default function ThreeWorld({
         y1: number
         hit: HuntPanelHit
       }[] = [
-        { x0: 0.05, y0: 0.21, x1: 0.46, y1: 0.305, hit: { kind: "stage", value: "outdoor" } },
-        { x0: 0.05, y0: 0.315, x1: 0.46, y1: 0.41, hit: { kind: "stage", value: "indoor" } },
-        { x0: 0.05, y0: 0.42, x1: 0.46, y1: 0.515, hit: { kind: "stage", value: "osaka" } },
-        { x0: 0.05, y0: 0.525, x1: 0.46, y1: 0.62, hit: { kind: "stage", value: "osaka_oni" } },
+        { x0: 0.05, y0: 0.21, x1: 0.46, y1: 0.288, hit: { kind: "stage", value: "outdoor" } },
+        { x0: 0.05, y0: 0.296, x1: 0.46, y1: 0.374, hit: { kind: "stage", value: "indoor" } },
+        { x0: 0.05, y0: 0.382, x1: 0.46, y1: 0.46, hit: { kind: "stage", value: "shibuya" } },
+        { x0: 0.05, y0: 0.468, x1: 0.46, y1: 0.546, hit: { kind: "stage", value: "osaka" } },
+        { x0: 0.05, y0: 0.554, x1: 0.46, y1: 0.632, hit: { kind: "stage", value: "osaka_oni" } },
         {
           x0: 0.05,
-          y0: 0.63,
+          y0: 0.64,
           x1: 0.46,
-          y1: 0.725,
+          y1: 0.718,
           hit: { kind: "stage", value: "osaka_cataclysm" },
         },
         { x0: 0.54, y0: 0.24, x1: 0.95, y1: 0.36, hit: { kind: "difficulty", value: 1 } },
@@ -16844,7 +16899,9 @@ export default function ThreeWorld({
                   : "OSAKA 終焉"
                 : r.hit.value === "osaka_oni"
                   ? "OSAKA 鬼"
-                  : r.hit.value.toUpperCase()
+                  : r.hit.value === "shibuya"
+                    ? "渋谷 SHIBUYA"
+                    : r.hit.value.toUpperCase()
               : r.hit.kind === "difficulty"
                 ? `LV${r.hit.value}`
                 : "[ DEPLOY ]"
@@ -16916,6 +16973,23 @@ export default function ThreeWorld({
       // every sign uses fictional text. Disposed by huntClearStage on return.
       // Animated scenery handles (driven by updateOsakaMap); reset every build.
       let osakaAnim: OsakaAnim | null = null
+      // SHIBUYA animated-scenery handles (Phase F): the big-vision screen scroll,
+      // seal-altar pulse/spin, neon flicker, and the off-centre distance-cull list.
+      // Driven by updateShibuyaMap; rebuilt on each buildShibuyaMap, nulled on clear.
+      type ShibuyaAnim = {
+        t: number
+        frame: number
+        adTex: THREE.Texture | null
+        seal: THREE.Mesh | null
+        sealLight: THREE.PointLight | null
+        neonMats: THREE.MeshStandardMaterial[]
+        cull: { obj: THREE.Object3D; cx: number; cz: number; r: number }[]
+      }
+      let shibuyaAnim: ShibuyaAnim | null = null
+      // SHIBUYA night sky saved on build so it restores on teardown (fog reuses the
+      // shared huntStageFogSaved; base-light dimming reuses huntStageLightSaved).
+      let shibuyaBgSaved: THREE.Color | THREE.Texture | null = null
+      let shibuyaBgWasSaved = false
       // The distant-skyline InstancedMesh, hidden on mobile / far distance culling.
       let osakaSkylineInst: THREE.InstancedMesh | null = null
       // Fine decorations that hide when the player is far from their area (the big
@@ -18662,6 +18736,1079 @@ export default function ThreeWorld({
           huntStageFogWasSaved = false
         }
       }
+      // ════════════════════════════════════════════════════════════════════════
+      // 渋谷編 (SHIBUYA) — HUNT の新ステージ「核」: スリバチ地形 + スクランブル交差点。
+      // OSAKA とは完全に独立。buildShibuyaMap が地形/ランドマークを一つの group に組み、
+      // clearShibuyaMap が破棄する。OSAKA のコード/マップには一切触れない。
+      // Phase A: 骨格 — スリバチ床メッシュ + 外周壁 + 中央プラザ/放射道路 + 接地ヘルパー。
+      // 後続フェーズ (B〜F) は flushMerges() の手前に造形を足していく。
+      // ════════════════════════════════════════════════════════════════════════
+      function buildShibuyaMap() {
+        const dense = isMobileDevice ? 0.5 : 1.0 // mobile thins decoration loops
+        const dn = (n: number) => Math.max(1, Math.round(n * dense))
+        let seed = 10934 // 渋谷 deterministic PRNG (≠ OSAKA seed → different layout)
+        const rnd = () => {
+          seed = (seed * 1103515245 + 12345) & 0x7fffffff
+          return seed / 0x7fffffff
+        }
+        const group = new THREE.Group()
+        group.position.set(HUNT_ARENA.x, 0, HUNT_ARENA.z) // all geometry is arena-local
+        const add = (m: THREE.Object3D) => group.add(m)
+        // Phase F animation/cull collectors — populated through the build, consumed
+        // when shibuyaAnim is assigned at the very end (off-centre detail is culled).
+        const animNeon: THREE.MeshStandardMaterial[] = []
+        const animCull: { obj: THREE.Object3D; cx: number; cz: number; r: number }[] = []
+        // ── SHIBUYA collision registry ─────────────────────────────────────────
+        // Mirrors addOsakaAABB: only MAJOR structures (perimeter walls + later the
+        // landmark footprints) get a hitbox so the scramble stays freely walkable.
+        // (cx,cz)=local centre, (hw,hd)=half-extents, h=top, y0=bottom (0=ground).
+        SHIBUYA_AABBS.length = 0 // fresh list each (re)build
+        const addShibuyaAABB = (
+          cx: number,
+          cz: number,
+          hw: number,
+          hd: number,
+          h: number,
+          y0 = 0,
+        ) => {
+          SHIBUYA_AABBS.push({
+            x1: HUNT_ARENA.x + cx - hw,
+            x2: HUNT_ARENA.x + cx + hw,
+            z1: HUNT_ARENA.z + cz - hd,
+            z2: HUNT_ARENA.z + cz + hd,
+            h,
+            y0,
+          })
+        }
+        // ── Static-geometry merger (same draw-call killer as OSAKA) ─────────────
+        // Every static mesh is funnelled through mAdd (bakes world transform into a
+        // cloned geometry, buckets by material); flushMerges() then merges each
+        // bucket into ONE mesh. Re-declared locally (OSAKA's are closures over its
+        // own group — untouched here).
+        const mergeMap = new Map<THREE.Material, THREE.BufferGeometry[]>()
+        const mAdd = (mesh: THREE.Mesh) => {
+          const mat = mesh.material
+          if (Array.isArray(mat)) {
+            add(mesh) // multi-material meshes can't share a single bucket
+            return
+          }
+          mesh.updateMatrix()
+          const g = mesh.geometry.clone().applyMatrix4(mesh.matrix)
+          const arr = mergeMap.get(mat)
+          if (arr) arr.push(g)
+          else mergeMap.set(mat, [g])
+        }
+        const flushMerges = () => {
+          for (const [mat, geos] of mergeMap) {
+            const first = geos[0]
+            if (!first) continue
+            const merged = geos.length === 1 ? first : mergeGeometries(geos, false)
+            if (!merged) {
+              for (const g of geos) add(new THREE.Mesh(g, mat))
+              continue
+            }
+            if (geos.length > 1) for (const g of geos) g.dispose()
+            const m = new THREE.Mesh(merged, mat)
+            m.castShadow = false
+            m.receiveShadow = false
+            m.frustumCulled = false
+            add(m)
+          }
+          mergeMap.clear()
+        }
+        // Instanced-mesh accumulator (one draw call for N copies of one geo+mat).
+        type Xf = {
+          pos: [number, number, number]
+          scl?: [number, number, number] | number
+          rotX?: number
+          rotY?: number
+          rotZ?: number
+        }
+        const idummy = new THREE.Object3D()
+        const instAdd = (geo: THREE.BufferGeometry, mat: THREE.Material, xforms: Xf[]) => {
+          if (xforms.length === 0) return null
+          const im = new THREE.InstancedMesh(geo, mat, xforms.length)
+          im.castShadow = false
+          im.receiveShadow = false
+          im.frustumCulled = false
+          xforms.forEach((xf, i) => {
+            idummy.position.set(xf.pos[0], xf.pos[1], xf.pos[2])
+            idummy.rotation.set(xf.rotX ?? 0, xf.rotY ?? 0, xf.rotZ ?? 0)
+            if (typeof xf.scl === "number") idummy.scale.setScalar(xf.scl)
+            else if (xf.scl) idummy.scale.set(xf.scl[0], xf.scl[1], xf.scl[2])
+            else idummy.scale.setScalar(1)
+            idummy.updateMatrix()
+            im.setMatrixAt(i, idummy.matrix)
+          })
+          im.instanceMatrix.needsUpdate = true
+          add(im)
+          return im
+        }
+        // ── GROUND: スリバチ (bowl) floor ──────────────────────────────────────
+        // A segmented plane whose vertices are pushed up toward the rim by
+        // shibuyaGroundY (radial smoothstep). After the -90° X-rotation the plane's
+        // local +z becomes world +y, so we displace the z attribute. The walkable
+        // core (r ≤ FLAT_R) stays exactly y=0 — the player never floats/clips; only
+        // the unreachable backdrop ring beyond the perimeter walls climbs.
+        const floorGeo = new THREE.PlaneGeometry(SHIBUYA_MAP, SHIBUYA_MAP, 80, 80)
+        const fpos = floorGeo.attributes.position
+        if (fpos) {
+          for (let i = 0; i < fpos.count; i++) {
+            // local x = world X (arena-local); local y maps to world Z (= -y), but
+            // the bowl is radial so the sign is irrelevant to the height.
+            fpos.setZ(i, shibuyaGroundY(fpos.getX(i), fpos.getY(i)))
+          }
+          fpos.needsUpdate = true
+        }
+        floorGeo.computeVertexNormals()
+        const asphaltTex = makeNoiseTexture(128, 0x34353d, 0.16, 26)
+        const floor = new THREE.Mesh(
+          floorGeo,
+          new THREE.MeshLambertMaterial({
+            map: asphaltTex,
+            color: 0x8a8d97,
+            emissive: 0x10131c,
+            emissiveIntensity: 1,
+          }),
+        )
+        floor.rotation.x = -Math.PI / 2
+        floor.position.y = 0.01
+        floor.receiveShadow = false
+        add(floor)
+        // ── Perimeter walls — closed square that contains the player on the flat
+        // core (sits at r ≤ HALF·√2 < FLAT_R, i.e. on y=0 ground). Beyond them the
+        // bowl rim rises as pure backdrop (unreachable this PR). ──
+        const H = SHIBUYA_HALF
+        const wallMat = new THREE.MeshLambertMaterial({ color: 0x24252b })
+        for (const [x, z, w, d] of [
+          [0, H, 2 * H, 2],
+          [0, -H, 2 * H, 2],
+          [H, 0, 2, 2 * H],
+          [-H, 0, 2, 2 * H],
+        ] as const) {
+          const wall = new THREE.Mesh(new THREE.BoxGeometry(w, 10, d), wallMat)
+          wall.position.set(x, 5, z)
+          mAdd(wall)
+          addShibuyaAABB(x, z, w / 2, d / 2, 10)
+        }
+        // ── Central scramble plaza + radiating main streets (lighter asphalt) ──
+        // The plaza is the scramble crossing slab (Phase B paints the diagonal
+        // crosswalk lines on top). Two main streets cross through it (N-S along the
+        // 公園通り axis, E-W along the 宮益坂 axis); the diagonal slope-roads
+        // (道玄坂/センター街) arrive with their areas in later PRs.
+        const roadMat = new THREE.MeshLambertMaterial({
+          color: 0x9498a2,
+          map: makeNoiseTexture(128, 0x3a3b44, 0.12, 18),
+          emissive: 0x141722,
+          emissiveIntensity: 1,
+        })
+        const plaza = new THREE.Mesh(new THREE.PlaneGeometry(44, 44), roadMat)
+        plaza.rotation.x = -Math.PI / 2
+        plaza.position.y = 0.02
+        mAdd(plaza)
+        for (const [w, d] of [
+          [20, 2 * H - 8],
+          [2 * H - 8, 20],
+        ] as const) {
+          const road = new THREE.Mesh(new THREE.PlaneGeometry(w, d), roadMat)
+          road.rotation.x = -Math.PI / 2
+          road.position.y = 0.015
+          mAdd(road)
+        }
+        // ── Sidewalk curbs flanking the two main streets (raised concrete strips) ──
+        const curbMat = new THREE.MeshLambertMaterial({ color: 0x52555f })
+        for (const sx of [-11, 11]) {
+          const curb = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.3, 2 * H - 8), curbMat)
+          curb.position.set(sx, 0.15, 0)
+          mAdd(curb)
+        }
+        for (const sz of [-11, 11]) {
+          const curb = new THREE.Mesh(new THREE.BoxGeometry(2 * H - 8, 0.3, 1.2), curbMat)
+          curb.position.set(0, 0.15, sz)
+          mAdd(curb)
+        }
+        // ── Wet-asphalt puddles (instanced dark patches — cheap urban-night cue) ──
+        const puddleGeo = new THREE.CircleGeometry(1, 10)
+        const puddleMat = new THREE.MeshBasicMaterial({ color: 0x13161e })
+        const puddleXf: Xf[] = []
+        for (let i = 0; i < dn(22); i++) {
+          puddleXf.push({
+            pos: [-H + rnd() * 2 * H, 0.04, -H + rnd() * 2 * H],
+            rotX: -Math.PI / 2,
+            scl: 0.6 + rnd() * 1.7,
+          })
+        }
+        instAdd(puddleGeo, puddleMat, puddleXf)
+
+        // ══ Phase B: スクランブル交差点 (渋谷の象徴) ══════════════════════════════
+        // The instantly-recognizable scramble: 4 straight + 2 diagonal (X) zebra
+        // crossings over a + intersection (20-wide N-S × E-W roads). All white bars
+        // collapse into ONE InstancedMesh. Stays freely walkable (no AABBs on the
+        // crossing) so standing in the centre reads as Shibuya at a glance.
+        const stripeGeo = new THREE.BoxGeometry(1, 0.04, 1) // unit bar, scaled per inst
+        const stripeMat = new THREE.MeshStandardMaterial({
+          color: 0xeef0f2,
+          emissive: 0x30343a,
+          emissiveIntensity: 0.5,
+          roughness: 0.85,
+        })
+        const stripeXf: Xf[] = []
+        // (cx,cz)=crossing centre, phi=walk direction (bars repeat along it & sit
+        // perpendicular), walkLen=road width crossed, barLen=crossing-band width.
+        const addCrosswalk = (
+          cx: number,
+          cz: number,
+          phi: number,
+          walkLen: number,
+          barLen: number,
+          count: number,
+          thick = 0.55,
+        ) => {
+          const rotY = -phi - Math.PI / 2 // turn the unit bar's +x to ⟂ the walk dir
+          for (let i = 0; i < count; i++) {
+            const along = (-0.5 + (i + 0.5) / count) * walkLen
+            stripeXf.push({
+              pos: [cx + Math.cos(phi) * along, 0.06, cz + Math.sin(phi) * along],
+              rotY,
+              scl: [barLen, 1, thick],
+            })
+          }
+        }
+        // 4 straight crossings hugging the 20×20 intersection box (band ~5 wide).
+        addCrosswalk(0, -13, 0, 20, 5, 15) // north arm — cross the N-S road (walk E-W)
+        addCrosswalk(0, 13, 0, 20, 5, 15) // south arm
+        addCrosswalk(-13, 0, Math.PI / 2, 20, 5, 15) // west arm — cross the E-W road
+        addCrosswalk(13, 0, Math.PI / 2, 20, 5, 15) // east arm
+        // 2 diagonal crossings forming the X across the centre — the scramble hallmark.
+        addCrosswalk(0, 0, Math.PI / 4, 42, 5, 28)
+        addCrosswalk(0, 0, -Math.PI / 4, 42, 5, 28)
+        // Stop lines: a thick bar just outside each crossing where traffic halts.
+        for (const [lx, lz, ang] of [
+          [0, -17, 0],
+          [0, 17, 0],
+          [-17, 0, Math.PI / 2],
+          [17, 0, Math.PI / 2],
+        ] as const) {
+          stripeXf.push({ pos: [lx, 0.06, lz], rotY: -ang - Math.PI / 2, scl: [18, 1, 0.9] })
+        }
+        instAdd(stripeGeo, stripeMat, stripeXf)
+        // ── Four corner sidewalk pads (flat) — the scramble corners + footprint
+        // anchors for the Phase C landmarks (109 / big-vision / glass tower). Flat
+        // (y=0.03) so there's zero step/clip; the towers + their AABBs land in C. ──
+        const sidewalkMat = new THREE.MeshLambertMaterial({
+          color: 0x70737d,
+          map: makeNoiseTexture(64, 0x42444c, 0.1, 6),
+        })
+        for (const [bx, bz] of [
+          [25, 25],
+          [-25, 25],
+          [25, -25],
+          [-25, -25],
+        ] as const) {
+          const sw = new THREE.Mesh(new THREE.PlaneGeometry(24, 24), sidewalkMat)
+          sw.rotation.x = -Math.PI / 2
+          sw.position.set(bx, 0.03, bz)
+          mAdd(sw)
+        }
+        // ── Traffic signals at the four inner corners (Japanese horizontal heads).
+        // Poles + heads + 3 lens colours = 5 instanced draw calls for all four. ──
+        const sigPoleGeo = new THREE.CylinderGeometry(0.12, 0.15, 5.4, 6)
+        const sigPoleMat = new THREE.MeshStandardMaterial({
+          color: 0x1b1b20,
+          roughness: 0.6,
+          metalness: 0.45,
+        })
+        const sigHeadGeo = new THREE.BoxGeometry(1.7, 0.5, 0.42)
+        const sigHeadMat = new THREE.MeshStandardMaterial({ color: 0x101014, roughness: 0.7 })
+        const lensGeo = new THREE.SphereGeometry(0.15, 8, 6)
+        const lensMat = (c: number) =>
+          new THREE.MeshStandardMaterial({ color: c, emissive: c, emissiveIntensity: 1.6 })
+        const sigPoleXf: Xf[] = []
+        const sigHeadXf: Xf[] = []
+        const redXf: Xf[] = []
+        const amberXf: Xf[] = []
+        const greenXf: Xf[] = []
+        for (const [sx, sz] of [
+          [12, 12],
+          [-12, 12],
+          [12, -12],
+          [-12, -12],
+        ] as const) {
+          const flen = Math.hypot(sx, sz) || 1
+          const fx = -sx / flen
+          const fz = -sz / flen // facing toward the centre
+          const hx = -fz
+          const hz = fx // horizontal axis (3 lenses sit along it)
+          const hy = 5.1
+          sigPoleXf.push({ pos: [sx, 2.7, sz] })
+          sigHeadXf.push({ pos: [sx + fx * 0.2, hy, sz + fz * 0.2], rotY: Math.atan2(fx, fz) })
+          for (let k = -1; k <= 1; k++) {
+            const xf: Xf = {
+              pos: [sx + fx * 0.34 + hx * (k * 0.46), hy, sz + fz * 0.34 + hz * (k * 0.46)],
+            }
+            if (k === -1) greenXf.push(xf)
+            else if (k === 0) amberXf.push(xf)
+            else redXf.push(xf)
+          }
+        }
+        instAdd(sigPoleGeo, sigPoleMat, sigPoleXf)
+        instAdd(sigHeadGeo, sigHeadMat, sigHeadXf)
+        instAdd(lensGeo, lensMat(0xff3328), redXf)
+        instAdd(lensGeo, lensMat(0xffb028), amberXf)
+        instAdd(lensGeo, lensMat(0x34ff74), greenXf)
+        // ── Street lamps lining the two main streets (instanced pole + glow head).
+        // Emissive heads only this PR (real point lights are added in Phase F). ──
+        const lampPoleGeo = new THREE.CylinderGeometry(0.1, 0.13, 6, 6)
+        const lampHeadGeo = new THREE.SphereGeometry(0.32, 8, 6)
+        const lampHeadMat = new THREE.MeshStandardMaterial({
+          color: 0xffeab0,
+          emissive: 0xffe6a0,
+          emissiveIntensity: 1.5,
+        })
+        const lampPoleXf: Xf[] = []
+        const lampHeadXf: Xf[] = []
+        for (let d = -90; d <= 90; d += 24) {
+          if (Math.abs(d) < 16) continue // leave the intersection itself clear
+          for (const side of [-12, 12]) {
+            lampPoleXf.push({ pos: [side, 3, d] }) // along the N-S road
+            lampHeadXf.push({ pos: [side, 6.1, d] })
+            lampPoleXf.push({ pos: [d, 3, side] }) // along the E-W road
+            lampHeadXf.push({ pos: [d, 6.1, side] })
+          }
+        }
+        instAdd(lampPoleGeo, sigPoleMat, lampPoleXf)
+        instAdd(lampHeadGeo, lampHeadMat, lampHeadXf)
+
+        // ══ Phase C: 駅前ランドマークビル群 (シルエットで渋谷を想起・全てオリジナル) ══
+        // Window-grid emissive texture: lit windows glow, gaps + dark windows stay
+        // black so only windows emit. Deterministic via the build PRNG.
+        const makeWindowTex = (cols: number, rows: number, litHex: number, litChance: number) => {
+          const cw = 6
+          const ch = 9
+          const cv = document.createElement("canvas")
+          cv.width = cols * cw
+          cv.height = rows * ch
+          const ctx = cv.getContext("2d")
+          if (ctx) {
+            ctx.fillStyle = "#000000"
+            ctx.fillRect(0, 0, cv.width, cv.height)
+            const litCol = `#${litHex.toString(16).padStart(6, "0")}`
+            for (let r = 0; r < rows; r++) {
+              for (let c = 0; c < cols; c++) {
+                const on = rnd() < litChance
+                ctx.fillStyle = on ? litCol : "#0a0d14"
+                ctx.fillRect(c * cw + 1, r * ch + 1, cw - 2, ch - 3)
+              }
+            }
+          }
+          const t = new THREE.CanvasTexture(cv)
+          t.wrapS = THREE.RepeatWrapping
+          t.wrapT = THREE.RepeatWrapping
+          t.colorSpace = THREE.SRGBColorSpace
+          return t
+        }
+        // A glass high-rise: box body wrapped in a window grid (own material → mAdd
+        // collapses body+setback to ONE draw call). castShadow handled by flushMerges.
+        const makeTower = (
+          cx: number,
+          cz: number,
+          w: number,
+          d: number,
+          h: number,
+          baseY: number,
+          litHex: number,
+          litChance: number,
+          setback = 0,
+        ) => {
+          const tex = makeWindowTex(16, 40, litHex, litChance)
+          tex.repeat.set(Math.max(2, Math.round(w / 4)), Math.max(3, Math.round(h / 4)))
+          const mat = new THREE.MeshStandardMaterial({
+            color: 0x0d111a,
+            roughness: 0.42,
+            metalness: 0.34,
+            emissive: 0xffffff,
+            emissiveMap: tex,
+            emissiveIntensity: 0.7,
+          })
+          const body = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat)
+          body.position.set(cx, baseY + h / 2, cz)
+          mAdd(body)
+          if (setback > 0) {
+            const top = new THREE.Mesh(new THREE.BoxGeometry(w * 0.62, setback, d * 0.62), mat)
+            top.position.set(cx, baseY + h + setback / 2, cz)
+            mAdd(top)
+          }
+        }
+        // — Glass tower (SE / 駅東 — Scramble-Square-style stepped glass high-rise).
+        makeTower(46, 30, 24, 24, 66, 0, 0x9fd0ff, 0.5, 14)
+        addShibuyaAABB(46, 30, 12, 12, 66)
+        // — Hikarie-direction tower (E, distant backdrop beyond the walls; no AABB).
+        makeTower(120, -20, 28, 32, 82, 0, 0xbfe0ff, 0.45, 10)
+        // — Backdrop skyline ring climbing the スリバチ rim (shared material → 1 draw
+        // call for the whole ring). Sits on the rising ground via shibuyaGroundY.
+        const rimWinTex = makeWindowTex(14, 44, 0x88a8d8, 0.4)
+        rimWinTex.repeat.set(4, 10)
+        const rimMat = new THREE.MeshStandardMaterial({
+          color: 0x090c14,
+          roughness: 0.7,
+          emissive: 0x9fb6dc,
+          emissiveMap: rimWinTex,
+          emissiveIntensity: 0.5,
+        })
+        for (let i = 0; i < dn(16); i++) {
+          const ang = (i / 16) * Math.PI * 2 + rnd() * 0.3
+          const rr = 150 + rnd() * 30
+          const bx = Math.cos(ang) * rr
+          const bz = Math.sin(ang) * rr
+          const bw = 12 + rnd() * 12
+          const bh = 30 + rnd() * 46
+          const tw = new THREE.Mesh(new THREE.BoxGeometry(bw, bh, bw), rimMat)
+          tw.position.set(bx, shibuyaGroundY(bx, bz) + bh / 2, bz)
+          mAdd(tw)
+        }
+        // — Big-vision building (N / 駅前 — the giant screen faces the crossing). ──
+        const bvX = 4
+        const bvZ = -42
+        const bvW = 26
+        const bvD = 20
+        const bvH = 34
+        const bvWinTex = makeWindowTex(16, 24, 0xffd9a0, 0.45)
+        bvWinTex.repeat.set(6, 8)
+        const bvMat = new THREE.MeshStandardMaterial({
+          color: 0x12110f,
+          roughness: 0.6,
+          emissive: 0xffffff,
+          emissiveMap: bvWinTex,
+          emissiveIntensity: 0.55,
+        })
+        const bvBody = new THREE.Mesh(new THREE.BoxGeometry(bvW, bvH, bvD), bvMat)
+        bvBody.position.set(bvX, bvH / 2, bvZ)
+        mAdd(bvBody)
+        addShibuyaAABB(bvX, bvZ, bvW / 2, bvD / 2, bvH)
+        // The giant screen: a bright fake-ad CanvasTexture (fictional brands). Scroll
+        // animation arrives in Phase F; for now it's a static lit billboard. Its own
+        // material → kept as its own draw call (emissive, frustum-culled off).
+        const adCv = document.createElement("canvas")
+        adCv.width = 256
+        adCv.height = 192
+        const adCtx = adCv.getContext("2d")
+        if (adCtx) {
+          adCtx.fillStyle = "#0a0420"
+          adCtx.fillRect(0, 0, 256, 192)
+          adCtx.fillStyle = "#ff2d7e"
+          adCtx.fillRect(16, 18, 224, 50)
+          adCtx.fillStyle = "#ffffff"
+          adCtx.font = "bold 34px sans-serif"
+          adCtx.textAlign = "center"
+          adCtx.textBaseline = "middle"
+          adCtx.fillText("渋谷で会おう", 128, 44)
+          adCtx.fillStyle = "#28e0ff"
+          adCtx.font = "bold 26px sans-serif"
+          adCtx.fillText("★ NOVA STYLE ★", 128, 96)
+          adCtx.fillStyle = "#ffe24a"
+          adCtx.font = "bold 30px sans-serif"
+          adCtx.fillText("SCRAMBLE", 128, 140)
+          adCtx.fillStyle = "#9affc0"
+          adCtx.font = "bold 22px sans-serif"
+          adCtx.fillText("LIVE 24:00", 128, 172)
+        }
+        const adTex = new THREE.CanvasTexture(adCv)
+        adTex.colorSpace = THREE.SRGBColorSpace
+        adTex.wrapT = THREE.RepeatWrapping // Phase F scrolls offset.y → the ad flows
+        const screen = new THREE.Mesh(
+          new THREE.PlaneGeometry(bvW * 0.82, bvH * 0.66),
+          new THREE.MeshBasicMaterial({ map: adTex }),
+        )
+        screen.position.set(bvX, bvH * 0.56, bvZ + bvD / 2 + 0.16) // south face → player
+        add(screen) // standalone (animated later) — not merged
+        // — 109-style cylindrical fashion building (W/SW — prow + tall vertical sign).
+        const cylX = -42
+        const cylZ = 30
+        const cylWinTex = makeWindowTex(28, 30, 0xff9ad0, 0.4) // warm pink fashion glow
+        cylWinTex.repeat.set(3, 8)
+        const cylMat = new THREE.MeshStandardMaterial({
+          color: 0x14101a,
+          roughness: 0.45,
+          metalness: 0.2,
+          emissive: 0xffffff,
+          emissiveMap: cylWinTex,
+          emissiveIntensity: 0.6,
+        })
+        const cyl = new THREE.Mesh(new THREE.CylinderGeometry(9.5, 11.5, 42, 18), cylMat)
+        cyl.position.set(cylX, 21, cylZ)
+        mAdd(cyl)
+        addShibuyaAABB(cylX, cylZ, 11.5, 11.5, 42)
+        // Vertical sign band on the prow facing the crossing (NE). Stacked-kana sign.
+        const signCv = document.createElement("canvas")
+        signCv.width = 64
+        signCv.height = 256
+        const signCtx = signCv.getContext("2d")
+        if (signCtx) {
+          signCtx.fillStyle = "#1a0a14"
+          signCtx.fillRect(0, 0, 64, 256)
+          signCtx.fillStyle = "#ff2d8e"
+          signCtx.font = "bold 40px sans-serif"
+          signCtx.textAlign = "center"
+          signCtx.textBaseline = "middle"
+          const chars = ["渋", "谷", "M", "O", "D", "E"]
+          for (let i = 0; i < chars.length; i++) {
+            signCtx.fillText(chars[i] ?? "", 32, 26 + i * 40)
+          }
+        }
+        const signTex = new THREE.CanvasTexture(signCv)
+        signTex.colorSpace = THREE.SRGBColorSpace
+        const signMat = new THREE.MeshBasicMaterial({ map: signTex })
+        const sign = new THREE.Mesh(new THREE.BoxGeometry(0.4, 18, 3.4), signMat)
+        // Push the sign out along the NE direction (toward the centre) on the prow.
+        const sa = Math.atan2(-cylZ, -cylX) // toward centre
+        sign.position.set(cylX + Math.cos(sa) * 11.6, 30, cylZ + Math.sin(sa) * 11.6)
+        sign.rotation.y = -sa
+        add(sign) // standalone (its faces use a single basic material)
+
+        // ══ Phase D: ハチ公 + センター街 + のんべい横丁 + 雑居ビル + ストリート什器 ══
+        // Shared merge-friendly materials. Neon signs accumulate into per-colour
+        // instanced sets (one draw call each). roadMat / sidewalkMat / makeWindowTex
+        // are reused from the earlier phases (same buildShibuyaMap scope).
+        const concreteMat = new THREE.MeshLambertMaterial({ color: 0x4a4c54 })
+        const midWinTex = makeWindowTex(20, 30, 0xcfe0ff, 0.42)
+        midWinTex.repeat.set(3, 5)
+        const midMat = new THREE.MeshStandardMaterial({
+          color: 0x14161e,
+          roughness: 0.6,
+          emissive: 0xffffff,
+          emissiveMap: midWinTex,
+          emissiveIntensity: 0.5,
+        })
+        // Neon-sign instanced sets (one InstancedMesh per colour).
+        const neonGeo = new THREE.BoxGeometry(1, 1, 0.3)
+        const neonCols = [0xff2d8e, 0x28e0ff, 0xffe24a, 0x39ff9e, 0xff6a2a]
+        const neonXf: Xf[][] = neonCols.map(() => [])
+        const addNeonOnFace = (cx: number, cz: number, w: number, d: number, faceAng: number) => {
+          const nx = Math.round(Math.cos(faceAng))
+          const onX = nx !== 0
+          const ext = onX ? d : w
+          const signs = 1 + (rnd() < 0.55 ? 1 : 0)
+          for (let s = 0; s < signs; s++) {
+            const ci = Math.floor(rnd() * neonCols.length)
+            const sw = 1.4 + rnd() * Math.min(4.5, ext * 0.45)
+            const sh = 1 + rnd() * 2.4
+            const sy = 3 + rnd() * 9
+            const off = (rnd() - 0.5) * ext * 0.5
+            const px = onX ? cx + nx * (w / 2 + 0.18) : cx + off
+            const pz = onX ? cz + off : cz + Math.round(Math.sin(faceAng)) * (d / 2 + 0.18)
+            neonXf[ci]?.push({ pos: [px, sy, pz], rotY: onX ? Math.PI / 2 : 0, scl: [sw, sh, 1] })
+          }
+        }
+        // A mid-rise zatkyo building: window-grid box + neon on its street-facing side.
+        const makeMidRise = (
+          cx: number,
+          cz: number,
+          w: number,
+          d: number,
+          h: number,
+          faceAng: number,
+        ) => {
+          const b = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), midMat)
+          b.position.set(cx, h / 2, cz)
+          mAdd(b)
+          addShibuyaAABB(cx, cz, w / 2, d / 2, h)
+          addNeonOnFace(cx, cz, w, d, faceAng)
+        }
+        // ── ハチ公像 (original sitting-dog bronze + pedestal + plaza pad) ──
+        // Small SW landmark in front of the 109 cylinder; faces the crossing (+z).
+        const bronzeMat = new THREE.MeshStandardMaterial({
+          color: 0x6f5b3c,
+          roughness: 0.5,
+          metalness: 0.6,
+          emissive: 0x130d05,
+          emissiveIntensity: 0.4,
+        })
+        const hx = -20
+        const hz = 22
+        const hpad = new THREE.Mesh(new THREE.CircleGeometry(7, 22), sidewalkMat)
+        hpad.rotation.x = -Math.PI / 2
+        hpad.position.set(hx, 0.028, hz)
+        mAdd(hpad)
+        const ped = new THREE.Mesh(new THREE.BoxGeometry(2.4, 1.1, 2.4), concreteMat)
+        ped.position.set(hx, 0.55, hz)
+        mAdd(ped)
+        addShibuyaAABB(hx, hz, 1.2, 1.2, 1.1)
+        const pTop = 1.1
+        const dog = (w: number, h: number, dd: number, ox: number, oy: number, oz: number) => {
+          const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, dd), bronzeMat)
+          m.position.set(hx + ox, pTop + oy, hz + oz)
+          mAdd(m)
+        }
+        dog(1.0, 1.0, 0.6, 0, 0.5, -0.15) // haunches (sitting, rear higher)
+        dog(0.9, 0.7, 0.7, 0, 0.95, 0.35) // chest rising to the front
+        dog(0.55, 0.5, 0.5, 0, 1.45, 0.55) // head
+        dog(0.5, 0.18, 0.22, 0, 1.5, 0.85) // muzzle
+        for (const ex of [-0.2, 0.2]) dog(0.16, 0.28, 0.12, ex, 1.78, 0.5) // ears
+        for (const ex of [-0.22, 0.22]) dog(0.18, 0.85, 0.2, ex, 0.42, 0.62) // front legs
+        dog(0.18, 0.5, 0.18, 0.32, 0.85, -0.45) // curled tail
+        // ── センター街 (arched shopping-street entrance + receding lane, NW) ──
+        // Original arch sign; lane runs west, flanked by neon mid-rises.
+        const cax = -18
+        const caz = -22
+        for (const px of [cax - 5, cax + 5]) {
+          const pil = new THREE.Mesh(new THREE.BoxGeometry(1.4, 7.5, 1.4), concreteMat)
+          pil.position.set(px, 3.75, caz)
+          mAdd(pil)
+          addShibuyaAABB(px, caz, 0.7, 0.7, 7.5)
+        }
+        const cgSignCv = document.createElement("canvas")
+        cgSignCv.width = 256
+        cgSignCv.height = 56
+        const cgCtx = cgSignCv.getContext("2d")
+        if (cgCtx) {
+          cgCtx.fillStyle = "#10131c"
+          cgCtx.fillRect(0, 0, 256, 56)
+          cgCtx.fillStyle = "#ffd24a"
+          cgCtx.font = "bold 30px sans-serif"
+          cgCtx.textAlign = "center"
+          cgCtx.textBaseline = "middle"
+          cgCtx.fillText("渋谷 CENTRE GAI", 128, 30)
+        }
+        const cgTex = new THREE.CanvasTexture(cgSignCv)
+        cgTex.colorSpace = THREE.SRGBColorSpace
+        const cgBeam = new THREE.Mesh(
+          new THREE.BoxGeometry(11.4, 2.2, 0.4),
+          new THREE.MeshBasicMaterial({ map: cgTex }),
+        )
+        cgBeam.position.set(cax, 8, caz + 0.7) // faces +z toward the approaching player
+        add(cgBeam)
+        // 60 along x (west), 9 along z → only the flat -90° X tilt is needed.
+        const cgLane = new THREE.Mesh(new THREE.PlaneGeometry(60, 9), roadMat)
+        cgLane.rotation.x = -Math.PI / 2
+        cgLane.position.set(cax - 32, 0.02, caz)
+        mAdd(cgLane)
+        for (let x = cax - 6; x > cax - 62; x -= 13) {
+          makeMidRise(x, caz - 7.5, 11, 6, 12 + rnd() * 12, Math.PI / 2) // north-side row → faces lane (+z)
+          makeMidRise(x, caz + 7.5, 11, 6, 12 + rnd() * 12, -Math.PI / 2) // south-side row → faces lane (−z)
+        }
+        // ── のんべい横丁 (tight izakaya alley, NE — lanterns + noren, OSAKA tech) ──
+        const izaMat = new THREE.MeshLambertMaterial({ color: 0x2c2622 })
+        const lanternGeo = new THREE.CylinderGeometry(0.26, 0.26, 0.5, 8)
+        const lanternMat = new THREE.MeshStandardMaterial({
+          color: 0xff5a3c,
+          emissive: 0xff4a2a,
+          emissiveIntensity: 1.7,
+        })
+        const norenGeo = new THREE.PlaneGeometry(1.3, 0.85)
+        const norenMat = new THREE.MeshBasicMaterial({ color: 0x1b2a55, side: THREE.DoubleSide })
+        const lanternXf: Xf[] = []
+        const norenXf: Xf[] = []
+        const nz = -28 // alley centre-line z
+        for (let x = 16; x < 64; x += 4.2) {
+          // tiny shops flanking the 4.5-wide lane (north & south)
+          for (const [sz, face] of [
+            [-3.5, 0],
+            [3.5, Math.PI],
+          ] as const) {
+            const sh = 2.6 + rnd() * 1.6
+            const shop = new THREE.Mesh(new THREE.BoxGeometry(3.6, sh, 3), izaMat)
+            shop.position.set(x, sh / 2, nz + sz)
+            mAdd(shop)
+            // noren over the door (faces the lane)
+            norenXf.push({ pos: [x, 1.5, nz + sz + (face === 0 ? 1.6 : -1.6)], rotY: face })
+          }
+          // a red lantern strung over the lane
+          lanternXf.push({ pos: [x, 3.1, nz], scl: 0.8 + rnd() * 0.5 })
+        }
+        addShibuyaAABB(40, nz - 3.5, 24, 1.6, 4) // alley block footprints (N & S rows)
+        addShibuyaAABB(40, nz + 3.5, 24, 1.6, 4)
+        const lanternMesh = instAdd(lanternGeo, lanternMat, lanternXf)
+        const norenMesh = instAdd(norenGeo, norenMat, norenXf)
+        // Distance-cull the alley dressing when the player is nowhere near it (NE).
+        if (lanternMesh) animCull.push({ obj: lanternMesh, cx: 40, cz: nz, r: 42 })
+        if (norenMesh) animCull.push({ obj: norenMesh, cx: 40, cz: nz, r: 42 })
+        // ── Dense zatkyo ring: mid-rises packed around the playable edge (filling
+        // the skyline between the named landmarks), each with neon. Skips the four
+        // landmark sectors so nothing overlaps. ──
+        for (let i = 0; i < dn(18); i++) {
+          const ang = (i / 18) * Math.PI * 2 + 0.2
+          const rr = 70 + rnd() * 18
+          const bx = Math.cos(ang) * rr
+          const bz = Math.sin(ang) * rr
+          // skip near the four landmark anchors
+          if (
+            Math.hypot(bx - 46, bz - 30) < 22 ||
+            Math.hypot(bx + 42, bz - 30) < 22 ||
+            Math.hypot(bx - 4, bz + 42) < 24 ||
+            Math.hypot(bx - 58, bz + 54) < 26 // leave the Phase E shrine grove clear
+          )
+            continue
+          const bw = 9 + rnd() * 9
+          const bh = 12 + rnd() * 22
+          makeMidRise(bx, bz, bw, bw, bh, Math.atan2(-bz, -bx)) // face the centre
+        }
+        neonCols.forEach((c, i) => {
+          const m = new THREE.MeshStandardMaterial({
+            color: c,
+            emissive: c,
+            emissiveIntensity: 1.5,
+          })
+          animNeon.push(m) // Phase F flickers these
+          instAdd(neonGeo, m, neonXf[i] ?? [])
+        })
+        // ── Street furniture (instanced; distance-culling is wired in Phase F) ──
+        // Vending machines (2 colour sets), utility poles, guardrail segments.
+        const vendGeo = new THREE.BoxGeometry(1.0, 1.9, 0.7)
+        const vendRedXf: Xf[] = []
+        const vendBlueXf: Xf[] = []
+        const poleGeo = new THREE.CylinderGeometry(0.13, 0.16, 7, 6)
+        const poleXf: Xf[] = []
+        for (let d = -84; d <= 84; d += 14) {
+          if (Math.abs(d) < 16) continue
+          ;(rnd() < 0.5 ? vendRedXf : vendBlueXf).push({ pos: [-13.5, 0.95, d] })
+          ;(rnd() < 0.5 ? vendRedXf : vendBlueXf).push({ pos: [13.5, 0.95, d] })
+          poleXf.push({ pos: [d, 3.5, -14.5] })
+          poleXf.push({ pos: [d, 3.5, 14.5] })
+        }
+        instAdd(
+          vendGeo,
+          new THREE.MeshStandardMaterial({
+            color: 0xcc2222,
+            emissive: 0x551111,
+            emissiveIntensity: 0.6,
+          }),
+          vendRedXf,
+        )
+        instAdd(
+          vendGeo,
+          new THREE.MeshStandardMaterial({
+            color: 0x2255cc,
+            emissive: 0x112255,
+            emissiveIntensity: 0.6,
+          }),
+          vendBlueXf,
+        )
+        instAdd(poleGeo, sigPoleMat, poleXf)
+        const railGeo = new THREE.BoxGeometry(3.6, 0.55, 0.12)
+        const railMat = new THREE.MeshStandardMaterial({
+          color: 0x9aa0a8,
+          roughness: 0.5,
+          metalness: 0.5,
+        })
+        const railXf: Xf[] = []
+        for (let d = -84; d <= 84; d += 4) {
+          if (Math.abs(d) < 18) continue // leave the crossings open
+          railXf.push({ pos: [-10.6, 0.5, d], rotY: Math.PI / 2 })
+          railXf.push({ pos: [10.6, 0.5, d], rotY: Math.PI / 2 })
+          railXf.push({ pos: [d, 0.5, -10.6] })
+          railXf.push({ pos: [d, 0.5, 10.6] })
+        }
+        instAdd(railGeo, railMat, railXf)
+
+        // ══ Phase E: 渋谷の神社 (封印の舞台・ストーリーの核) ══════════════════════
+        // A small original shrine grove ringed by the zatkyo buildings (NE). Torii →
+        // komainu → stone steps → seal altar → honden along a north approach. The
+        // central seal altar is where a future giant boss is released; this PR builds
+        // only the altar + seal-effect FOUNDATION (glowing circle + shimenawa). The
+        // seal pulse + boss break-out land in later PRs (hooks: shibuyaSealRef in F).
+        const sx0 = 58
+        const sz0 = -54
+        const shrineStoneMat = new THREE.MeshLambertMaterial({ color: 0x8b8880 })
+        const vermilionMat = new THREE.MeshStandardMaterial({
+          color: 0xc23a2b,
+          roughness: 0.6,
+          emissive: 0x3a0d07,
+          emissiveIntensity: 0.4,
+        })
+        const woodMat = new THREE.MeshLambertMaterial({ color: 0x6b4a2f })
+        const roofMat = new THREE.MeshLambertMaterial({ color: 0x282c33 })
+        // Precinct pad (raised stone — low enough to step onto, no AABB).
+        const precinct = new THREE.Mesh(
+          new THREE.CylinderGeometry(15, 15, 0.32, 28),
+          shrineStoneMat,
+        )
+        precinct.position.set(sx0, 0.16, sz0)
+        mAdd(precinct)
+        // Torii gate at the south entrance (faces +z toward the approaching player).
+        for (const px of [sx0 - 5, sx0 + 5]) {
+          const pillar = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.5, 0.55, 7.2, 10),
+            vermilionMat,
+          )
+          pillar.position.set(px, 3.6, sz0 + 12)
+          mAdd(pillar)
+          addShibuyaAABB(px, sz0 + 12, 0.6, 0.6, 7.2)
+        }
+        const kasagi = new THREE.Mesh(new THREE.BoxGeometry(13, 0.7, 1.0), vermilionMat) // top beam
+        kasagi.position.set(sx0, 7.3, sz0 + 12)
+        mAdd(kasagi)
+        const nuki = new THREE.Mesh(new THREE.BoxGeometry(12, 0.5, 0.7), vermilionMat) // lower tie
+        nuki.position.set(sx0, 5.4, sz0 + 12)
+        mAdd(nuki)
+        // Komainu (guardian dogs) on pedestals flanking the approach — stone.
+        const komainu = (cx: number, cz: number) => {
+          const base = new THREE.Mesh(new THREE.BoxGeometry(1.4, 1.0, 1.4), shrineStoneMat)
+          base.position.set(cx, 0.66, cz)
+          mAdd(base)
+          addShibuyaAABB(cx, cz, 0.7, 0.7, 1.0)
+          const part = (w: number, h: number, d: number, ox: number, oy: number, oz: number) => {
+            const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), shrineStoneMat)
+            m.position.set(cx + ox, 1.16 + oy, cz + oz)
+            mAdd(m)
+          }
+          part(0.7, 0.8, 0.5, 0, 0.4, -0.1) // haunches
+          part(0.6, 0.6, 0.55, 0, 0.85, 0.3) // chest + head
+          part(0.36, 0.14, 0.2, 0, 0.95, 0.6) // muzzle
+          for (const ex of [-0.18, 0.18]) part(0.16, 0.5, 0.16, ex, 0.25, 0.45) // forelegs
+        }
+        komainu(sx0 - 6, sz0 + 6)
+        komainu(sx0 + 6, sz0 + 6)
+        // Stone steps rising toward the honden at the back.
+        for (let s = 0; s < 3; s++) {
+          const step = new THREE.Mesh(new THREE.BoxGeometry(9 - s * 1.5, 0.3, 1.4), shrineStoneMat)
+          step.position.set(sx0, 0.32 + s * 0.3, sz0 - 8 - s * 1.2)
+          mAdd(step)
+        }
+        // Honden (shrine hall) at the back — wood body + dark gabled roof.
+        const hBody = new THREE.Mesh(new THREE.BoxGeometry(9, 4.2, 6), woodMat)
+        hBody.position.set(sx0, 2.6, sz0 - 13)
+        mAdd(hBody)
+        addShibuyaAABB(sx0, sz0 - 13, 4.5, 3, 4.7)
+        const hRoof = new THREE.Mesh(new THREE.ConeGeometry(7.6, 2.6, 4), roofMat)
+        hRoof.rotation.y = Math.PI / 4
+        hRoof.position.set(sx0, 6.0, sz0 - 13)
+        mAdd(hRoof)
+        // Grove: instanced trees (trunk + foliage) ringing the precinct.
+        const trunkGeo = new THREE.CylinderGeometry(0.3, 0.4, 4, 6)
+        const leafGeo = new THREE.SphereGeometry(2.2, 8, 6)
+        const trunkXf: Xf[] = []
+        const leafXf: Xf[] = []
+        for (let i = 0; i < 9; i++) {
+          const a = (i / 9) * Math.PI * 2 + 0.4
+          const tx = sx0 + Math.cos(a) * 13
+          const tz = sz0 + Math.sin(a) * 13
+          if (tz > sz0 + 9) continue // keep the torii entrance clear
+          trunkXf.push({ pos: [tx, 2, tz] })
+          leafXf.push({ pos: [tx, 4.6, tz], scl: 0.8 + rnd() * 0.5 })
+        }
+        instAdd(trunkGeo, woodMat, trunkXf)
+        instAdd(
+          leafGeo,
+          new THREE.MeshLambertMaterial({
+            color: 0x223a22,
+            emissive: 0x0a160a,
+            emissiveIntensity: 0.4,
+          }),
+          leafXf,
+        )
+        // ── 封印の祭壇 (seal altar) — the story core. Glowing magic circle + shimenawa. ──
+        const dais = new THREE.Mesh(new THREE.CylinderGeometry(5, 5.4, 0.4, 24), shrineStoneMat)
+        dais.position.set(sx0, 0.36, sz0)
+        mAdd(dais)
+        // Glowing seal: a magic-circle CanvasTexture on a flat disc (transparent gaps
+        // so only the lines glow). Standalone so Phase F can pulse it.
+        const sealCv = document.createElement("canvas")
+        sealCv.width = 128
+        sealCv.height = 128
+        const sCtx = sealCv.getContext("2d")
+        if (sCtx) {
+          sCtx.clearRect(0, 0, 128, 128)
+          sCtx.strokeStyle = "#6fe9ff"
+          sCtx.lineWidth = 2.4
+          sCtx.beginPath()
+          sCtx.arc(64, 64, 58, 0, Math.PI * 2)
+          sCtx.stroke()
+          sCtx.beginPath()
+          sCtx.arc(64, 64, 44, 0, Math.PI * 2)
+          sCtx.stroke()
+          sCtx.beginPath()
+          sCtx.arc(64, 64, 22, 0, Math.PI * 2)
+          sCtx.stroke()
+          for (let k = 0; k < 8; k++) {
+            const a = (k / 8) * Math.PI * 2
+            sCtx.beginPath()
+            sCtx.moveTo(64 + Math.cos(a) * 22, 64 + Math.sin(a) * 22)
+            sCtx.lineTo(64 + Math.cos(a) * 58, 64 + Math.sin(a) * 58)
+            sCtx.stroke()
+          }
+        }
+        const sealTex = new THREE.CanvasTexture(sealCv)
+        sealTex.colorSpace = THREE.SRGBColorSpace
+        const seal = new THREE.Mesh(
+          new THREE.CircleGeometry(4.6, 32),
+          new THREE.MeshBasicMaterial({
+            map: sealTex,
+            transparent: true,
+            opacity: 0.9,
+            depthWrite: false,
+          }),
+        )
+        seal.rotation.x = -Math.PI / 2
+        seal.position.set(sx0, 0.58, sz0)
+        add(seal) // standalone — animated (pulse) in Phase F
+        // Two emissive rings hovering over the seal (the binding).
+        const ringMat = new THREE.MeshBasicMaterial({ color: 0x7fe9ff })
+        for (const [ry, rr] of [
+          [0.7, 4.7],
+          [1.3, 3.6],
+        ] as const) {
+          const ring = new THREE.Mesh(new THREE.TorusGeometry(rr, 0.08, 6, 36), ringMat)
+          ring.rotation.x = -Math.PI / 2
+          ring.position.set(sx0, ry, sz0)
+          add(ring)
+        }
+        // Shimenawa: 4 posts + a straw rope ring + hanging shide (paper zigzags).
+        const ropeMat = new THREE.MeshLambertMaterial({
+          color: 0xd8c98a,
+          emissive: 0x2a2410,
+          emissiveIntensity: 0.4,
+        })
+        for (let k = 0; k < 4; k++) {
+          const a = (k / 4) * Math.PI * 2 + Math.PI / 4
+          const px = sx0 + Math.cos(a) * 5
+          const pz = sz0 + Math.sin(a) * 5
+          const post = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.18, 2.6, 6), woodMat)
+          post.position.set(px, 1.3, pz)
+          mAdd(post)
+        }
+        const rope = new THREE.Mesh(new THREE.TorusGeometry(5, 0.22, 6, 28), ropeMat)
+        rope.rotation.x = -Math.PI / 2
+        rope.position.set(sx0, 2.4, sz0)
+        mAdd(rope)
+        const shideMat = new THREE.MeshBasicMaterial({ color: 0xf4f4ee, side: THREE.DoubleSide })
+        const shideXf: Xf[] = []
+        for (let k = 0; k < 6; k++) {
+          const a = (k / 6) * Math.PI * 2
+          shideXf.push({ pos: [sx0 + Math.cos(a) * 5, 1.85, sz0 + Math.sin(a) * 5], rotY: -a })
+        }
+        instAdd(new THREE.PlaneGeometry(0.3, 0.8), shideMat, shideXf)
+        // Sacred light: one soft point light over the altar (re-used by the future
+        // seal-break sequence). A child of the group → removed on teardown.
+        const sealLight = new THREE.PointLight(0x9fe6ff, 1.4, 34, 2)
+        sealLight.position.set(sx0, 6, sz0)
+        sealLight.castShadow = false
+        add(sealLight)
+
+        // ══ Phase F: 渋谷の夜 — 環境・空気感 ════════════════════════════════════════
+        // Night palette, distinct from OSAKA's warm/red. Dim the base daylight rig
+        // (saved into the shared huntStageLightSaved → huntClearStage restores it),
+        // then light the city with a cool hemisphere + magenta/cyan neon spill at the
+        // scramble. Fog + sky saved/restored on teardown.
+        for (const light of [worldAmbient, hemi, sun, fillLight]) {
+          huntStageLightSaved.push({ light, intensity: light.intensity })
+        }
+        worldAmbient.intensity = 0.16
+        hemi.intensity = 0.22
+        sun.intensity = 0.12
+        fillLight.intensity = 0.1
+        const nightHemi = new THREE.HemisphereLight(0x1a2240, 0x06070c, 0.55)
+        add(nightHemi)
+        const neonGlowMag = new THREE.PointLight(0xff2d8e, 0.8, 80, 2)
+        neonGlowMag.position.set(-16, 10, 8)
+        neonGlowMag.castShadow = false
+        add(neonGlowMag)
+        const neonGlowCyan = new THREE.PointLight(0x28e0ff, 0.8, 80, 2)
+        neonGlowCyan.position.set(18, 10, -8)
+        neonGlowCyan.castShadow = false
+        add(neonGlowCyan)
+        // Fog: cool urban haze (reuse the shared save slot → clearOsakaMap restores).
+        huntStageFogSaved = scene.fog
+        huntStageFogWasSaved = true
+        scene.fog = new THREE.Fog(0x0a0e1a, isMobileDevice ? 60 : 90, isMobileDevice ? 230 : 340)
+        // Night sky behind the skyline (saved here, restored in clearShibuyaMap).
+        shibuyaBgSaved = scene.background
+        shibuyaBgWasSaved = true
+        scene.background = new THREE.Color(0x080b14)
+
+        flushMerges() // collapse all static buckets → one mesh per material
+        scene.add(group)
+        shibuyaMapMeshesRef.current.push(group)
+        // Phase F: publish the animation handles (screen scroll, seal pulse/spin,
+        // neon flicker, distance cull). Reset to null in clearShibuyaMap.
+        shibuyaAnim = {
+          t: 0,
+          frame: 0,
+          adTex,
+          seal,
+          sealLight,
+          neonMats: animNeon,
+          cull: animCull,
+        }
+      }
+      function clearShibuyaMap() {
+        // Dispose every SHIBUYA map object the same way clearOsakaMap does: walk the
+        // tracked group, remove, dispose geometry + material (+ map/emissiveMap
+        // CanvasTextures, which material.dispose() alone leaves resident). Null-safe:
+        // the ref is empty when SHIBUYA was never built, so this is a no-op then.
+        const disposeMat = (m: THREE.Material) => {
+          const sm = m as THREE.MeshStandardMaterial
+          sm.map?.dispose()
+          sm.emissiveMap?.dispose()
+          m.dispose()
+        }
+        for (const obj of shibuyaMapMeshesRef.current) {
+          scene.remove(obj)
+          obj.traverse((o) => {
+            if (o instanceof THREE.Mesh) {
+              o.geometry.dispose()
+              const m = o.material
+              if (Array.isArray(m)) for (const mm of m) disposeMat(mm)
+              else disposeMat(m)
+            }
+          })
+        }
+        shibuyaMapMeshesRef.current = []
+        SHIBUYA_AABBS.length = 0 // drop the SHIBUYA collision boxes on teardown
+        shibuyaAnim = null // animated handles die with the disposed meshes (Phase F)
+        // Restore the night sky (fog + base-light dimming restore via clearOsakaMap /
+        // huntClearStage, which run alongside this in the teardown).
+        if (shibuyaBgWasSaved) {
+          scene.background = shibuyaBgSaved
+          shibuyaBgSaved = null
+          shibuyaBgWasSaved = false
+        }
+      }
+      // 渋谷ミッション開始時のプレイヤー配置。今回 (核 PR) は敵/ボス無し — 谷底の
+      // スクランブル中央 (y=0) に置き、北 (公園通り/駅前方向) を向かせるだけ。外周
+      // エリアの進行 (道玄坂/宮益坂…) は後続 PR で shibuyaProgress として足す。
+      function shibuyaInitProgression() {
+        const c = shibuyaAreaCenter("scramble")
+        const psafe = findSafeSpawnNear(c.x, c.z + 14, PLAYER_RADIUS)
+        focalPoint.set(psafe.x, 0, psafe.z)
+        focalPoint.y = 0
+        camState.yaw = Math.PI // face north (−z) — across the crossing toward 駅前
+        camState.pitch = -0.02
+      }
+      // Per-frame SHIBUYA scenery animation (Phase F): big-vision screen scroll,
+      // seal-altar spin+pulse, neon flicker, and ~3×/s distance culling of the
+      // off-centre detail. No-op until buildShibuyaMap publishes shibuyaAnim.
+      function updateShibuyaMap(dt: number) {
+        const a = shibuyaAnim
+        if (!a) return
+        a.t += dt
+        a.frame++
+        const t = a.t
+        // Big-vision ad scrolls upward and loops (wrapT set at build time).
+        if (a.adTex) a.adTex.offset.y = (a.adTex.offset.y - dt * 0.06 + 1) % 1
+        // Seal: slow magic-circle spin + opacity breathing; the sacred light pulses.
+        if (a.seal) {
+          const mat = a.seal.material as THREE.MeshBasicMaterial
+          if (mat.map) {
+            mat.map.center.set(0.5, 0.5)
+            mat.map.rotation += dt * 0.3
+          }
+          mat.opacity = 0.62 + 0.32 * Math.sin(t * 1.6)
+        }
+        if (a.sealLight) a.sealLight.intensity = 1.15 + 0.5 * Math.sin(t * 1.6)
+        // Neon flicker: each colour breathes on its own phase, with rare dropouts.
+        for (let i = 0; i < a.neonMats.length; i++) {
+          const m = a.neonMats[i]
+          if (!m) continue
+          const flick = Math.sin(t * (6 + i) + i * 1.7) > -0.92 ? 1 : 0.35
+          m.emissiveIntensity = (1.2 + 0.35 * Math.sin(t * 3 + i)) * flick
+        }
+        // Distance cull the off-centre dressing ~3×/s (arena-local player position).
+        if (a.frame % 20 === 0 && a.cull.length > 0) {
+          const lx = focalPoint.x - HUNT_ARENA.x
+          const lz = focalPoint.z - HUNT_ARENA.z
+          for (const c of a.cull) c.obj.visible = Math.hypot(lx - c.cx, lz - c.cz) < c.r
+        }
+      }
       // Per-frame OSAKA scenery animation: neon flicker/pulse, lantern sway,
       // rooftop blinkers, water shimmer, tower beacon hue, scrolling marquee.
       function updateOsakaMap(dt: number) {
@@ -18765,6 +19912,14 @@ export default function ThreeWorld({
           buildOsakaMap() // 鬼モードもマップは共通 (倍率だけ変わる; FINAL-H)
           return
         }
+        if (isShibuyaStage(stage)) {
+          // Same base-world swap as OSAKA (osakaHideBaseWorld is a generic "hide the
+          // base urban city + suppress its collision" — see its body). Then build the
+          // 渋谷 field; restored by huntClearStage → osakaShowBaseWorld.
+          osakaHideBaseWorld()
+          buildShibuyaMap()
+          return
+        }
         if (stage !== "indoor") return
         const group = new THREE.Group()
         // Ceiling over the arena (the open battlefield gets a low dark roof).
@@ -18820,8 +19975,9 @@ export default function ThreeWorld({
           huntIndoorGroup = null
         }
         clearOsakaMap() // dispose the OSAKA field + restore the prior fog
+        clearShibuyaMap() // dispose the SHIBUYA field (null-safe; empty if never built)
         osakaTeardownMid() // dispose the OSAKA mid-boss + projectiles, reset progress
-        osakaShowBaseWorld() // un-hide the base urban world hidden for OSAKA
+        osakaShowBaseWorld() // un-hide the base urban world hidden for OSAKA / SHIBUYA
         huntFlickerLights.length = 0
         for (const s of huntStageLightSaved) s.light.intensity = s.intensity
         huntStageLightSaved.length = 0
@@ -19085,7 +20241,13 @@ export default function ThreeWorld({
         // OSAKA is a fixed, max-difficulty stage — always start at the top level.
         // (Area progression + the 五変化 boss land in Phase 2b; for now the O key
         // still summons the boss into the freshly built OSAKA field.)
-        if (isOsakaStage(huntMissionConfigRef.current.stage)) {
+        if (
+          isOsakaStage(huntMissionConfigRef.current.stage) ||
+          isShibuyaStage(huntMissionConfigRef.current.stage)
+        ) {
+          // OSAKA / SHIBUYA are fixed stages — pin to the last level entry so `lv`
+          // stays valid. SHIBUYA ignores the generic level/boss data; this PR builds
+          // only the walkable core (no minions/boss).
           huntHasDeployedRef.current = true
           huntLevelIdxRef.current = HUNT_LEVELS.length - 1
         } else if (!huntHasDeployedRef.current) {
@@ -19104,6 +20266,7 @@ export default function ThreeWorld({
         const hpScale = lv.level === 3 ? 1 + 0.2 * huntRepeatRef.current : 1
         const th = HUNT_THEMES[lv.theme]
         const isOsaka = isOsakaStage(huntMissionConfigRef.current.stage)
+        const isShibuya = isShibuyaStage(huntMissionConfigRef.current.stage)
         if (isOsaka) {
           // OSAKA drives its own area progression (Dotonbori → … → 五変化 boss)
           // instead of the generic minion ring + single HUNT boss.
@@ -19115,6 +20278,10 @@ export default function ThreeWorld({
           // in clearOsakaMap if left uncollected.
           const hamaSpawn = osakaAreaCenter("dotonbori")
           makeRPGPickup(hamaSpawn.x + 6, hamaSpawn.z + 4, 0, "hamaho")
+        } else if (isShibuya) {
+          // SHIBUYA core PR: no minions/boss yet — just place the player at the
+          // scramble. Outer-ring areas + enemies + the sealed boss land in later PRs.
+          shibuyaInitProgression()
         } else {
           // Minions ring the arena centre.
           for (let i = 0; i < lv.zakoCount; i++) {
@@ -19167,8 +20334,9 @@ export default function ThreeWorld({
         huntDeadlineRef.current = lv.timeLimitSec ? Date.now() + lv.timeLimitSec * 1000 : 0
         huntOobSinceRef.current = 0
         setHuntOob(false)
-        // Drop the player into the arena centre (OSAKA placed them in Dotonbori).
-        if (!isOsaka) {
+        // Drop the player into the arena centre (OSAKA placed them in Dotonbori;
+        // SHIBUYA placed them at the scramble in shibuyaInitProgression).
+        if (!isOsaka && !isShibuya) {
           const psafe = findSafeSpawnNear(HUNT_ARENA.x, HUNT_ARENA.z, PLAYER_RADIUS)
           focalPoint.set(psafe.x, 0, psafe.z)
         }
@@ -19180,7 +20348,11 @@ export default function ThreeWorld({
         huntPhaseRef.current = "mission"
         setHuntPhase("mission")
         showNotification(
-          isOsaka ? "大阪編 — 道頓堀へ" : `Lv.${lv.level} — ${lv.target.name} を狩れ`,
+          isOsaka
+            ? "大阪編 — 道頓堀へ"
+            : isShibuya
+              ? "渋谷編 — スクランブル交差点"
+              : `Lv.${lv.level} — ${lv.target.name} を狩れ`,
         )
       }
       // Head-pop death (boundary breach / quota miss): red burst + game over.
@@ -19814,7 +20986,13 @@ export default function ThreeWorld({
           // across a 180m field, not a shrinking-ring survival, so its boundary +
           // head-pop are disabled (the player must be free to cross the map).
           const lv = HUNT_LEVELS[huntLevelIdxRef.current]
-          if (!isOsakaStage(huntMissionConfigRef.current.stage)) {
+          if (
+            !isOsakaStage(huntMissionConfigRef.current.stage) &&
+            !isShibuyaStage(huntMissionConfigRef.current.stage)
+          ) {
+            // SHIBUYA (like OSAKA) is a free-roam city core, not a shrinking-ring
+            // survival — its boundary + head-pop are disabled so the player can walk
+            // the whole scramble freely.
             if (lv?.shrink) {
               const tt = Math.min(1, (now - huntShrinkStartRef.current) / (HUNT_SHRINK_SEC * 1000))
               huntRadiusRef.current = HUNT_BASE_RADIUS - (HUNT_BASE_RADIUS - HUNT_MIN_RADIUS) * tt
@@ -21961,6 +23139,7 @@ export default function ThreeWorld({
           updateOsakaMidBoss(dt) // OSAKA mid-boss (Tengu / Yamaya)
           updateOsakaBikes(dt) // 鉄輪部隊 (Block B): track riders + squad-clear bonus
           updateOsakaMap(dt) // OSAKA scenery animation (neon, lanterns, marquee…)
+          updateShibuyaMap(dt) // SHIBUYA scenery (screen scroll, seal pulse, neon)
           updateOsakaFx(dt) // OSAKA boss hazards (telegraphs, pools, splitters…)
           updateOsakaRain(dt) // OSAKA rain streaks + ground ripples
           updateOsakaEnv(dt) // OSAKA collapsing bridges
