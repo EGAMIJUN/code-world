@@ -20156,6 +20156,124 @@ export default function ThreeWorld({
         cladWall(46, 30 - 12, 0, -1, 22, 60, 6, isMobileDevice ? 0.5 : 0.85) // SE tower −z face
         cladWall(46 - 12, 30, -1, 0, 22, 60, 6, isMobileDevice ? 0.5 : 0.85) // SE tower −x face
         addBladeStack(-42 + 6, 30 + 8, 0.5, 0.62, 4) // a stack on the 109 prow corner
+        // ══ センター街 Phase B: 両側にびっしり店舗 (看板の洪水 + 多様シルエット) ══════
+        // Pack both lane walls wall-to-wall with varied-height zatkyo buildings that
+        // sit BEHIND the Phase A side walls — so they add NO lane-side collision (the
+        // player is already stopped by the Phase A wall; AABBs stay exact, no #117
+        // ghosts). Each shop floods its lane-facing wall with signs (cladWall) +
+        // projecting blade signs, with a lit shopfront + awning at street level.
+        // Furniture (lamps, nobori, parked bikes) makes it 猥雑. Every building body
+        // rides the existing merge buckets; all dressing is instanced.
+        const cgBodyMats = [midMat, concreteMat, facGlassMat] as const
+        const cgAwnGeo = new THREE.BoxGeometry(1, 0.18, 1)
+        const cgAwnCols = [0xb23a3a, 0x2f6f4f, 0x2a4d8f]
+        const cgAwnMats = cgAwnCols.map(
+          (c) => new THREE.MeshStandardMaterial({ color: c, roughness: 0.8 }),
+        )
+        const cgAwnXf: Xf[][] = cgAwnCols.map(() => [])
+        const cgGlowGeo = new THREE.PlaneGeometry(1, 1)
+        const cgGlowMat = new THREE.MeshBasicMaterial({ color: 0xffd9a0, toneMapped: false })
+        const cgGlowXf: Xf[] = []
+        const cgNobGeo = new THREE.PlaneGeometry(0.55, 2.6)
+        const cgNobCols = [0xff3a6a, 0x2ce0ff]
+        const cgNobMats = cgNobCols.map(
+          (c) => new THREE.MeshStandardMaterial({ color: c, emissive: c, emissiveIntensity: 1.1 }),
+        )
+        const cgNobXf: Xf[][] = cgNobCols.map(() => [])
+        // Walk each side, tight-packing shops from the mouth to the dead-end.
+        for (const side of [-1, 1] as const) {
+          const innerZ = CG_Z + side * CG_HW // -27 (north) or -17 (south)
+          const nz = -side // outward normal INTO the lane: north→+1, south→−1
+          const outerZ = innerZ - nz * 2 // wall outer face (buildings sit behind it)
+          let x = CG_X0 - 1
+          let guard = 0
+          while (x > CG_X1 + 3 && guard++ < 64) {
+            const sw = 7 + rnd() * 8 // shop width 7..15
+            const cx = x - sw / 2
+            const bh = 9 + rnd() * 19 // 9..28 → varied skyline silhouette
+            const bd = 6 + rnd() * 6
+            const mat = cgBodyMats[Math.floor(rnd() * cgBodyMats.length)] ?? midMat
+            const body = new THREE.Mesh(new THREE.BoxGeometry(sw - 0.4, bh, bd), mat)
+            body.position.set(cx, bh / 2, outerZ - nz * (bd / 2))
+            mAdd(body) // no AABB — the Phase A wall already blocks the lane here
+            if (rnd() < 0.42) {
+              const th = bh * (0.2 + rnd() * 0.22) // stepped setback for silhouette variety
+              const top = new THREE.Mesh(
+                new THREE.BoxGeometry((sw - 0.4) * 0.62, th, bd * 0.62),
+                mat,
+              )
+              top.position.set(cx, bh + th / 2, outerZ - nz * (bd / 2))
+              mAdd(top)
+            }
+            // Flood the lane-facing wall with shop signs; project blades over the lane.
+            cladWall(
+              cx,
+              innerZ,
+              0,
+              nz,
+              sw * 0.92,
+              Math.min(bh, 20),
+              3.4,
+              isMobileDevice ? 0.6 : 0.95,
+            )
+            if (rnd() < 0.72) {
+              const bsx = cx + (rnd() - 0.5) * sw * 0.4
+              addBladeStack(bsx, innerZ, 0, nz, 2 + Math.floor(rnd() * 3))
+            }
+            // Lit shopfront panel + awning + a nobori flag at street level.
+            cgGlowXf.push({
+              pos: [cx, 1.6, innerZ + nz * 0.06],
+              rotY: nz > 0 ? 0 : Math.PI,
+              scl: [sw * 0.8, 2.2, 1],
+            })
+            const ai = Math.floor(rnd() * cgAwnCols.length)
+            cgAwnXf[ai]?.push({ pos: [cx, 2.95, innerZ + nz * 0.9], scl: [sw * 0.9, 1, 1.7] })
+            if (rnd() < 0.5) {
+              const ni = Math.floor(rnd() * cgNobCols.length)
+              cgNobXf[ni]?.push({ pos: [cx + sw * 0.4, 1.6, innerZ + nz * 1.2] })
+            }
+            x -= sw + (0.2 + rnd() * 0.7) // tight packing with tiny gaps
+          }
+        }
+        cgAwnMats.forEach((m, i) => instAdd(cgAwnGeo, m, cgAwnXf[i] ?? []))
+        instAdd(cgGlowGeo, cgGlowMat, cgGlowXf)
+        cgNobMats.forEach((m, i) => instAdd(cgNobGeo, m, cgNobXf[i] ?? []))
+        // Street lamps down both kerbs + a scatter of parked bicycles (放置自転車).
+        const cgLampPoleGeo = new THREE.CylinderGeometry(0.09, 0.11, 6, 6)
+        const cgLampHeadGeo = new THREE.BoxGeometry(0.55, 0.4, 0.55)
+        const cgLampHeadMat = new THREE.MeshStandardMaterial({
+          color: 0xfff0d0,
+          emissive: 0xffe7b0,
+          emissiveIntensity: 1.4,
+        })
+        const cgLampPoleXf: Xf[] = []
+        const cgLampHeadXf: Xf[] = []
+        const cgBikeFrameGeo = new THREE.BoxGeometry(1.4, 0.5, 0.16)
+        const cgBikeWheelGeo = new THREE.CylinderGeometry(0.32, 0.32, 0.07, 10)
+        const cgBikeMat = new THREE.MeshStandardMaterial({
+          color: 0x4a5563,
+          roughness: 0.6,
+          metalness: 0.4,
+        })
+        const cgBikeFrameXf: Xf[] = []
+        const cgBikeWheelXf: Xf[] = []
+        for (let lx = CG_X0 - 9; lx > CG_X1 + 6; lx -= 15) {
+          for (const side of [-1, 1] as const) {
+            const z = CG_Z + side * (CG_HW - 0.7)
+            cgLampPoleXf.push({ pos: [lx, 3, z] })
+            cgLampHeadXf.push({ pos: [lx, 6.1, z] })
+            if (rnd() < 0.5) {
+              const bz = CG_Z + side * (CG_HW - 1.4)
+              cgBikeFrameXf.push({ pos: [lx + 3, 0.55, bz], rotY: 0.2 })
+              cgBikeWheelXf.push({ pos: [lx + 2.5, 0.32, bz], rotX: Math.PI / 2 })
+              cgBikeWheelXf.push({ pos: [lx + 3.5, 0.32, bz], rotX: Math.PI / 2 })
+            }
+          }
+        }
+        instAdd(cgLampPoleGeo, sigPoleMat, cgLampPoleXf)
+        instAdd(cgLampHeadGeo, cgLampHeadMat, cgLampHeadXf)
+        instAdd(cgBikeFrameGeo, cgBikeMat, cgBikeFrameXf)
+        instAdd(cgBikeWheelGeo, cgBikeMat, cgBikeWheelXf)
         // Build all the sign InstancedMeshes (one draw call per sign texture).
         flatSpec.forEach((_s, i) => {
           const m = flatMats[i]
