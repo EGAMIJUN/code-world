@@ -20359,6 +20359,123 @@ export default function ThreeWorld({
         }
         instAdd(lanternGeo, lanternMat, alLanternXf)
         instAdd(norenGeo, norenMat, alNorenXf)
+        // ══ センター街 Phase D: 突き当り (工事中バリケード) + 将来エリア接続予約 ════════
+        // Dress the Phase A dead-end cap as a 工事中 hoarding: a rolling shutter on the
+        // cap face, a striped barrier (the actual hard stop — its AABB halts the player
+        // a few units short of the cap, with the shutter visible behind), hazard cones,
+        // a warning lamp, and a "この先 工事中" sign overhead.
+        // ── FUTURE / 接続予約 ──────────────────────────────────────────────────────
+        // This cap (CG_X1, CG_Z) is the reserved hand-off to 道玄坂 / 公園通り. When
+        // those areas land, replace the cap + this hoarding with an open mouth (same
+        // recipe as the west perimeter-wall gap at the top of buildShibuyaMap) and run
+        // the next walkable lane on from here — the ground stays flat to r≈144, beyond
+        // which a new local floor slab would be needed.
+        const shutCv = document.createElement("canvas")
+        shutCv.width = 64
+        shutCv.height = 64
+        const shutCtx = shutCv.getContext("2d")
+        if (shutCtx) {
+          shutCtx.fillStyle = "#3a3d44"
+          shutCtx.fillRect(0, 0, 64, 64)
+          shutCtx.fillStyle = "#2a2d33"
+          for (let y = 0; y < 64; y += 6) shutCtx.fillRect(0, y, 64, 3) // shutter slats
+        }
+        const shutTex = new THREE.CanvasTexture(shutCv)
+        shutTex.wrapS = THREE.RepeatWrapping
+        shutTex.wrapT = THREE.RepeatWrapping
+        shutTex.repeat.set(2, 2)
+        const shutter = new THREE.Mesh(
+          new THREE.PlaneGeometry(CG_HW * 2, CG_WALL_H),
+          new THREE.MeshStandardMaterial({
+            map: shutTex,
+            color: 0x9aa0a8,
+            roughness: 0.6,
+            metalness: 0.5,
+          }),
+        )
+        shutter.position.set(CG_X1 + 0.05, CG_WALL_H / 2, CG_Z)
+        shutter.rotation.y = Math.PI / 2 // face +x toward the player
+        add(shutter)
+        // "この先 工事中" sign over the shutter.
+        const cwCv = document.createElement("canvas")
+        cwCv.width = 256
+        cwCv.height = 48
+        const cwCtx = cwCv.getContext("2d")
+        if (cwCtx) {
+          cwCtx.fillStyle = "#1a1d22"
+          cwCtx.fillRect(0, 0, 256, 48)
+          cwCtx.fillStyle = "#ffd24a"
+          cwCtx.fillRect(0, 0, 256, 6)
+          cwCtx.fillRect(0, 42, 256, 6)
+          cwCtx.fillStyle = "#ffe89a"
+          cwCtx.font = "bold 26px sans-serif"
+          cwCtx.textAlign = "center"
+          cwCtx.textBaseline = "middle"
+          cwCtx.fillText("この先 工事中", 128, 26)
+        }
+        const cwTex = new THREE.CanvasTexture(cwCv)
+        cwTex.colorSpace = THREE.SRGBColorSpace
+        const cwSign = new THREE.Mesh(
+          new THREE.PlaneGeometry(CG_HW * 2, 1.8),
+          new THREE.MeshBasicMaterial({ map: cwTex, toneMapped: false }),
+        )
+        cwSign.position.set(CG_X1 + 1.4, CG_WALL_H + 1.2, CG_Z)
+        cwSign.rotation.y = Math.PI / 2
+        add(cwSign)
+        // Striped hazard barrier across the lane — its AABB is the hard stop.
+        const barCv = document.createElement("canvas")
+        barCv.width = 64
+        barCv.height = 16
+        const barCtx = barCv.getContext("2d")
+        if (barCtx) {
+          barCtx.fillStyle = "#ffcc00"
+          barCtx.fillRect(0, 0, 64, 16)
+          barCtx.fillStyle = "#141414"
+          for (let i = -16; i < 64; i += 16) {
+            barCtx.beginPath()
+            barCtx.moveTo(i, 0)
+            barCtx.lineTo(i + 8, 0)
+            barCtx.lineTo(i + 8 + 16, 16)
+            barCtx.lineTo(i + 16, 16)
+            barCtx.closePath()
+            barCtx.fill()
+          }
+        }
+        const barTex = new THREE.CanvasTexture(barCv)
+        barTex.wrapS = THREE.RepeatWrapping
+        barTex.repeat.set(8, 1)
+        const barMat = new THREE.MeshStandardMaterial({ map: barTex, roughness: 0.7 })
+        const barX = CG_X1 + 5
+        const barBoard = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.7, CG_HW * 2), barMat)
+        barBoard.position.set(barX, 1.0, CG_Z)
+        add(barBoard)
+        addShibuyaAABB(barX, CG_Z, 0.5, CG_HW, 1.4) // hard stop — AABB matches the board span
+        for (const lz of [CG_Z - CG_HW + 0.8, CG_Z + CG_HW - 0.8] as const) {
+          const leg = new THREE.Mesh(new THREE.BoxGeometry(0.5, 1.3, 0.5), concreteMat)
+          leg.position.set(barX, 0.65, lz)
+          mAdd(leg)
+        }
+        // Hazard cones (instanced) scattered on the player side of the barrier.
+        const coneGeo = new THREE.ConeGeometry(0.28, 0.9, 8)
+        const coneMat = new THREE.MeshStandardMaterial({
+          color: 0xff6a1a,
+          emissive: 0x3a1400,
+          emissiveIntensity: 0.5,
+        })
+        const coneXf: Xf[] = []
+        for (let i = 0; i < 5; i++) {
+          coneXf.push({
+            pos: [barX + 2 + rnd() * 5, 0.45, CG_Z - CG_HW + 1 + rnd() * (CG_HW * 2 - 2)],
+          })
+        }
+        instAdd(coneGeo, coneMat, coneXf)
+        // Warning lamp on the barrier (bright; reads through the dark dead-end).
+        const warnLamp = new THREE.Mesh(
+          new THREE.SphereGeometry(0.22, 8, 6),
+          new THREE.MeshBasicMaterial({ color: 0xff3a1a, toneMapped: false }),
+        )
+        warnLamp.position.set(barX, 1.6, CG_Z)
+        add(warnLamp)
         // Build all the sign InstancedMeshes (one draw call per sign texture).
         flatSpec.forEach((_s, i) => {
           const m = flatMats[i]
