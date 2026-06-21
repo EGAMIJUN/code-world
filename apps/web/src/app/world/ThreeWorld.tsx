@@ -2490,6 +2490,7 @@ export default function ThreeWorld({
   const hitMarkerElRef = useRef<HTMLDivElement | null>(null)
   const hitMarkerTimeRef = useRef(0)
   const tetsurinHitSfxRef = useRef(0)
+  const tetsurinSparkRef = useRef(0) // Phase 1: throttle gatling impact sparks (ms)
   const mouseDownRef = useRef(false)
   // Phase C: 破魔砲 のチャージ蓄積 (秒)。hold で増え、release で fireHamaho。
   const hamahoChargeRef = useRef(0)
@@ -7772,6 +7773,22 @@ export default function ThreeWorld({
 
       // Shared jet weapon visuals (one material each, reused per shot).
       const jetTracerMat = new THREE.MeshBasicMaterial({ color: 0xffee66, depthTest: false })
+      // Phase 1: 鉄輪 gatling tracer pool — a fixed ring of reusable meshes (shared
+      // geometry) so the 10-20 rounds/s weapon never allocates a Mesh+BoxGeometry per
+      // shot. Each tracer carries its own velocity + expiry; advanced in the animate
+      // loop. Session-lifetime (like jetTracerMat) — created once, never per-frame.
+      const GATLING_TRACER_POOL = 20
+      const gatlingTracerGeo = new THREE.BoxGeometry(0.06, 0.06, 1.8)
+      const gatlingTracers: { mesh: THREE.Mesh; vel: THREE.Vector3; until: number }[] = []
+      for (let gi = 0; gi < GATLING_TRACER_POOL; gi++) {
+        const tm = new THREE.Mesh(gatlingTracerGeo, jetTracerMat)
+        tm.renderOrder = 998
+        tm.visible = false
+        tm.frustumCulled = false
+        scene.add(tm)
+        gatlingTracers.push({ mesh: tm, vel: new THREE.Vector3(), until: 0 })
+      }
+      let gatlingTracerIdx = 0
       const jetMissileMat = new THREE.MeshStandardMaterial({
         color: 0x9aa0a6,
         roughness: 0.4,
@@ -8808,15 +8825,6 @@ export default function ThreeWorld({
         raycaster.set(nose, fwd)
         const prevFar = raycaster.far
         raycaster.far = TETSURIN_GATLING_RANGE
-        const parts: THREE.Object3D[] = []
-        for (const e of enemies) {
-          if (e.hp > 0 && !e.aiDriving) {
-            e.mesh.traverse((c) => {
-              if (c instanceof THREE.Mesh && c.userData.enemyId) parts.push(c)
-            })
-          }
-        }
-        const enemyHit = raycaster.intersectObjects(parts, false)[0]
         const wallHit = raycaster.intersectObjects(wallMeshes, false)[0]
         const cands = collectHardTargets(raycaster, TETSURIN_GATLING_DAMAGE, {
           jetAssistR: 0,
@@ -8824,38 +8832,34 @@ export default function ThreeWorld({
           jetRange: TETSURIN_GATLING_RANGE,
         })
         raycaster.far = prevFar
-        // Ground enemies: exact mesh first, then a forgiving sphere assist so the
-        // fast-moving bike still lands rounds on small figures.
+        // Phase 1: ground-enemy hit via the cheap analytic sphere-assist ray
+        // projection ONLY. The old per-shot enemies.traverse() that rebuilt every
+        // enemy submesh list + an intersectObjects against it (10-20×/s) was the
+        // gatling's main CPU/GC cost; the assist sphere is forgiving enough for the
+        // fast bike. Boss / 大魔 cores keep their precise raycasts below.
         let enemyCand: { dist: number; point: THREE.Vector3; en: CombatEnemy } | null = null
-        if (enemyHit) {
-          const id = enemyHit.object.userData.enemyId as string | undefined
-          const en = enemies.find((e) => e.id === id)
-          if (en) enemyCand = { dist: enemyHit.distance, point: enemyHit.point.clone(), en }
-        }
-        if (!enemyCand) {
-          const ray = raycaster.ray
-          let bestT = Number.POSITIVE_INFINITY
-          for (const e of enemies) {
-            if (e.hp <= 0 || e.aiDriving) continue
-            const ex = e.mesh.position.x
-            const ey = e.mesh.position.y
-            const ez = e.mesh.position.z
-            const ox = ex - ray.origin.x
-            const oy = ey - ray.origin.y
-            const oz = ez - ray.origin.z
-            const t = ox * ray.direction.x + oy * ray.direction.y + oz * ray.direction.z
-            if (t <= 0 || t > TETSURIN_GATLING_RANGE || t >= bestT) continue
-            const px = ray.origin.x + ray.direction.x * t
-            const py = ray.origin.y + ray.direction.y * t
-            const pz = ray.origin.z + ray.direction.z * t
-            if (
-              Math.hypot(ex - px, ey - py, ez - pz) >
-              TETSURIN_GATLING_ASSIST + e.config.bodyH * 0.5
-            )
-              continue
-            bestT = t
-            enemyCand = { dist: t, point: new THREE.Vector3(px, py, pz), en: e }
-          }
+        const ray = raycaster.ray
+        let bestT = Number.POSITIVE_INFINITY
+        for (const e of enemies) {
+          if (e.hp <= 0 || e.aiDriving) continue
+          const ex = e.mesh.position.x
+          const ey = e.mesh.position.y
+          const ez = e.mesh.position.z
+          const ox = ex - ray.origin.x
+          const oy = ey - ray.origin.y
+          const oz = ez - ray.origin.z
+          const t = ox * ray.direction.x + oy * ray.direction.y + oz * ray.direction.z
+          if (t <= 0 || t > TETSURIN_GATLING_RANGE || t >= bestT) continue
+          const px = ray.origin.x + ray.direction.x * t
+          const py = ray.origin.y + ray.direction.y * t
+          const pz = ray.origin.z + ray.direction.z * t
+          if (
+            Math.hypot(ex - px, ey - py, ez - pz) >
+            TETSURIN_GATLING_ASSIST + e.config.bodyH * 0.5
+          )
+            continue
+          bestT = t
+          enemyCand = { dist: t, point: new THREE.Vector3(px, py, pz), en: e }
         }
         if (enemyCand) {
           const { en, point } = enemyCand
@@ -8955,21 +8959,22 @@ export default function ThreeWorld({
         } else if (wallHit) {
           impact = wallHit.point.clone()
         }
-        // Tracer streak from the nose (reuses the jet tracer material + bullet pool).
-        const tracer = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.06, 1.8), jetTracerMat)
-        tracer.position.copy(nose)
-        tracer.lookAt(nose.clone().add(fwd))
-        tracer.renderOrder = 998
-        scene.add(tracer)
-        bullets.push({
-          mesh: tracer,
-          velocity: fwd.clone().multiplyScalar(160),
-          life: 0.3,
-          isEnemy: false,
-          damage: 0,
-        })
-        // Impact dust (existing spark/explosion particles — no new pipeline).
-        if (impact) spawnExplosion(impact, true)
+        // Phase 1: tracer from the pooled ring (no per-shot Mesh/geometry alloc).
+        const tr = gatlingTracers[gatlingTracerIdx]
+        gatlingTracerIdx = (gatlingTracerIdx + 1) % GATLING_TRACER_POOL
+        if (tr) {
+          tr.mesh.position.copy(nose)
+          tr.mesh.lookAt(nose.clone().add(fwd))
+          tr.mesh.visible = true
+          tr.vel.copy(fwd).multiplyScalar(160)
+          tr.until = Date.now() + 300
+        }
+        // Impact dust — throttled (Phase 1): the spark spawns up to 6 meshes, so at
+        // 10-20 rounds/s cap it to ~1 per 110ms instead of one per impact.
+        if (impact && Date.now() >= tetsurinSparkRef.current) {
+          spawnExplosion(impact, true)
+          tetsurinSparkRef.current = Date.now() + 110
+        }
         // Muzzle flash (reuses the shared muzzle light) + light shake.
         muzzleFlashTimerRef.current = MUZZLE_FLASH_DURATION
         SOUNDS.pistol()
@@ -9325,7 +9330,7 @@ export default function ThreeWorld({
           // ── Block F: tyre sparks at speed + motion-blur flag ─────────────────
           const fastFrac = sp / maxs
           tetsurinFxFrame++
-          if (fastFrac > 0.6 && tetsurinFxFrame % 4 === 0) {
+          if (fastFrac > 0.6 && tetsurinFxFrame % 8 === 0) {
             // Spark kicked out behind the wheel (reuses the spark particle).
             const bx = v.x + Math.sin(v.heading) * 0.25
             const bz = v.z + Math.cos(v.heading) * 0.25
@@ -22274,6 +22279,15 @@ export default function ThreeWorld({
           } else if (gatHm.style.opacity !== "0") {
             gatHm.style.opacity = "0"
           }
+        }
+
+        // Phase 1: advance pooled gatling tracers (move + hide on expiry; O(pool),
+        // no allocation).
+        const gtNow = Date.now()
+        for (const gtr of gatlingTracers) {
+          if (!gtr.mesh.visible) continue
+          if (gtNow >= gtr.until) gtr.mesh.visible = false
+          else gtr.mesh.position.addScaledVector(gtr.vel, dt)
         }
 
         // Continuous fire
