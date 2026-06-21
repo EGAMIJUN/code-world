@@ -19058,6 +19058,191 @@ export default function ThreeWorld({
         instAdd(lampPoleGeo, sigPoleMat, lampPoleXf)
         instAdd(lampHeadGeo, lampHeadMat, lampHeadXf)
 
+        // ══ Phase C: 駅前ランドマークビル群 (シルエットで渋谷を想起・全てオリジナル) ══
+        // Window-grid emissive texture: lit windows glow, gaps + dark windows stay
+        // black so only windows emit. Deterministic via the build PRNG.
+        const makeWindowTex = (cols: number, rows: number, litHex: number, litChance: number) => {
+          const cw = 6
+          const ch = 9
+          const cv = document.createElement("canvas")
+          cv.width = cols * cw
+          cv.height = rows * ch
+          const ctx = cv.getContext("2d")
+          if (ctx) {
+            ctx.fillStyle = "#000000"
+            ctx.fillRect(0, 0, cv.width, cv.height)
+            const litCol = `#${litHex.toString(16).padStart(6, "0")}`
+            for (let r = 0; r < rows; r++) {
+              for (let c = 0; c < cols; c++) {
+                const on = rnd() < litChance
+                ctx.fillStyle = on ? litCol : "#0a0d14"
+                ctx.fillRect(c * cw + 1, r * ch + 1, cw - 2, ch - 3)
+              }
+            }
+          }
+          const t = new THREE.CanvasTexture(cv)
+          t.wrapS = THREE.RepeatWrapping
+          t.wrapT = THREE.RepeatWrapping
+          t.colorSpace = THREE.SRGBColorSpace
+          return t
+        }
+        // A glass high-rise: box body wrapped in a window grid (own material → mAdd
+        // collapses body+setback to ONE draw call). castShadow handled by flushMerges.
+        const makeTower = (
+          cx: number,
+          cz: number,
+          w: number,
+          d: number,
+          h: number,
+          baseY: number,
+          litHex: number,
+          litChance: number,
+          setback = 0,
+        ) => {
+          const tex = makeWindowTex(16, 40, litHex, litChance)
+          tex.repeat.set(Math.max(2, Math.round(w / 4)), Math.max(3, Math.round(h / 4)))
+          const mat = new THREE.MeshStandardMaterial({
+            color: 0x0d111a,
+            roughness: 0.42,
+            metalness: 0.34,
+            emissive: 0xffffff,
+            emissiveMap: tex,
+            emissiveIntensity: 0.7,
+          })
+          const body = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat)
+          body.position.set(cx, baseY + h / 2, cz)
+          mAdd(body)
+          if (setback > 0) {
+            const top = new THREE.Mesh(new THREE.BoxGeometry(w * 0.62, setback, d * 0.62), mat)
+            top.position.set(cx, baseY + h + setback / 2, cz)
+            mAdd(top)
+          }
+        }
+        // — Glass tower (SE / 駅東 — Scramble-Square-style stepped glass high-rise).
+        makeTower(46, 30, 24, 24, 66, 0, 0x9fd0ff, 0.5, 14)
+        addShibuyaAABB(46, 30, 12, 12, 66)
+        // — Hikarie-direction tower (E, distant backdrop beyond the walls; no AABB).
+        makeTower(120, -20, 28, 32, 82, 0, 0xbfe0ff, 0.45, 10)
+        // — Backdrop skyline ring climbing the スリバチ rim (shared material → 1 draw
+        // call for the whole ring). Sits on the rising ground via shibuyaGroundY.
+        const rimWinTex = makeWindowTex(14, 44, 0x88a8d8, 0.4)
+        rimWinTex.repeat.set(4, 10)
+        const rimMat = new THREE.MeshStandardMaterial({
+          color: 0x090c14,
+          roughness: 0.7,
+          emissive: 0x9fb6dc,
+          emissiveMap: rimWinTex,
+          emissiveIntensity: 0.5,
+        })
+        for (let i = 0; i < dn(16); i++) {
+          const ang = (i / 16) * Math.PI * 2 + rnd() * 0.3
+          const rr = 150 + rnd() * 30
+          const bx = Math.cos(ang) * rr
+          const bz = Math.sin(ang) * rr
+          const bw = 12 + rnd() * 12
+          const bh = 30 + rnd() * 46
+          const tw = new THREE.Mesh(new THREE.BoxGeometry(bw, bh, bw), rimMat)
+          tw.position.set(bx, shibuyaGroundY(bx, bz) + bh / 2, bz)
+          mAdd(tw)
+        }
+        // — Big-vision building (N / 駅前 — the giant screen faces the crossing). ──
+        const bvX = 4
+        const bvZ = -42
+        const bvW = 26
+        const bvD = 20
+        const bvH = 34
+        const bvWinTex = makeWindowTex(16, 24, 0xffd9a0, 0.45)
+        bvWinTex.repeat.set(6, 8)
+        const bvMat = new THREE.MeshStandardMaterial({
+          color: 0x12110f,
+          roughness: 0.6,
+          emissive: 0xffffff,
+          emissiveMap: bvWinTex,
+          emissiveIntensity: 0.55,
+        })
+        const bvBody = new THREE.Mesh(new THREE.BoxGeometry(bvW, bvH, bvD), bvMat)
+        bvBody.position.set(bvX, bvH / 2, bvZ)
+        mAdd(bvBody)
+        addShibuyaAABB(bvX, bvZ, bvW / 2, bvD / 2, bvH)
+        // The giant screen: a bright fake-ad CanvasTexture (fictional brands). Scroll
+        // animation arrives in Phase F; for now it's a static lit billboard. Its own
+        // material → kept as its own draw call (emissive, frustum-culled off).
+        const adCv = document.createElement("canvas")
+        adCv.width = 256
+        adCv.height = 192
+        const adCtx = adCv.getContext("2d")
+        if (adCtx) {
+          adCtx.fillStyle = "#0a0420"
+          adCtx.fillRect(0, 0, 256, 192)
+          adCtx.fillStyle = "#ff2d7e"
+          adCtx.fillRect(16, 18, 224, 50)
+          adCtx.fillStyle = "#ffffff"
+          adCtx.font = "bold 34px sans-serif"
+          adCtx.textAlign = "center"
+          adCtx.textBaseline = "middle"
+          adCtx.fillText("渋谷で会おう", 128, 44)
+          adCtx.fillStyle = "#28e0ff"
+          adCtx.font = "bold 26px sans-serif"
+          adCtx.fillText("★ NOVA STYLE ★", 128, 96)
+          adCtx.fillStyle = "#ffe24a"
+          adCtx.font = "bold 30px sans-serif"
+          adCtx.fillText("SCRAMBLE", 128, 140)
+          adCtx.fillStyle = "#9affc0"
+          adCtx.font = "bold 22px sans-serif"
+          adCtx.fillText("LIVE 24:00", 128, 172)
+        }
+        const adTex = new THREE.CanvasTexture(adCv)
+        adTex.colorSpace = THREE.SRGBColorSpace
+        const screen = new THREE.Mesh(
+          new THREE.PlaneGeometry(bvW * 0.82, bvH * 0.66),
+          new THREE.MeshBasicMaterial({ map: adTex }),
+        )
+        screen.position.set(bvX, bvH * 0.56, bvZ + bvD / 2 + 0.16) // south face → player
+        add(screen) // standalone (animated later) — not merged
+        // — 109-style cylindrical fashion building (W/SW — prow + tall vertical sign).
+        const cylX = -42
+        const cylZ = 30
+        const cylWinTex = makeWindowTex(28, 30, 0xff9ad0, 0.4) // warm pink fashion glow
+        cylWinTex.repeat.set(3, 8)
+        const cylMat = new THREE.MeshStandardMaterial({
+          color: 0x14101a,
+          roughness: 0.45,
+          metalness: 0.2,
+          emissive: 0xffffff,
+          emissiveMap: cylWinTex,
+          emissiveIntensity: 0.6,
+        })
+        const cyl = new THREE.Mesh(new THREE.CylinderGeometry(9.5, 11.5, 42, 18), cylMat)
+        cyl.position.set(cylX, 21, cylZ)
+        mAdd(cyl)
+        addShibuyaAABB(cylX, cylZ, 11.5, 11.5, 42)
+        // Vertical sign band on the prow facing the crossing (NE). Stacked-kana sign.
+        const signCv = document.createElement("canvas")
+        signCv.width = 64
+        signCv.height = 256
+        const signCtx = signCv.getContext("2d")
+        if (signCtx) {
+          signCtx.fillStyle = "#1a0a14"
+          signCtx.fillRect(0, 0, 64, 256)
+          signCtx.fillStyle = "#ff2d8e"
+          signCtx.font = "bold 40px sans-serif"
+          signCtx.textAlign = "center"
+          signCtx.textBaseline = "middle"
+          const chars = ["渋", "谷", "M", "O", "D", "E"]
+          for (let i = 0; i < chars.length; i++) {
+            signCtx.fillText(chars[i] ?? "", 32, 26 + i * 40)
+          }
+        }
+        const signTex = new THREE.CanvasTexture(signCv)
+        signTex.colorSpace = THREE.SRGBColorSpace
+        const signMat = new THREE.MeshBasicMaterial({ map: signTex })
+        const sign = new THREE.Mesh(new THREE.BoxGeometry(0.4, 18, 3.4), signMat)
+        // Push the sign out along the NE direction (toward the centre) on the prow.
+        const sa = Math.atan2(-cylZ, -cylX) // toward centre
+        sign.position.set(cylX + Math.cos(sa) * 11.6, 30, cylZ + Math.sin(sa) * 11.6)
+        sign.rotation.y = -sa
+        add(sign) // standalone (its faces use a single basic material)
+
         flushMerges() // collapse all static buckets → one mesh per material
         scene.add(group)
         shibuyaMapMeshesRef.current.push(group)
