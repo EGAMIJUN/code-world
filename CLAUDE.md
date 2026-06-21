@@ -116,7 +116,7 @@ Hono ルーターで `/api/*` 配下にマウント。すべて JSON、共通エ
 |---|---|
 | `/` | ランディングページ |
 | `/login` / `/signup` | フォーム認証 UI |
-| `/world` | メインの FPS ゲーム。`WorldClient` がモード/マップ選択画面 → `ThreeWorld.tsx` (約16,500行・継続増加中) |
+| `/world` | メインの FPS ゲーム。`WorldClient` がモード/マップ選択画面 → `ThreeWorld.tsx` (約29,400行・継続増加中) |
 | `/leaderboard` | totalScore ランキング |
 | `/profile` / `/profile/[id]` | プロフィール表示 |
 
@@ -137,9 +137,22 @@ Hono ルーターで `/api/*` 配下にマウント。すべて JSON、共通エ
 - 安全スポーン: `findSafeSpawnNear(x, z, radius)` (同心円スパイラル探索) を `spawnEnemiesFromDef` / `spawnBots` / bot respawn 全てに通して建物内スポーンを回避
 - 死亡アニメ: `DEATH_ANIM_TOTAL = 4.0s` (`FALL 1.2s` で 0→π/2 を ease-out でプローン化 + 膝崩れ → `LIE 1.8s` 地面接地 → `FADE 1.0s` 不透明度フェード)。`deathFallDir` をキル時に shooter とのドット積で決定し、撃たれた方向へ倒れる。`mesh.position.y = sin(tilt) * 0.18` で胴体が地面に乗る
 
+### 大阪編 (OSAKA / HUNT ステージ) の現状
+
+`/world` の HUNT モードに大阪ステージ群があり、以下が実装済み:
+- エリア進行: 道頓堀 → 通天閣 → 大阪城。各エリアに雑魚 (`yokai_lite` 妖怪) + 中ボス (天狗 / 山谷)、最終エリアで **五変化ボス** (`spawnOsakaBoss`、6形態)。
+- 難易度: 通常 / **鬼モード** (`osaka_oni`) / **終焉モード** (`osaka_cataclysm`、鬼クリアで解放)。
+- **終焉モード**: 赤黒い災厄ライティング + 黒い雨 + 落雷。真・五変化撃破後に **大魔 (Daima)** が降臨 (`spawnDaima` → 地中からせり上がる演出) — 7コア破壊式の最終ボス。
+- **恐怖演出**: 暗転 / 顕現フラッシュ / 大魔コア接近で赤ビネット脈動 / 不定期の遠い唸り (全て CSS オーバーレイ + 既存 SOUNDS、`updateDaima` + 都市崩壊シーケンサ駆動)。
+- **鉄輪 (Tetsurin)**: 大阪専用モノホイール戦闘バイク (`makeTetsurin`)。ガトリング `fireTetsurinGatling`、敵鉄輪兵部隊 `spawnOsakaBikeSquad`。
+- **破魔砲 (hamahō)**: チャージ式の極太貫通ビーム武器 (`fireHamaho`、`WEAPONS[5]`、ピックアップで解放、`h` キー、4発)。
+- **実績/称号**: localStorage フラグ (`osaka_oni_clear` / `osaka_cataclysm_clear` / `osaka_tetsurin_champion` / `osaka_shuen_suit` 等) → プロフィール画面に i18n 表示。
+- 雑魚の最大同時数: `OSAKA_ENEMY_CAP` = 20 (PC) / 15 (モバイル)。
+- **perf 最適化**: 大阪雑魚は creature 差し替え時にヒューマノイドリグを省略 (`makeEnemy` の `slim` 引数 → 不可視ヒットボックス1個。当たり判定/死亡/AI は全て null ガード済みで維持) + `yokai_lite` を頂点カラーで 2 メッシュに統合。鉄輪ガトリングはトレーサー/スパークをプール化。影は 512² マップ + プレイヤー追従の ±40 frustum。
+
 ### ⚠️ ThreeWorld.tsx 編集時の必読ルール（トークン上限）
 
-> **ThreeWorld.tsx は 16,500 行超。** 大型機能は必ず段階的に実装し、1回のコミットで追加・変更するのは
+> **ThreeWorld.tsx は 29,000 行超。** 大型機能は必ず段階的に実装し、1回のコミットで追加・変更するのは
 > **最大 1,500 行程度**に抑えること。出力トークン上限（約 32k）に対してファイルが巨大なため、
 > 実装は**複数フェーズに分割してコミット**すること。1フェーズ＝1責務（例: データ定義 → 生成関数 →
 > 更新ループ統合 → HUD）を目安にする。ファイル全体の書き直し・大規模な行移動は禁止（差分が肥大化し
@@ -149,63 +162,66 @@ Hono ルーターで `/api/*` 配下にマウント。すべて JSON、共通エ
 
 | 行範囲 | 内容 |
 |---|---|
-| `1〜1,667` | 定数・型・純粋ヘルパー関数（モジュールスコープ。`WEAPONS` / `ENEMY_CONFIGS` / `MISSION_DEFS` / `WALL_AABBS` / `collidesWithWall` など） |
-| `1,669〜` | `ThreeWorld` コンポーネント本体開始 |
-| `1,669〜2,140` | `useRef`(129個) / `useState`(74個) の宣言密集帯（ゲーム状態はほぼ ref 経由の暗黙グローバル） |
-| `2,137〜13,100` | **巨大 useEffect**: Three.js シーン構築 + 全ゲームロジック + `animate()` ループを内包 |
-| `13,612〜16,506` | JSX return（HUD/UI 全体。60+ の条件付きオーバーレイ） |
+| `1〜2,379` | 定数・型・純粋ヘルパー関数（モジュールスコープ。`WEAPONS` / `ENEMY_CONFIGS` / `WALL_AABBS` / `DAIMA_*` / `OSAKA_*` 定数 / `collidesWithWall` など） |
+| `2,380〜` | `export default function ThreeWorld` コンポーネント本体開始 |
+| `2,380〜3,050` | `useRef` / `useState` の宣言密集帯（useRef + useState 計 ~299 箇所。ゲーム状態はほぼ ref 経由の暗黙グローバル） |
+| `3,093〜24,867` | **巨大 useEffect**: Three.js シーン構築 (`scene` 3177 / `renderer` 3332) + 全ゲームロジック + `animate()` ループ (21,725) を内包 |
+| `24,888〜29,359` | JSX return（HUD/UI 全体。60+ の条件付きオーバーレイ） |
 
 ### ThreeWorld.tsx 主要システム関数マップ（巨大 useEffect 内・実測行番号）
 
 新機能やバグ修正の際は、まず該当システムの関数へ直行すること。
 
 **マップ/ジオメトリ生成**
-`makeNoiseTexture`(2356), `makeHollowBuilding`(3053), `addBuildingWindows`(3241), `makeRoofTower`(3484), `makeMansion`(3708), `makeLandmarkTower`(3968), `makeCrane`(4753)
+`makeNoiseTexture`(3492), `makeHollowBuilding`(4189), `addBuildingWindows`(4387), `makeRoofTower`(4631), `makeMansion`(4855), `makeLandmarkTower`(5149)
 
 **プレイヤー/カメラ**
-`updateCamera`(5056), `buildPlayerAvatar`(5205), `showPlayerAvatar`(5270), `applyPlayerDamage`(6058)
+`updateCamera`(6295), `buildPlayerAvatar`(6453), `showPlayerAvatar`(6566), `applyPlayerDamage`(7615)
 
 **車両（共通）**
-`makeVehicle`(5295), `spawnVehicle`(5606), `enterVehicle`(5890), `exitVehicle`(5962), `updateVehicle`(7359), `destroyActiveVehicle`(6024)
+`makeVehicle`(6595), `spawnVehicle`(7123), `enterVehicle`(7407), `exitVehicle`(7482), `updateVehicle`(9193), `destroyActiveVehicle`(7561)
 
-**バイク**
-`makeBike`(5378), `addBikeSlot`(5672), `updateBikeRiders`(5766), `tryTerraformerSeekBike`(5720)
+**バイク / 鉄輪**
+`makeBike`(6678), `makeTetsurin`(6753), `addBikeSlot`(7189), `updateBikeRiders`(7283), `tryTerraformerSeekBike`(7237), `fireTetsurinGatling`(8820)
 
 **戦車**
-`makeTank`(5425), `fireCannon`(10471)
+`makeTank`(6942), `fireCannon`(21202)
 
 **ジェット/航空戦**
-`makeJet`(5531), `spawnEnemyJet`(6655), `updateEnemyJets`(6691), `updateCrashJets`(6800), `ejectFromJet`(6880), `skySpawnSquadron`(6947), `updateSkyArena`(6961), `fireJetGun`(7049), `fireJetMissile`(7161), `updateJet`(7211)
+`makeJet`(7048), `spawnEnemyJet`(8246), `updateEnemyJets`(8284), `updateCrashJets`(8454), `ejectFromJet`(8534), `skySpawnSquadron`(8601), `updateSkyArena`(8617), `fireJetGun`(8705), `fireJetMissile`(8995), `updateJet`(9045)
 
 **対空砲(AA)**
-`makeAAGun`(6350), `fireAAShell`(6397), `updateAAGuns`(6409), `updateAAShells`(6432), `updateMountedAA`(6587)
+`makeAAGun`(7926), `fireAAShell`(7973), `updateAAGuns`(7985), `updateAAShells`(8008), `updateMountedAA`(8178)
 
 **敵生成/AI**
-`makeEnemy`(7558), `spawnEnemiesFromDef`(8396), `spawnBots`(8523), `updateEnemyClimb`(10789)
+`makeEnemy`(9473、`slim` 引数で creature 敵はリグ省略), `spawnEnemiesFromDef`(10417), `spawnBots`(10546), `updateEnemyClimb`(21642)
 
 **ミッション/ウェーブ**
-`spawnMission`(8645), `spawnWave`(8710), `spawnZombieWave`(8723), `spawnTerraformerWave`(8854), `updateRocketStrikes`(8901)
+`spawnMission`(10671), `spawnWave`(10736), `spawnZombieWave`(10749), `spawnTerraformerWave`(10881), `updateRocketStrikes`(10929)
 
 **HUNT モード**
-`huntMakeEnemy`(8982), `buildHuntRoom`(9015), `huntStartRoom`(9251), `huntBeginMission`(9284), `huntHeadExplode`(9352), `huntReturnToRoom`(9373), `updateHunt`(9412)
+`huntMakeEnemy`(12063), `makeHuntCreature`(11535、yokai_lite 等の妖怪), `buildHuntRoom`(16412), `huntStartRoom`(19025), `huntBeginMission`(19073), `huntHeadExplode`(19176), `huntReturnToRoom`(19198), `updateHunt`(19700)
+
+**OSAKA 編（終焉 / 大魔 / 中ボス / 鉄輪）**
+`buildOsakaMap`(16946), `clearOsakaMap`(18540), `spawnOsakaBoss`(12937、五変化6形態) / `updateOsakaBoss`(15289), `spawnTengu`(15772) / `spawnYamaya`(15865) / `updateOsakaMidBoss`(15972), `buildDaima`(14753) / `spawnDaima`(14947) / `updateDaima`(15077) / `daimaHitCore`(15033), `osakaTelegraph`(13144、予兆リング), `osakaShowCutin`(14669), `spawnOsakaBikeSquad`(16166) / `updateOsakaBikes`(16209)
 
 **武器/射撃/戦闘**
-`createBullet`(9627), `fire`(10505), `meleeAttack`(10384), `fireRocket`(10283), `detonateGrenade`(10212), `damageAllInRadius`(9920), `applyEnemyKill`(9754)
+`fire`(21236), `fireHamaho`(20897、破魔砲チャージビーム), `createBullet`(20011), `meleeAttack`(21115), `fireRocket`(21003), `detonateGrenade`(20822), `damageAllInRadius`(20512), `applyEnemyKill`(20336)
 
-**RPG**
-`makeRPGPickup`(10316), `collectRPG`(10332), `updateRPGPickups`(10359)
+**RPG / ピックアップ**
+`makeRPGPickup`(21036), `collectRPG`(21057、`weaponId` で RPG / 破魔砲を付与), `updateRPGPickups`(21090)
 
 **エフェクト**
-`spawnBlood`(9684), `spawnExplosion`(9709)
+`spawnBlood`(20068), `spawnExplosion`(20093)
 
 **入力**
-`onMouseDown`(10732), `onMouseUp`(10749), `onKeyDown`(13156), `onKeyUp`(13240)
+`onMouseDown`(21585), `onMouseUp`(21602), `onKeyDown`(24367), `onKeyUp`(24499)
 
 **メインループ**
-`animate`(10872〜13070、約2,200行) — 上記すべての `update*()` を毎フレーム呼び出すオーケストレーター
+`animate`(21725〜約24,600、約2,800行) — 上記すべての `update*()` を毎フレーム呼び出すオーケストレーター
 
 **JSX/HUD**
-`13,612〜16,506` — 60+ の条件付きオーバーレイ（設定モーダル・HUNT HUD・クロスヘア・ミニマップ・キルフィード・武器セレクタ・モバイルボタン群）
+`24,888〜29,359` — 60+ の条件付きオーバーレイ（設定モーダル・HUNT/終焉 HUD・クロスヘア・ミニマップ・キルフィード・武器セレクタ・モバイルボタン群）
 
 > ⚠️ 行番号は実測時点の値。ファイルは継続増加中のため、編集前に `grep -n "function 関数名" ThreeWorld.tsx` で
 > 現在地を再確認すること。
