@@ -631,13 +631,54 @@ interface HuntLevel {
 // stage = arena dressing (outdoor day vs. indoor green-lit hall);
 // difficulty = which HUNT_LEVELS entry a fresh run starts at (1/2/3).
 type HuntMissionConfig = {
-  stage: "outdoor" | "indoor" | "osaka" | "osaka_oni" | "osaka_cataclysm"
+  stage: "outdoor" | "indoor" | "osaka" | "osaka_oni" | "osaka_cataclysm" | "shibuya"
   difficulty: 1 | 2 | 3
 }
 // OSAKA 鬼モード (FINAL-H) / 終焉モード (Cataclysm): マップ/進行は OSAKA と共通、
 // 倍率と守衛、そして終焉だけの大魔・崩壊演出が上乗せされる。
 const isOsakaStage = (s: HuntMissionConfig["stage"]): boolean =>
   s === "osaka" || s === "osaka_oni" || s === "osaka_cataclysm"
+// 渋谷編 (SHIBUYA): スリバチ地形の都市核 — スクランブル交差点を中心に独立した新ステージ。
+// OSAKA とは完全に別系統で、buildShibuyaMap / clearShibuyaMap が土台を組む。
+const isShibuyaStage = (s: HuntMissionConfig["stage"]): boolean => s === "shibuya"
+// ── 渋谷スリバチ地形 ──────────────────────────────────────────────────────
+// 谷地形 (スリバチ): 中心 (スクランブル) が最も低く y=0、外周に向かって緩やかに
+// せり上がる「すり鉢」。歩行可能なコアは平坦 (FLAT_R 以内は必ず y=0)、その外側 ——
+// 外周壁の向こう —— だけが RIM_H までせり上がる背景。プレイヤー Y は y=0 固定の
+// ままなので浮き/めり込みは一切起きない。外周エリア (道玄坂/宮益坂/公園通り) を
+// 歩けるようにするのは後続 PR (floors[] とクランプを足して拡張)。
+const SHIBUYA_MAP = 380 // 床メッシュ全体のサイズ (背景リム込み)
+const SHIBUYA_HALF = 100 // 外周壁の半幅 → 歩行可能 200×200 (大阪 180 よりやや大きめ)
+const SHIBUYA_FLAT_R = 144 // 平坦な谷底の半径 (壁の角 r≈141 を内包するので全可動域が平坦)
+const SHIBUYA_RIM_R = 188 // せり上がりが頂部に達する半径
+const SHIBUYA_RIM_H = 26 // リム (谷の縁) の高さ
+// ローカル座標 (グループ中心 = HUNT_ARENA からの相対) での地面の高さ。
+// 平坦コア内は 0、外周リングだけ smoothstep でせり上がる。床メッシュの頂点変位と
+// 背景プロップの接地の両方に使う純関数。
+const shibuyaGroundY = (lx: number, lz: number): number => {
+  const r = Math.hypot(lx, lz)
+  if (r <= SHIBUYA_FLAT_R) return 0
+  if (r >= SHIBUYA_RIM_R) return SHIBUYA_RIM_H
+  const t = (r - SHIBUYA_FLAT_R) / (SHIBUYA_RIM_R - SHIBUYA_FLAT_R)
+  return SHIBUYA_RIM_H * t * t * (3 - 2 * t) // smoothstep
+}
+// 渋谷エリア中心 (ワールド座標)。今回はコア (scramble) のみ使用するが、後続 PR の
+// 外周拡張 (道玄坂/宮益坂/公園通り/センター街/神社) を見越して方角の概念を持たせる。
+type ShibuyaArea = "scramble" | "dogenzaka" | "miyamasuzaka" | "koendori" | "centergai" | "shrine"
+const shibuyaAreaCenter = (area: ShibuyaArea): { x: number; z: number } => {
+  // ローカルオフセット → ワールド (HUNT_ARENA 基準)。方角: 道玄坂=南西, 宮益坂=東,
+  // 公園通り=北, センター街=北西, 神社=北東の杜。
+  const off: Record<ShibuyaArea, [number, number]> = {
+    scramble: [0, 0],
+    dogenzaka: [-52, 44],
+    miyamasuzaka: [62, -8],
+    koendori: [-6, -64],
+    centergai: [-46, -40],
+    shrine: [58, -54],
+  }
+  const [dx, dz] = off[area]
+  return { x: HUNT_ARENA.x + dx, z: HUNT_ARENA.z + dz }
+}
 // Per-theme minion spec — reuse an existing enemy model with a colour/scale
 // tweak. base = model, tint = body recolour, eyes = eye-glow colour.
 type HuntCreatureKind =
@@ -1205,6 +1246,11 @@ let osakaSuppressBaseCollision = false
 // (re)build and on mission teardown. Module-scoped because the collision helpers
 // are module-level (collidesWithWall can't reach a component ref).
 const OSAKA_AABBS: WallAABB[] = []
+// SHIBUYA's OWN collision list — same role as OSAKA_AABBS but for the 渋谷 stage
+// (perimeter walls + landmark footprints registered by buildShibuyaMap). Only one
+// hunt overlay stage is ever live, so when the base map is suppressed the sweep
+// tests OSAKA_AABBS *and* SHIBUYA_AABBS; the inactive stage's array is empty.
+const SHIBUYA_AABBS: WallAABB[] = []
 
 // Shared per-AABB tests (so the OSAKA path and the base-map path stay identical).
 function aabbBlocksMover(
@@ -1248,6 +1294,7 @@ function collidesWithWall(px: number, pz: number, radius: number, feetY = 0): bo
   // OSAKA structures. An empty list = the old free-field behaviour.
   if (osakaSuppressBaseCollision) {
     for (const w of OSAKA_AABBS) if (aabbBlocksMover(w, px, pz, radius, feetY)) return true
+    for (const w of SHIBUYA_AABBS) if (aabbBlocksMover(w, px, pz, radius, feetY)) return true
     return false
   }
   if (
@@ -1267,6 +1314,7 @@ function pointInsideWall(px: number, py: number, pz: number): boolean {
   // OSAKA: bullets are stopped only by the registered OSAKA structures.
   if (osakaSuppressBaseCollision) {
     for (const w of OSAKA_AABBS) if (pointInAABB(w, px, py, pz)) return true
+    for (const w of SHIBUYA_AABBS) if (pointInAABB(w, px, py, pz)) return true
     return false
   }
   for (const w of ALL_AABBS) if (pointInAABB(w, px, py, pz)) return true
@@ -2609,6 +2657,9 @@ export default function ThreeWorld({
   // OSAKA stage map (Dotonbori / Tsutenkaku / Osaka Castle). Top-level objects
   // built by buildOsakaMap, disposed on mission return.
   const osakaMapMeshesRef = useRef<THREE.Object3D[]>([])
+  // SHIBUYA stage map (scramble core + landmarks). Top-level objects built by
+  // buildShibuyaMap, disposed by clearShibuyaMap on mission return.
+  const shibuyaMapMeshesRef = useRef<THREE.Object3D[]>([])
   // OSAKA area-progression state + the active mid-boss (Tengu / Yamaya).
   const osakaProgressRef = useRef<OsakaProgressState>({
     area: "dotonbori",
@@ -16337,11 +16388,14 @@ export default function ThreeWorld({
       let huntPanelClickAt = 0 // throttle held-fire so one tap = one selection
       // Clickable regions in normalised canvas space (top-left origin).
       type HuntPanelHit =
-        | { kind: "stage"; value: "outdoor" | "indoor" | "osaka" | "osaka_oni" | "osaka_cataclysm" }
+        | {
+            kind: "stage"
+            value: "outdoor" | "indoor" | "osaka" | "osaka_oni" | "osaka_cataclysm" | "shibuya"
+          }
         | { kind: "difficulty"; value: 1 | 2 | 3 }
         | { kind: "deploy" }
-      // 5段目に「OSAKA 終焉」(Cataclysm) が入ったぶん、ステージ行はさらに詰めてある
-      // (0.21〜0.725 を5等分)。難度列は右側 (x≥0.54) なので干渉しない。
+      // ステージ行は 6 段 (outdoor / indoor / 渋谷 / OSAKA / 鬼 / 終焉) を 0.21〜0.725 に
+      // 等分。難度列は右側 (x≥0.54) なので干渉しない。
       const HUNT_PANEL_REGIONS: {
         x0: number
         y0: number
@@ -16349,15 +16403,16 @@ export default function ThreeWorld({
         y1: number
         hit: HuntPanelHit
       }[] = [
-        { x0: 0.05, y0: 0.21, x1: 0.46, y1: 0.305, hit: { kind: "stage", value: "outdoor" } },
-        { x0: 0.05, y0: 0.315, x1: 0.46, y1: 0.41, hit: { kind: "stage", value: "indoor" } },
-        { x0: 0.05, y0: 0.42, x1: 0.46, y1: 0.515, hit: { kind: "stage", value: "osaka" } },
-        { x0: 0.05, y0: 0.525, x1: 0.46, y1: 0.62, hit: { kind: "stage", value: "osaka_oni" } },
+        { x0: 0.05, y0: 0.21, x1: 0.46, y1: 0.288, hit: { kind: "stage", value: "outdoor" } },
+        { x0: 0.05, y0: 0.296, x1: 0.46, y1: 0.374, hit: { kind: "stage", value: "indoor" } },
+        { x0: 0.05, y0: 0.382, x1: 0.46, y1: 0.46, hit: { kind: "stage", value: "shibuya" } },
+        { x0: 0.05, y0: 0.468, x1: 0.46, y1: 0.546, hit: { kind: "stage", value: "osaka" } },
+        { x0: 0.05, y0: 0.554, x1: 0.46, y1: 0.632, hit: { kind: "stage", value: "osaka_oni" } },
         {
           x0: 0.05,
-          y0: 0.63,
+          y0: 0.64,
           x1: 0.46,
-          y1: 0.725,
+          y1: 0.718,
           hit: { kind: "stage", value: "osaka_cataclysm" },
         },
         { x0: 0.54, y0: 0.24, x1: 0.95, y1: 0.36, hit: { kind: "difficulty", value: 1 } },
@@ -16844,7 +16899,9 @@ export default function ThreeWorld({
                   : "OSAKA 終焉"
                 : r.hit.value === "osaka_oni"
                   ? "OSAKA 鬼"
-                  : r.hit.value.toUpperCase()
+                  : r.hit.value === "shibuya"
+                    ? "渋谷 SHIBUYA"
+                    : r.hit.value.toUpperCase()
               : r.hit.kind === "difficulty"
                 ? `LV${r.hit.value}`
                 : "[ DEPLOY ]"
@@ -18662,6 +18719,246 @@ export default function ThreeWorld({
           huntStageFogWasSaved = false
         }
       }
+      // ════════════════════════════════════════════════════════════════════════
+      // 渋谷編 (SHIBUYA) — HUNT の新ステージ「核」: スリバチ地形 + スクランブル交差点。
+      // OSAKA とは完全に独立。buildShibuyaMap が地形/ランドマークを一つの group に組み、
+      // clearShibuyaMap が破棄する。OSAKA のコード/マップには一切触れない。
+      // Phase A: 骨格 — スリバチ床メッシュ + 外周壁 + 中央プラザ/放射道路 + 接地ヘルパー。
+      // 後続フェーズ (B〜F) は flushMerges() の手前に造形を足していく。
+      // ════════════════════════════════════════════════════════════════════════
+      function buildShibuyaMap() {
+        const dense = isMobileDevice ? 0.5 : 1.0 // mobile thins decoration loops
+        const dn = (n: number) => Math.max(1, Math.round(n * dense))
+        let seed = 10934 // 渋谷 deterministic PRNG (≠ OSAKA seed → different layout)
+        const rnd = () => {
+          seed = (seed * 1103515245 + 12345) & 0x7fffffff
+          return seed / 0x7fffffff
+        }
+        const group = new THREE.Group()
+        group.position.set(HUNT_ARENA.x, 0, HUNT_ARENA.z) // all geometry is arena-local
+        const add = (m: THREE.Object3D) => group.add(m)
+        // ── SHIBUYA collision registry ─────────────────────────────────────────
+        // Mirrors addOsakaAABB: only MAJOR structures (perimeter walls + later the
+        // landmark footprints) get a hitbox so the scramble stays freely walkable.
+        // (cx,cz)=local centre, (hw,hd)=half-extents, h=top, y0=bottom (0=ground).
+        SHIBUYA_AABBS.length = 0 // fresh list each (re)build
+        const addShibuyaAABB = (
+          cx: number,
+          cz: number,
+          hw: number,
+          hd: number,
+          h: number,
+          y0 = 0,
+        ) => {
+          SHIBUYA_AABBS.push({
+            x1: HUNT_ARENA.x + cx - hw,
+            x2: HUNT_ARENA.x + cx + hw,
+            z1: HUNT_ARENA.z + cz - hd,
+            z2: HUNT_ARENA.z + cz + hd,
+            h,
+            y0,
+          })
+        }
+        // ── Static-geometry merger (same draw-call killer as OSAKA) ─────────────
+        // Every static mesh is funnelled through mAdd (bakes world transform into a
+        // cloned geometry, buckets by material); flushMerges() then merges each
+        // bucket into ONE mesh. Re-declared locally (OSAKA's are closures over its
+        // own group — untouched here).
+        const mergeMap = new Map<THREE.Material, THREE.BufferGeometry[]>()
+        const mAdd = (mesh: THREE.Mesh) => {
+          const mat = mesh.material
+          if (Array.isArray(mat)) {
+            add(mesh) // multi-material meshes can't share a single bucket
+            return
+          }
+          mesh.updateMatrix()
+          const g = mesh.geometry.clone().applyMatrix4(mesh.matrix)
+          const arr = mergeMap.get(mat)
+          if (arr) arr.push(g)
+          else mergeMap.set(mat, [g])
+        }
+        const flushMerges = () => {
+          for (const [mat, geos] of mergeMap) {
+            const first = geos[0]
+            if (!first) continue
+            const merged = geos.length === 1 ? first : mergeGeometries(geos, false)
+            if (!merged) {
+              for (const g of geos) add(new THREE.Mesh(g, mat))
+              continue
+            }
+            if (geos.length > 1) for (const g of geos) g.dispose()
+            const m = new THREE.Mesh(merged, mat)
+            m.castShadow = false
+            m.receiveShadow = false
+            m.frustumCulled = false
+            add(m)
+          }
+          mergeMap.clear()
+        }
+        // Instanced-mesh accumulator (one draw call for N copies of one geo+mat).
+        type Xf = {
+          pos: [number, number, number]
+          scl?: [number, number, number] | number
+          rotX?: number
+          rotY?: number
+          rotZ?: number
+        }
+        const idummy = new THREE.Object3D()
+        const instAdd = (geo: THREE.BufferGeometry, mat: THREE.Material, xforms: Xf[]) => {
+          if (xforms.length === 0) return null
+          const im = new THREE.InstancedMesh(geo, mat, xforms.length)
+          im.castShadow = false
+          im.receiveShadow = false
+          im.frustumCulled = false
+          xforms.forEach((xf, i) => {
+            idummy.position.set(xf.pos[0], xf.pos[1], xf.pos[2])
+            idummy.rotation.set(xf.rotX ?? 0, xf.rotY ?? 0, xf.rotZ ?? 0)
+            if (typeof xf.scl === "number") idummy.scale.setScalar(xf.scl)
+            else if (xf.scl) idummy.scale.set(xf.scl[0], xf.scl[1], xf.scl[2])
+            else idummy.scale.setScalar(1)
+            idummy.updateMatrix()
+            im.setMatrixAt(i, idummy.matrix)
+          })
+          im.instanceMatrix.needsUpdate = true
+          add(im)
+          return im
+        }
+        // ── GROUND: スリバチ (bowl) floor ──────────────────────────────────────
+        // A segmented plane whose vertices are pushed up toward the rim by
+        // shibuyaGroundY (radial smoothstep). After the -90° X-rotation the plane's
+        // local +z becomes world +y, so we displace the z attribute. The walkable
+        // core (r ≤ FLAT_R) stays exactly y=0 — the player never floats/clips; only
+        // the unreachable backdrop ring beyond the perimeter walls climbs.
+        const floorGeo = new THREE.PlaneGeometry(SHIBUYA_MAP, SHIBUYA_MAP, 80, 80)
+        const fpos = floorGeo.attributes.position
+        if (fpos) {
+          for (let i = 0; i < fpos.count; i++) {
+            // local x = world X (arena-local); local y maps to world Z (= -y), but
+            // the bowl is radial so the sign is irrelevant to the height.
+            fpos.setZ(i, shibuyaGroundY(fpos.getX(i), fpos.getY(i)))
+          }
+          fpos.needsUpdate = true
+        }
+        floorGeo.computeVertexNormals()
+        const asphaltTex = makeNoiseTexture(128, 0x34353d, 0.16, 26)
+        const floor = new THREE.Mesh(
+          floorGeo,
+          new THREE.MeshLambertMaterial({
+            map: asphaltTex,
+            color: 0x8a8d97,
+            emissive: 0x10131c,
+            emissiveIntensity: 1,
+          }),
+        )
+        floor.rotation.x = -Math.PI / 2
+        floor.position.y = 0.01
+        floor.receiveShadow = false
+        add(floor)
+        // ── Perimeter walls — closed square that contains the player on the flat
+        // core (sits at r ≤ HALF·√2 < FLAT_R, i.e. on y=0 ground). Beyond them the
+        // bowl rim rises as pure backdrop (unreachable this PR). ──
+        const H = SHIBUYA_HALF
+        const wallMat = new THREE.MeshLambertMaterial({ color: 0x24252b })
+        for (const [x, z, w, d] of [
+          [0, H, 2 * H, 2],
+          [0, -H, 2 * H, 2],
+          [H, 0, 2, 2 * H],
+          [-H, 0, 2, 2 * H],
+        ] as const) {
+          const wall = new THREE.Mesh(new THREE.BoxGeometry(w, 10, d), wallMat)
+          wall.position.set(x, 5, z)
+          mAdd(wall)
+          addShibuyaAABB(x, z, w / 2, d / 2, 10)
+        }
+        // ── Central scramble plaza + radiating main streets (lighter asphalt) ──
+        // The plaza is the scramble crossing slab (Phase B paints the diagonal
+        // crosswalk lines on top). Two main streets cross through it (N-S along the
+        // 公園通り axis, E-W along the 宮益坂 axis); the diagonal slope-roads
+        // (道玄坂/センター街) arrive with their areas in later PRs.
+        const roadMat = new THREE.MeshLambertMaterial({
+          color: 0x9498a2,
+          map: makeNoiseTexture(128, 0x3a3b44, 0.12, 18),
+          emissive: 0x141722,
+          emissiveIntensity: 1,
+        })
+        const plaza = new THREE.Mesh(new THREE.PlaneGeometry(44, 44), roadMat)
+        plaza.rotation.x = -Math.PI / 2
+        plaza.position.y = 0.02
+        mAdd(plaza)
+        for (const [w, d] of [
+          [20, 2 * H - 8],
+          [2 * H - 8, 20],
+        ] as const) {
+          const road = new THREE.Mesh(new THREE.PlaneGeometry(w, d), roadMat)
+          road.rotation.x = -Math.PI / 2
+          road.position.y = 0.015
+          mAdd(road)
+        }
+        // ── Sidewalk curbs flanking the two main streets (raised concrete strips) ──
+        const curbMat = new THREE.MeshLambertMaterial({ color: 0x52555f })
+        for (const sx of [-11, 11]) {
+          const curb = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.3, 2 * H - 8), curbMat)
+          curb.position.set(sx, 0.15, 0)
+          mAdd(curb)
+        }
+        for (const sz of [-11, 11]) {
+          const curb = new THREE.Mesh(new THREE.BoxGeometry(2 * H - 8, 0.3, 1.2), curbMat)
+          curb.position.set(0, 0.15, sz)
+          mAdd(curb)
+        }
+        // ── Wet-asphalt puddles (instanced dark patches — cheap urban-night cue) ──
+        const puddleGeo = new THREE.CircleGeometry(1, 10)
+        const puddleMat = new THREE.MeshBasicMaterial({ color: 0x13161e })
+        const puddleXf: Xf[] = []
+        for (let i = 0; i < dn(22); i++) {
+          puddleXf.push({
+            pos: [-H + rnd() * 2 * H, 0.04, -H + rnd() * 2 * H],
+            rotX: -Math.PI / 2,
+            scl: 0.6 + rnd() * 1.7,
+          })
+        }
+        instAdd(puddleGeo, puddleMat, puddleXf)
+
+        flushMerges() // collapse all static buckets → one mesh per material
+        scene.add(group)
+        shibuyaMapMeshesRef.current.push(group)
+      }
+      function clearShibuyaMap() {
+        // Dispose every SHIBUYA map object the same way clearOsakaMap does: walk the
+        // tracked group, remove, dispose geometry + material (+ map/emissiveMap
+        // CanvasTextures, which material.dispose() alone leaves resident). Null-safe:
+        // the ref is empty when SHIBUYA was never built, so this is a no-op then.
+        const disposeMat = (m: THREE.Material) => {
+          const sm = m as THREE.MeshStandardMaterial
+          sm.map?.dispose()
+          sm.emissiveMap?.dispose()
+          m.dispose()
+        }
+        for (const obj of shibuyaMapMeshesRef.current) {
+          scene.remove(obj)
+          obj.traverse((o) => {
+            if (o instanceof THREE.Mesh) {
+              o.geometry.dispose()
+              const m = o.material
+              if (Array.isArray(m)) for (const mm of m) disposeMat(mm)
+              else disposeMat(m)
+            }
+          })
+        }
+        shibuyaMapMeshesRef.current = []
+        SHIBUYA_AABBS.length = 0 // drop the SHIBUYA collision boxes on teardown
+      }
+      // 渋谷ミッション開始時のプレイヤー配置。今回 (核 PR) は敵/ボス無し — 谷底の
+      // スクランブル中央 (y=0) に置き、北 (公園通り/駅前方向) を向かせるだけ。外周
+      // エリアの進行 (道玄坂/宮益坂…) は後続 PR で shibuyaProgress として足す。
+      function shibuyaInitProgression() {
+        const c = shibuyaAreaCenter("scramble")
+        const psafe = findSafeSpawnNear(c.x, c.z + 14, PLAYER_RADIUS)
+        focalPoint.set(psafe.x, 0, psafe.z)
+        focalPoint.y = 0
+        camState.yaw = Math.PI // face north (−z) — across the crossing toward 駅前
+        camState.pitch = -0.02
+      }
       // Per-frame OSAKA scenery animation: neon flicker/pulse, lantern sway,
       // rooftop blinkers, water shimmer, tower beacon hue, scrolling marquee.
       function updateOsakaMap(dt: number) {
@@ -18765,6 +19062,14 @@ export default function ThreeWorld({
           buildOsakaMap() // 鬼モードもマップは共通 (倍率だけ変わる; FINAL-H)
           return
         }
+        if (isShibuyaStage(stage)) {
+          // Same base-world swap as OSAKA (osakaHideBaseWorld is a generic "hide the
+          // base urban city + suppress its collision" — see its body). Then build the
+          // 渋谷 field; restored by huntClearStage → osakaShowBaseWorld.
+          osakaHideBaseWorld()
+          buildShibuyaMap()
+          return
+        }
         if (stage !== "indoor") return
         const group = new THREE.Group()
         // Ceiling over the arena (the open battlefield gets a low dark roof).
@@ -18820,8 +19125,9 @@ export default function ThreeWorld({
           huntIndoorGroup = null
         }
         clearOsakaMap() // dispose the OSAKA field + restore the prior fog
+        clearShibuyaMap() // dispose the SHIBUYA field (null-safe; empty if never built)
         osakaTeardownMid() // dispose the OSAKA mid-boss + projectiles, reset progress
-        osakaShowBaseWorld() // un-hide the base urban world hidden for OSAKA
+        osakaShowBaseWorld() // un-hide the base urban world hidden for OSAKA / SHIBUYA
         huntFlickerLights.length = 0
         for (const s of huntStageLightSaved) s.light.intensity = s.intensity
         huntStageLightSaved.length = 0
@@ -19085,7 +19391,13 @@ export default function ThreeWorld({
         // OSAKA is a fixed, max-difficulty stage — always start at the top level.
         // (Area progression + the 五変化 boss land in Phase 2b; for now the O key
         // still summons the boss into the freshly built OSAKA field.)
-        if (isOsakaStage(huntMissionConfigRef.current.stage)) {
+        if (
+          isOsakaStage(huntMissionConfigRef.current.stage) ||
+          isShibuyaStage(huntMissionConfigRef.current.stage)
+        ) {
+          // OSAKA / SHIBUYA are fixed stages — pin to the last level entry so `lv`
+          // stays valid. SHIBUYA ignores the generic level/boss data; this PR builds
+          // only the walkable core (no minions/boss).
           huntHasDeployedRef.current = true
           huntLevelIdxRef.current = HUNT_LEVELS.length - 1
         } else if (!huntHasDeployedRef.current) {
@@ -19104,6 +19416,7 @@ export default function ThreeWorld({
         const hpScale = lv.level === 3 ? 1 + 0.2 * huntRepeatRef.current : 1
         const th = HUNT_THEMES[lv.theme]
         const isOsaka = isOsakaStage(huntMissionConfigRef.current.stage)
+        const isShibuya = isShibuyaStage(huntMissionConfigRef.current.stage)
         if (isOsaka) {
           // OSAKA drives its own area progression (Dotonbori → … → 五変化 boss)
           // instead of the generic minion ring + single HUNT boss.
@@ -19115,6 +19428,10 @@ export default function ThreeWorld({
           // in clearOsakaMap if left uncollected.
           const hamaSpawn = osakaAreaCenter("dotonbori")
           makeRPGPickup(hamaSpawn.x + 6, hamaSpawn.z + 4, 0, "hamaho")
+        } else if (isShibuya) {
+          // SHIBUYA core PR: no minions/boss yet — just place the player at the
+          // scramble. Outer-ring areas + enemies + the sealed boss land in later PRs.
+          shibuyaInitProgression()
         } else {
           // Minions ring the arena centre.
           for (let i = 0; i < lv.zakoCount; i++) {
@@ -19167,8 +19484,9 @@ export default function ThreeWorld({
         huntDeadlineRef.current = lv.timeLimitSec ? Date.now() + lv.timeLimitSec * 1000 : 0
         huntOobSinceRef.current = 0
         setHuntOob(false)
-        // Drop the player into the arena centre (OSAKA placed them in Dotonbori).
-        if (!isOsaka) {
+        // Drop the player into the arena centre (OSAKA placed them in Dotonbori;
+        // SHIBUYA placed them at the scramble in shibuyaInitProgression).
+        if (!isOsaka && !isShibuya) {
           const psafe = findSafeSpawnNear(HUNT_ARENA.x, HUNT_ARENA.z, PLAYER_RADIUS)
           focalPoint.set(psafe.x, 0, psafe.z)
         }
@@ -19180,7 +19498,11 @@ export default function ThreeWorld({
         huntPhaseRef.current = "mission"
         setHuntPhase("mission")
         showNotification(
-          isOsaka ? "大阪編 — 道頓堀へ" : `Lv.${lv.level} — ${lv.target.name} を狩れ`,
+          isOsaka
+            ? "大阪編 — 道頓堀へ"
+            : isShibuya
+              ? "渋谷編 — スクランブル交差点"
+              : `Lv.${lv.level} — ${lv.target.name} を狩れ`,
         )
       }
       // Head-pop death (boundary breach / quota miss): red burst + game over.
@@ -19814,7 +20136,13 @@ export default function ThreeWorld({
           // across a 180m field, not a shrinking-ring survival, so its boundary +
           // head-pop are disabled (the player must be free to cross the map).
           const lv = HUNT_LEVELS[huntLevelIdxRef.current]
-          if (!isOsakaStage(huntMissionConfigRef.current.stage)) {
+          if (
+            !isOsakaStage(huntMissionConfigRef.current.stage) &&
+            !isShibuyaStage(huntMissionConfigRef.current.stage)
+          ) {
+            // SHIBUYA (like OSAKA) is a free-roam city core, not a shrinking-ring
+            // survival — its boundary + head-pop are disabled so the player can walk
+            // the whole scramble freely.
             if (lv?.shrink) {
               const tt = Math.min(1, (now - huntShrinkStartRef.current) / (HUNT_SHRINK_SEC * 1000))
               huntRadiusRef.current = HUNT_BASE_RADIUS - (HUNT_BASE_RADIUS - HUNT_MIN_RADIUS) * tt
