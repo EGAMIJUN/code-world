@@ -47,23 +47,15 @@ function countryFlag(code: string | null): string {
 // Phase F: OSAKA の称号・スーツ・実績。各フラグは ThreeWorld.tsx の OSAKA クリア処理が
 // localStorage に "1" で書き込む (device-local)。ここはクライアント側で読み出して表示
 // するだけ (サーバ送信は今回スコープ外)。
-const OSAKA_ACHIEVEMENTS: { key: string; kind: string; name: string; desc: string }[] = [
-  { key: "osaka_oni_clear", kind: "称号", name: "大阪の鬼", desc: "大阪 鬼モードを制覇" },
-  { key: "osaka_true_clear", kind: "実績", name: "真・五変化 撃破", desc: "真・五変化を討つ" },
-  {
-    key: "osaka_tetsurin_champion",
-    kind: "称号",
-    name: "鉄輪の覇者",
-    desc: "鉄輪のまま真ボスを討つ",
-  },
-  { key: "osaka_dash_oni", kind: "実績", name: "疾走の鬼", desc: "鉄輪で規定距離を走破" },
-  {
-    key: "osaka_cataclysm_clear",
-    kind: "称号",
-    name: "終焉を超えし者",
-    desc: "終焉モードを生き抜く",
-  },
-  { key: "osaka_shuen_suit", kind: "スーツ", name: "終焉", desc: "終焉クリアで専用スーツ解放" },
+// Phase D: tone drives the accent colour + the localised kind label; name stays a
+// JP proper noun; the description is localised (t.profile.ach*, keyed below).
+const OSAKA_ACHIEVEMENTS: { key: string; tone: "title" | "feat" | "suit"; name: string }[] = [
+  { key: "osaka_oni_clear", tone: "title", name: "大阪の鬼" },
+  { key: "osaka_true_clear", tone: "feat", name: "真・五変化 撃破" },
+  { key: "osaka_tetsurin_champion", tone: "title", name: "鉄輪の覇者" },
+  { key: "osaka_dash_oni", tone: "feat", name: "疾走の鬼" },
+  { key: "osaka_cataclysm_clear", tone: "title", name: "終焉を超えし者" },
+  { key: "osaka_shuen_suit", tone: "suit", name: "終焉" },
 ]
 const OSAKA_BEST_KEY = "osaka_best_score"
 
@@ -174,6 +166,16 @@ export default function ProfilePage() {
   }
 
   const weapons = Object.entries(profile.weaponKills ?? {}).sort((a, b) => b[1] - a[1])
+  // Phase D: localised description per achievement (name stays JP; everything else
+  // resolves through the i18n dict).
+  const achDesc: Record<string, string> = {
+    osaka_oni_clear: t.profile.achOni,
+    osaka_true_clear: t.profile.achTrue,
+    osaka_tetsurin_champion: t.profile.achTetsurin,
+    osaka_dash_oni: t.profile.achDash,
+    osaka_cataclysm_clear: t.profile.achCata,
+    osaka_shuen_suit: t.profile.achSuit,
+  }
 
   return (
     <div
@@ -245,13 +247,19 @@ export default function ProfilePage() {
 
         {/* Phase F: 称号・スーツ (OSAKA) — 獲得済みは点灯、未獲得はロック/グレーアウト */}
         <div style={{ fontSize: "0.75rem", color: "#00aa2a", letterSpacing: "0.2em" }}>
-          称号・スーツ / TITLES &amp; SUITS
+          {t.profile.titlesSuits}
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: "0.5rem" }}>
           {OSAKA_ACHIEVEMENTS.map((a) => {
             const got = earned[a.key] ?? false
-            const accent =
-              a.kind === "スーツ" ? "#c060ff" : a.kind === "実績" ? "#ffb347" : "#ffd700"
+            const accent = a.tone === "suit" ? "#c060ff" : a.tone === "feat" ? "#ffb347" : "#ffd700"
+            const kindLabel =
+              a.tone === "suit"
+                ? t.profile.kindSuit
+                : a.tone === "feat"
+                  ? t.profile.kindFeat
+                  : t.profile.kindTitle
+            const desc = achDesc[a.key] ?? ""
             return (
               <div
                 key={a.key}
@@ -274,7 +282,7 @@ export default function ProfilePage() {
                     textShadow: got ? `0 0 8px ${accent}` : "none",
                   }}
                 >
-                  {got ? "★" : "🔒"} {a.kind}「{a.name}」
+                  {got ? "★" : "🔒"} {kindLabel}「{a.name}」
                 </span>
                 <span
                   style={{
@@ -283,7 +291,7 @@ export default function ProfilePage() {
                     letterSpacing: "0.04em",
                   }}
                 >
-                  {got ? a.desc : `未獲得 — ${a.desc}`}
+                  {got ? desc : `${t.profile.locked} — ${desc}`}
                 </span>
               </div>
             )
@@ -291,7 +299,7 @@ export default function ProfilePage() {
         </div>
         {osakaBest !== null && (
           <div style={{ fontSize: "0.65rem", color: "#00aa2a", letterSpacing: "0.1em" }}>
-            大阪編 ベストスコア:{" "}
+            {t.profile.osakaBestScore}:{" "}
             <span style={{ color: "#ffd700", fontWeight: "bold" }}>
               {osakaBest.toLocaleString()}
             </span>
