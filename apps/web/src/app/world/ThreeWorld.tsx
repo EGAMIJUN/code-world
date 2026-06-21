@@ -9476,6 +9476,13 @@ export default function ThreeWorld({
         z: number,
         isCommander = false,
         scaleMul = 1,
+        // Phase 1 (perf): creature-swapped zako (huntMakeEnemy non-bosses) hide the
+        // whole humanoid and ride a creature, so the ~37-mesh rig is built only to be
+        // invisible. slim=true skips the rig entirely — just an invisible enemyId-
+        // tagged hitbox — saving the meshes, the huntTint material clones, and the
+        // per-frame walk-pose writes. All rig fields are nullable + every reader
+        // null-guards them, so death-anim / AI / fade / hit-detection are unaffected.
+        slim = false,
       ): CombatEnemy {
         const cfg = ENEMY_CONFIGS[type]
         const isZombie = type === "zombie"
@@ -9501,6 +9508,100 @@ export default function ThreeWorld({
         root.rotation.order = "YXZ"
         root.position.set(x, 0, z)
         scene.add(root)
+
+        // Phase 1 (perf): slim path — skip the humanoid rig. Build one invisible
+        // hitbox (raycasts ignore visibility) tagged with enemyId, spanning the body
+        // so the position-based headshot test still discriminates head vs body, and
+        // return with every rig field null/omitted (all readers null-guard). Mirrors
+        // the rig's hit cylinder so hit behaviour is preserved; the visible creature
+        // is added by huntMakeEnemy. Data fields below match the full return exactly.
+        if (slim) {
+          const hbH = cfg.bodyH * scale
+          const hbR = cfg.bodyW * scale * 0.5
+          const hitbox = new THREE.Mesh(
+            new THREE.CylinderGeometry(hbR, hbR, hbH, 6),
+            new THREE.MeshBasicMaterial(),
+          )
+          hitbox.position.y = hbH / 2
+          hitbox.visible = false // raycast still hits it; nothing rendered
+          hitbox.userData.enemyId = enemyIdStr
+          root.add(hitbox)
+          const PATROL_R = 40
+          const wp = (dx: number, dz: number) => ({
+            x: Math.max(WORLD_MIN + 2, Math.min(WORLD_MAX - 2, x + dx)),
+            z: Math.max(WORLD_MIN + 2, Math.min(WORLD_MAX - 2, z + dz)),
+          })
+          return {
+            id: enemyIdStr,
+            mesh: root,
+            hp: cfg.hp,
+            maxHp: cfg.hp,
+            type,
+            config: cfg,
+            state: "patrol" as EnemyState,
+            patrolWaypoints: [
+              { x, z },
+              wp(PATROL_R * 0.7, PATROL_R * 0.5),
+              wp(-PATROL_R * 0.6, PATROL_R * 0.7),
+              wp(-PATROL_R * 0.5, -PATROL_R * 0.6),
+              wp(PATROL_R * 0.6, -PATROL_R * 0.4),
+            ],
+            patrolIndex: 0,
+            lastAttackTime: 0,
+            lastFireTime: 0,
+            facing: new THREE.Vector3(0, 0, 1),
+            lastSeenPlayer: null,
+            searchTimer: 0,
+            respawnTimer: ENEMY_NO_RESPAWN,
+            spawnX: x,
+            spawnZ: z,
+            dyingTimer: -1,
+            deathFallDir: 1,
+            animTime: Math.random() * Math.PI * 2,
+            leftArm: null,
+            rightArm: null,
+            leftLeg: null,
+            rightLeg: null,
+            steerX: 0,
+            steerZ: 0,
+            steerUntil: 0,
+            lodDetails: [],
+            velocity: { x: 0, z: 0 },
+            smoothedYaw: 0,
+            pose: {
+              leftShoulder: 0,
+              rightShoulder: 0,
+              leftElbow: 0,
+              rightElbow: 0,
+              leftHip: 0,
+              rightHip: 0,
+              leftKnee: 0,
+              rightKnee: 0,
+              torsoLeanZ: 0,
+              torsoPitchX: 0,
+              torsoBreath: 0,
+              pelvisRotY: 0,
+              headYaw: 0,
+              headPitch: 0,
+              eyeOpenness: 1,
+            },
+            blinkPhase: Math.random() * Math.PI * 2,
+            blinkTimer: 2 + Math.random() * 5,
+            blinkActive: 0,
+            breathPhase: Math.random() * Math.PI * 2,
+            microIdleSeed: Math.random() * 1000,
+            isCommander,
+            alertedUntil: 0,
+            flankSide: Math.random() < 0.5 ? -1 : 1,
+            flankStrength: 0.4 + Math.random() * 0.6,
+            dashUntil: 0,
+            nextDashCheckTime: 0,
+            nextGrenadeTime: 0,
+            markerKind: null,
+            markerUntil: 0,
+            meleeAnimUntil: 0,
+          }
+        }
 
         // ── Materials ────────────────────────────────────────────────────────
         // Per-zombie colour drift so a horde never looks uniform: flesh slides
@@ -11863,36 +11964,55 @@ export default function ThreeWorld({
             armBaseY,
           }
         } else if (kind === "yokai_lite") {
-          // Block O perf fodder: one hunched body, a pair of merged glowing eyes,
-          // and two merged horns — 3 draw calls total, so a full castle swarm stays
-          // inside the draw-call budget. Eyes ride eyeMat (pulse via
-          // updateHuntCreatures); the body is registered to twitch.
-          const body = new THREE.Mesh(huntBlobGeo, bodyMat)
+          // Block O perf fodder. Phase 2: the body + two oni horns are baked into ONE
+          // vertex-coloured mesh (was 2 meshes) — body verts are white (× the
+          // material's bodyColor) and horn verts are 0.45 grey (→ the old darkMat =
+          // bodyColor×0.45), so the two-tone oni look is preserved in a single
+          // material. Plus a pair of merged glowing eyes (separate — emissive +
+          // pulsed via updateHuntCreatures). 2 draw calls (was 3). Intermediate
+          // clones are never rendered, so they need no dispose — GC reclaims them.
+          const tintGeo = (g: THREE.BufferGeometry, v: number) => {
+            const col = new Float32Array((g.attributes.position?.count ?? 0) * 3)
+            col.fill(v)
+            g.setAttribute("color", new THREE.BufferAttribute(col, 3))
+            return g
+          }
+          // Body geo centered at the mesh origin (its old scale baked in) so the
+          // twitch's rotation pivot stays at the body centre; horns baked relative to
+          // that centre (old world y 1.18 − body y 0.72 = 0.46).
+          const partGeos: THREE.BufferGeometry[] = [
+            tintGeo(huntBlobGeo.clone().scale(0.52, 0.64, 0.48), 1),
+          ]
+          for (const s of [-1, 1]) {
+            partGeos.push(
+              tintGeo(
+                huntConeGeo
+                  .clone()
+                  .scale(0.08, 0.36, 0.08)
+                  .rotateZ(s * 0.34)
+                  .translate(s * 0.17, 0.46, -0.04),
+                0.45,
+              ),
+            )
+          }
+          const bodyGeo = mergeGeometries(partGeos, false) ?? huntBlobGeo
+          const yokaiMat = new THREE.MeshStandardMaterial({
+            color: bodyColor,
+            roughness: 0.85,
+            metalness: 0.05,
+            vertexColors: true,
+          })
+          const body = new THREE.Mesh(bodyGeo, yokaiMat)
           body.position.y = 0.72
-          body.scale.set(0.52, 0.64, 0.48)
           group.add(body)
           twitch.push(body)
-          // Two glowing eyes merged into a single emissive mesh (clones are
-          // never rendered, so they need no dispose — GC reclaims them).
+          // Two glowing eyes merged into a single emissive mesh.
           const eyeGeos: THREE.BufferGeometry[] = []
           for (const ex of [-0.14, 0.14]) {
             eyeGeos.push(huntEyeGeo.clone().scale(0.07, 0.07, 0.07).translate(ex, 0.82, -0.44))
           }
           const mergedEye = mergeGeometries(eyeGeos, false) ?? huntEyeGeo
           group.add(new THREE.Mesh(mergedEye, eyeMat))
-          // Two dark horns merged into one mesh for an oni silhouette.
-          const hornGeos: THREE.BufferGeometry[] = []
-          for (const s of [-1, 1]) {
-            hornGeos.push(
-              huntConeGeo
-                .clone()
-                .scale(0.08, 0.36, 0.08)
-                .rotateZ(s * 0.34)
-                .translate(s * 0.17, 1.18, -0.04),
-            )
-          }
-          const mergedHorn = mergeGeometries(hornGeos, false) ?? huntConeGeo
-          group.add(new THREE.Mesh(mergedHorn, darkMat))
         } else {
           // A four-legged beast with three independent heads on long necks.
           const trunk = new THREE.Mesh(huntBlobGeo, bodyMat)
@@ -11954,7 +12074,9 @@ export default function ThreeWorld({
         name: string,
         creatureKind: HuntCreatureKind,
       ): CombatEnemy {
-        const e = makeEnemy(base, x, z, false, scale)
+        // Phase 1: non-boss creature zako use the slim (rig-free) build; bosses keep
+        // the full humanoid (then hide it) in case a boss design ever reveals it.
+        const e = makeEnemy(base, x, z, false, scale, !isBoss)
         // Stealth (PR-Z2): HUNT enemies only notice the player up close, so the
         // blade lets you pick them off quietly. Guns are still loud (the noise
         // system aggros nearby enemies on fire).
@@ -11973,10 +12095,11 @@ export default function ThreeWorld({
         e.huntName = name
         e.isHuntBoss = isBoss
         if (isBoss) e.huntNextSpecial = Date.now() + 10000
-        // Swap the humanoid skin for a monster creature: hide the built body
-        // (the skeleton still drives AI + death), then ride a creature on the
-        // root. The eyes glow strongly for night visibility (boss brighter).
-        for (const c of e.mesh.children) c.visible = false
+        // Swap the humanoid skin for a monster creature, then ride a creature on the
+        // root. Bosses built the full rig (hide it here); slim zako have no rig (just
+        // an invisible hitbox), so only bosses need the hide loop. The skeleton (or
+        // the slim hitbox) still drives AI + death + hit detection.
+        if (isBoss) for (const c of e.mesh.children) c.visible = false
         const cr = makeHuntCreature(creatureKind, tint, eyes, isBoss)
         for (const m of cr.eyeMats) m.emissiveIntensity = isBoss ? 5.0 : 3.0
         e.mesh.add(cr.group)
@@ -12085,7 +12208,18 @@ export default function ThreeWorld({
       }
       // Remove every (live or dying) enemy mesh and empty the array.
       function huntClearEnemies() {
-        for (const e of enemies) scene.remove(e.mesh)
+        for (const e of enemies) {
+          scene.remove(e.mesh)
+          // Slim zako own their invisible hitbox geometry + material exclusively.
+          // Dispose here for enemies cleared alive (the reap path covers die+fade).
+          // Creature meshes share module-scope geos and must not be disposed.
+          e.mesh.traverse((child) => {
+            if (child instanceof THREE.Mesh && !child.visible && child.userData.enemyId) {
+              child.geometry.dispose()
+              ;(child.material as THREE.Material).dispose()
+            }
+          })
+        }
         enemies.length = 0
         setAliveEnemyCount(0)
         disposeOsakaBoss() // any active OSAKA boss is torn down with the wave
