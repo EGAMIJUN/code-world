@@ -18919,6 +18919,145 @@ export default function ThreeWorld({
         }
         instAdd(puddleGeo, puddleMat, puddleXf)
 
+        // ══ Phase B: スクランブル交差点 (渋谷の象徴) ══════════════════════════════
+        // The instantly-recognizable scramble: 4 straight + 2 diagonal (X) zebra
+        // crossings over a + intersection (20-wide N-S × E-W roads). All white bars
+        // collapse into ONE InstancedMesh. Stays freely walkable (no AABBs on the
+        // crossing) so standing in the centre reads as Shibuya at a glance.
+        const stripeGeo = new THREE.BoxGeometry(1, 0.04, 1) // unit bar, scaled per inst
+        const stripeMat = new THREE.MeshStandardMaterial({
+          color: 0xeef0f2,
+          emissive: 0x30343a,
+          emissiveIntensity: 0.5,
+          roughness: 0.85,
+        })
+        const stripeXf: Xf[] = []
+        // (cx,cz)=crossing centre, phi=walk direction (bars repeat along it & sit
+        // perpendicular), walkLen=road width crossed, barLen=crossing-band width.
+        const addCrosswalk = (
+          cx: number,
+          cz: number,
+          phi: number,
+          walkLen: number,
+          barLen: number,
+          count: number,
+          thick = 0.55,
+        ) => {
+          const rotY = -phi - Math.PI / 2 // turn the unit bar's +x to ⟂ the walk dir
+          for (let i = 0; i < count; i++) {
+            const along = (-0.5 + (i + 0.5) / count) * walkLen
+            stripeXf.push({
+              pos: [cx + Math.cos(phi) * along, 0.06, cz + Math.sin(phi) * along],
+              rotY,
+              scl: [barLen, 1, thick],
+            })
+          }
+        }
+        // 4 straight crossings hugging the 20×20 intersection box (band ~5 wide).
+        addCrosswalk(0, -13, 0, 20, 5, 15) // north arm — cross the N-S road (walk E-W)
+        addCrosswalk(0, 13, 0, 20, 5, 15) // south arm
+        addCrosswalk(-13, 0, Math.PI / 2, 20, 5, 15) // west arm — cross the E-W road
+        addCrosswalk(13, 0, Math.PI / 2, 20, 5, 15) // east arm
+        // 2 diagonal crossings forming the X across the centre — the scramble hallmark.
+        addCrosswalk(0, 0, Math.PI / 4, 42, 5, 28)
+        addCrosswalk(0, 0, -Math.PI / 4, 42, 5, 28)
+        // Stop lines: a thick bar just outside each crossing where traffic halts.
+        for (const [lx, lz, ang] of [
+          [0, -17, 0],
+          [0, 17, 0],
+          [-17, 0, Math.PI / 2],
+          [17, 0, Math.PI / 2],
+        ] as const) {
+          stripeXf.push({ pos: [lx, 0.06, lz], rotY: -ang - Math.PI / 2, scl: [18, 1, 0.9] })
+        }
+        instAdd(stripeGeo, stripeMat, stripeXf)
+        // ── Four corner sidewalk pads (flat) — the scramble corners + footprint
+        // anchors for the Phase C landmarks (109 / big-vision / glass tower). Flat
+        // (y=0.03) so there's zero step/clip; the towers + their AABBs land in C. ──
+        const sidewalkMat = new THREE.MeshLambertMaterial({
+          color: 0x70737d,
+          map: makeNoiseTexture(64, 0x42444c, 0.1, 6),
+        })
+        for (const [bx, bz] of [
+          [25, 25],
+          [-25, 25],
+          [25, -25],
+          [-25, -25],
+        ] as const) {
+          const sw = new THREE.Mesh(new THREE.PlaneGeometry(24, 24), sidewalkMat)
+          sw.rotation.x = -Math.PI / 2
+          sw.position.set(bx, 0.03, bz)
+          mAdd(sw)
+        }
+        // ── Traffic signals at the four inner corners (Japanese horizontal heads).
+        // Poles + heads + 3 lens colours = 5 instanced draw calls for all four. ──
+        const sigPoleGeo = new THREE.CylinderGeometry(0.12, 0.15, 5.4, 6)
+        const sigPoleMat = new THREE.MeshStandardMaterial({
+          color: 0x1b1b20,
+          roughness: 0.6,
+          metalness: 0.45,
+        })
+        const sigHeadGeo = new THREE.BoxGeometry(1.7, 0.5, 0.42)
+        const sigHeadMat = new THREE.MeshStandardMaterial({ color: 0x101014, roughness: 0.7 })
+        const lensGeo = new THREE.SphereGeometry(0.15, 8, 6)
+        const lensMat = (c: number) =>
+          new THREE.MeshStandardMaterial({ color: c, emissive: c, emissiveIntensity: 1.6 })
+        const sigPoleXf: Xf[] = []
+        const sigHeadXf: Xf[] = []
+        const redXf: Xf[] = []
+        const amberXf: Xf[] = []
+        const greenXf: Xf[] = []
+        for (const [sx, sz] of [
+          [12, 12],
+          [-12, 12],
+          [12, -12],
+          [-12, -12],
+        ] as const) {
+          const flen = Math.hypot(sx, sz) || 1
+          const fx = -sx / flen
+          const fz = -sz / flen // facing toward the centre
+          const hx = -fz
+          const hz = fx // horizontal axis (3 lenses sit along it)
+          const hy = 5.1
+          sigPoleXf.push({ pos: [sx, 2.7, sz] })
+          sigHeadXf.push({ pos: [sx + fx * 0.2, hy, sz + fz * 0.2], rotY: Math.atan2(fx, fz) })
+          for (let k = -1; k <= 1; k++) {
+            const xf: Xf = {
+              pos: [sx + fx * 0.34 + hx * (k * 0.46), hy, sz + fz * 0.34 + hz * (k * 0.46)],
+            }
+            if (k === -1) greenXf.push(xf)
+            else if (k === 0) amberXf.push(xf)
+            else redXf.push(xf)
+          }
+        }
+        instAdd(sigPoleGeo, sigPoleMat, sigPoleXf)
+        instAdd(sigHeadGeo, sigHeadMat, sigHeadXf)
+        instAdd(lensGeo, lensMat(0xff3328), redXf)
+        instAdd(lensGeo, lensMat(0xffb028), amberXf)
+        instAdd(lensGeo, lensMat(0x34ff74), greenXf)
+        // ── Street lamps lining the two main streets (instanced pole + glow head).
+        // Emissive heads only this PR (real point lights are added in Phase F). ──
+        const lampPoleGeo = new THREE.CylinderGeometry(0.1, 0.13, 6, 6)
+        const lampHeadGeo = new THREE.SphereGeometry(0.32, 8, 6)
+        const lampHeadMat = new THREE.MeshStandardMaterial({
+          color: 0xffeab0,
+          emissive: 0xffe6a0,
+          emissiveIntensity: 1.5,
+        })
+        const lampPoleXf: Xf[] = []
+        const lampHeadXf: Xf[] = []
+        for (let d = -90; d <= 90; d += 24) {
+          if (Math.abs(d) < 16) continue // leave the intersection itself clear
+          for (const side of [-12, 12]) {
+            lampPoleXf.push({ pos: [side, 3, d] }) // along the N-S road
+            lampHeadXf.push({ pos: [side, 6.1, d] })
+            lampPoleXf.push({ pos: [d, 3, side] }) // along the E-W road
+            lampHeadXf.push({ pos: [d, 6.1, side] })
+          }
+        }
+        instAdd(lampPoleGeo, sigPoleMat, lampPoleXf)
+        instAdd(lampHeadGeo, lampHeadMat, lampHeadXf)
+
         flushMerges() // collapse all static buckets → one mesh per material
         scene.add(group)
         shibuyaMapMeshesRef.current.push(group)
