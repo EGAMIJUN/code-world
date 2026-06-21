@@ -19243,6 +19243,236 @@ export default function ThreeWorld({
         sign.rotation.y = -sa
         add(sign) // standalone (its faces use a single basic material)
 
+        // ══ Phase D: ハチ公 + センター街 + のんべい横丁 + 雑居ビル + ストリート什器 ══
+        // Shared merge-friendly materials. Neon signs accumulate into per-colour
+        // instanced sets (one draw call each). roadMat / sidewalkMat / makeWindowTex
+        // are reused from the earlier phases (same buildShibuyaMap scope).
+        const concreteMat = new THREE.MeshLambertMaterial({ color: 0x4a4c54 })
+        const midWinTex = makeWindowTex(20, 30, 0xcfe0ff, 0.42)
+        midWinTex.repeat.set(3, 5)
+        const midMat = new THREE.MeshStandardMaterial({
+          color: 0x14161e,
+          roughness: 0.6,
+          emissive: 0xffffff,
+          emissiveMap: midWinTex,
+          emissiveIntensity: 0.5,
+        })
+        // Neon-sign instanced sets (one InstancedMesh per colour).
+        const neonGeo = new THREE.BoxGeometry(1, 1, 0.3)
+        const neonCols = [0xff2d8e, 0x28e0ff, 0xffe24a, 0x39ff9e, 0xff6a2a]
+        const neonXf: Xf[][] = neonCols.map(() => [])
+        const addNeonOnFace = (cx: number, cz: number, w: number, d: number, faceAng: number) => {
+          const nx = Math.round(Math.cos(faceAng))
+          const onX = nx !== 0
+          const ext = onX ? d : w
+          const signs = 1 + (rnd() < 0.55 ? 1 : 0)
+          for (let s = 0; s < signs; s++) {
+            const ci = Math.floor(rnd() * neonCols.length)
+            const sw = 1.4 + rnd() * Math.min(4.5, ext * 0.45)
+            const sh = 1 + rnd() * 2.4
+            const sy = 3 + rnd() * 9
+            const off = (rnd() - 0.5) * ext * 0.5
+            const px = onX ? cx + nx * (w / 2 + 0.18) : cx + off
+            const pz = onX ? cz + off : cz + Math.round(Math.sin(faceAng)) * (d / 2 + 0.18)
+            neonXf[ci]?.push({ pos: [px, sy, pz], rotY: onX ? Math.PI / 2 : 0, scl: [sw, sh, 1] })
+          }
+        }
+        // A mid-rise zatkyo building: window-grid box + neon on its street-facing side.
+        const makeMidRise = (
+          cx: number,
+          cz: number,
+          w: number,
+          d: number,
+          h: number,
+          faceAng: number,
+        ) => {
+          const b = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), midMat)
+          b.position.set(cx, h / 2, cz)
+          mAdd(b)
+          addShibuyaAABB(cx, cz, w / 2, d / 2, h)
+          addNeonOnFace(cx, cz, w, d, faceAng)
+        }
+        // ── ハチ公像 (original sitting-dog bronze + pedestal + plaza pad) ──
+        // Small SW landmark in front of the 109 cylinder; faces the crossing (+z).
+        const bronzeMat = new THREE.MeshStandardMaterial({
+          color: 0x6f5b3c,
+          roughness: 0.5,
+          metalness: 0.6,
+          emissive: 0x130d05,
+          emissiveIntensity: 0.4,
+        })
+        const hx = -20
+        const hz = 22
+        const hpad = new THREE.Mesh(new THREE.CircleGeometry(7, 22), sidewalkMat)
+        hpad.rotation.x = -Math.PI / 2
+        hpad.position.set(hx, 0.028, hz)
+        mAdd(hpad)
+        const ped = new THREE.Mesh(new THREE.BoxGeometry(2.4, 1.1, 2.4), concreteMat)
+        ped.position.set(hx, 0.55, hz)
+        mAdd(ped)
+        addShibuyaAABB(hx, hz, 1.2, 1.2, 1.1)
+        const pTop = 1.1
+        const dog = (w: number, h: number, dd: number, ox: number, oy: number, oz: number) => {
+          const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, dd), bronzeMat)
+          m.position.set(hx + ox, pTop + oy, hz + oz)
+          mAdd(m)
+        }
+        dog(1.0, 1.0, 0.6, 0, 0.5, -0.15) // haunches (sitting, rear higher)
+        dog(0.9, 0.7, 0.7, 0, 0.95, 0.35) // chest rising to the front
+        dog(0.55, 0.5, 0.5, 0, 1.45, 0.55) // head
+        dog(0.5, 0.18, 0.22, 0, 1.5, 0.85) // muzzle
+        for (const ex of [-0.2, 0.2]) dog(0.16, 0.28, 0.12, ex, 1.78, 0.5) // ears
+        for (const ex of [-0.22, 0.22]) dog(0.18, 0.85, 0.2, ex, 0.42, 0.62) // front legs
+        dog(0.18, 0.5, 0.18, 0.32, 0.85, -0.45) // curled tail
+        // ── センター街 (arched shopping-street entrance + receding lane, NW) ──
+        // Original arch sign; lane runs west, flanked by neon mid-rises.
+        const cax = -18
+        const caz = -22
+        for (const px of [cax - 5, cax + 5]) {
+          const pil = new THREE.Mesh(new THREE.BoxGeometry(1.4, 7.5, 1.4), concreteMat)
+          pil.position.set(px, 3.75, caz)
+          mAdd(pil)
+          addShibuyaAABB(px, caz, 0.7, 0.7, 7.5)
+        }
+        const cgSignCv = document.createElement("canvas")
+        cgSignCv.width = 256
+        cgSignCv.height = 56
+        const cgCtx = cgSignCv.getContext("2d")
+        if (cgCtx) {
+          cgCtx.fillStyle = "#10131c"
+          cgCtx.fillRect(0, 0, 256, 56)
+          cgCtx.fillStyle = "#ffd24a"
+          cgCtx.font = "bold 30px sans-serif"
+          cgCtx.textAlign = "center"
+          cgCtx.textBaseline = "middle"
+          cgCtx.fillText("渋谷 CENTRE GAI", 128, 30)
+        }
+        const cgTex = new THREE.CanvasTexture(cgSignCv)
+        cgTex.colorSpace = THREE.SRGBColorSpace
+        const cgBeam = new THREE.Mesh(
+          new THREE.BoxGeometry(11.4, 2.2, 0.4),
+          new THREE.MeshBasicMaterial({ map: cgTex }),
+        )
+        cgBeam.position.set(cax, 8, caz + 0.7) // faces +z toward the approaching player
+        add(cgBeam)
+        // 60 along x (west), 9 along z → only the flat -90° X tilt is needed.
+        const cgLane = new THREE.Mesh(new THREE.PlaneGeometry(60, 9), roadMat)
+        cgLane.rotation.x = -Math.PI / 2
+        cgLane.position.set(cax - 32, 0.02, caz)
+        mAdd(cgLane)
+        for (let x = cax - 6; x > cax - 62; x -= 13) {
+          makeMidRise(x, caz - 7.5, 11, 6, 12 + rnd() * 12, Math.PI / 2) // north-side row → faces lane (+z)
+          makeMidRise(x, caz + 7.5, 11, 6, 12 + rnd() * 12, -Math.PI / 2) // south-side row → faces lane (−z)
+        }
+        // ── のんべい横丁 (tight izakaya alley, NE — lanterns + noren, OSAKA tech) ──
+        const izaMat = new THREE.MeshLambertMaterial({ color: 0x2c2622 })
+        const lanternGeo = new THREE.CylinderGeometry(0.26, 0.26, 0.5, 8)
+        const lanternMat = new THREE.MeshStandardMaterial({
+          color: 0xff5a3c,
+          emissive: 0xff4a2a,
+          emissiveIntensity: 1.7,
+        })
+        const norenGeo = new THREE.PlaneGeometry(1.3, 0.85)
+        const norenMat = new THREE.MeshBasicMaterial({ color: 0x1b2a55, side: THREE.DoubleSide })
+        const lanternXf: Xf[] = []
+        const norenXf: Xf[] = []
+        const nz = -28 // alley centre-line z
+        for (let x = 16; x < 64; x += 4.2) {
+          // tiny shops flanking the 4.5-wide lane (north & south)
+          for (const [sz, face] of [
+            [-3.5, 0],
+            [3.5, Math.PI],
+          ] as const) {
+            const sh = 2.6 + rnd() * 1.6
+            const shop = new THREE.Mesh(new THREE.BoxGeometry(3.6, sh, 3), izaMat)
+            shop.position.set(x, sh / 2, nz + sz)
+            mAdd(shop)
+            // noren over the door (faces the lane)
+            norenXf.push({ pos: [x, 1.5, nz + sz + (face === 0 ? 1.6 : -1.6)], rotY: face })
+          }
+          // a red lantern strung over the lane
+          lanternXf.push({ pos: [x, 3.1, nz], scl: 0.8 + rnd() * 0.5 })
+        }
+        addShibuyaAABB(40, nz - 3.5, 24, 1.6, 4) // alley block footprints (N & S rows)
+        addShibuyaAABB(40, nz + 3.5, 24, 1.6, 4)
+        instAdd(lanternGeo, lanternMat, lanternXf)
+        instAdd(norenGeo, norenMat, norenXf)
+        // ── Dense zatkyo ring: mid-rises packed around the playable edge (filling
+        // the skyline between the named landmarks), each with neon. Skips the four
+        // landmark sectors so nothing overlaps. ──
+        for (let i = 0; i < dn(18); i++) {
+          const ang = (i / 18) * Math.PI * 2 + 0.2
+          const rr = 70 + rnd() * 18
+          const bx = Math.cos(ang) * rr
+          const bz = Math.sin(ang) * rr
+          // skip near the four landmark anchors
+          if (
+            Math.hypot(bx - 46, bz - 30) < 22 ||
+            Math.hypot(bx + 42, bz - 30) < 22 ||
+            Math.hypot(bx - 4, bz + 42) < 24
+          )
+            continue
+          const bw = 9 + rnd() * 9
+          const bh = 12 + rnd() * 22
+          makeMidRise(bx, bz, bw, bw, bh, Math.atan2(-bz, -bx)) // face the centre
+        }
+        neonCols.forEach((c, i) => {
+          const m = new THREE.MeshStandardMaterial({
+            color: c,
+            emissive: c,
+            emissiveIntensity: 1.5,
+          })
+          instAdd(neonGeo, m, neonXf[i] ?? [])
+        })
+        // ── Street furniture (instanced; distance-culling is wired in Phase F) ──
+        // Vending machines (2 colour sets), utility poles, guardrail segments.
+        const vendGeo = new THREE.BoxGeometry(1.0, 1.9, 0.7)
+        const vendRedXf: Xf[] = []
+        const vendBlueXf: Xf[] = []
+        const poleGeo = new THREE.CylinderGeometry(0.13, 0.16, 7, 6)
+        const poleXf: Xf[] = []
+        for (let d = -84; d <= 84; d += 14) {
+          if (Math.abs(d) < 16) continue
+          ;(rnd() < 0.5 ? vendRedXf : vendBlueXf).push({ pos: [-13.5, 0.95, d] })
+          ;(rnd() < 0.5 ? vendRedXf : vendBlueXf).push({ pos: [13.5, 0.95, d] })
+          poleXf.push({ pos: [d, 3.5, -14.5] })
+          poleXf.push({ pos: [d, 3.5, 14.5] })
+        }
+        instAdd(
+          vendGeo,
+          new THREE.MeshStandardMaterial({
+            color: 0xcc2222,
+            emissive: 0x551111,
+            emissiveIntensity: 0.6,
+          }),
+          vendRedXf,
+        )
+        instAdd(
+          vendGeo,
+          new THREE.MeshStandardMaterial({
+            color: 0x2255cc,
+            emissive: 0x112255,
+            emissiveIntensity: 0.6,
+          }),
+          vendBlueXf,
+        )
+        instAdd(poleGeo, sigPoleMat, poleXf)
+        const railGeo = new THREE.BoxGeometry(3.6, 0.55, 0.12)
+        const railMat = new THREE.MeshStandardMaterial({
+          color: 0x9aa0a8,
+          roughness: 0.5,
+          metalness: 0.5,
+        })
+        const railXf: Xf[] = []
+        for (let d = -84; d <= 84; d += 4) {
+          if (Math.abs(d) < 18) continue // leave the crossings open
+          railXf.push({ pos: [-10.6, 0.5, d], rotY: Math.PI / 2 })
+          railXf.push({ pos: [10.6, 0.5, d], rotY: Math.PI / 2 })
+          railXf.push({ pos: [d, 0.5, -10.6] })
+          railXf.push({ pos: [d, 0.5, 10.6] })
+        }
+        instAdd(railGeo, railMat, railXf)
+
         flushMerges() // collapse all static buckets → one mesh per material
         scene.add(group)
         shibuyaMapMeshesRef.current.push(group)
