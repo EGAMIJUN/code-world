@@ -16973,6 +16973,23 @@ export default function ThreeWorld({
       // every sign uses fictional text. Disposed by huntClearStage on return.
       // Animated scenery handles (driven by updateOsakaMap); reset every build.
       let osakaAnim: OsakaAnim | null = null
+      // SHIBUYA animated-scenery handles (Phase F): the big-vision screen scroll,
+      // seal-altar pulse/spin, neon flicker, and the off-centre distance-cull list.
+      // Driven by updateShibuyaMap; rebuilt on each buildShibuyaMap, nulled on clear.
+      type ShibuyaAnim = {
+        t: number
+        frame: number
+        adTex: THREE.Texture | null
+        seal: THREE.Mesh | null
+        sealLight: THREE.PointLight | null
+        neonMats: THREE.MeshStandardMaterial[]
+        cull: { obj: THREE.Object3D; cx: number; cz: number; r: number }[]
+      }
+      let shibuyaAnim: ShibuyaAnim | null = null
+      // SHIBUYA night sky saved on build so it restores on teardown (fog reuses the
+      // shared huntStageFogSaved; base-light dimming reuses huntStageLightSaved).
+      let shibuyaBgSaved: THREE.Color | THREE.Texture | null = null
+      let shibuyaBgWasSaved = false
       // The distant-skyline InstancedMesh, hidden on mobile / far distance culling.
       let osakaSkylineInst: THREE.InstancedMesh | null = null
       // Fine decorations that hide when the player is far from their area (the big
@@ -18737,6 +18754,10 @@ export default function ThreeWorld({
         const group = new THREE.Group()
         group.position.set(HUNT_ARENA.x, 0, HUNT_ARENA.z) // all geometry is arena-local
         const add = (m: THREE.Object3D) => group.add(m)
+        // Phase F animation/cull collectors — populated through the build, consumed
+        // when shibuyaAnim is assigned at the very end (off-centre detail is culled).
+        const animNeon: THREE.MeshStandardMaterial[] = []
+        const animCull: { obj: THREE.Object3D; cx: number; cz: number; r: number }[] = []
         // ── SHIBUYA collision registry ─────────────────────────────────────────
         // Mirrors addOsakaAABB: only MAJOR structures (perimeter walls + later the
         // landmark footprints) get a hitbox so the scramble stays freely walkable.
@@ -19193,6 +19214,7 @@ export default function ThreeWorld({
         }
         const adTex = new THREE.CanvasTexture(adCv)
         adTex.colorSpace = THREE.SRGBColorSpace
+        adTex.wrapT = THREE.RepeatWrapping // Phase F scrolls offset.y → the ad flows
         const screen = new THREE.Mesh(
           new THREE.PlaneGeometry(bvW * 0.82, bvH * 0.66),
           new THREE.MeshBasicMaterial({ map: adTex }),
@@ -19395,8 +19417,11 @@ export default function ThreeWorld({
         }
         addShibuyaAABB(40, nz - 3.5, 24, 1.6, 4) // alley block footprints (N & S rows)
         addShibuyaAABB(40, nz + 3.5, 24, 1.6, 4)
-        instAdd(lanternGeo, lanternMat, lanternXf)
-        instAdd(norenGeo, norenMat, norenXf)
+        const lanternMesh = instAdd(lanternGeo, lanternMat, lanternXf)
+        const norenMesh = instAdd(norenGeo, norenMat, norenXf)
+        // Distance-cull the alley dressing when the player is nowhere near it (NE).
+        if (lanternMesh) animCull.push({ obj: lanternMesh, cx: 40, cz: nz, r: 42 })
+        if (norenMesh) animCull.push({ obj: norenMesh, cx: 40, cz: nz, r: 42 })
         // ── Dense zatkyo ring: mid-rises packed around the playable edge (filling
         // the skyline between the named landmarks), each with neon. Skips the four
         // landmark sectors so nothing overlaps. ──
@@ -19423,6 +19448,7 @@ export default function ThreeWorld({
             emissive: c,
             emissiveIntensity: 1.5,
           })
+          animNeon.push(m) // Phase F flickers these
           instAdd(neonGeo, m, neonXf[i] ?? [])
         })
         // ── Street furniture (instanced; distance-culling is wired in Phase F) ──
@@ -19658,9 +19684,51 @@ export default function ThreeWorld({
         sealLight.castShadow = false
         add(sealLight)
 
+        // ══ Phase F: 渋谷の夜 — 環境・空気感 ════════════════════════════════════════
+        // Night palette, distinct from OSAKA's warm/red. Dim the base daylight rig
+        // (saved into the shared huntStageLightSaved → huntClearStage restores it),
+        // then light the city with a cool hemisphere + magenta/cyan neon spill at the
+        // scramble. Fog + sky saved/restored on teardown.
+        for (const light of [worldAmbient, hemi, sun, fillLight]) {
+          huntStageLightSaved.push({ light, intensity: light.intensity })
+        }
+        worldAmbient.intensity = 0.16
+        hemi.intensity = 0.22
+        sun.intensity = 0.12
+        fillLight.intensity = 0.1
+        const nightHemi = new THREE.HemisphereLight(0x1a2240, 0x06070c, 0.55)
+        add(nightHemi)
+        const neonGlowMag = new THREE.PointLight(0xff2d8e, 0.8, 80, 2)
+        neonGlowMag.position.set(-16, 10, 8)
+        neonGlowMag.castShadow = false
+        add(neonGlowMag)
+        const neonGlowCyan = new THREE.PointLight(0x28e0ff, 0.8, 80, 2)
+        neonGlowCyan.position.set(18, 10, -8)
+        neonGlowCyan.castShadow = false
+        add(neonGlowCyan)
+        // Fog: cool urban haze (reuse the shared save slot → clearOsakaMap restores).
+        huntStageFogSaved = scene.fog
+        huntStageFogWasSaved = true
+        scene.fog = new THREE.Fog(0x0a0e1a, isMobileDevice ? 60 : 90, isMobileDevice ? 230 : 340)
+        // Night sky behind the skyline (saved here, restored in clearShibuyaMap).
+        shibuyaBgSaved = scene.background
+        shibuyaBgWasSaved = true
+        scene.background = new THREE.Color(0x080b14)
+
         flushMerges() // collapse all static buckets → one mesh per material
         scene.add(group)
         shibuyaMapMeshesRef.current.push(group)
+        // Phase F: publish the animation handles (screen scroll, seal pulse/spin,
+        // neon flicker, distance cull). Reset to null in clearShibuyaMap.
+        shibuyaAnim = {
+          t: 0,
+          frame: 0,
+          adTex,
+          seal,
+          sealLight,
+          neonMats: animNeon,
+          cull: animCull,
+        }
       }
       function clearShibuyaMap() {
         // Dispose every SHIBUYA map object the same way clearOsakaMap does: walk the
@@ -19686,6 +19754,14 @@ export default function ThreeWorld({
         }
         shibuyaMapMeshesRef.current = []
         SHIBUYA_AABBS.length = 0 // drop the SHIBUYA collision boxes on teardown
+        shibuyaAnim = null // animated handles die with the disposed meshes (Phase F)
+        // Restore the night sky (fog + base-light dimming restore via clearOsakaMap /
+        // huntClearStage, which run alongside this in the teardown).
+        if (shibuyaBgWasSaved) {
+          scene.background = shibuyaBgSaved
+          shibuyaBgSaved = null
+          shibuyaBgWasSaved = false
+        }
       }
       // 渋谷ミッション開始時のプレイヤー配置。今回 (核 PR) は敵/ボス無し — 谷底の
       // スクランブル中央 (y=0) に置き、北 (公園通り/駅前方向) を向かせるだけ。外周
@@ -19697,6 +19773,41 @@ export default function ThreeWorld({
         focalPoint.y = 0
         camState.yaw = Math.PI // face north (−z) — across the crossing toward 駅前
         camState.pitch = -0.02
+      }
+      // Per-frame SHIBUYA scenery animation (Phase F): big-vision screen scroll,
+      // seal-altar spin+pulse, neon flicker, and ~3×/s distance culling of the
+      // off-centre detail. No-op until buildShibuyaMap publishes shibuyaAnim.
+      function updateShibuyaMap(dt: number) {
+        const a = shibuyaAnim
+        if (!a) return
+        a.t += dt
+        a.frame++
+        const t = a.t
+        // Big-vision ad scrolls upward and loops (wrapT set at build time).
+        if (a.adTex) a.adTex.offset.y = (a.adTex.offset.y - dt * 0.06 + 1) % 1
+        // Seal: slow magic-circle spin + opacity breathing; the sacred light pulses.
+        if (a.seal) {
+          const mat = a.seal.material as THREE.MeshBasicMaterial
+          if (mat.map) {
+            mat.map.center.set(0.5, 0.5)
+            mat.map.rotation += dt * 0.3
+          }
+          mat.opacity = 0.62 + 0.32 * Math.sin(t * 1.6)
+        }
+        if (a.sealLight) a.sealLight.intensity = 1.15 + 0.5 * Math.sin(t * 1.6)
+        // Neon flicker: each colour breathes on its own phase, with rare dropouts.
+        for (let i = 0; i < a.neonMats.length; i++) {
+          const m = a.neonMats[i]
+          if (!m) continue
+          const flick = Math.sin(t * (6 + i) + i * 1.7) > -0.92 ? 1 : 0.35
+          m.emissiveIntensity = (1.2 + 0.35 * Math.sin(t * 3 + i)) * flick
+        }
+        // Distance cull the off-centre dressing ~3×/s (arena-local player position).
+        if (a.frame % 20 === 0 && a.cull.length > 0) {
+          const lx = focalPoint.x - HUNT_ARENA.x
+          const lz = focalPoint.z - HUNT_ARENA.z
+          for (const c of a.cull) c.obj.visible = Math.hypot(lx - c.cx, lz - c.cz) < c.r
+        }
       }
       // Per-frame OSAKA scenery animation: neon flicker/pulse, lantern sway,
       // rooftop blinkers, water shimmer, tower beacon hue, scrolling marquee.
@@ -23028,6 +23139,7 @@ export default function ThreeWorld({
           updateOsakaMidBoss(dt) // OSAKA mid-boss (Tengu / Yamaya)
           updateOsakaBikes(dt) // 鉄輪部隊 (Block B): track riders + squad-clear bonus
           updateOsakaMap(dt) // OSAKA scenery animation (neon, lanterns, marquee…)
+          updateShibuyaMap(dt) // SHIBUYA scenery (screen scroll, seal pulse, neon)
           updateOsakaFx(dt) // OSAKA boss hazards (telegraphs, pools, splitters…)
           updateOsakaRain(dt) // OSAKA rain streaks + ground ripples
           updateOsakaEnv(dt) // OSAKA collapsing bridges
