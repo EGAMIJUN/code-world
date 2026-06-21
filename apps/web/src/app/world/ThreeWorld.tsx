@@ -16991,6 +16991,8 @@ export default function ThreeWorld({
         t: number
         frame: number
         adTex: THREE.Texture | null
+        // Phase C: every big-vision / round-vision screen scrolls its CanvasTexture.
+        screens: { tex: THREE.Texture; spd: number }[]
         seal: THREE.Mesh | null
         sealLight: THREE.PointLight | null
         neonMats: THREE.MeshStandardMaterial[]
@@ -20115,6 +20117,132 @@ export default function ThreeWorld({
           if (m) instAdd(bladeGeo, m, bladeXf[i] ?? [])
         })
 
+        // ══ Phase C (scramble-detail): 大型ビジョン群 (駅前の顔) ════════════════════
+        // The 駅前 video-wall look: several giant fictional-ad screens facing the
+        // crossing + a round vision crowning the 渋谷MODE cylinder. Each screen is one
+        // standalone bright plane (MeshBasicMaterial, toneMapped off) whose CanvasTex
+        // scrolls in updateShibuyaMap. Collected here, published into shibuyaAnim.screens.
+        const bigVisionScreens: { tex: THREE.Texture; spd: number }[] = []
+        // The existing big-vision screen (Phase C-original) joins the scroll set.
+        bigVisionScreens.push({ tex: adTex, spd: 0.06 })
+        type AdSpec = {
+          bg: string
+          bands: { color: string; text: string; tc: string; f: number }[]
+        }
+        const makeAdTex = (s: AdSpec) => {
+          const cv = document.createElement("canvas")
+          cv.width = 256
+          cv.height = 192
+          const c = cv.getContext("2d")
+          if (c) {
+            c.fillStyle = s.bg
+            c.fillRect(0, 0, 256, 192)
+            c.textAlign = "center"
+            c.textBaseline = "middle"
+            const bh = 192 / s.bands.length
+            s.bands.forEach((b, i) => {
+              c.fillStyle = b.color
+              c.fillRect(10, i * bh + 6, 236, bh - 12)
+              c.fillStyle = b.tc
+              c.font = `bold ${b.f}px sans-serif`
+              c.fillText(b.text, 128, i * bh + bh / 2)
+            })
+          }
+          const t = new THREE.CanvasTexture(cv)
+          t.colorSpace = THREE.SRGBColorSpace
+          t.anisotropy = maxAniso
+          t.wrapT = THREE.RepeatWrapping
+          return t
+        }
+        const adFest = makeAdTex({
+          bg: "#0a0420",
+          bands: [
+            { color: "#ff2d8e", text: "夜光フェス", tc: "#ffffff", f: 34 },
+            { color: "#06303a", text: "NIGHT GLOW LIVE", tc: "#2ce6ff", f: 24 },
+            { color: "#1a1406", text: "24:00 OPEN", tc: "#ffe24a", f: 26 },
+          ],
+        })
+        const adGear = makeAdTex({
+          bg: "#160404",
+          bands: [
+            { color: "#7a0f08", text: "新作上陸", tc: "#ffe24a", f: 34 },
+            { color: "#101010", text: "SCRAMBLE GEAR", tc: "#ffffff", f: 22 },
+            { color: "#b88a14", text: "SALE 50%", tc: "#1a1a1a", f: 28 },
+          ],
+        })
+        const adWanted = makeAdTex({
+          bg: "#0a0006",
+          bands: [
+            { color: "#2a0008", text: "賞金首", tc: "#ff3a3a", f: 34 },
+            { color: "#120004", text: "大魔 — WANTED", tc: "#ff6a6a", f: 24 },
+            { color: "#0a0a0a", text: "懸賞金 ¥∞", tc: "#9a9a9a", f: 24 },
+          ],
+        })
+        const adRound = makeAdTex({
+          bg: "#03101a",
+          bands: [
+            { color: "#06303a", text: "渋谷", tc: "#2ce6ff", f: 40 },
+            { color: "#101820", text: "VISION", tc: "#ffffff", f: 30 },
+            { color: "#2a0820", text: "ON AIR", tc: "#ff2d8e", f: 28 },
+          ],
+        })
+        const bezMat = concreteMat // dark bezel rides the existing merge bucket
+        const makeBigVision = (
+          cx: number,
+          cy: number,
+          cz: number,
+          w: number,
+          h: number,
+          faceAng: number,
+          tex: THREE.Texture,
+          spd = 0.05,
+        ) => {
+          const nx = Math.cos(faceAng)
+          const nz = Math.sin(faceAng)
+          const rotY = Math.atan2(nx, nz)
+          const scr = new THREE.Mesh(
+            new THREE.PlaneGeometry(w, h),
+            new THREE.MeshBasicMaterial({ map: tex, toneMapped: false }),
+          )
+          scr.position.set(cx, cy, cz)
+          scr.rotation.y = rotY
+          add(scr)
+          const bez = new THREE.Mesh(new THREE.BoxGeometry(w + 0.7, h + 0.7, 0.3), bezMat)
+          bez.position.set(cx - nx * 0.25, cy, cz - nz * 0.25)
+          bez.rotation.y = rotY
+          mAdd(bez)
+          bigVisionScreens.push({ tex, spd })
+        }
+        // 駅前 video wall — all face +z (toward the crossing). A banner stacked over the
+        // existing big-vision building + two flanking screens on their own backing slabs.
+        const faceCross = Math.PI / 2 // normal (0,+1)
+        makeBigVision(bvX, bvH - 3, bvZ + bvD / 2 + 0.18, bvW * 0.8, 5.5, faceCross, adFest, 0.05)
+        for (const [sx, sz, sw, sh, tex] of [
+          [-18, -46, 13, 15, adGear],
+          [26, -44, 12, 14, adWanted],
+        ] as const) {
+          const slab = new THREE.Mesh(new THREE.BoxGeometry(sw + 3, sh + 9, 5), midMat)
+          slab.position.set(sx, (sh + 9) / 2, sz)
+          mAdd(slab)
+          addShibuyaAABB(sx, sz, (sw + 3) / 2, 2.5, sh + 9)
+          makeBigVision(sx, (sh + 9) * 0.6, sz + 2.7, sw, sh, faceCross, tex, 0.05)
+        }
+        // Round vision crowning the 渋谷MODE cylinder (faces the crossing centre).
+        const rda = Math.atan2(-cylZ, -cylX)
+        const roundScreen = new THREE.Mesh(
+          new THREE.CircleGeometry(6, 30),
+          new THREE.MeshBasicMaterial({ map: adRound, toneMapped: false }),
+        )
+        roundScreen.position.set(cylX + Math.cos(rda) * 2.2, 40, cylZ + Math.sin(rda) * 2.2)
+        roundScreen.rotation.y = Math.atan2(Math.cos(rda), Math.sin(rda))
+        add(roundScreen)
+        bigVisionScreens.push({ tex: adRound, spd: 0.03 })
+        // One soft spill light so the video wall throws colour onto the plaza.
+        const screenSpill = new THREE.PointLight(0x9fc8ff, 0.7, 72, 2)
+        screenSpill.position.set(4, 15, -28)
+        screenSpill.castShadow = false
+        add(screenSpill)
+
         // ══ Phase F: 渋谷の夜 — 環境・空気感 ════════════════════════════════════════
         // Night palette, distinct from OSAKA's warm/red. (Scramble-detail Phase A:
         // BRIGHTENED — the night must read as "夜だが街全体が見える", not a black void.
@@ -20161,6 +20289,7 @@ export default function ThreeWorld({
           t: 0,
           frame: 0,
           adTex,
+          screens: bigVisionScreens,
           seal,
           sealLight,
           neonMats: animNeon,
@@ -20220,8 +20349,9 @@ export default function ThreeWorld({
         a.t += dt
         a.frame++
         const t = a.t
-        // Big-vision ad scrolls upward and loops (wrapT set at build time).
-        if (a.adTex) a.adTex.offset.y = (a.adTex.offset.y - dt * 0.06 + 1) % 1
+        // Big-vision / round-vision screens scroll their ads upward and loop (wrapT
+        // set at build time). The original big-vision tex is included in this set.
+        for (const s of a.screens) s.tex.offset.y = (s.tex.offset.y - dt * s.spd + 1) % 1
         // Seal: slow magic-circle spin + opacity breathing; the sacred light pulses.
         if (a.seal) {
           const mat = a.seal.material as THREE.MeshBasicMaterial
