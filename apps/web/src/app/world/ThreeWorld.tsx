@@ -16394,8 +16394,9 @@ export default function ThreeWorld({
           }
         | { kind: "difficulty"; value: 1 | 2 | 3 }
         | { kind: "deploy" }
-      // ステージ行は 6 段 (outdoor / indoor / 渋谷 / OSAKA / 鬼 / 終焉) を 0.21〜0.725 に
-      // 等分。難度列は右側 (x≥0.54) なので干渉しない。
+      // ステージ行は 6 段 (outdoor / indoor / 渋谷 / OSAKA / 鬼 / 終焉) を 0.21〜0.825 に
+      // 等分 (各 ~0.093H, gap ~0.012H)。難度列は右側 (x≥0.54) なので干渉しない。
+      // キャンバスは 512×512 (正方形) — 旧 512×384 より各行が約 47px になり読みやすい。
       const HUNT_PANEL_REGIONS: {
         x0: number
         y0: number
@@ -16403,22 +16404,22 @@ export default function ThreeWorld({
         y1: number
         hit: HuntPanelHit
       }[] = [
-        { x0: 0.05, y0: 0.21, x1: 0.46, y1: 0.288, hit: { kind: "stage", value: "outdoor" } },
-        { x0: 0.05, y0: 0.296, x1: 0.46, y1: 0.374, hit: { kind: "stage", value: "indoor" } },
-        { x0: 0.05, y0: 0.382, x1: 0.46, y1: 0.46, hit: { kind: "stage", value: "shibuya" } },
-        { x0: 0.05, y0: 0.468, x1: 0.46, y1: 0.546, hit: { kind: "stage", value: "osaka" } },
-        { x0: 0.05, y0: 0.554, x1: 0.46, y1: 0.632, hit: { kind: "stage", value: "osaka_oni" } },
+        { x0: 0.05, y0: 0.21, x1: 0.46, y1: 0.303, hit: { kind: "stage", value: "outdoor" } },
+        { x0: 0.05, y0: 0.315, x1: 0.46, y1: 0.408, hit: { kind: "stage", value: "indoor" } },
+        { x0: 0.05, y0: 0.42, x1: 0.46, y1: 0.513, hit: { kind: "stage", value: "shibuya" } },
+        { x0: 0.05, y0: 0.525, x1: 0.46, y1: 0.618, hit: { kind: "stage", value: "osaka" } },
+        { x0: 0.05, y0: 0.63, x1: 0.46, y1: 0.723, hit: { kind: "stage", value: "osaka_oni" } },
         {
           x0: 0.05,
-          y0: 0.64,
+          y0: 0.735,
           x1: 0.46,
-          y1: 0.718,
+          y1: 0.828,
           hit: { kind: "stage", value: "osaka_cataclysm" },
         },
-        { x0: 0.54, y0: 0.24, x1: 0.95, y1: 0.36, hit: { kind: "difficulty", value: 1 } },
-        { x0: 0.54, y0: 0.38, x1: 0.95, y1: 0.5, hit: { kind: "difficulty", value: 2 } },
-        { x0: 0.54, y0: 0.52, x1: 0.95, y1: 0.64, hit: { kind: "difficulty", value: 3 } },
-        { x0: 0.22, y0: 0.74, x1: 0.78, y1: 0.92, hit: { kind: "deploy" } },
+        { x0: 0.54, y0: 0.25, x1: 0.95, y1: 0.37, hit: { kind: "difficulty", value: 1 } },
+        { x0: 0.54, y0: 0.4, x1: 0.95, y1: 0.52, hit: { kind: "difficulty", value: 2 } },
+        { x0: 0.54, y0: 0.55, x1: 0.95, y1: 0.67, hit: { kind: "difficulty", value: 3 } },
+        { x0: 0.22, y0: 0.85, x1: 0.78, y1: 0.965, hit: { kind: "deploy" } },
       ]
       // ── HUNT indoor stage overlay (built per mission, disposed on return) ─────
       let huntIndoorGroup: THREE.Group | null = null
@@ -16756,12 +16757,12 @@ export default function ThreeWorld({
         // door, and turned to face the player (-z normal).
         const panelCanvas = document.createElement("canvas")
         panelCanvas.width = 512
-        panelCanvas.height = 384
+        panelCanvas.height = 512
         const panelCtx = panelCanvas.getContext("2d")
         if (panelCtx) {
           const panelTex = new THREE.CanvasTexture(panelCanvas)
           const panelMesh = new THREE.Mesh(
-            new THREE.PlaneGeometry(3.6, 2.7),
+            new THREE.PlaneGeometry(3.6, 3.6),
             new THREE.MeshBasicMaterial({ map: panelTex, transparent: true }),
           )
           panelMesh.position.set(-1.0, 1.9, W - 0.25)
@@ -16809,10 +16810,11 @@ export default function ThreeWorld({
         ctx.fillText("MISSION SELECT", W / 2, H * 0.12)
         // Column headers.
         const osaka = isOsakaStage(cfg.stage)
+        const shibuya = isShibuyaStage(cfg.stage)
         ctx.fillStyle = "#88ffcc"
         ctx.font = "bold 22px monospace"
         ctx.fillText("STAGE", W * 0.255, H * 0.18)
-        // OSAKA is a fixed max-difficulty stage → the difficulty column is hidden.
+        // OSAKA/SHIBUYA hide the difficulty column and show descriptive text instead.
         if (osaka) {
           ctx.fillStyle = cfg.stage === "osaka_cataclysm" ? "#ff2255" : "#ff4444"
           ctx.fillText(
@@ -16831,12 +16833,20 @@ export default function ThreeWorld({
             ctx.fillText("鉄輪で駆け、7つの核を撃て", W * 0.745, H * 0.56)
             ctx.font = "bold 22px monospace"
           }
+        } else if (shibuya) {
+          ctx.fillStyle = "#44ccff"
+          ctx.fillText("SHIBUYA — 自由探索", W * 0.745, H * 0.41)
+          ctx.fillStyle = "#88ddff"
+          ctx.font = "bold 17px monospace"
+          ctx.fillText("スクランブルを歩き回れ", W * 0.745, H * 0.49)
+          ctx.fillText("敵はSTEP2で降臨する", W * 0.745, H * 0.55)
+          ctx.font = "bold 22px monospace"
         } else {
           ctx.fillText("DIFFICULTY", W * 0.745, H * 0.18)
         }
         // Each clickable region: highlight when it is the current selection.
         for (const r of HUNT_PANEL_REGIONS) {
-          if (osaka && r.hit.kind === "difficulty") continue // hidden in OSAKA
+          if ((osaka || shibuya) && r.hit.kind === "difficulty") continue // hidden in OSAKA/SHIBUYA
           const selected =
             (r.hit.kind === "stage" && cfg.stage === r.hit.value) ||
             (r.hit.kind === "difficulty" && cfg.difficulty === r.hit.value)
@@ -16915,8 +16925,9 @@ export default function ThreeWorld({
         const cx = u
         const cy = 1 - v // canvas rows run top→bottom
         const osaka = isOsakaStage(huntMissionConfigRef.current.stage)
+        const shibuya = isShibuyaStage(huntMissionConfigRef.current.stage)
         for (const r of HUNT_PANEL_REGIONS) {
-          if (osaka && r.hit.kind === "difficulty") continue // hidden in OSAKA
+          if ((osaka || shibuya) && r.hit.kind === "difficulty") continue // hidden in OSAKA/SHIBUYA
           if (cx >= r.x0 && cx <= r.x1 && cy >= r.y0 && cy <= r.y1) return r.hit
         }
         return null
@@ -21072,9 +21083,12 @@ export default function ThreeWorld({
           // array, so while it is active its escorts/fodder dying must NOT end the
           // mission — its own defeat path calls huntReturnToRoom instead. OSAKA
           // stage is fully driven by updateOsakaProgress (its empty waves between
-          // areas must never trip this generic clear).
+          // areas must never trip this generic clear). SHIBUYA (STEP1) is a
+          // zero-enemy exploration stage — enemies arrive in STEP2, so skip the
+          // generic clear to avoid an instant-clear on DEPLOY.
           if (
             !isOsakaStage(huntMissionConfigRef.current.stage) &&
+            !isShibuyaStage(huntMissionConfigRef.current.stage) &&
             !osakaBossRef.current &&
             enemies.filter((e) => e.hp > 0).length === 0
           ) {
