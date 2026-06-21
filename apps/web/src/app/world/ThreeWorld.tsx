@@ -203,6 +203,14 @@ const RPG_SPLASH = 25 // splash damage at the rim
 const RPG_HOMING_TURN = 1.6 // rad/s steering toward the locked target (medium)
 const RPG_LIFE = 5.0 // seconds before self-detonate
 const RPG_DIRECT_RADIUS = 4 // proximity-fuse radius around the locked target
+// 破魔砲 (hamahō, Phase C): チャージ式の極太貫通ビーム。強力ゆえ弾数少なめ。
+const HAMAHO_MAX_AMMO = 4
+const HAMAHO_RELOAD_MS = 7000
+const HAMAHO_MIN_DAMAGE = 90 // 即離し (最低チャージ)
+const HAMAHO_MAX_DAMAGE = 420 // フルチャージ
+const HAMAHO_FULL_CHARGE = 1.5 // フルチャージまでの秒数
+const HAMAHO_RANGE = 120 // ビーム到達距離 (m)
+const HAMAHO_THICK = 3.0 // ビームの太さ (貫通ヒット半幅)
 // Half-angle of the launch lock-on cone: at fire time the nearest enemy of any
 // type within this cone of the aim direction becomes the homing target.
 const RPG_LOCK_COS = Math.cos((20 * Math.PI) / 180)
@@ -248,7 +256,7 @@ const DEATH_ANIM_TOTAL = DEATH_ANIM_FALL + DEATH_ANIM_LIE + DEATH_ANIM_FADE
 
 // ── Weapon definitions ─────────────────────────────────────────────────────────
 interface WeaponDef {
-  id: "pistol" | "shotgun" | "sniper" | "knife" | "rpg"
+  id: "pistol" | "shotgun" | "sniper" | "knife" | "rpg" | "hamaho"
   name: string
   maxAmmo: number // -1 = infinite
   hitDamage: number
@@ -265,6 +273,9 @@ interface WeaponDef {
   // Rocket weapon (RPG): fire() launches a single homing rocket that AOE-
   // explodes. Locked until picked up off the map. PR-G1.
   rocket?: boolean
+  // Charge weapon (破魔砲, Phase C): hold to charge, release to fire a thick
+  // piercing beam. Locked until picked up; driven from the animate loop.
+  charge?: boolean
 }
 
 // Knife melee tuning — forward fan-shaped hitbox.
@@ -336,6 +347,19 @@ const WEAPONS: WeaponDef[] = [
     bulletColor: 0xff6622,
     recoil: 0.3,
     rocket: true,
+  },
+  {
+    id: "hamaho",
+    name: "破魔砲",
+    maxAmmo: HAMAHO_MAX_AMMO,
+    hitDamage: HAMAHO_MAX_DAMAGE, // 参考値 (実ダメージは fireHamaho でチャージ量に比例)
+    reloadTime: HAMAHO_RELOAD_MS,
+    spread: 0,
+    pellets: 1,
+    bulletLifetime: 0.25,
+    bulletColor: 0xaaffff,
+    recoil: 0.35,
+    charge: true,
   },
 ]
 
@@ -410,6 +434,12 @@ const SOUNDS = {
   rpg() {
     _noise(0.3, 0.7, "lowpass", 420)
     _tone(48, 0.26, 0.4, "sawtooth")
+  },
+  // 破魔砲 (Phase C): a heavy charged discharge — descending saw + bright zap + low noise.
+  hamaho() {
+    _tone(190, 0.5, 0.5, "sawtooth", 60)
+    _tone(880, 0.32, 0.28, "square", 280)
+    _noise(0.4, 0.35, "lowpass", 900)
   },
   // Distant zombie groan — low growl + filtered noise rumble. Used as the
   // sparse ambient sting at the start of each zombie wave.
@@ -2461,6 +2491,8 @@ export default function ThreeWorld({
   const hitMarkerTimeRef = useRef(0)
   const tetsurinHitSfxRef = useRef(0)
   const mouseDownRef = useRef(false)
+  // Phase C: 破魔砲 のチャージ蓄積 (秒)。hold で増え、release で fireHamaho。
+  const hamahoChargeRef = useRef(0)
   const lastFireTimeRef = useRef(0)
   // Explosive barrels live for the lifetime of the current map (disposed on
   // teardown). Populated by spawnExplosiveBarrels during scene init.
@@ -2468,7 +2500,9 @@ export default function ThreeWorld({
   // Weapon refs
   const currentWeaponIdxRef = useRef(0)
   // 4-slot: pistol(∞) / shotgun(8) / sniper(5) / knife(∞). -1 = infinite.
-  const weaponAmmoRef = useRef<[number, number, number, number, number]>([-1, 8, 5, -1, 0])
+  const weaponAmmoRef = useRef<[number, number, number, number, number, number]>([
+    -1, 8, 5, -1, 0, 0,
+  ])
   // Knife: timestamp gate (anti re-input during swing) + active swing timer
   // (seconds remaining, drives the first-person swing animation).
   const lastMeleeRef = useRef(0)
@@ -7810,6 +7844,7 @@ export default function ThreeWorld({
         z: number
         y: number
         taken: boolean
+        weaponId: string // Phase C: どの武器を付与するか ("rpg" | "hamaho")
       }
       const rpgPickups: RPGPickup[] = []
       interface AAShell {
@@ -18343,6 +18378,17 @@ export default function ThreeWorld({
         setOsakaCorePulse(0)
         osakaCorePulseLast = -1
         osakaNextDreadAt = 0
+        // Phase C: dispose any un-collected 破魔砲 / RPG pickup placed for this map
+        // (geometries are per-pickup; the material is shared, so leave it).
+        for (const p of rpgPickups) {
+          if (!p.taken) {
+            scene.remove(p.group)
+            p.group.traverse((o) => {
+              if (o instanceof THREE.Mesh) o.geometry.dispose()
+            })
+          }
+        }
+        rpgPickups.length = 0
         const disposeMat = (m: THREE.Material) => {
           const sm = m as THREE.MeshStandardMaterial
           sm.map?.dispose()
@@ -18887,6 +18933,11 @@ export default function ThreeWorld({
           osakaRunReset() // リザルト用のラン戦績 (タイム/キル/命中率/被ダメ) を起動
           osakaInitProgression()
           if (osakaHardMode()) osakaSpawnOniGuards() // 鬼/終焉: 隠し武器への道に守衛
+          // Phase C: drop ONE 破魔砲 pickup near the 道頓堀 spawn (existing pickup mechanism,
+          // offset from an existing area centre → map geometry/coords untouched). Disposed
+          // in clearOsakaMap if left uncollected.
+          const hamaSpawn = osakaAreaCenter("dotonbori")
+          makeRPGPickup(hamaSpawn.x + 6, hamaSpawn.z + 4, 0, "hamaho")
         } else {
           // Minions ring the arena centre.
           for (let i = 0; i < lv.zakoCount; i++) {
@@ -20672,6 +20723,116 @@ export default function ThreeWorld({
         )
       }
 
+      // 破魔砲 (Phase C): a charged piercing beam. Hold accumulates charge (driven in
+      // the animate loop); release calls this with the charge seconds. Damage + beam
+      // thickness scale with charge. Hits zako / 五変化 boss / 大魔 cores via the existing
+      // damage paths, pierces along the line, and draws ONE reused tracer box (auto-
+      // despawned by the bullet pool) — no new persistent mesh / particle system.
+      function fireHamaho(charge: number) {
+        const idx = currentWeaponIdxRef.current
+        const weapon = WEAPONS[idx]
+        if (!weapon || weapon.id !== "hamaho" || reloadingRef.current) return
+        if (ammoRef.current <= 0) {
+          startReload(weapon)
+          return
+        }
+        ammoRef.current -= 1
+        weaponAmmoRef.current[idx] = ammoRef.current
+        setAmmo(ammoRef.current)
+        osakaRunShot()
+        recoilRef.current = weapon.recoil
+        const frac = Math.min(1, Math.max(0.25, charge / HAMAHO_FULL_CHARGE))
+        const dmg = HAMAHO_MIN_DAMAGE + (HAMAHO_MAX_DAMAGE - HAMAHO_MIN_DAMAGE) * frac
+        camera.getWorldDirection(fwd3)
+        const dir = fwd3.clone().normalize()
+        const origin = new THREE.Vector3(
+          focalPoint.x + dir.x * 1.2,
+          focalPoint.y + EYE_HEIGHT + dir.y * 1.2,
+          focalPoint.z + dir.z * 1.2,
+        )
+        raycaster.set(origin, dir)
+        const prevFar = raycaster.far
+        raycaster.far = HAMAHO_RANGE
+        const wallHit = raycaster.intersectObjects(wallMeshes, false)[0]
+        const reach = wallHit ? wallHit.distance : HAMAHO_RANGE
+        // 1) zako along the beam (piercing, thick line test)
+        for (const e of enemies) {
+          if (e.hp <= 0) continue
+          const ox = e.mesh.position.x - origin.x
+          const oy = e.mesh.position.y - origin.y
+          const oz = e.mesh.position.z - origin.z
+          const t = ox * dir.x + oy * dir.y + oz * dir.z
+          if (t <= 0 || t > reach) continue
+          const cx = origin.x + dir.x * t
+          const cy = origin.y + dir.y * t
+          const cz = origin.z + dir.z * t
+          if (
+            Math.hypot(e.mesh.position.x - cx, e.mesh.position.y - cy, e.mesh.position.z - cz) >
+            HAMAHO_THICK + e.config.bodyH * 0.5
+          )
+            continue
+          e.hp -= dmg
+          spawnBlood(new THREE.Vector3(cx, cy, cz))
+          scoreRef.current += Math.floor(dmg * 6)
+          if (e.hp <= 0) applyEnemyKill(e, "hamaho")
+        }
+        setScore(scoreRef.current)
+        // 2) 五変化 boss (core wins over body) along the beam
+        const ob = osakaBossRef.current
+        if (ob && !ob.transitioning) {
+          const cores: THREE.Object3D[] = []
+          const body: THREE.Object3D[] = []
+          ob.group.traverse((c) => {
+            if (c instanceof THREE.Mesh && c.visible) {
+              if (c.userData.osakaCore) cores.push(c)
+              else if (c.userData.osakaBody) body.push(c)
+            }
+          })
+          const ch = raycaster.intersectObjects(cores, false)[0]
+          const bh = raycaster.intersectObjects(body, false)[0]
+          if (ch && ch.distance <= reach) osakaDamage(dmg * OSAKA_CORE_MULT)
+          else if (bh && bh.distance <= reach) osakaDamage(dmg * OSAKA_BODY_MULT)
+        }
+        // 3) 大魔 cores along the beam (pierce every core the line crosses)
+        const dm = osakaDaima
+        if (dm && !dm.defeated) {
+          const parts: THREE.Object3D[] = []
+          dm.group.traverse((c) => {
+            if (c instanceof THREE.Mesh && c.visible && typeof c.userData.daimaCore === "number")
+              parts.push(c)
+          })
+          const seen = new Set<number>()
+          for (const h of raycaster.intersectObjects(parts, false)) {
+            if (h.distance > reach) break
+            const ci = h.object.userData.daimaCore as number
+            if (seen.has(ci)) continue
+            seen.add(ci)
+            daimaHitCore(ci, dmg * OSAKA_CORE_MULT)
+          }
+        }
+        raycaster.far = prevFar
+        // Visual: one thick beam box from the muzzle, reusing the jet tracer material +
+        // bullet pool (auto-despawn → no new persistent mesh).
+        const thick = 0.4 + frac * 0.7
+        const beam = new THREE.Mesh(new THREE.BoxGeometry(thick, thick, reach), jetTracerMat)
+        const mid = origin.clone().addScaledVector(dir, reach / 2)
+        beam.position.copy(mid)
+        beam.lookAt(mid.clone().add(dir))
+        beam.renderOrder = 998
+        scene.add(beam)
+        bullets.push({
+          mesh: beam,
+          velocity: new THREE.Vector3(0, 0, 0),
+          life: 0.22,
+          isEnemy: false,
+          damage: 0,
+        })
+        spawnExplosion(origin.clone().addScaledVector(dir, reach), false)
+        SOUNDS.hamaho()
+        cameraShakeRef.current.intensity = Math.max(cameraShakeRef.current.intensity, 4 + frac * 4)
+        if (ammoRef.current <= 0) startReload(weapon)
+      }
+
       // Launch a single homing rocket from the camera along the aim direction.
       function fireRocket() {
         camera.getWorldDirection(fwd3)
@@ -20706,7 +20867,7 @@ export default function ThreeWorld({
       }
 
       // ── PR-G1: RPG pickups (arm the launcher by walking over one) ────────────
-      function makeRPGPickup(x: number, z: number, y = 0) {
+      function makeRPGPickup(x: number, z: number, y = 0, weaponId = "rpg") {
         const safe = findSafeSpawnNear(x, z, 0.6)
         const g = new THREE.Group()
         const tube = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.15, 1.4, 8), rpgPickupMat)
@@ -20719,17 +20880,24 @@ export default function ThreeWorld({
         g.add(warhead)
         g.position.set(safe.x, y, safe.z)
         scene.add(g)
-        rpgPickups.push({ group: g, x: safe.x, z: safe.z, y, taken: false })
+        const pickup: RPGPickup = { group: g, x: safe.x, z: safe.z, y, taken: false, weaponId }
+        rpgPickups.push(pickup)
+        return pickup
       }
 
-      function collectRPG() {
-        const idx = WEAPONS.findIndex((w) => w.id === "rpg")
-        if (idx < 0) return
-        weaponAmmoRef.current[idx] = 1
+      // Phase C: generalised so the same pickup mechanism grants either the RPG or
+      // the 破魔砲 (weaponId). Sets that slot to its full magazine, unlocks +
+      // persists it, and auto-equips.
+      function collectRPG(weaponId = "rpg") {
+        const idx = WEAPONS.findIndex((w) => w.id === weaponId)
+        const wpn = WEAPONS[idx]
+        if (idx < 0 || !wpn) return
+        const full = wpn.maxAmmo
+        weaponAmmoRef.current[idx] = full
         setUnlockedWeapons((s) => {
-          if (s.has("rpg")) return s
-          const next = new Set([...s, "rpg"])
-          // Persist so the launcher survives a page refresh (startup reads this
+          if (s.has(weaponId)) return s
+          const next = new Set([...s, weaponId])
+          // Persist so the weapon survives a page refresh (startup reads this
           // same key into unlockedWeapons).
           try {
             localStorage.setItem("fps_unlocked_weapons", JSON.stringify([...next]))
@@ -20738,13 +20906,17 @@ export default function ThreeWorld({
           }
           return next
         })
-        // Auto-equip the launcher (mirrors the inline switch the weapon UI uses).
+        // Auto-equip (mirrors the inline switch the weapon UI uses).
         weaponAmmoRef.current[currentWeaponIdxRef.current] = ammoRef.current
         currentWeaponIdxRef.current = idx
-        ammoRef.current = 1
-        setAmmo(1)
+        ammoRef.current = full
+        setAmmo(full)
         setCurrentWeaponIdx(idx)
-        showNotification("RPG 取得 — 対空ロケット装備！")
+        showNotification(
+          weaponId === "hamaho"
+            ? "破魔砲 取得 — 長押しでチャージ、離して極太ビーム！"
+            : "RPG 取得 — 対空ロケット装備！",
+        )
         SOUNDS.pistol()
       }
 
@@ -20764,7 +20936,7 @@ export default function ThreeWorld({
           ) {
             p.taken = true
             scene.remove(p.group)
-            collectRPG()
+            collectRPG(p.weaponId)
           }
         }
       }
@@ -20931,6 +21103,9 @@ export default function ThreeWorld({
         }
         const weapon = WEAPONS[currentWeaponIdxRef.current]
         if (!weapon) return
+        // Phase C: 破魔砲 はチャージ式。press / 連射ループからの fire() はここで握り潰し、
+        // hold→release は animate ループ (fireHamaho) が処理する。
+        if (weapon.charge) return
         // Knife: melee swing instead of a projectile. Its own cooldown gate
         // lives in meleeAttack so a held FIRE button can't chain swings.
         // (meleeAttack stays disabled while driving — no knifing from a car.)
@@ -22103,6 +22278,25 @@ export default function ThreeWorld({
 
         // Continuous fire
         if (mouseDownRef.current && gamePhaseRef.current === "playing") fire()
+        // Phase C 破魔砲: handheld charge weapon — hold to charge, release to fire.
+        // (fire() above swallows the charge weapon, so discharge happens here.)
+        const hamahoW = WEAPONS[currentWeaponIdxRef.current]
+        if (
+          hamahoW?.charge &&
+          gamePhaseRef.current === "playing" &&
+          !drivingRef.current &&
+          !reloadingRef.current
+        ) {
+          if (mouseDownRef.current && ammoRef.current > 0) {
+            hamahoChargeRef.current = Math.min(HAMAHO_FULL_CHARGE, hamahoChargeRef.current + dt)
+          } else if (hamahoChargeRef.current > 0.05) {
+            const c = hamahoChargeRef.current
+            hamahoChargeRef.current = 0
+            fireHamaho(c)
+          }
+        } else if (hamahoChargeRef.current !== 0) {
+          hamahoChargeRef.current = 0
+        }
 
         // ── PR-G1: rocket exhaust puffs (scale-grow, then despawn) ───────────
         for (let i = rocketPuffs.length - 1; i >= 0; i--) {
@@ -24032,7 +24226,7 @@ export default function ThreeWorld({
         if (e.key === "r" || e.key === "R") huntReloadReqRef.current = true
         // 1-5 fall through to the normal-weapon switch below, which also drops
         // back off the HUNT weapon.
-        if (["1", "2", "3", "4", "5"].includes(e.key)) huntClearHuntWeapon()
+        if (["1", "2", "3", "4", "5", "h", "H"].includes(e.key)) huntClearHuntWeapon()
       }
       // In a tank, 1/2/3 pick handheld guns (and leave the cannon), 4 selects
       // the main cannon. On foot / in a car, 1/2/3/4 are the usual weapons.
@@ -24056,6 +24250,9 @@ export default function ThreeWorld({
         }
       }
       if (e.key === "5") switchWeapon(4) // PR-G1: RPG (locked until picked up)
+      // Phase C: 破魔砲 — digits 1-0 are fully allocated (1-5 handheld / 6-0 HUNT), so
+      // the charge cannon binds to 'h' (破魔). Locked until picked up.
+      if (e.key === "h" || e.key === "H") switchWeapon(5)
       if (e.key === "e" || e.key === "E") {
         // Climb interaction — animate loop consumes the request and only
         // fires if the player is currently inside a climb zone.
