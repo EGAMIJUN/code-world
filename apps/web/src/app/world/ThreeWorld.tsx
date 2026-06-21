@@ -14557,6 +14557,10 @@ export default function ThreeWorld({
       let osakaHudFrame = 0
       let osakaHudLastPct = -1
       let osakaHudLastPhase = 0
+      // Phase 3: change-gates for the 大魔 HUD so updateDaima doesn't trigger a full
+      // ThreeWorld re-render every 8 frames when HP / cores are unchanged.
+      let daimaHpLast = -1
+      let daimaCoresSig = ""
       // Phase C: throttle state for the 中ボス HP gauge (push every 5 frames on change).
       let osakaMidHudFrame = 0
       let osakaMidHudLastPct = -1
@@ -14897,6 +14901,9 @@ export default function ThreeWorld({
         // Phase E: コア脈動も畳む。
         setOsakaCorePulse(0)
         osakaCorePulseLast = -1
+        // Phase 3: reset 大魔 HUD change-gates so the next 大魔 re-pushes from full.
+        daimaHpLast = -1
+        daimaCoresSig = ""
       }
       // Route a weapon hit onto core #idx (×3 like the 五変化 weak point). A dead
       // core hides its orb + beacon; clearing all 7 wins the fight.
@@ -15132,8 +15139,19 @@ export default function ThreeWorld({
           }, 1900)
         }
         if ((d.frame & 7) === 0) {
-          setBossHpPct(Math.round((d.hp / d.maxHp) * 100))
-          setDaimaCoreHud(d.cores.map((c) => (c.dead ? 0 : Math.max(0, c.hp / c.maxHp))))
+          // Phase 3: only push HUD state when it actually changed (was unconditional
+          // every 8 frames → a full re-render + new cores array even when static).
+          const dHpPct = Math.round((d.hp / d.maxHp) * 100)
+          if (dHpPct !== daimaHpLast) {
+            daimaHpLast = dHpPct
+            setBossHpPct(dHpPct)
+          }
+          let dSig = ""
+          for (const c of d.cores) dSig += c.dead ? "x" : `${Math.round((c.hp / c.maxHp) * 20)},`
+          if (dSig !== daimaCoresSig) {
+            daimaCoresSig = dSig
+            setDaimaCoreHud(d.cores.map((c) => (c.dead ? 0 : Math.max(0, c.hp / c.maxHp))))
+          }
           // Phase E: コアが近いほど画面が脈動する (心臓の鼓動)。半径内で 0→1、変化が小
           // さい時は state を更新しない。
           const cp = nearestCore < OSAKA_CORE_PULSE_R ? 1 - nearestCore / OSAKA_CORE_PULSE_R : 0
@@ -16093,9 +16111,14 @@ export default function ThreeWorld({
           }
           const ex = e.mesh.position.x
           const ez = e.mesh.position.z
-          // Distance-cull the mesh (the rider stays as the hittable target).
+          // Phase 3: distance-cull BOTH the bike mesh AND the rider's ~37-mesh
+          // humanoid rig (was bike-only). The rider stays raycast-hittable while
+          // invisible, so hit detection is unaffected — this only drops the render +
+          // shadow cost of distant riders.
           const far = Math.hypot(ex - camera.position.x, ez - camera.position.z) > OSAKA_BIKE_CULL
           b.group.visible = !far
+          e.mesh.visible = !far
+          if (e.shadowMesh) e.shadowMesh.visible = !far
           if (far) continue
           b.group.position.set(ex, 0, ez)
           const sp2 = e.velocity.x * e.velocity.x + e.velocity.z * e.velocity.z
@@ -16118,7 +16141,12 @@ export default function ThreeWorld({
       function updateOsakaProgress() {
         const p = osakaProgressRef.current
         if (p.area === "boss" || p.area === "clear") return
-        const zako = enemies.filter((e) => e.hp > 0 && e.huntName === OSAKA_ZAKO_NAME).length
+        // Phase 3: count with a plain loop (was enemies.filter(...).length every
+        // frame — a closure + throwaway array per frame).
+        let zako = 0
+        for (const e of enemies) {
+          if (e.hp > 0 && e.huntName === OSAKA_ZAKO_NAME) zako++
+        }
         p.enemyCount = zako
         if (p.midBossSpawned || zako > 0) return
         if (p.area === "castle") {
