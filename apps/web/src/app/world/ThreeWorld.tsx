@@ -2490,6 +2490,7 @@ export default function ThreeWorld({
   const hitMarkerElRef = useRef<HTMLDivElement | null>(null)
   const hitMarkerTimeRef = useRef(0)
   const tetsurinHitSfxRef = useRef(0)
+  const tetsurinSparkRef = useRef(0) // Phase 1: throttle gatling impact sparks (ms)
   const mouseDownRef = useRef(false)
   // Phase C: 破魔砲 のチャージ蓄積 (秒)。hold で増え、release で fireHamaho。
   const hamahoChargeRef = useRef(0)
@@ -3421,21 +3422,31 @@ export default function ThreeWorld({
       )
       sun.position.set(isHunt ? 100 : 60, isHunt ? 200 : 80, isHunt ? 100 : 40)
       sun.castShadow = true
-      // Shadow map 1024 (was 2048) — quarter the memory + sampling cost.
-      // Soft PCF blur covers the precision loss on most viewing angles.
-      sun.shadow.mapSize.set(1024, 1024)
+      // Shadow map 512 (Phase 2: was 1024) — quarter the texel sampling + memory.
+      // Soft PCF blur covers the precision loss; the tighter player-following
+      // frustum below keeps texel density high near the action.
+      sun.shadow.mapSize.set(512, 512)
       sun.shadow.camera.near = 0.5
-      sun.shadow.camera.far = 200
-      sun.shadow.camera.left = -80
-      sun.shadow.camera.right = 80
-      sun.shadow.camera.bottom = -80
-      sun.shadow.camera.top = 80
+      // Phase 2: tight ±40 / far 120 frustum (was ±80 / far 200). The shadow camera
+      // is re-centered on the player every frame (see sunShadowOffset below), so the
+      // small frustum keeps full resolution on the player + nearby enemies without
+      // shadows popping out at the field edges.
+      sun.shadow.camera.far = 120
+      sun.shadow.camera.left = -40
+      sun.shadow.camera.right = 40
+      sun.shadow.camera.bottom = -40
+      sun.shadow.camera.top = 40
       // Bias fights shadow acne on the flat building walls; normal bias
       // handles the bands where the sun grazes a vertical surface.
       sun.shadow.bias = -0.0005
       sun.shadow.normalBias = 0.04
       sun.shadow.radius = 2
       scene.add(sun)
+      // Phase 2: capture the sun's offset from its target so the shadow camera can
+      // follow the player each frame (keeps the tight ±40 frustum over the action).
+      // Adding the target to the scene lets the renderer track its world matrix.
+      const sunShadowOffset = sun.position.clone()
+      scene.add(sun.target)
       // Fill light from opposite side (gentle bounce-light proxy)
       const fillLight = new THREE.DirectionalLight(
         0xb0c8ff,
@@ -7772,6 +7783,22 @@ export default function ThreeWorld({
 
       // Shared jet weapon visuals (one material each, reused per shot).
       const jetTracerMat = new THREE.MeshBasicMaterial({ color: 0xffee66, depthTest: false })
+      // Phase 1: 鉄輪 gatling tracer pool — a fixed ring of reusable meshes (shared
+      // geometry) so the 10-20 rounds/s weapon never allocates a Mesh+BoxGeometry per
+      // shot. Each tracer carries its own velocity + expiry; advanced in the animate
+      // loop. Session-lifetime (like jetTracerMat) — created once, never per-frame.
+      const GATLING_TRACER_POOL = 20
+      const gatlingTracerGeo = new THREE.BoxGeometry(0.06, 0.06, 1.8)
+      const gatlingTracers: { mesh: THREE.Mesh; vel: THREE.Vector3; until: number }[] = []
+      for (let gi = 0; gi < GATLING_TRACER_POOL; gi++) {
+        const tm = new THREE.Mesh(gatlingTracerGeo, jetTracerMat)
+        tm.renderOrder = 998
+        tm.visible = false
+        tm.frustumCulled = false
+        scene.add(tm)
+        gatlingTracers.push({ mesh: tm, vel: new THREE.Vector3(), until: 0 })
+      }
+      let gatlingTracerIdx = 0
       const jetMissileMat = new THREE.MeshStandardMaterial({
         color: 0x9aa0a6,
         roughness: 0.4,
@@ -8808,15 +8835,6 @@ export default function ThreeWorld({
         raycaster.set(nose, fwd)
         const prevFar = raycaster.far
         raycaster.far = TETSURIN_GATLING_RANGE
-        const parts: THREE.Object3D[] = []
-        for (const e of enemies) {
-          if (e.hp > 0 && !e.aiDriving) {
-            e.mesh.traverse((c) => {
-              if (c instanceof THREE.Mesh && c.userData.enemyId) parts.push(c)
-            })
-          }
-        }
-        const enemyHit = raycaster.intersectObjects(parts, false)[0]
         const wallHit = raycaster.intersectObjects(wallMeshes, false)[0]
         const cands = collectHardTargets(raycaster, TETSURIN_GATLING_DAMAGE, {
           jetAssistR: 0,
@@ -8824,38 +8842,34 @@ export default function ThreeWorld({
           jetRange: TETSURIN_GATLING_RANGE,
         })
         raycaster.far = prevFar
-        // Ground enemies: exact mesh first, then a forgiving sphere assist so the
-        // fast-moving bike still lands rounds on small figures.
+        // Phase 1: ground-enemy hit via the cheap analytic sphere-assist ray
+        // projection ONLY. The old per-shot enemies.traverse() that rebuilt every
+        // enemy submesh list + an intersectObjects against it (10-20×/s) was the
+        // gatling's main CPU/GC cost; the assist sphere is forgiving enough for the
+        // fast bike. Boss / 大魔 cores keep their precise raycasts below.
         let enemyCand: { dist: number; point: THREE.Vector3; en: CombatEnemy } | null = null
-        if (enemyHit) {
-          const id = enemyHit.object.userData.enemyId as string | undefined
-          const en = enemies.find((e) => e.id === id)
-          if (en) enemyCand = { dist: enemyHit.distance, point: enemyHit.point.clone(), en }
-        }
-        if (!enemyCand) {
-          const ray = raycaster.ray
-          let bestT = Number.POSITIVE_INFINITY
-          for (const e of enemies) {
-            if (e.hp <= 0 || e.aiDriving) continue
-            const ex = e.mesh.position.x
-            const ey = e.mesh.position.y
-            const ez = e.mesh.position.z
-            const ox = ex - ray.origin.x
-            const oy = ey - ray.origin.y
-            const oz = ez - ray.origin.z
-            const t = ox * ray.direction.x + oy * ray.direction.y + oz * ray.direction.z
-            if (t <= 0 || t > TETSURIN_GATLING_RANGE || t >= bestT) continue
-            const px = ray.origin.x + ray.direction.x * t
-            const py = ray.origin.y + ray.direction.y * t
-            const pz = ray.origin.z + ray.direction.z * t
-            if (
-              Math.hypot(ex - px, ey - py, ez - pz) >
-              TETSURIN_GATLING_ASSIST + e.config.bodyH * 0.5
-            )
-              continue
-            bestT = t
-            enemyCand = { dist: t, point: new THREE.Vector3(px, py, pz), en: e }
-          }
+        const ray = raycaster.ray
+        let bestT = Number.POSITIVE_INFINITY
+        for (const e of enemies) {
+          if (e.hp <= 0 || e.aiDriving) continue
+          const ex = e.mesh.position.x
+          const ey = e.mesh.position.y
+          const ez = e.mesh.position.z
+          const ox = ex - ray.origin.x
+          const oy = ey - ray.origin.y
+          const oz = ez - ray.origin.z
+          const t = ox * ray.direction.x + oy * ray.direction.y + oz * ray.direction.z
+          if (t <= 0 || t > TETSURIN_GATLING_RANGE || t >= bestT) continue
+          const px = ray.origin.x + ray.direction.x * t
+          const py = ray.origin.y + ray.direction.y * t
+          const pz = ray.origin.z + ray.direction.z * t
+          if (
+            Math.hypot(ex - px, ey - py, ez - pz) >
+            TETSURIN_GATLING_ASSIST + e.config.bodyH * 0.5
+          )
+            continue
+          bestT = t
+          enemyCand = { dist: t, point: new THREE.Vector3(px, py, pz), en: e }
         }
         if (enemyCand) {
           const { en, point } = enemyCand
@@ -8955,21 +8969,22 @@ export default function ThreeWorld({
         } else if (wallHit) {
           impact = wallHit.point.clone()
         }
-        // Tracer streak from the nose (reuses the jet tracer material + bullet pool).
-        const tracer = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.06, 1.8), jetTracerMat)
-        tracer.position.copy(nose)
-        tracer.lookAt(nose.clone().add(fwd))
-        tracer.renderOrder = 998
-        scene.add(tracer)
-        bullets.push({
-          mesh: tracer,
-          velocity: fwd.clone().multiplyScalar(160),
-          life: 0.3,
-          isEnemy: false,
-          damage: 0,
-        })
-        // Impact dust (existing spark/explosion particles — no new pipeline).
-        if (impact) spawnExplosion(impact, true)
+        // Phase 1: tracer from the pooled ring (no per-shot Mesh/geometry alloc).
+        const tr = gatlingTracers[gatlingTracerIdx]
+        gatlingTracerIdx = (gatlingTracerIdx + 1) % GATLING_TRACER_POOL
+        if (tr) {
+          tr.mesh.position.copy(nose)
+          tr.mesh.lookAt(nose.clone().add(fwd))
+          tr.mesh.visible = true
+          tr.vel.copy(fwd).multiplyScalar(160)
+          tr.until = Date.now() + 300
+        }
+        // Impact dust — throttled (Phase 1): the spark spawns up to 6 meshes, so at
+        // 10-20 rounds/s cap it to ~1 per 110ms instead of one per impact.
+        if (impact && Date.now() >= tetsurinSparkRef.current) {
+          spawnExplosion(impact, true)
+          tetsurinSparkRef.current = Date.now() + 110
+        }
         // Muzzle flash (reuses the shared muzzle light) + light shake.
         muzzleFlashTimerRef.current = MUZZLE_FLASH_DURATION
         SOUNDS.pistol()
@@ -9325,7 +9340,7 @@ export default function ThreeWorld({
           // ── Block F: tyre sparks at speed + motion-blur flag ─────────────────
           const fastFrac = sp / maxs
           tetsurinFxFrame++
-          if (fastFrac > 0.6 && tetsurinFxFrame % 4 === 0) {
+          if (fastFrac > 0.6 && tetsurinFxFrame % 8 === 0) {
             // Spark kicked out behind the wheel (reuses the spark particle).
             const bx = v.x + Math.sin(v.heading) * 0.25
             const bz = v.z + Math.cos(v.heading) * 0.25
@@ -14542,6 +14557,10 @@ export default function ThreeWorld({
       let osakaHudFrame = 0
       let osakaHudLastPct = -1
       let osakaHudLastPhase = 0
+      // Phase 3: change-gates for the 大魔 HUD so updateDaima doesn't trigger a full
+      // ThreeWorld re-render every 8 frames when HP / cores are unchanged.
+      let daimaHpLast = -1
+      let daimaCoresSig = ""
       // Phase C: throttle state for the 中ボス HP gauge (push every 5 frames on change).
       let osakaMidHudFrame = 0
       let osakaMidHudLastPct = -1
@@ -14882,6 +14901,9 @@ export default function ThreeWorld({
         // Phase E: コア脈動も畳む。
         setOsakaCorePulse(0)
         osakaCorePulseLast = -1
+        // Phase 3: reset 大魔 HUD change-gates so the next 大魔 re-pushes from full.
+        daimaHpLast = -1
+        daimaCoresSig = ""
       }
       // Route a weapon hit onto core #idx (×3 like the 五変化 weak point). A dead
       // core hides its orb + beacon; clearing all 7 wins the fight.
@@ -15117,8 +15139,19 @@ export default function ThreeWorld({
           }, 1900)
         }
         if ((d.frame & 7) === 0) {
-          setBossHpPct(Math.round((d.hp / d.maxHp) * 100))
-          setDaimaCoreHud(d.cores.map((c) => (c.dead ? 0 : Math.max(0, c.hp / c.maxHp))))
+          // Phase 3: only push HUD state when it actually changed (was unconditional
+          // every 8 frames → a full re-render + new cores array even when static).
+          const dHpPct = Math.round((d.hp / d.maxHp) * 100)
+          if (dHpPct !== daimaHpLast) {
+            daimaHpLast = dHpPct
+            setBossHpPct(dHpPct)
+          }
+          let dSig = ""
+          for (const c of d.cores) dSig += c.dead ? "x" : `${Math.round((c.hp / c.maxHp) * 20)},`
+          if (dSig !== daimaCoresSig) {
+            daimaCoresSig = dSig
+            setDaimaCoreHud(d.cores.map((c) => (c.dead ? 0 : Math.max(0, c.hp / c.maxHp))))
+          }
           // Phase E: コアが近いほど画面が脈動する (心臓の鼓動)。半径内で 0→1、変化が小
           // さい時は state を更新しない。
           const cp = nearestCore < OSAKA_CORE_PULSE_R ? 1 - nearestCore / OSAKA_CORE_PULSE_R : 0
@@ -16078,9 +16111,14 @@ export default function ThreeWorld({
           }
           const ex = e.mesh.position.x
           const ez = e.mesh.position.z
-          // Distance-cull the mesh (the rider stays as the hittable target).
+          // Phase 3: distance-cull BOTH the bike mesh AND the rider's ~37-mesh
+          // humanoid rig (was bike-only). The rider stays raycast-hittable while
+          // invisible, so hit detection is unaffected — this only drops the render +
+          // shadow cost of distant riders.
           const far = Math.hypot(ex - camera.position.x, ez - camera.position.z) > OSAKA_BIKE_CULL
           b.group.visible = !far
+          e.mesh.visible = !far
+          if (e.shadowMesh) e.shadowMesh.visible = !far
           if (far) continue
           b.group.position.set(ex, 0, ez)
           const sp2 = e.velocity.x * e.velocity.x + e.velocity.z * e.velocity.z
@@ -16103,7 +16141,12 @@ export default function ThreeWorld({
       function updateOsakaProgress() {
         const p = osakaProgressRef.current
         if (p.area === "boss" || p.area === "clear") return
-        const zako = enemies.filter((e) => e.hp > 0 && e.huntName === OSAKA_ZAKO_NAME).length
+        // Phase 3: count with a plain loop (was enemies.filter(...).length every
+        // frame — a closure + throwaway array per frame).
+        let zako = 0
+        for (const e of enemies) {
+          if (e.hp > 0 && e.huntName === OSAKA_ZAKO_NAME) zako++
+        }
         p.enemyCount = zako
         if (p.midBossSpawned || zako > 0) return
         if (p.area === "castle") {
@@ -22275,6 +22318,21 @@ export default function ThreeWorld({
             gatHm.style.opacity = "0"
           }
         }
+
+        // Phase 1: advance pooled gatling tracers (move + hide on expiry; O(pool),
+        // no allocation).
+        const gtNow = Date.now()
+        for (const gtr of gatlingTracers) {
+          if (!gtr.mesh.visible) continue
+          if (gtNow >= gtr.until) gtr.mesh.visible = false
+          else gtr.mesh.position.addScaledVector(gtr.vel, dt)
+        }
+
+        // Phase 2: re-center the shadow camera on the player so the tight ±40 sun
+        // frustum always covers the player + nearby enemies (no edge pop). Cheap;
+        // a no-op cost-wise on mobile where shadowMap is disabled.
+        sun.position.copy(refs.focalPoint).add(sunShadowOffset)
+        sun.target.position.copy(refs.focalPoint)
 
         // Continuous fire
         if (mouseDownRef.current && gamePhaseRef.current === "playing") fire()
