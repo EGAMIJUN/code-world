@@ -924,6 +924,10 @@ type OsakaMidBoss = {
   diveHit: boolean // tengu: melee already landed this dive
   rockCd: number // yamaya: seconds to next rock volley
   quakeCd: number // yamaya: seconds to next quake
+  featherCd: number // Phase B tengu: 羽根飛ばし (fan of feather telegraphs)
+  whirlCd: number // Phase B tengu: 旋風 (telegraph ring around the tengu)
+  boulderCd: number // Phase B yamaya: 岩投げ (telegraphed meteor-style drops)
+  slamCd: number // Phase B yamaya: 地面叩き (shockwave ring)
   flash: THREE.PointLight[] // yamaya quake flash lights
   iris: THREE.Mesh[] // glowing eyes
 }
@@ -15600,6 +15604,10 @@ export default function ThreeWorld({
           diveHit: false,
           rockCd: 0,
           quakeCd: 0,
+          featherCd: 4,
+          whirlCd: 6.5,
+          boulderCd: 0,
+          slamCd: 0,
           flash: [],
           iris,
         }
@@ -15694,6 +15702,10 @@ export default function ThreeWorld({
           diveHit: false,
           rockCd: 4,
           quakeCd: 8,
+          featherCd: 0,
+          whirlCd: 0,
+          boulderCd: 5,
+          slamCd: 9,
           flash,
           iris,
         }
@@ -15836,6 +15848,39 @@ export default function ThreeWorld({
             if (dist < 12 && safeToHit && osakaSecretRef.current.loc === "none")
               applyPlayerDamage(40, 5)
           }
+          // Phase B 羽根飛ばし: 本体から扇状に羽根 (telegraph) を投げる。横へ抜けて回避。
+          mb.featherCd -= dt
+          if (mb.featherCd <= 0) {
+            mb.featherCd = 5 * oniCd
+            const base = Math.atan2(toZ, toX)
+            const reach = Math.min(Math.max(dist, 10), 30)
+            for (let i = -2; i <= 2; i++) {
+              const a = base + i * 0.18
+              osakaTelegraph(
+                mb.group.position.x + Math.cos(a) * reach,
+                mb.group.position.z + Math.sin(a) * reach,
+                2.6,
+                1000,
+                34,
+              )
+            }
+          }
+          // Phase B 旋風: 本体の周囲に旋風の telegraph リング → 近寄りすぎを罰する。
+          mb.whirlCd -= dt
+          if (mb.whirlCd <= 0) {
+            mb.whirlCd = 7 * oniCd
+            for (let i = 0; i < 6; i++) {
+              const a = (i / 6) * Math.PI * 2
+              osakaTelegraph(
+                mb.group.position.x + Math.cos(a) * 8,
+                mb.group.position.z + Math.sin(a) * 8,
+                3,
+                1100,
+                30,
+                0x66ccff,
+              )
+            }
+          }
         } else {
           // Yamaya: slow ground stalk + rock volleys + quakes; enraged below 50%.
           const rage = mb.hp <= mb.maxHp * 0.5
@@ -15861,6 +15906,30 @@ export default function ThreeWorld({
             for (const fl of mb.flash) fl.intensity = 6
             if (dist < 15 && safeToHit && osakaSecretRef.current.loc === "none")
               applyPlayerDamage(30, 8)
+          }
+          // Phase B 岩投げ: プレイヤー周辺に隕石状の落石 (telegraph → explosion 流用)。
+          mb.boulderCd -= dt
+          if (mb.boulderCd <= 0) {
+            mb.boulderCd = (rage ? 3.5 : 5) * oniCd
+            const drops = rage ? 3 : 2
+            for (let i = 0; i < drops; i++) {
+              const a = Math.random() * Math.PI * 2
+              const rr = 4 + Math.random() * 16
+              const bx = px + Math.cos(a) * rr
+              const bz = pz + Math.sin(a) * rr
+              osakaTelegraph(bx, bz, 4, 1100, 36, 0xaa6633)
+              window.setTimeout(() => {
+                if (osakaMidBossRef.current === mb) spawnExplosion(new THREE.Vector3(bx, 1.2, bz))
+              }, 1100)
+            }
+          }
+          // Phase B 地面叩き: 本体中心の衝撃波リング (telegraph) + 揺れ。外周へ逃げる。
+          mb.slamCd -= dt
+          if (mb.slamCd <= 0) {
+            mb.slamCd = (rage ? 6 : 9) * oniCd
+            osakaTelegraph(mb.group.position.x, mb.group.position.z, 13, 1200, 40, 0xff7722)
+            cameraShakeRef.current.intensity = Math.max(cameraShakeRef.current.intensity, 4)
+            SOUNDS.bossStomp()
           }
           for (const fl of mb.flash) fl.intensity = Math.max(0, fl.intensity - dt * 12)
         }
