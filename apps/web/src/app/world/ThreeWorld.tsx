@@ -12208,7 +12208,18 @@ export default function ThreeWorld({
       }
       // Remove every (live or dying) enemy mesh and empty the array.
       function huntClearEnemies() {
-        for (const e of enemies) scene.remove(e.mesh)
+        for (const e of enemies) {
+          scene.remove(e.mesh)
+          // Slim zako own their invisible hitbox geometry + material exclusively.
+          // Dispose here for enemies cleared alive (the reap path covers die+fade).
+          // Creature meshes share module-scope geos and must not be disposed.
+          e.mesh.traverse((child) => {
+            if (child instanceof THREE.Mesh && !child.visible && child.userData.enemyId) {
+              child.geometry.dispose()
+              ;(child.material as THREE.Material).dispose()
+            }
+          })
+        }
         enemies.length = 0
         setAliveEnemyCount(0)
         disposeOsakaBoss() // any active OSAKA boss is torn down with the wave
