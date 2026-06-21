@@ -20243,6 +20243,156 @@ export default function ThreeWorld({
         screenSpill.castShadow = false
         add(screenSpill)
 
+        // ══ Phase D (scramble-detail): 交差点を囲む構造 + 足元 ═══════════════════════
+        // The station backdrop + a subway entrance + sign-light pooling on the wet
+        // asphalt + a little more street furniture, so the crossing reads as enclosed
+        // top-to-bottom. Bodies ride the existing merge buckets; pools/bollards are
+        // instanced. (makeSignTex / SignSpec from Phase B are reused for the signage.)
+        // ── 駅 (station) silhouette: a long low 横長 backdrop on the far 駅前 side. ──
+        const staZ = -90
+        const staBody = new THREE.Mesh(new THREE.BoxGeometry(70, 22, 14), midMat)
+        staBody.position.set(0, 11, staZ)
+        mAdd(staBody)
+        addShibuyaAABB(0, staZ, 35, 7, 22)
+        const staRoof = new THREE.Mesh(new THREE.BoxGeometry(74, 1.4, 18), roofMat)
+        staRoof.position.set(0, 22.4, staZ)
+        mAdd(staRoof)
+        // A long canopy over the platform front (faces the crossing, +z).
+        const staCanopy = new THREE.Mesh(new THREE.BoxGeometry(66, 0.6, 5), roofMat)
+        staCanopy.position.set(0, 8.5, staZ + 8.5)
+        mAdd(staCanopy)
+        for (const cxp of [-28, -10, 10, 28]) {
+          const col = new THREE.Mesh(new THREE.BoxGeometry(0.8, 8.5, 0.8), concreteMat)
+          col.position.set(cxp, 4.25, staZ + 10.6)
+          mAdd(col)
+        }
+        // Station name board on the face (original).
+        const staSignTex = makeSignTex({
+          kind: "board",
+          w: 10,
+          h: 1.8,
+          bg: "#08142e",
+          t1: "SHIBUYA STA.",
+          c1: "#9fd0ff",
+          t2: "渋谷駅",
+          c2: "#ffffff",
+          bar: "#123a78",
+        })
+        const staSign = new THREE.Mesh(
+          new THREE.PlaneGeometry(20, 3.6),
+          new THREE.MeshBasicMaterial({ map: staSignTex, toneMapped: false }),
+        )
+        staSign.position.set(0, 16.5, staZ + 7.05)
+        add(staSign)
+        // ── 地下鉄入口 (subway entrance): sunk stairwell + railings + signpost. ──
+        const subX = -13
+        const subZ = 9
+        // The dark sunk stairwell (stepped boxes descending — visual depth only).
+        for (let s = 0; s < 4; s++) {
+          const st = new THREE.Mesh(new THREE.BoxGeometry(3.4, 0.4, 1.1), wallMat)
+          st.position.set(subX, -0.2 - s * 0.34, subZ - 1.5 + s * 1.0)
+          mAdd(st)
+        }
+        const subHole = new THREE.Mesh(new THREE.BoxGeometry(3.6, 0.1, 5), wallMat)
+        subHole.position.set(subX, -1.6, subZ)
+        mAdd(subHole)
+        // Railings around three sides (instanced posts + a top rail box).
+        const subPostGeo = new THREE.CylinderGeometry(0.07, 0.07, 1.0, 6)
+        const subPostXf: Xf[] = []
+        for (let i = 0; i <= 5; i++) {
+          const z = subZ - 2.5 + i
+          subPostXf.push({ pos: [subX - 1.9, 0.5, z] })
+          subPostXf.push({ pos: [subX + 1.9, 0.5, z] })
+        }
+        for (const sxp of [-1.3, 0, 1.3]) subPostXf.push({ pos: [subX + sxp, 0.5, subZ + 2.6] })
+        instAdd(subPostGeo, railMat, subPostXf)
+        for (const rxp of [-1.9, 1.9]) {
+          const rail = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.08, 5.2), railMat)
+          rail.position.set(subX + rxp, 1.0, subZ)
+          mAdd(rail)
+        }
+        addShibuyaAABB(subX, subZ, 2.1, 2.8, 1.1) // keep the player out of the hole
+        // Signpost: two posts + a sign beam pointing down into the station.
+        for (const pxp of [subX - 1.6, subX + 1.6]) {
+          const p = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 3.2, 6), railMat)
+          p.position.set(pxp, 1.6, subZ + 2.7)
+          mAdd(p)
+        }
+        const subSignTex = makeSignTex({
+          kind: "board",
+          w: 5,
+          h: 1.4,
+          bg: "#0a1f10",
+          t1: "SHIBUYA STA.",
+          c1: "#5fe39a",
+          t2: "▼ METRO",
+          c2: "#ffffff",
+          bar: "#0c5a2e",
+        })
+        const subSign = new THREE.Mesh(
+          new THREE.PlaneGeometry(4.4, 1.3),
+          new THREE.MeshBasicMaterial({
+            map: subSignTex,
+            toneMapped: false,
+            side: THREE.DoubleSide,
+          }),
+        )
+        subSign.position.set(subX, 3.0, subZ + 2.7)
+        add(subSign)
+        // ── Sign-light pools on the wet asphalt (additive discs under the bright
+        // clusters — the neon flood "reflecting" on the deck). Two colour sets. ──
+        const poolGeo = new THREE.CircleGeometry(1, 18)
+        const poolBlueMat = new THREE.MeshBasicMaterial({
+          color: 0x6fa8ff,
+          transparent: true,
+          opacity: 0.16,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+        })
+        const poolMagMat = new THREE.MeshBasicMaterial({
+          color: 0xff5aa8,
+          transparent: true,
+          opacity: 0.14,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+        })
+        const poolBlueXf: Xf[] = []
+        const poolMagXf: Xf[] = []
+        // Under the 駅前 screens (blue), the 109 + corners (mixed).
+        for (const [px, pz, c, sc] of [
+          [4, -30, 0, 9],
+          [-18, -34, 0, 6],
+          [26, -32, 1, 6],
+          [-30, 22, 1, 7],
+          [22, 20, 0, 6],
+          [-22, -18, 1, 5],
+          [20, -16, 0, 5],
+          [0, 6, 0, 5],
+        ] as const) {
+          ;(c === 0 ? poolBlueXf : poolMagXf).push({
+            pos: [px, 0.05, pz],
+            rotX: -Math.PI / 2,
+            scl: sc,
+          })
+        }
+        instAdd(poolGeo, poolBlueMat, poolBlueXf)
+        instAdd(poolGeo, poolMagMat, poolMagXf)
+        // ── A ring of bollards around the central plaza (instanced short posts). ──
+        const bollGeo = new THREE.CylinderGeometry(0.12, 0.14, 0.8, 6)
+        const bollMat = new THREE.MeshStandardMaterial({
+          color: 0x2a2c34,
+          roughness: 0.5,
+          metalness: 0.4,
+          emissive: 0x223044,
+          emissiveIntensity: 0.5,
+        })
+        const bollXf: Xf[] = []
+        for (let i = 0; i < dn(20); i++) {
+          const a = (i / 20) * Math.PI * 2
+          bollXf.push({ pos: [Math.cos(a) * 13.5, 0.4, Math.sin(a) * 13.5] })
+        }
+        instAdd(bollGeo, bollMat, bollXf)
+
         // ══ Phase F: 渋谷の夜 — 環境・空気感 ════════════════════════════════════════
         // Night palette, distinct from OSAKA's warm/red. (Scramble-detail Phase A:
         // BRIGHTENED — the night must read as "夜だが街全体が見える", not a black void.
