@@ -11964,36 +11964,55 @@ export default function ThreeWorld({
             armBaseY,
           }
         } else if (kind === "yokai_lite") {
-          // Block O perf fodder: one hunched body, a pair of merged glowing eyes,
-          // and two merged horns — 3 draw calls total, so a full castle swarm stays
-          // inside the draw-call budget. Eyes ride eyeMat (pulse via
-          // updateHuntCreatures); the body is registered to twitch.
-          const body = new THREE.Mesh(huntBlobGeo, bodyMat)
+          // Block O perf fodder. Phase 2: the body + two oni horns are baked into ONE
+          // vertex-coloured mesh (was 2 meshes) — body verts are white (× the
+          // material's bodyColor) and horn verts are 0.45 grey (→ the old darkMat =
+          // bodyColor×0.45), so the two-tone oni look is preserved in a single
+          // material. Plus a pair of merged glowing eyes (separate — emissive +
+          // pulsed via updateHuntCreatures). 2 draw calls (was 3). Intermediate
+          // clones are never rendered, so they need no dispose — GC reclaims them.
+          const tintGeo = (g: THREE.BufferGeometry, v: number) => {
+            const col = new Float32Array((g.attributes.position?.count ?? 0) * 3)
+            col.fill(v)
+            g.setAttribute("color", new THREE.BufferAttribute(col, 3))
+            return g
+          }
+          // Body geo centered at the mesh origin (its old scale baked in) so the
+          // twitch's rotation pivot stays at the body centre; horns baked relative to
+          // that centre (old world y 1.18 − body y 0.72 = 0.46).
+          const partGeos: THREE.BufferGeometry[] = [
+            tintGeo(huntBlobGeo.clone().scale(0.52, 0.64, 0.48), 1),
+          ]
+          for (const s of [-1, 1]) {
+            partGeos.push(
+              tintGeo(
+                huntConeGeo
+                  .clone()
+                  .scale(0.08, 0.36, 0.08)
+                  .rotateZ(s * 0.34)
+                  .translate(s * 0.17, 0.46, -0.04),
+                0.45,
+              ),
+            )
+          }
+          const bodyGeo = mergeGeometries(partGeos, false) ?? huntBlobGeo
+          const yokaiMat = new THREE.MeshStandardMaterial({
+            color: bodyColor,
+            roughness: 0.85,
+            metalness: 0.05,
+            vertexColors: true,
+          })
+          const body = new THREE.Mesh(bodyGeo, yokaiMat)
           body.position.y = 0.72
-          body.scale.set(0.52, 0.64, 0.48)
           group.add(body)
           twitch.push(body)
-          // Two glowing eyes merged into a single emissive mesh (clones are
-          // never rendered, so they need no dispose — GC reclaims them).
+          // Two glowing eyes merged into a single emissive mesh.
           const eyeGeos: THREE.BufferGeometry[] = []
           for (const ex of [-0.14, 0.14]) {
             eyeGeos.push(huntEyeGeo.clone().scale(0.07, 0.07, 0.07).translate(ex, 0.82, -0.44))
           }
           const mergedEye = mergeGeometries(eyeGeos, false) ?? huntEyeGeo
           group.add(new THREE.Mesh(mergedEye, eyeMat))
-          // Two dark horns merged into one mesh for an oni silhouette.
-          const hornGeos: THREE.BufferGeometry[] = []
-          for (const s of [-1, 1]) {
-            hornGeos.push(
-              huntConeGeo
-                .clone()
-                .scale(0.08, 0.36, 0.08)
-                .rotateZ(s * 0.34)
-                .translate(s * 0.17, 1.18, -0.04),
-            )
-          }
-          const mergedHorn = mergeGeometries(hornGeos, false) ?? huntConeGeo
-          group.add(new THREE.Mesh(mergedHorn, darkMat))
         } else {
           // A four-legged beast with three independent heads on long necks.
           const trunk = new THREE.Mesh(huntBlobGeo, bodyMat)
