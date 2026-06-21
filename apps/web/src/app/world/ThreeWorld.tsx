@@ -19409,7 +19409,8 @@ export default function ThreeWorld({
           if (
             Math.hypot(bx - 46, bz - 30) < 22 ||
             Math.hypot(bx + 42, bz - 30) < 22 ||
-            Math.hypot(bx - 4, bz + 42) < 24
+            Math.hypot(bx - 4, bz + 42) < 24 ||
+            Math.hypot(bx - 58, bz + 54) < 26 // leave the Phase E shrine grove clear
           )
             continue
           const bw = 9 + rnd() * 9
@@ -19472,6 +19473,190 @@ export default function ThreeWorld({
           railXf.push({ pos: [d, 0.5, 10.6] })
         }
         instAdd(railGeo, railMat, railXf)
+
+        // ══ Phase E: 渋谷の神社 (封印の舞台・ストーリーの核) ══════════════════════
+        // A small original shrine grove ringed by the zatkyo buildings (NE). Torii →
+        // komainu → stone steps → seal altar → honden along a north approach. The
+        // central seal altar is where a future giant boss is released; this PR builds
+        // only the altar + seal-effect FOUNDATION (glowing circle + shimenawa). The
+        // seal pulse + boss break-out land in later PRs (hooks: shibuyaSealRef in F).
+        const sx0 = 58
+        const sz0 = -54
+        const shrineStoneMat = new THREE.MeshLambertMaterial({ color: 0x8b8880 })
+        const vermilionMat = new THREE.MeshStandardMaterial({
+          color: 0xc23a2b,
+          roughness: 0.6,
+          emissive: 0x3a0d07,
+          emissiveIntensity: 0.4,
+        })
+        const woodMat = new THREE.MeshLambertMaterial({ color: 0x6b4a2f })
+        const roofMat = new THREE.MeshLambertMaterial({ color: 0x282c33 })
+        // Precinct pad (raised stone — low enough to step onto, no AABB).
+        const precinct = new THREE.Mesh(
+          new THREE.CylinderGeometry(15, 15, 0.32, 28),
+          shrineStoneMat,
+        )
+        precinct.position.set(sx0, 0.16, sz0)
+        mAdd(precinct)
+        // Torii gate at the south entrance (faces +z toward the approaching player).
+        for (const px of [sx0 - 5, sx0 + 5]) {
+          const pillar = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.5, 0.55, 7.2, 10),
+            vermilionMat,
+          )
+          pillar.position.set(px, 3.6, sz0 + 12)
+          mAdd(pillar)
+          addShibuyaAABB(px, sz0 + 12, 0.6, 0.6, 7.2)
+        }
+        const kasagi = new THREE.Mesh(new THREE.BoxGeometry(13, 0.7, 1.0), vermilionMat) // top beam
+        kasagi.position.set(sx0, 7.3, sz0 + 12)
+        mAdd(kasagi)
+        const nuki = new THREE.Mesh(new THREE.BoxGeometry(12, 0.5, 0.7), vermilionMat) // lower tie
+        nuki.position.set(sx0, 5.4, sz0 + 12)
+        mAdd(nuki)
+        // Komainu (guardian dogs) on pedestals flanking the approach — stone.
+        const komainu = (cx: number, cz: number) => {
+          const base = new THREE.Mesh(new THREE.BoxGeometry(1.4, 1.0, 1.4), shrineStoneMat)
+          base.position.set(cx, 0.66, cz)
+          mAdd(base)
+          addShibuyaAABB(cx, cz, 0.7, 0.7, 1.0)
+          const part = (w: number, h: number, d: number, ox: number, oy: number, oz: number) => {
+            const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), shrineStoneMat)
+            m.position.set(cx + ox, 1.16 + oy, cz + oz)
+            mAdd(m)
+          }
+          part(0.7, 0.8, 0.5, 0, 0.4, -0.1) // haunches
+          part(0.6, 0.6, 0.55, 0, 0.85, 0.3) // chest + head
+          part(0.36, 0.14, 0.2, 0, 0.95, 0.6) // muzzle
+          for (const ex of [-0.18, 0.18]) part(0.16, 0.5, 0.16, ex, 0.25, 0.45) // forelegs
+        }
+        komainu(sx0 - 6, sz0 + 6)
+        komainu(sx0 + 6, sz0 + 6)
+        // Stone steps rising toward the honden at the back.
+        for (let s = 0; s < 3; s++) {
+          const step = new THREE.Mesh(new THREE.BoxGeometry(9 - s * 1.5, 0.3, 1.4), shrineStoneMat)
+          step.position.set(sx0, 0.32 + s * 0.3, sz0 - 8 - s * 1.2)
+          mAdd(step)
+        }
+        // Honden (shrine hall) at the back — wood body + dark gabled roof.
+        const hBody = new THREE.Mesh(new THREE.BoxGeometry(9, 4.2, 6), woodMat)
+        hBody.position.set(sx0, 2.6, sz0 - 13)
+        mAdd(hBody)
+        addShibuyaAABB(sx0, sz0 - 13, 4.5, 3, 4.7)
+        const hRoof = new THREE.Mesh(new THREE.ConeGeometry(7.6, 2.6, 4), roofMat)
+        hRoof.rotation.y = Math.PI / 4
+        hRoof.position.set(sx0, 6.0, sz0 - 13)
+        mAdd(hRoof)
+        // Grove: instanced trees (trunk + foliage) ringing the precinct.
+        const trunkGeo = new THREE.CylinderGeometry(0.3, 0.4, 4, 6)
+        const leafGeo = new THREE.SphereGeometry(2.2, 8, 6)
+        const trunkXf: Xf[] = []
+        const leafXf: Xf[] = []
+        for (let i = 0; i < 9; i++) {
+          const a = (i / 9) * Math.PI * 2 + 0.4
+          const tx = sx0 + Math.cos(a) * 13
+          const tz = sz0 + Math.sin(a) * 13
+          if (tz > sz0 + 9) continue // keep the torii entrance clear
+          trunkXf.push({ pos: [tx, 2, tz] })
+          leafXf.push({ pos: [tx, 4.6, tz], scl: 0.8 + rnd() * 0.5 })
+        }
+        instAdd(trunkGeo, woodMat, trunkXf)
+        instAdd(
+          leafGeo,
+          new THREE.MeshLambertMaterial({
+            color: 0x223a22,
+            emissive: 0x0a160a,
+            emissiveIntensity: 0.4,
+          }),
+          leafXf,
+        )
+        // ── 封印の祭壇 (seal altar) — the story core. Glowing magic circle + shimenawa. ──
+        const dais = new THREE.Mesh(new THREE.CylinderGeometry(5, 5.4, 0.4, 24), shrineStoneMat)
+        dais.position.set(sx0, 0.36, sz0)
+        mAdd(dais)
+        // Glowing seal: a magic-circle CanvasTexture on a flat disc (transparent gaps
+        // so only the lines glow). Standalone so Phase F can pulse it.
+        const sealCv = document.createElement("canvas")
+        sealCv.width = 128
+        sealCv.height = 128
+        const sCtx = sealCv.getContext("2d")
+        if (sCtx) {
+          sCtx.clearRect(0, 0, 128, 128)
+          sCtx.strokeStyle = "#6fe9ff"
+          sCtx.lineWidth = 2.4
+          sCtx.beginPath()
+          sCtx.arc(64, 64, 58, 0, Math.PI * 2)
+          sCtx.stroke()
+          sCtx.beginPath()
+          sCtx.arc(64, 64, 44, 0, Math.PI * 2)
+          sCtx.stroke()
+          sCtx.beginPath()
+          sCtx.arc(64, 64, 22, 0, Math.PI * 2)
+          sCtx.stroke()
+          for (let k = 0; k < 8; k++) {
+            const a = (k / 8) * Math.PI * 2
+            sCtx.beginPath()
+            sCtx.moveTo(64 + Math.cos(a) * 22, 64 + Math.sin(a) * 22)
+            sCtx.lineTo(64 + Math.cos(a) * 58, 64 + Math.sin(a) * 58)
+            sCtx.stroke()
+          }
+        }
+        const sealTex = new THREE.CanvasTexture(sealCv)
+        sealTex.colorSpace = THREE.SRGBColorSpace
+        const seal = new THREE.Mesh(
+          new THREE.CircleGeometry(4.6, 32),
+          new THREE.MeshBasicMaterial({
+            map: sealTex,
+            transparent: true,
+            opacity: 0.9,
+            depthWrite: false,
+          }),
+        )
+        seal.rotation.x = -Math.PI / 2
+        seal.position.set(sx0, 0.58, sz0)
+        add(seal) // standalone — animated (pulse) in Phase F
+        // Two emissive rings hovering over the seal (the binding).
+        const ringMat = new THREE.MeshBasicMaterial({ color: 0x7fe9ff })
+        for (const [ry, rr] of [
+          [0.7, 4.7],
+          [1.3, 3.6],
+        ] as const) {
+          const ring = new THREE.Mesh(new THREE.TorusGeometry(rr, 0.08, 6, 36), ringMat)
+          ring.rotation.x = -Math.PI / 2
+          ring.position.set(sx0, ry, sz0)
+          add(ring)
+        }
+        // Shimenawa: 4 posts + a straw rope ring + hanging shide (paper zigzags).
+        const ropeMat = new THREE.MeshLambertMaterial({
+          color: 0xd8c98a,
+          emissive: 0x2a2410,
+          emissiveIntensity: 0.4,
+        })
+        for (let k = 0; k < 4; k++) {
+          const a = (k / 4) * Math.PI * 2 + Math.PI / 4
+          const px = sx0 + Math.cos(a) * 5
+          const pz = sz0 + Math.sin(a) * 5
+          const post = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.18, 2.6, 6), woodMat)
+          post.position.set(px, 1.3, pz)
+          mAdd(post)
+        }
+        const rope = new THREE.Mesh(new THREE.TorusGeometry(5, 0.22, 6, 28), ropeMat)
+        rope.rotation.x = -Math.PI / 2
+        rope.position.set(sx0, 2.4, sz0)
+        mAdd(rope)
+        const shideMat = new THREE.MeshBasicMaterial({ color: 0xf4f4ee, side: THREE.DoubleSide })
+        const shideXf: Xf[] = []
+        for (let k = 0; k < 6; k++) {
+          const a = (k / 6) * Math.PI * 2
+          shideXf.push({ pos: [sx0 + Math.cos(a) * 5, 1.85, sz0 + Math.sin(a) * 5], rotY: -a })
+        }
+        instAdd(new THREE.PlaneGeometry(0.3, 0.8), shideMat, shideXf)
+        // Sacred light: one soft point light over the altar (re-used by the future
+        // seal-break sequence). A child of the group → removed on teardown.
+        const sealLight = new THREE.PointLight(0x9fe6ff, 1.4, 34, 2)
+        sealLight.position.set(sx0, 6, sz0)
+        sealLight.castShadow = false
+        add(sealLight)
 
         flushMerges() // collapse all static buckets → one mesh per material
         scene.add(group)
