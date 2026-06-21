@@ -3422,21 +3422,31 @@ export default function ThreeWorld({
       )
       sun.position.set(isHunt ? 100 : 60, isHunt ? 200 : 80, isHunt ? 100 : 40)
       sun.castShadow = true
-      // Shadow map 1024 (was 2048) — quarter the memory + sampling cost.
-      // Soft PCF blur covers the precision loss on most viewing angles.
-      sun.shadow.mapSize.set(1024, 1024)
+      // Shadow map 512 (Phase 2: was 1024) — quarter the texel sampling + memory.
+      // Soft PCF blur covers the precision loss; the tighter player-following
+      // frustum below keeps texel density high near the action.
+      sun.shadow.mapSize.set(512, 512)
       sun.shadow.camera.near = 0.5
-      sun.shadow.camera.far = 200
-      sun.shadow.camera.left = -80
-      sun.shadow.camera.right = 80
-      sun.shadow.camera.bottom = -80
-      sun.shadow.camera.top = 80
+      // Phase 2: tight ±40 / far 120 frustum (was ±80 / far 200). The shadow camera
+      // is re-centered on the player every frame (see sunShadowOffset below), so the
+      // small frustum keeps full resolution on the player + nearby enemies without
+      // shadows popping out at the field edges.
+      sun.shadow.camera.far = 120
+      sun.shadow.camera.left = -40
+      sun.shadow.camera.right = 40
+      sun.shadow.camera.bottom = -40
+      sun.shadow.camera.top = 40
       // Bias fights shadow acne on the flat building walls; normal bias
       // handles the bands where the sun grazes a vertical surface.
       sun.shadow.bias = -0.0005
       sun.shadow.normalBias = 0.04
       sun.shadow.radius = 2
       scene.add(sun)
+      // Phase 2: capture the sun's offset from its target so the shadow camera can
+      // follow the player each frame (keeps the tight ±40 frustum over the action).
+      // Adding the target to the scene lets the renderer track its world matrix.
+      const sunShadowOffset = sun.position.clone()
+      scene.add(sun.target)
       // Fill light from opposite side (gentle bounce-light proxy)
       const fillLight = new THREE.DirectionalLight(
         0xb0c8ff,
@@ -22289,6 +22299,12 @@ export default function ThreeWorld({
           if (gtNow >= gtr.until) gtr.mesh.visible = false
           else gtr.mesh.position.addScaledVector(gtr.vel, dt)
         }
+
+        // Phase 2: re-center the shadow camera on the player so the tight ±40 sun
+        // frustum always covers the player + nearby enemies (no edge pop). Cheap;
+        // a no-op cost-wise on mobile where shadowMap is disabled.
+        sun.position.copy(refs.focalPoint).add(sunShadowOffset)
+        sun.target.position.copy(refs.focalPoint)
 
         // Continuous fire
         if (mouseDownRef.current && gamePhaseRef.current === "playing") fire()
