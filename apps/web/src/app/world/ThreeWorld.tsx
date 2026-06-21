@@ -18890,14 +18890,19 @@ export default function ThreeWorld({
         add(floor)
         // ── Perimeter walls — closed square that contains the player on the flat
         // core (sits at r ≤ HALF·√2 < FLAT_R, i.e. on y=0 ground). Beyond them the
-        // bowl rim rises as pure backdrop (unreachable this PR). ──
+        // bowl rim rises as pure backdrop. The WEST wall is split: a gap at
+        // z∈[-27,-17] is the センター街 (Centre-gai) corridor mouth — the corridor
+        // punches out through here and runs on the still-flat core (r≤FLAT_R holds
+        // out to x≈-141 even past the wall). Its own side walls seal the sides, so the
+        // gap never leaks (built below in the Phase D センター街 section). ──
         const H = SHIBUYA_HALF
         const wallMat = new THREE.MeshLambertMaterial({ color: 0x24252b })
         for (const [x, z, w, d] of [
           [0, H, 2 * H, 2],
           [0, -H, 2 * H, 2],
           [H, 0, 2, 2 * H],
-          [-H, 0, 2, 2 * H],
+          [-H, -63.5, 2, 73], // west wall — segment NORTH of the centre-gai mouth
+          [-H, 41.5, 2, 117], // west wall — segment SOUTH of the centre-gai mouth
         ] as const) {
           const wall = new THREE.Mesh(new THREE.BoxGeometry(w, 10, d), wallMat)
           wall.position.set(x, 5, z)
@@ -19359,15 +19364,57 @@ export default function ThreeWorld({
         for (const ex of [-0.2, 0.2]) dog(0.16, 0.28, 0.12, ex, 1.78, 0.5) // ears
         for (const ex of [-0.22, 0.22]) dog(0.18, 0.85, 0.2, ex, 0.42, 0.62) // front legs
         dog(0.18, 0.5, 0.18, 0.32, 0.85, -0.45) // curled tail
-        // ── センター街 (arched shopping-street entrance + receding lane, NW) ──
-        // Original arch sign; lane runs west, flanked by neon mid-rises.
-        const cax = -18
-        const caz = -22
-        for (const px of [cax - 5, cax + 5]) {
+        // ══ センター街 (歩行可能な商店街・本物の密度) — Phase A 土台 ══════════════════
+        // A genuinely walkable shopping street: the arch at the mouth, then a straight
+        // lane running WEST through the west-wall gap to a far dead-end. Axis-aligned
+        // (due west) so every AABB matches its mesh footprint EXACTLY — no rotation
+        // expansion, no #117 ghost walls. The lane floor stays on the flat valley core
+        // (r≤FLAT_R ⇒ y=0 out to x≈-141), so the player walks it at fixed y=0 with no
+        // terrain follow. The TWO side walls below are the SINGLE collision source for
+        // the lane; Phase B packs shops BEHIND them (adding no lane-side hitbox), Phase
+        // C branches alleys, Phase D caps the far end. Centre-line z, extents, and the
+        // walkable half-width are shared constants so later phases stay consistent.
+        const CG_Z = -22 // lane centre-line (local z)
+        const CG_HW = 5 // walkable half-width → 10-wide lane (両側に店が迫る狭さ)
+        const CG_X0 = -16 // east mouth (opens onto the scramble plaza)
+        const CG_X1 = -138 // west dead-end inner face (r≈140 < FLAT_R ⇒ flat ground)
+        const CG_WALL_H = 9 // shopfront-base height (Phase B stacks taller buildings behind)
+        const cgLen = CG_X0 - CG_X1 // 122 units of straight street
+        const cgMidX = (CG_X0 + CG_X1) / 2
+        // Anything inside this band is the lane — generic facade/zatkyo loops skip it so
+        // nothing spawns in the walkable corridor (consumed by sbBlocked + the ring).
+        const inCentergaiZone = (x: number, z: number) =>
+          x > CG_X1 - 6 && x < CG_X0 + 8 && z > CG_Z - 16 && z < CG_Z + 16
+        // Lane pavement (rides the flat core; brighter than the asphalt deck).
+        const cgRoad = new THREE.Mesh(new THREE.PlaneGeometry(cgLen, CG_HW * 2), roadMat)
+        cgRoad.rotation.x = -Math.PI / 2
+        cgRoad.position.set(cgMidX, 0.02, CG_Z)
+        mAdd(cgRoad)
+        // Two continuous side walls (inner faces exactly at z = CG_Z ∓ CG_HW). Thickness
+        // 2, so the box centre sits one unit outside the walkable face → AABB half-depth
+        // 1 matches the mesh. They tuck into the west-wall gap ends, sealing the tube.
+        const cgWallGeo = new THREE.BoxGeometry(cgLen, CG_WALL_H, 2)
+        for (const zc of [CG_Z - CG_HW - 1, CG_Z + CG_HW + 1] as const) {
+          const w = new THREE.Mesh(cgWallGeo, concreteMat)
+          w.position.set(cgMidX, CG_WALL_H / 2, zc)
+          mAdd(w)
+          addShibuyaAABB(cgMidX, zc, cgLen / 2, 1, CG_WALL_H)
+        }
+        // West dead-end cap (Phase D dresses it as a 工事中 barricade / shutter).
+        const cgCap = new THREE.Mesh(
+          new THREE.BoxGeometry(2, CG_WALL_H, CG_HW * 2 + 4),
+          concreteMat,
+        )
+        cgCap.position.set(CG_X1 - 1, CG_WALL_H / 2, CG_Z)
+        mAdd(cgCap)
+        addShibuyaAABB(CG_X1 - 1, CG_Z, 1, CG_HW + 2, CG_WALL_H)
+        // Arch at the mouth — two pillars straddling the lane width + a CENTRE GAI sign
+        // beam facing +x (toward the player approaching from the plaza).
+        for (const pz of [CG_Z - CG_HW - 0.5, CG_Z + CG_HW + 0.5] as const) {
           const pil = new THREE.Mesh(new THREE.BoxGeometry(1.4, 7.5, 1.4), concreteMat)
-          pil.position.set(px, 3.75, caz)
+          pil.position.set(CG_X0, 3.75, pz)
           mAdd(pil)
-          addShibuyaAABB(px, caz, 0.7, 0.7, 7.5)
+          addShibuyaAABB(CG_X0, pz, 0.7, 0.7, 7.5)
         }
         const cgSignCv = document.createElement("canvas")
         cgSignCv.width = 256
@@ -19385,20 +19432,12 @@ export default function ThreeWorld({
         const cgTex = new THREE.CanvasTexture(cgSignCv)
         cgTex.colorSpace = THREE.SRGBColorSpace
         const cgBeam = new THREE.Mesh(
-          new THREE.BoxGeometry(11.4, 2.2, 0.4),
+          new THREE.PlaneGeometry(CG_HW * 2 + 2, 2.2),
           new THREE.MeshBasicMaterial({ map: cgTex }),
         )
-        cgBeam.position.set(cax, 8, caz + 0.7) // faces +z toward the approaching player
+        cgBeam.position.set(CG_X0 + 0.6, 8, CG_Z)
+        cgBeam.rotation.y = Math.PI / 2 // plane (+z) → faces +x toward the player
         add(cgBeam)
-        // 60 along x (west), 9 along z → only the flat -90° X tilt is needed.
-        const cgLane = new THREE.Mesh(new THREE.PlaneGeometry(60, 9), roadMat)
-        cgLane.rotation.x = -Math.PI / 2
-        cgLane.position.set(cax - 32, 0.02, caz)
-        mAdd(cgLane)
-        for (let x = cax - 6; x > cax - 62; x -= 13) {
-          makeMidRise(x, caz - 7.5, 11, 6, 12 + rnd() * 12, Math.PI / 2) // north-side row → faces lane (+z)
-          makeMidRise(x, caz + 7.5, 11, 6, 12 + rnd() * 12, -Math.PI / 2) // south-side row → faces lane (−z)
-        }
         // ── のんべい横丁 (tight izakaya alley, NE — lanterns + noren, OSAKA tech) ──
         const izaMat = new THREE.MeshLambertMaterial({ color: 0x2c2622 })
         const lanternGeo = new THREE.CylinderGeometry(0.26, 0.26, 0.5, 8)
@@ -19443,12 +19482,13 @@ export default function ThreeWorld({
           const rr = 70 + rnd() * 18
           const bx = Math.cos(ang) * rr
           const bz = Math.sin(ang) * rr
-          // skip near the four landmark anchors
+          // skip near the four landmark anchors + the センター街 corridor band
           if (
             Math.hypot(bx - 46, bz - 30) < 22 ||
             Math.hypot(bx + 42, bz - 30) < 22 ||
             Math.hypot(bx - 4, bz + 42) < 24 ||
-            Math.hypot(bx - 58, bz + 54) < 26 // leave the Phase E shrine grove clear
+            Math.hypot(bx - 58, bz + 54) < 26 || // leave the Phase E shrine grove clear
+            inCentergaiZone(bx, bz) // keep the walkable lane clear
           )
             continue
           const bw = 9 + rnd() * 9
@@ -20058,8 +20098,9 @@ export default function ThreeWorld({
           [-20, 22, 9],
           [40, -28, 20],
         ]
+        // inCentergaiZone keeps generic facades out of the walkable センター街 lane.
         const sbBlocked = (x: number, z: number) =>
-          sbAvoid.some(([ax, az, ar]) => Math.hypot(x - ax, z - az) < ar)
+          sbAvoid.some(([ax, az, ar]) => Math.hypot(x - ax, z - az) < ar) || inCentergaiZone(x, z)
         // (1) Four corner clusters in the diagonal sectors (the road arms stay open).
         for (let k = 0; k < 4; k++) {
           const baseA = Math.PI / 4 + k * (Math.PI / 2)
