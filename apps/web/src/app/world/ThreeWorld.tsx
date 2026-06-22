@@ -18874,13 +18874,18 @@ export default function ThreeWorld({
           fpos.needsUpdate = true
         }
         floorGeo.computeVertexNormals()
-        const asphaltTex = makeNoiseTexture(128, 0x34353d, 0.16, 26)
+        // Wet night asphalt: a dark neutral deck (#26–#2c grey) whose sheen comes from
+        // the neon reflections layered on top, NOT from a bright base. Darkened from the
+        // old mid-grey so the street reads as rain-wet, while the strong night
+        // hemisphere + a faint cool emissive floor keep it legible (no black void — the
+        // Phase F rig was deliberately lifted for exactly this reason).
+        const asphaltTex = makeNoiseTexture(128, 0x2b2c33, 0.14, 26)
         const floor = new THREE.Mesh(
           floorGeo,
           new THREE.MeshLambertMaterial({
             map: asphaltTex,
-            color: 0x8a8d97,
-            emissive: 0x10131c,
+            color: 0x70727c,
+            emissive: 0x101420,
             emissiveIntensity: 1,
           }),
         )
@@ -18914,10 +18919,12 @@ export default function ThreeWorld({
         // crosswalk lines on top). Two main streets cross through it (N-S along the
         // 公園通り axis, E-W along the 宮益坂 axis); the diagonal slope-roads
         // (道玄坂/センター街) arrive with their areas in later PRs.
+        // Wet asphalt for the roads/lane/alleys (kept a touch lighter than the deck so
+        // the street network still reads), reused for the センター街 lane + alleys.
         const roadMat = new THREE.MeshLambertMaterial({
-          color: 0x9498a2,
-          map: makeNoiseTexture(128, 0x3a3b44, 0.12, 18),
-          emissive: 0x141722,
+          color: 0x7c7e88,
+          map: makeNoiseTexture(128, 0x303139, 0.12, 18),
+          emissive: 0x141826,
           emissiveIntensity: 1,
         })
         const plaza = new THREE.Mesh(new THREE.PlaneGeometry(44, 44), roadMat)
@@ -18957,6 +18964,51 @@ export default function ThreeWorld({
           })
         }
         instAdd(puddleGeo, puddleMat, puddleXf)
+        // ── Wet 石畳 seams: a faint cool grid baked into a tiny canvas, tiled over the
+        // walkable deck as ONE additive overlay. Reads as rain-wet paving joints
+        // catching the neon — pure texture, zero geometry density. The UVs are
+        // pre-scaled to a fixed ~3.4-unit paver so the tiling never stretches. ──
+        const seamCanvas = document.createElement("canvas")
+        seamCanvas.width = 128
+        seamCanvas.height = 128
+        const sctx = seamCanvas.getContext("2d")
+        if (sctx) {
+          sctx.clearRect(0, 0, 128, 128)
+          sctx.strokeStyle = "rgba(150,178,224,0.6)" // cool seam glint
+          sctx.lineWidth = 2
+          sctx.strokeRect(1, 1, 126, 126)
+          sctx.globalAlpha = 0.45
+          sctx.beginPath()
+          sctx.moveTo(64, 0)
+          sctx.lineTo(64, 128) // half-joint (running-bond look)
+          sctx.stroke()
+        }
+        const seamTex = new THREE.CanvasTexture(seamCanvas)
+        seamTex.wrapS = THREE.RepeatWrapping
+        seamTex.wrapT = THREE.RepeatWrapping
+        seamTex.anisotropy = 4
+        const seamGeo = new THREE.PlaneGeometry(2 * H, 2 * H)
+        const seamUV = seamGeo.attributes.uv
+        if (seamUV) {
+          const pav = (2 * H) / 3.4 // ~3.4-unit pavers across the 200u deck
+          for (let i = 0; i < seamUV.count; i++) {
+            seamUV.setXY(i, seamUV.getX(i) * pav, seamUV.getY(i) * pav)
+          }
+          seamUV.needsUpdate = true
+        }
+        const seamDeck = new THREE.Mesh(
+          seamGeo,
+          new THREE.MeshBasicMaterial({
+            map: seamTex,
+            transparent: true,
+            opacity: 0.12,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false,
+          }),
+        )
+        seamDeck.rotation.x = -Math.PI / 2
+        seamDeck.position.y = 0.03
+        add(seamDeck)
 
         // ══ Phase B: スクランブル交差点 (渋谷の象徴) ══════════════════════════════
         // The instantly-recognizable scramble: 4 straight + 2 diagonal (X) zebra
@@ -20744,6 +20796,14 @@ export default function ThreeWorld({
           [-22, -18, 1, 5],
           [20, -16, 0, 5],
           [0, 6, 0, 5],
+          // Phase A: pools running down the センター街 lane (the hero street) + a couple more.
+          [-30, -22, 0, 5],
+          [-52, -22, 1, 5],
+          [-74, -22, 0, 5],
+          [-96, -22, 1, 4],
+          [-118, -22, 0, 4],
+          [-8, 0, 1, 5],
+          [12, 28, 0, 5],
         ] as const) {
           ;(c === 0 ? poolBlueXf : poolMagXf).push({
             pos: [px, 0.05, pz],
@@ -20753,6 +20813,44 @@ export default function ThreeWorld({
         }
         instAdd(poolGeo, poolBlueMat, poolBlueXf)
         instAdd(poolGeo, poolMagMat, poolMagXf)
+        // ── Neon "reflections" smeared in the wet deck: brighter, stretched additive
+        // streaks (a sign's mirror image breaking up on the rain film). Two colour
+        // sets, one instanced mesh each, sitting just above the dark puddles/pools. ──
+        const reflBlueMat = new THREE.MeshBasicMaterial({
+          color: 0xbfe0ff,
+          transparent: true,
+          opacity: 0.2,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+        })
+        const reflMagMat = new THREE.MeshBasicMaterial({
+          color: 0xff8fc8,
+          transparent: true,
+          opacity: 0.18,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+        })
+        const reflBlueXf: Xf[] = []
+        const reflMagXf: Xf[] = []
+        // sx → world X width, sz → world Z length (local Y after the -90° X-rotation).
+        for (const [rx, rz, c, sx, sz] of [
+          [-2, -29, 0, 1.5, 6.0], // under the 駅前 big-visions — smear toward the viewer
+          [22, -30, 0, 1.3, 5.0],
+          [-20, 20, 1, 1.3, 4.5],
+          [16, 14, 0, 1.2, 4.0],
+          [-30, -22, 1, 5.5, 1.3], // センター街 lane — smear down the street (X)
+          [-54, -22, 0, 5.5, 1.3],
+          [-78, -22, 1, 5.5, 1.3],
+          [-102, -22, 0, 5.0, 1.3],
+        ] as const) {
+          ;(c === 0 ? reflBlueXf : reflMagXf).push({
+            pos: [rx, 0.06, rz],
+            rotX: -Math.PI / 2,
+            scl: [sx, sz, 1],
+          })
+        }
+        instAdd(poolGeo, reflBlueMat, reflBlueXf)
+        instAdd(poolGeo, reflMagMat, reflMagXf)
         // ── A ring of bollards around the central plaza (instanced short posts). ──
         const bollGeo = new THREE.CylinderGeometry(0.12, 0.14, 0.8, 6)
         const bollMat = new THREE.MeshStandardMaterial({
