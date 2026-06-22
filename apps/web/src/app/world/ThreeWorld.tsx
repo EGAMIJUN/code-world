@@ -19524,6 +19524,94 @@ export default function ThreeWorld({
         cgBeam.position.set(CG_X0 + 0.6, 8, CG_Z)
         cgBeam.rotation.y = Math.PI / 2 // plane (+z) → faces +x toward the player
         add(cgBeam)
+        // ── アーケード屋根 (real-street Phase B): a translucent shotengai arcade over
+        // the センター街 main lane ONLY (alleys stay open-air). A metal-grey frame —
+        // ridge + eave purlins, transverse ties, sloped rafters, and knee-braces
+        // reaching off the shopfront walls — carries two bluish translucent panel
+        // slopes that glow faintly (emissive) as if catching the neon flood from
+        // below. EVERY frame member is funnelled through mAdd (rotation baked into the
+        // merge), so the whole frame is ONE draw call + the panels another. No
+        // collision (it's overhead) → no #117 ghost walls. ──
+        const arcEaveY = 9.6 // just above the CG_WALL_H=9 shopfront walls
+        const arcRidgeY = 12.0
+        const arcEaveZN = CG_Z - CG_HW - 0.3 // -27.3, over the north wall
+        const arcEaveZS = CG_Z + CG_HW + 0.3 // -16.7, over the south wall
+        const arcRun = CG_HW + 0.3 // 5.3 horizontal eave→ridge run
+        const arcRise = arcRidgeY - arcEaveY // 2.4
+        const arcSlope = Math.hypot(arcRun, arcRise) // rafter / panel length
+        const arcPhi = Math.atan2(arcRise, arcRun) // slope angle off horizontal
+        const arcMidY = (arcEaveY + arcRidgeY) / 2 // 10.8
+        const arcX0 = CG_X0 - 2 // -18, just inside the mouth arch
+        const arcX1 = CG_X1 + 2 // -136, just shy of the dead-end cap
+        const arcLen = arcX0 - arcX1 // 118 of covered lane
+        const arcMidX = (arcX0 + arcX1) / 2 // -77
+        const frameMat = new THREE.MeshStandardMaterial({
+          color: 0x55585f,
+          roughness: 0.45,
+          metalness: 0.65,
+          emissive: 0x0a0c12,
+          emissiveIntensity: 0.4,
+        })
+        const arcPanelMat = new THREE.MeshStandardMaterial({
+          color: 0x8fb6df,
+          transparent: true,
+          opacity: 0.34,
+          emissive: 0x1b3052,
+          emissiveIntensity: 0.7,
+          side: THREE.DoubleSide,
+          roughness: 0.3,
+          metalness: 0.1,
+          depthWrite: false,
+        })
+        // Longitudinal purlins: ridge + two eaves (merged into the frame bucket).
+        for (const [py, pz, pt] of [
+          [arcRidgeY, CG_Z, 0.22],
+          [arcEaveY, arcEaveZN, 0.2],
+          [arcEaveY, arcEaveZS, 0.2],
+        ] as const) {
+          const beam = new THREE.Mesh(new THREE.BoxGeometry(arcLen, pt, pt), frameMat)
+          beam.position.set(arcMidX, py, pz)
+          mAdd(beam)
+        }
+        // Transverse frame per bay: a flat tie across the lane, two sloped rafters up to
+        // the ridge, a knee-brace each side off the shopfront wall. raftGeo/braceGeo are
+        // Z-long boxes so a single rotX tilts them onto the slope.
+        const tieGeo = new THREE.BoxGeometry(0.18, 0.18, CG_HW * 2 + 0.6)
+        const raftGeo = new THREE.BoxGeometry(0.16, 0.16, arcSlope)
+        const braceGeo = new THREE.BoxGeometry(0.14, 0.14, 2.0)
+        const arcStep = isMobileDevice ? 8 : 5.6
+        for (let x = arcX0; x >= arcX1 - 0.01; x -= arcStep) {
+          const tie = new THREE.Mesh(tieGeo, frameMat)
+          tie.position.set(x, arcEaveY, CG_Z)
+          mAdd(tie)
+          const rN = new THREE.Mesh(raftGeo, frameMat)
+          rN.position.set(x, arcMidY, (arcEaveZN + CG_Z) / 2)
+          rN.rotation.x = -arcPhi
+          mAdd(rN)
+          const rS = new THREE.Mesh(raftGeo, frameMat)
+          rS.position.set(x, arcMidY, (arcEaveZS + CG_Z) / 2)
+          rS.rotation.x = arcPhi
+          mAdd(rS)
+          const bN = new THREE.Mesh(braceGeo, frameMat)
+          bN.position.set(x, arcEaveY - 0.9, arcEaveZN + 0.9)
+          bN.rotation.x = -Math.PI / 4
+          mAdd(bN)
+          const bS = new THREE.Mesh(braceGeo, frameMat)
+          bS.position.set(x, arcEaveY - 0.9, arcEaveZS - 0.9)
+          bS.rotation.x = Math.PI / 4
+          mAdd(bS)
+        }
+        // Two translucent panel slopes (single rotX tilt; share arcPanelMat → merged
+        // into one draw call). They ride just under the rafters and glow with reflected
+        // neon. DoubleSide so the underside is lit from inside the lane.
+        const arcPanelN = new THREE.Mesh(new THREE.PlaneGeometry(arcLen, arcSlope), arcPanelMat)
+        arcPanelN.rotation.x = -Math.PI / 2 - arcPhi
+        arcPanelN.position.set(arcMidX, arcMidY, (arcEaveZN + CG_Z) / 2)
+        mAdd(arcPanelN)
+        const arcPanelS = new THREE.Mesh(new THREE.PlaneGeometry(arcLen, arcSlope), arcPanelMat)
+        arcPanelS.rotation.x = -Math.PI / 2 + arcPhi
+        arcPanelS.position.set(arcMidX, arcMidY, (arcEaveZS + CG_Z) / 2)
+        mAdd(arcPanelS)
         // ── のんべい横丁 (tight izakaya alley, NE — lanterns + noren, OSAKA tech) ──
         const izaMat = new THREE.MeshLambertMaterial({ color: 0x2c2622 })
         const lanternGeo = new THREE.CylinderGeometry(0.26, 0.26, 0.5, 8)
