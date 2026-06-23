@@ -20463,6 +20463,106 @@ export default function ThreeWorld({
         instAdd(cgLampHeadGeo, cgLampHeadMat, cgLampHeadXf)
         instAdd(cgBikeFrameGeo, cgBikeMat, cgBikeFrameXf)
         instAdd(cgBikeWheelGeo, cgBikeMat, cgBikeWheelXf)
+        // ══ センター街 real-street Phase D: 雑居ビルの設備 (室外機・配管・電線・非常階段) ══
+        // The grime that makes a 雑居ビル wall read as real: AC condensers + drain hoses,
+        // vertical pipe runs, a tangle of sagging cables across the lane, and two steel
+        // fire escapes. ALL mounted overhead (y≥3.6) so the player passes underneath, and
+        // ALL non-colliding (no AABB → no #117 ghosts). AC bodies/fans/pipes/hoses are
+        // instanced; the cables merge into ONE wire mesh; the fire escapes reuse frameMat
+        // → they merge into the arcade-frame bucket (zero extra draw call).
+        const acFanMat = new THREE.MeshStandardMaterial({ color: 0x26282c, roughness: 0.7 })
+        const pipeMat = new THREE.MeshStandardMaterial({
+          color: 0x3c3a36,
+          roughness: 0.75,
+          metalness: 0.3,
+        })
+        const hoseMat = new THREE.MeshStandardMaterial({ color: 0x1c1d20, roughness: 0.9 })
+        const wireMat = new THREE.MeshLambertMaterial({ color: 0x0a0a0c })
+        const acBodyGeo = new THREE.BoxGeometry(1.15, 0.78, 0.5)
+        const acFanGeo = new THREE.CircleGeometry(0.28, 14)
+        const pipeGeo = new THREE.CylinderGeometry(0.09, 0.09, 1, 6) // unit Y, scaled per run
+        const hoseGeo = new THREE.CylinderGeometry(0.045, 0.045, 1, 5)
+        const acBodyXf: Xf[] = []
+        const acFanXf: Xf[] = []
+        const pipeXf: Xf[] = []
+        const hoseXf: Xf[] = []
+        // Sagging cable: a low-poly tube along a quadratic sag (its own wireMat bucket so
+        // it never mixes attribute sets with the box merges).
+        const addWire = (a: THREE.Vector3, b: THREE.Vector3, droop: number) => {
+          const mid = new THREE.Vector3((a.x + b.x) / 2, (a.y + b.y) / 2 - droop, (a.z + b.z) / 2)
+          const curve = new THREE.QuadraticBezierCurve3(a, mid, b)
+          mAdd(new THREE.Mesh(new THREE.TubeGeometry(curve, 6, 0.035, 4, false), wireMat))
+        }
+        for (const side of [-1, 1] as const) {
+          const innerZ = CG_Z + side * CG_HW // -27 (north) / -17 (south) wall face
+          const nz = -side // +1 north (into lane = +z), -1 south
+          for (let x = CG_X0 - 5; x > CG_X1 + 5; x -= 5.5) {
+            if (rnd() < 0.85) {
+              const ay = 4.6 + rnd() * 3.4 // y 4.6..8 (overhead — player walks under)
+              const ax = x + (rnd() - 0.5) * 3
+              acBodyXf.push({ pos: [ax, ay, innerZ + nz * 0.3] })
+              acFanXf.push({ pos: [ax, ay, innerZ + nz * 0.56], rotY: nz > 0 ? 0 : Math.PI })
+              if (rnd() < 0.55) {
+                hoseXf.push({
+                  pos: [ax + 0.4, ay - 1.0, innerZ + nz * 0.32],
+                  scl: [1, 1.7, 1],
+                  rotX: nz * 0.25,
+                })
+              }
+            }
+            if (rnd() < 0.6) {
+              const px = x + (rnd() - 0.5) * 4
+              pipeXf.push({ pos: [px, 4.6, innerZ + nz * 0.16], scl: [1, 9, 1] })
+            }
+          }
+        }
+        instAdd(acBodyGeo, acUnitMat, acBodyXf)
+        instAdd(acFanGeo, acFanMat, acFanXf)
+        instAdd(pipeGeo, pipeMat, pipeXf)
+        instAdd(hoseGeo, hoseMat, hoseXf)
+        // Cross-lane cable tangle (every ~11u, sagging under the arcade) + a few along-lane
+        // droops each side. All merged into the single wireMat mesh.
+        for (let x = CG_X0 - 8; x > CG_X1 + 8; x -= 11) {
+          addWire(
+            new THREE.Vector3(x, 8.7, CG_Z - CG_HW - 0.2),
+            new THREE.Vector3(x + (rnd() - 0.5) * 2, 8.7, CG_Z + CG_HW + 0.2),
+            0.9 + rnd() * 0.5,
+          )
+        }
+        for (const side of [-1, 1] as const) {
+          const wz = CG_Z + side * (CG_HW + 0.1)
+          for (let x = CG_X0 - 10; x > CG_X1 + 22; x -= 22) {
+            addWire(new THREE.Vector3(x, 8.5, wz), new THREE.Vector3(x - 18, 8.5, wz), 1.1)
+          }
+        }
+        // 非常階段 (steel fire escapes): landings + guard rails + steep flights, merged into
+        // frameMat. First landing at y=3.6 (player passes under); projects ~1.3 into the
+        // lane; no AABB.
+        const fireEscape = (fx: number, innerZ: number, nz: number) => {
+          const out = nz * 1.3
+          for (let lvl = 0; lvl < 3; lvl++) {
+            const ly = 3.6 + lvl * 2.8
+            const land = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.12, 1.3), frameMat)
+            land.position.set(fx, ly, innerZ + out * 0.5)
+            mAdd(land)
+            const rail = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.1, 0.08), frameMat)
+            rail.position.set(fx, ly + 0.9, innerZ + out)
+            mAdd(rail)
+            for (const ex of [-1, 1]) {
+              const post = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.95, 0.08), frameMat)
+              post.position.set(fx + ex * 1.05, ly + 0.45, innerZ + out)
+              mAdd(post)
+            }
+            if (lvl < 2) {
+              const flight = new THREE.Mesh(new THREE.BoxGeometry(0.85, 0.1, 3.1), frameMat)
+              flight.position.set(fx + 0.55, ly + 1.4, innerZ + out * 0.55)
+              flight.rotation.x = nz * 1.05 // steep ramp between landings
+              mAdd(flight)
+            }
+          }
+        }
+        fireEscape(-42, CG_Z - CG_HW, 1) // north shopfront
+        fireEscape(-92, CG_Z + CG_HW, -1) // south shopfront
         // ══ センター街 Phase C: 枝分かれの路地 (薄暗い横丁・行き止まり) ══════════════
         // Each alley branches off the lane through the gap left in its wall, runs out to
         // a dead-end cap, and is packed tighter + darker than the main street: small
