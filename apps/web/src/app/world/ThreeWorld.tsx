@@ -16997,6 +16997,20 @@ export default function ThreeWorld({
         sealLight: THREE.PointLight | null
         neonMats: THREE.MeshStandardMaterial[]
         cull: { obj: THREE.Object3D; cx: number; cz: number; r: number }[]
+        // real-street Phase G: pendulum sway of hanging decor (noren/lanterns) + a light
+        // bar running the arcade. Geometry-light — a few instanced meshes re-stamped at
+        // half rate, plus one moving mesh. (Crowd + cars are STATIC, built into the map.)
+        sway: {
+          mesh: THREE.InstancedMesh
+          base: { x: number; y: number; z: number; s: number; ph: number; ry: number }[]
+          amp: number
+          freq: number
+          pv: number
+        }[]
+        lightRunner: THREE.Mesh | null
+        runnerMinX: number
+        runnerMaxX: number
+        dummy: THREE.Object3D
       }
       let shibuyaAnim: ShibuyaAnim | null = null
       // SHIBUYA night sky saved on build so it restores on teardown (fog reuses the
@@ -18874,13 +18888,18 @@ export default function ThreeWorld({
           fpos.needsUpdate = true
         }
         floorGeo.computeVertexNormals()
-        const asphaltTex = makeNoiseTexture(128, 0x34353d, 0.16, 26)
+        // Wet night asphalt: a dark neutral deck (#26–#2c grey) whose sheen comes from
+        // the neon reflections layered on top, NOT from a bright base. Darkened from the
+        // old mid-grey so the street reads as rain-wet, while the strong night
+        // hemisphere + a faint cool emissive floor keep it legible (no black void — the
+        // Phase F rig was deliberately lifted for exactly this reason).
+        const asphaltTex = makeNoiseTexture(128, 0x2b2c33, 0.14, 26)
         const floor = new THREE.Mesh(
           floorGeo,
           new THREE.MeshLambertMaterial({
             map: asphaltTex,
-            color: 0x8a8d97,
-            emissive: 0x10131c,
+            color: 0x70727c,
+            emissive: 0x101420,
             emissiveIntensity: 1,
           }),
         )
@@ -18914,10 +18933,12 @@ export default function ThreeWorld({
         // crosswalk lines on top). Two main streets cross through it (N-S along the
         // 公園通り axis, E-W along the 宮益坂 axis); the diagonal slope-roads
         // (道玄坂/センター街) arrive with their areas in later PRs.
+        // Wet asphalt for the roads/lane/alleys (kept a touch lighter than the deck so
+        // the street network still reads), reused for the センター街 lane + alleys.
         const roadMat = new THREE.MeshLambertMaterial({
-          color: 0x9498a2,
-          map: makeNoiseTexture(128, 0x3a3b44, 0.12, 18),
-          emissive: 0x141722,
+          color: 0x7c7e88,
+          map: makeNoiseTexture(128, 0x303139, 0.12, 18),
+          emissive: 0x141826,
           emissiveIntensity: 1,
         })
         const plaza = new THREE.Mesh(new THREE.PlaneGeometry(44, 44), roadMat)
@@ -18957,6 +18978,51 @@ export default function ThreeWorld({
           })
         }
         instAdd(puddleGeo, puddleMat, puddleXf)
+        // ── Wet 石畳 seams: a faint cool grid baked into a tiny canvas, tiled over the
+        // walkable deck as ONE additive overlay. Reads as rain-wet paving joints
+        // catching the neon — pure texture, zero geometry density. The UVs are
+        // pre-scaled to a fixed ~3.4-unit paver so the tiling never stretches. ──
+        const seamCanvas = document.createElement("canvas")
+        seamCanvas.width = 128
+        seamCanvas.height = 128
+        const sctx = seamCanvas.getContext("2d")
+        if (sctx) {
+          sctx.clearRect(0, 0, 128, 128)
+          sctx.strokeStyle = "rgba(150,178,224,0.6)" // cool seam glint
+          sctx.lineWidth = 2
+          sctx.strokeRect(1, 1, 126, 126)
+          sctx.globalAlpha = 0.45
+          sctx.beginPath()
+          sctx.moveTo(64, 0)
+          sctx.lineTo(64, 128) // half-joint (running-bond look)
+          sctx.stroke()
+        }
+        const seamTex = new THREE.CanvasTexture(seamCanvas)
+        seamTex.wrapS = THREE.RepeatWrapping
+        seamTex.wrapT = THREE.RepeatWrapping
+        seamTex.anisotropy = 4
+        const seamGeo = new THREE.PlaneGeometry(2 * H, 2 * H)
+        const seamUV = seamGeo.attributes.uv
+        if (seamUV) {
+          const pav = (2 * H) / 3.4 // ~3.4-unit pavers across the 200u deck
+          for (let i = 0; i < seamUV.count; i++) {
+            seamUV.setXY(i, seamUV.getX(i) * pav, seamUV.getY(i) * pav)
+          }
+          seamUV.needsUpdate = true
+        }
+        const seamDeck = new THREE.Mesh(
+          seamGeo,
+          new THREE.MeshBasicMaterial({
+            map: seamTex,
+            transparent: true,
+            opacity: 0.12,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false,
+          }),
+        )
+        seamDeck.rotation.x = -Math.PI / 2
+        seamDeck.position.y = 0.03
+        add(seamDeck)
 
         // ══ Phase B: スクランブル交差点 (渋谷の象徴) ══════════════════════════════
         // The instantly-recognizable scramble: 4 straight + 2 diagonal (X) zebra
@@ -19101,8 +19167,12 @@ export default function ThreeWorld({
         // Window-grid emissive texture: lit windows glow, gaps + dark windows stay
         // black so only windows emit. Deterministic via the build PRNG.
         const makeWindowTex = (cols: number, rows: number, litHex: number, litChance: number) => {
-          const cw = 6
-          const ch = 9
+          // Larger panes (was 6×9) so distant facades read as windows, not TV static —
+          // the old fine grid aliased into "white noise" on the right-edge towers. Each
+          // lit pane also gets its own brightness so the field shimmers instead of
+          // being a flat sheet of identical bright dots.
+          const cw = 9
+          const ch = 13
           const cv = document.createElement("canvas")
           cv.width = cols * cw
           cv.height = rows * ch
@@ -19110,11 +19180,17 @@ export default function ThreeWorld({
           if (ctx) {
             ctx.fillStyle = "#000000"
             ctx.fillRect(0, 0, cv.width, cv.height)
-            const litCol = `#${litHex.toString(16).padStart(6, "0")}`
+            const lr = (litHex >> 16) & 0xff
+            const lg = (litHex >> 8) & 0xff
+            const lb = litHex & 0xff
             for (let r = 0; r < rows; r++) {
               for (let c = 0; c < cols; c++) {
-                const on = rnd() < litChance
-                ctx.fillStyle = on ? litCol : "#0a0d14"
+                if (rnd() < litChance) {
+                  const k = 0.45 + rnd() * 0.55 // per-pane brightness
+                  ctx.fillStyle = `rgb(${Math.round(lr * k)},${Math.round(lg * k)},${Math.round(lb * k)})`
+                } else {
+                  ctx.fillStyle = "#0a0d14"
+                }
                 ctx.fillRect(c * cw + 1, r * ch + 1, cw - 2, ch - 3)
               }
             }
@@ -19138,15 +19214,15 @@ export default function ThreeWorld({
           litChance: number,
           setback = 0,
         ) => {
-          const tex = makeWindowTex(16, 40, litHex, litChance)
-          tex.repeat.set(Math.max(2, Math.round(w / 4)), Math.max(3, Math.round(h / 4)))
+          const tex = makeWindowTex(12, 22, litHex, litChance)
+          tex.repeat.set(Math.max(2, Math.round(w / 7)), Math.max(2, Math.round(h / 7)))
           const mat = new THREE.MeshStandardMaterial({
             color: 0x0d111a,
             roughness: 0.42,
             metalness: 0.34,
             emissive: 0xffffff,
             emissiveMap: tex,
-            emissiveIntensity: 0.7,
+            emissiveIntensity: 0.55,
           })
           const body = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat)
           body.position.set(cx, baseY + h / 2, cz)
@@ -19164,14 +19240,14 @@ export default function ThreeWorld({
         makeTower(120, -20, 28, 32, 82, 0, 0xbfe0ff, 0.45, 10)
         // — Backdrop skyline ring climbing the スリバチ rim (shared material → 1 draw
         // call for the whole ring). Sits on the rising ground via shibuyaGroundY.
-        const rimWinTex = makeWindowTex(14, 44, 0x88a8d8, 0.4)
-        rimWinTex.repeat.set(4, 10)
+        const rimWinTex = makeWindowTex(12, 24, 0x7e9ccc, 0.34)
+        rimWinTex.repeat.set(3, 6)
         const rimMat = new THREE.MeshStandardMaterial({
           color: 0x090c14,
           roughness: 0.7,
-          emissive: 0x9fb6dc,
+          emissive: 0x8aa0c4,
           emissiveMap: rimWinTex,
-          emissiveIntensity: 0.5,
+          emissiveIntensity: 0.36,
         })
         for (let i = 0; i < dn(16); i++) {
           const ang = (i / 16) * Math.PI * 2 + rnd() * 0.3
@@ -19472,6 +19548,94 @@ export default function ThreeWorld({
         cgBeam.position.set(CG_X0 + 0.6, 8, CG_Z)
         cgBeam.rotation.y = Math.PI / 2 // plane (+z) → faces +x toward the player
         add(cgBeam)
+        // ── アーケード屋根 (real-street Phase B): a translucent shotengai arcade over
+        // the センター街 main lane ONLY (alleys stay open-air). A metal-grey frame —
+        // ridge + eave purlins, transverse ties, sloped rafters, and knee-braces
+        // reaching off the shopfront walls — carries two bluish translucent panel
+        // slopes that glow faintly (emissive) as if catching the neon flood from
+        // below. EVERY frame member is funnelled through mAdd (rotation baked into the
+        // merge), so the whole frame is ONE draw call + the panels another. No
+        // collision (it's overhead) → no #117 ghost walls. ──
+        const arcEaveY = 9.6 // just above the CG_WALL_H=9 shopfront walls
+        const arcRidgeY = 12.0
+        const arcEaveZN = CG_Z - CG_HW - 0.3 // -27.3, over the north wall
+        const arcEaveZS = CG_Z + CG_HW + 0.3 // -16.7, over the south wall
+        const arcRun = CG_HW + 0.3 // 5.3 horizontal eave→ridge run
+        const arcRise = arcRidgeY - arcEaveY // 2.4
+        const arcSlope = Math.hypot(arcRun, arcRise) // rafter / panel length
+        const arcPhi = Math.atan2(arcRise, arcRun) // slope angle off horizontal
+        const arcMidY = (arcEaveY + arcRidgeY) / 2 // 10.8
+        const arcX0 = CG_X0 - 2 // -18, just inside the mouth arch
+        const arcX1 = CG_X1 + 2 // -136, just shy of the dead-end cap
+        const arcLen = arcX0 - arcX1 // 118 of covered lane
+        const arcMidX = (arcX0 + arcX1) / 2 // -77
+        const frameMat = new THREE.MeshStandardMaterial({
+          color: 0x55585f,
+          roughness: 0.45,
+          metalness: 0.65,
+          emissive: 0x0a0c12,
+          emissiveIntensity: 0.4,
+        })
+        const arcPanelMat = new THREE.MeshStandardMaterial({
+          color: 0x8fb6df,
+          transparent: true,
+          opacity: 0.34,
+          emissive: 0x1b3052,
+          emissiveIntensity: 0.7,
+          side: THREE.DoubleSide,
+          roughness: 0.3,
+          metalness: 0.1,
+          depthWrite: false,
+        })
+        // Longitudinal purlins: ridge + two eaves (merged into the frame bucket).
+        for (const [py, pz, pt] of [
+          [arcRidgeY, CG_Z, 0.22],
+          [arcEaveY, arcEaveZN, 0.2],
+          [arcEaveY, arcEaveZS, 0.2],
+        ] as const) {
+          const beam = new THREE.Mesh(new THREE.BoxGeometry(arcLen, pt, pt), frameMat)
+          beam.position.set(arcMidX, py, pz)
+          mAdd(beam)
+        }
+        // Transverse frame per bay: a flat tie across the lane, two sloped rafters up to
+        // the ridge, a knee-brace each side off the shopfront wall. raftGeo/braceGeo are
+        // Z-long boxes so a single rotX tilts them onto the slope.
+        const tieGeo = new THREE.BoxGeometry(0.18, 0.18, CG_HW * 2 + 0.6)
+        const raftGeo = new THREE.BoxGeometry(0.16, 0.16, arcSlope)
+        const braceGeo = new THREE.BoxGeometry(0.14, 0.14, 2.0)
+        const arcStep = isMobileDevice ? 8 : 5.6
+        for (let x = arcX0; x >= arcX1 - 0.01; x -= arcStep) {
+          const tie = new THREE.Mesh(tieGeo, frameMat)
+          tie.position.set(x, arcEaveY, CG_Z)
+          mAdd(tie)
+          const rN = new THREE.Mesh(raftGeo, frameMat)
+          rN.position.set(x, arcMidY, (arcEaveZN + CG_Z) / 2)
+          rN.rotation.x = -arcPhi
+          mAdd(rN)
+          const rS = new THREE.Mesh(raftGeo, frameMat)
+          rS.position.set(x, arcMidY, (arcEaveZS + CG_Z) / 2)
+          rS.rotation.x = arcPhi
+          mAdd(rS)
+          const bN = new THREE.Mesh(braceGeo, frameMat)
+          bN.position.set(x, arcEaveY - 0.9, arcEaveZN + 0.9)
+          bN.rotation.x = -Math.PI / 4
+          mAdd(bN)
+          const bS = new THREE.Mesh(braceGeo, frameMat)
+          bS.position.set(x, arcEaveY - 0.9, arcEaveZS - 0.9)
+          bS.rotation.x = Math.PI / 4
+          mAdd(bS)
+        }
+        // Two translucent panel slopes (single rotX tilt; share arcPanelMat → merged
+        // into one draw call). They ride just under the rafters and glow with reflected
+        // neon. DoubleSide so the underside is lit from inside the lane.
+        const arcPanelN = new THREE.Mesh(new THREE.PlaneGeometry(arcLen, arcSlope), arcPanelMat)
+        arcPanelN.rotation.x = -Math.PI / 2 - arcPhi
+        arcPanelN.position.set(arcMidX, arcMidY, (arcEaveZN + CG_Z) / 2)
+        mAdd(arcPanelN)
+        const arcPanelS = new THREE.Mesh(new THREE.PlaneGeometry(arcLen, arcSlope), arcPanelMat)
+        arcPanelS.rotation.x = -Math.PI / 2 + arcPhi
+        arcPanelS.position.set(arcMidX, arcMidY, (arcEaveZS + CG_Z) / 2)
+        mAdd(arcPanelS)
         // ── のんべい横丁 (tight izakaya alley, NE — lanterns + noren, OSAKA tech) ──
         const izaMat = new THREE.MeshLambertMaterial({ color: 0x2c2622 })
         const lanternGeo = new THREE.CylinderGeometry(0.26, 0.26, 0.5, 8)
@@ -19656,9 +19820,14 @@ export default function ThreeWorld({
         hBody.position.set(sx0, 2.6, sz0 - 13)
         mAdd(hBody)
         addShibuyaAABB(sx0, sz0 - 13, 4.5, 3, 4.7)
-        const hRoof = new THREE.Mesh(new THREE.ConeGeometry(7.6, 2.6, 4), roofMat)
+        // Honden hip-roof: warm dark tile. The old cold-slate, very wide+flat cone read
+        // from the scramble as a stray "mystery blue triangle" (it caught the cool night
+        // hemi + cyan seal light); recoloured warm and tightened (less eave overhang,
+        // a touch taller) so it reads as a shrine roof, not a floating artifact.
+        const hRoofMat = new THREE.MeshLambertMaterial({ color: 0x332a20 })
+        const hRoof = new THREE.Mesh(new THREE.ConeGeometry(6.0, 3.4, 4), hRoofMat)
         hRoof.rotation.y = Math.PI / 4
-        hRoof.position.set(sx0, 6.0, sz0 - 13)
+        hRoof.position.set(sx0, 6.2, sz0 - 13)
         mAdd(hRoof)
         // Grove: instanced trees (trunk + foliage) ringing the precinct.
         const trunkGeo = new THREE.CylinderGeometry(0.3, 0.4, 4, 6)
@@ -20308,6 +20477,106 @@ export default function ThreeWorld({
         instAdd(cgLampHeadGeo, cgLampHeadMat, cgLampHeadXf)
         instAdd(cgBikeFrameGeo, cgBikeMat, cgBikeFrameXf)
         instAdd(cgBikeWheelGeo, cgBikeMat, cgBikeWheelXf)
+        // ══ センター街 real-street Phase D: 雑居ビルの設備 (室外機・配管・電線・非常階段) ══
+        // The grime that makes a 雑居ビル wall read as real: AC condensers + drain hoses,
+        // vertical pipe runs, a tangle of sagging cables across the lane, and two steel
+        // fire escapes. ALL mounted overhead (y≥3.6) so the player passes underneath, and
+        // ALL non-colliding (no AABB → no #117 ghosts). AC bodies/fans/pipes/hoses are
+        // instanced; the cables merge into ONE wire mesh; the fire escapes reuse frameMat
+        // → they merge into the arcade-frame bucket (zero extra draw call).
+        const acFanMat = new THREE.MeshStandardMaterial({ color: 0x26282c, roughness: 0.7 })
+        const pipeMat = new THREE.MeshStandardMaterial({
+          color: 0x3c3a36,
+          roughness: 0.75,
+          metalness: 0.3,
+        })
+        const hoseMat = new THREE.MeshStandardMaterial({ color: 0x1c1d20, roughness: 0.9 })
+        const wireMat = new THREE.MeshLambertMaterial({ color: 0x0a0a0c })
+        const acBodyGeo = new THREE.BoxGeometry(1.15, 0.78, 0.5)
+        const acFanGeo = new THREE.CircleGeometry(0.28, 14)
+        const pipeGeo = new THREE.CylinderGeometry(0.09, 0.09, 1, 6) // unit Y, scaled per run
+        const hoseGeo = new THREE.CylinderGeometry(0.045, 0.045, 1, 5)
+        const acBodyXf: Xf[] = []
+        const acFanXf: Xf[] = []
+        const pipeXf: Xf[] = []
+        const hoseXf: Xf[] = []
+        // Sagging cable: a low-poly tube along a quadratic sag (its own wireMat bucket so
+        // it never mixes attribute sets with the box merges).
+        const addWire = (a: THREE.Vector3, b: THREE.Vector3, droop: number) => {
+          const mid = new THREE.Vector3((a.x + b.x) / 2, (a.y + b.y) / 2 - droop, (a.z + b.z) / 2)
+          const curve = new THREE.QuadraticBezierCurve3(a, mid, b)
+          mAdd(new THREE.Mesh(new THREE.TubeGeometry(curve, 6, 0.035, 4, false), wireMat))
+        }
+        for (const side of [-1, 1] as const) {
+          const innerZ = CG_Z + side * CG_HW // -27 (north) / -17 (south) wall face
+          const nz = -side // +1 north (into lane = +z), -1 south
+          for (let x = CG_X0 - 5; x > CG_X1 + 5; x -= 5.5) {
+            if (rnd() < 0.85) {
+              const ay = 4.6 + rnd() * 3.4 // y 4.6..8 (overhead — player walks under)
+              const ax = x + (rnd() - 0.5) * 3
+              acBodyXf.push({ pos: [ax, ay, innerZ + nz * 0.3] })
+              acFanXf.push({ pos: [ax, ay, innerZ + nz * 0.56], rotY: nz > 0 ? 0 : Math.PI })
+              if (rnd() < 0.55) {
+                hoseXf.push({
+                  pos: [ax + 0.4, ay - 1.0, innerZ + nz * 0.32],
+                  scl: [1, 1.7, 1],
+                  rotX: nz * 0.25,
+                })
+              }
+            }
+            if (rnd() < 0.6) {
+              const px = x + (rnd() - 0.5) * 4
+              pipeXf.push({ pos: [px, 4.6, innerZ + nz * 0.16], scl: [1, 9, 1] })
+            }
+          }
+        }
+        instAdd(acBodyGeo, acUnitMat, acBodyXf)
+        instAdd(acFanGeo, acFanMat, acFanXf)
+        instAdd(pipeGeo, pipeMat, pipeXf)
+        instAdd(hoseGeo, hoseMat, hoseXf)
+        // Cross-lane cable tangle (every ~11u, sagging under the arcade) + a few along-lane
+        // droops each side. All merged into the single wireMat mesh.
+        for (let x = CG_X0 - 8; x > CG_X1 + 8; x -= 11) {
+          addWire(
+            new THREE.Vector3(x, 8.7, CG_Z - CG_HW - 0.2),
+            new THREE.Vector3(x + (rnd() - 0.5) * 2, 8.7, CG_Z + CG_HW + 0.2),
+            0.9 + rnd() * 0.5,
+          )
+        }
+        for (const side of [-1, 1] as const) {
+          const wz = CG_Z + side * (CG_HW + 0.1)
+          for (let x = CG_X0 - 10; x > CG_X1 + 22; x -= 22) {
+            addWire(new THREE.Vector3(x, 8.5, wz), new THREE.Vector3(x - 18, 8.5, wz), 1.1)
+          }
+        }
+        // 非常階段 (steel fire escapes): landings + guard rails + steep flights, merged into
+        // frameMat. First landing at y=3.6 (player passes under); projects ~1.3 into the
+        // lane; no AABB.
+        const fireEscape = (fx: number, innerZ: number, nz: number) => {
+          const out = nz * 1.3
+          for (let lvl = 0; lvl < 3; lvl++) {
+            const ly = 3.6 + lvl * 2.8
+            const land = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.12, 1.3), frameMat)
+            land.position.set(fx, ly, innerZ + out * 0.5)
+            mAdd(land)
+            const rail = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.1, 0.08), frameMat)
+            rail.position.set(fx, ly + 0.9, innerZ + out)
+            mAdd(rail)
+            for (const ex of [-1, 1]) {
+              const post = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.95, 0.08), frameMat)
+              post.position.set(fx + ex * 1.05, ly + 0.45, innerZ + out)
+              mAdd(post)
+            }
+            if (lvl < 2) {
+              const flight = new THREE.Mesh(new THREE.BoxGeometry(0.85, 0.1, 3.1), frameMat)
+              flight.position.set(fx + 0.55, ly + 1.4, innerZ + out * 0.55)
+              flight.rotation.x = nz * 1.05 // steep ramp between landings
+              mAdd(flight)
+            }
+          }
+        }
+        fireEscape(-42, CG_Z - CG_HW, 1) // north shopfront
+        fireEscape(-92, CG_Z + CG_HW, -1) // south shopfront
         // ══ センター街 Phase C: 枝分かれの路地 (薄暗い横丁・行き止まり) ══════════════
         // Each alley branches off the lane through the gap left in its wall, runs out to
         // a dead-end cap, and is packed tighter + darker than the main street: small
@@ -20744,6 +21013,14 @@ export default function ThreeWorld({
           [-22, -18, 1, 5],
           [20, -16, 0, 5],
           [0, 6, 0, 5],
+          // Phase A: pools running down the センター街 lane (the hero street) + a couple more.
+          [-30, -22, 0, 5],
+          [-52, -22, 1, 5],
+          [-74, -22, 0, 5],
+          [-96, -22, 1, 4],
+          [-118, -22, 0, 4],
+          [-8, 0, 1, 5],
+          [12, 28, 0, 5],
         ] as const) {
           ;(c === 0 ? poolBlueXf : poolMagXf).push({
             pos: [px, 0.05, pz],
@@ -20753,6 +21030,44 @@ export default function ThreeWorld({
         }
         instAdd(poolGeo, poolBlueMat, poolBlueXf)
         instAdd(poolGeo, poolMagMat, poolMagXf)
+        // ── Neon "reflections" smeared in the wet deck: brighter, stretched additive
+        // streaks (a sign's mirror image breaking up on the rain film). Two colour
+        // sets, one instanced mesh each, sitting just above the dark puddles/pools. ──
+        const reflBlueMat = new THREE.MeshBasicMaterial({
+          color: 0xbfe0ff,
+          transparent: true,
+          opacity: 0.2,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+        })
+        const reflMagMat = new THREE.MeshBasicMaterial({
+          color: 0xff8fc8,
+          transparent: true,
+          opacity: 0.18,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+        })
+        const reflBlueXf: Xf[] = []
+        const reflMagXf: Xf[] = []
+        // sx → world X width, sz → world Z length (local Y after the -90° X-rotation).
+        for (const [rx, rz, c, sx, sz] of [
+          [-2, -29, 0, 1.5, 6.0], // under the 駅前 big-visions — smear toward the viewer
+          [22, -30, 0, 1.3, 5.0],
+          [-20, 20, 1, 1.3, 4.5],
+          [16, 14, 0, 1.2, 4.0],
+          [-30, -22, 1, 5.5, 1.3], // センター街 lane — smear down the street (X)
+          [-54, -22, 0, 5.5, 1.3],
+          [-78, -22, 1, 5.5, 1.3],
+          [-102, -22, 0, 5.0, 1.3],
+        ] as const) {
+          ;(c === 0 ? reflBlueXf : reflMagXf).push({
+            pos: [rx, 0.06, rz],
+            rotX: -Math.PI / 2,
+            scl: [sx, sz, 1],
+          })
+        }
+        instAdd(poolGeo, reflBlueMat, reflBlueXf)
+        instAdd(poolGeo, reflMagMat, reflMagXf)
         // ── A ring of bollards around the central plaza (instanced short posts). ──
         const bollGeo = new THREE.CylinderGeometry(0.12, 0.14, 0.8, 6)
         const bollMat = new THREE.MeshStandardMaterial({
@@ -20768,6 +21083,383 @@ export default function ThreeWorld({
           bollXf.push({ pos: [Math.cos(a) * 13.5, 0.4, Math.sin(a) * 13.5] })
         }
         instAdd(bollGeo, bollMat, bollXf)
+
+        // ══ センター街/駅前 real-street Phase E: 路上什器 (猥雑感の核) ══════════════════
+        // Lived-in clutter: standing signboards, vending clusters, 券売機 + 食品サンプル
+        // cases, abandoned bicycle piles, alley rubbish (ゴミ袋・段ボール・コーン), and
+        // street furniture (電柱・ガードレール・マンホール). Almost everything sits FLUSH to
+        // a wall/corner the player can't reach (player stops ~PLAYER_RADIUS off a wall),
+        // so it needs NO hitbox; only the free-standing bicycle piles in open ground get
+        // a tight AABB that exactly matches the pile (no #117 ghosts). All instanced;
+        // vending/cone/bike geos + concreteMat are reused.
+        const offWhiteMat = new THREE.MeshStandardMaterial({ color: 0xd8d4c8, roughness: 0.85 })
+        const warmPanelMat = new THREE.MeshBasicMaterial({ color: 0xffd9a0, toneMapped: false })
+        const cyanPanelMat = new THREE.MeshBasicMaterial({ color: 0x8fe8ff, toneMapped: false })
+        const trashMat = new THREE.MeshStandardMaterial({ color: 0x24271f, roughness: 0.95 })
+        const cardboardMat = new THREE.MeshStandardMaterial({ color: 0x6b5436, roughness: 0.95 })
+        const manholeMat = new THREE.MeshStandardMaterial({
+          color: 0x303236,
+          roughness: 0.85,
+          metalness: 0.5,
+        })
+        const vendRMat = new THREE.MeshStandardMaterial({
+          color: 0xc0392b,
+          emissive: 0x3a0f0a,
+          emissiveIntensity: 0.6,
+          roughness: 0.5,
+        })
+        const vendBMat = new THREE.MeshStandardMaterial({
+          color: 0x2456b0,
+          emissive: 0x0a1a3a,
+          emissiveIntensity: 0.6,
+          roughness: 0.5,
+        })
+        const furnMat = new THREE.MeshStandardMaterial({
+          color: 0x33343a,
+          roughness: 0.6,
+          metalness: 0.3,
+        })
+        const foodMat = new THREE.MeshStandardMaterial({
+          color: 0xcabfa0,
+          emissive: 0x5a4a2e,
+          emissiveIntensity: 0.6,
+          roughness: 0.4,
+        })
+        // Standing signboard (board + base) and utility pole (mast + crossarm) and
+        // guardrail (beam + 2 posts) are each merged ONCE into one geo, then instanced.
+        const _bdBoard = new THREE.BoxGeometry(0.85, 1.0, 0.05)
+        _bdBoard.translate(0, 0.62, 0)
+        const _bdBase = new THREE.BoxGeometry(0.85, 0.08, 0.5)
+        _bdBase.translate(0, 0.04, 0.12)
+        const boardGeo = mergeGeometries([_bdBoard, _bdBase], false) ?? _bdBoard
+        const boardPanelGeo = new THREE.PlaneGeometry(0.7, 0.78)
+        const trashGeo = new THREE.SphereGeometry(0.42, 7, 5)
+        const cardboardGeo = new THREE.BoxGeometry(0.6, 0.5, 0.5)
+        const manholeGeo = new THREE.CircleGeometry(0.5, 16)
+        const ticketGeo = new THREE.BoxGeometry(0.75, 1.5, 0.42)
+        const ticketPanelGeo = new THREE.PlaneGeometry(0.6, 0.5)
+        const foodCaseGeo = new THREE.BoxGeometry(1.0, 0.9, 0.55)
+        const boardXf: Xf[] = []
+        const boardPanelXf: Xf[] = []
+        const trashXf: Xf[] = []
+        const cardboardXf: Xf[] = []
+        const manholeXf: Xf[] = []
+        const ticketXf: Xf[] = []
+        const ticketPanelXf: Xf[] = []
+        const foodCaseXf: Xf[] = []
+        const vendRXf: Xf[] = []
+        const vendBXf: Xf[] = []
+        const eBikeFrameXf: Xf[] = []
+        const eBikeWheelXf: Xf[] = []
+        const eConeXf: Xf[] = []
+        // Zone 1 — lane storefronts: walk both walls, drop one item per stretch, FLUSH to
+        // the wall (unreachable → no AABB).
+        for (const side of [-1, 1] as const) {
+          const innerZ = CG_Z + side * CG_HW // -27 / -17
+          const nz = -side // into the lane
+          for (let x = CG_X0 - 6; x > CG_X1 + 6; x -= 7) {
+            const r = rnd()
+            if (r < 0.28) {
+              boardXf.push({ pos: [x, 0, innerZ + nz * 0.6], rotY: nz > 0 ? 0 : Math.PI })
+              boardPanelXf.push({ pos: [x, 0.66, innerZ + nz * 0.66], rotY: nz > 0 ? 0 : Math.PI })
+            } else if (r < 0.52) {
+              ;(rnd() < 0.5 ? vendRXf : vendBXf).push({ pos: [x - 0.6, 0.95, innerZ + nz * 0.45] })
+              ;(rnd() < 0.5 ? vendRXf : vendBXf).push({ pos: [x + 0.6, 0.95, innerZ + nz * 0.45] })
+            } else if (r < 0.7) {
+              ticketXf.push({ pos: [x, 0.75, innerZ + nz * 0.4], rotY: nz > 0 ? 0 : Math.PI })
+              ticketPanelXf.push({ pos: [x, 1.08, innerZ + nz * 0.62], rotY: nz > 0 ? 0 : Math.PI })
+            } else if (r < 0.84) {
+              foodCaseXf.push({ pos: [x, 0.95, innerZ + nz * 0.5] })
+            } else {
+              for (let b = 0; b < 2 + Math.floor(rnd() * 3); b++) {
+                const bx = x + b * 0.4
+                const bz = innerZ + nz * (0.7 + rnd() * 0.25)
+                eBikeFrameXf.push({ pos: [bx, 0.55, bz], rotY: 0.15 + rnd() * 0.2 })
+                eBikeWheelXf.push({ pos: [bx - 0.5, 0.32, bz], rotX: Math.PI / 2 })
+                eBikeWheelXf.push({ pos: [bx + 0.5, 0.32, bz], rotX: Math.PI / 2 })
+              }
+            }
+          }
+        }
+        // Zone 2 — alley rubbish piled at each dead-end (dark corners; small → no AABB).
+        for (const al of cgAlleys) {
+          const zEnd = CG_Z + al.side * (CG_HW + al.len)
+          for (let i = 0; i < dn(5); i++) {
+            const ax = al.x + (rnd() - 0.5) * (al.w - 1)
+            const az = zEnd - al.side * (0.8 + rnd() * 2.5)
+            const k = rnd()
+            if (k < 0.5) trashXf.push({ pos: [ax, 0.4, az], scl: 0.7 + rnd() * 0.6 })
+            else if (k < 0.8)
+              cardboardXf.push({ pos: [ax, 0.25, az], rotY: rnd() * 1.5, scl: 0.7 + rnd() * 0.7 })
+            else eConeXf.push({ pos: [ax, 0.45, az] })
+          }
+        }
+        // Zone 3 — flat manholes scattered on the plaza/roads/lane (no hitbox). Utility
+        // poles + guardrails already ring the main streets (built earlier in this fn), so
+        // they are NOT duplicated here.
+        for (const [mx, mz] of [
+          [3, 4],
+          [-6, -8],
+          [9, -3],
+          [0, 14],
+          [-12, 6],
+          [-30, -22],
+          [-60, -22],
+          [-95, -22],
+          [-120, -22],
+        ] as const) {
+          manholeXf.push({ pos: [mx, 0.045, mz], rotX: -Math.PI / 2 })
+        }
+        // A few free-standing bicycle piles in OPEN ground — these DO collide via a tight
+        // AABB matching the pile, so you can't walk through them (honours the brief's
+        // "bikes/standing-signs get a minimal hitbox").
+        for (const [px, pz] of [
+          [16, 14],
+          [-18, 16],
+        ] as const) {
+          for (let b = 0; b < 4; b++) {
+            eBikeFrameXf.push({ pos: [px + b * 0.42, 0.55, pz], rotY: 0.2 })
+            eBikeWheelXf.push({ pos: [px + b * 0.42 - 0.5, 0.32, pz], rotX: Math.PI / 2 })
+            eBikeWheelXf.push({ pos: [px + b * 0.42 + 0.5, 0.32, pz], rotX: Math.PI / 2 })
+          }
+          addShibuyaAABB(px + 0.8, pz, 1.2, 0.45, 1.0)
+        }
+        instAdd(boardGeo, offWhiteMat, boardXf)
+        instAdd(boardPanelGeo, warmPanelMat, boardPanelXf)
+        instAdd(vendGeo, vendRMat, vendRXf)
+        instAdd(vendGeo, vendBMat, vendBXf)
+        instAdd(ticketGeo, furnMat, ticketXf)
+        instAdd(ticketPanelGeo, cyanPanelMat, ticketPanelXf)
+        instAdd(foodCaseGeo, foodMat, foodCaseXf)
+        instAdd(cgBikeFrameGeo, cgBikeMat, eBikeFrameXf)
+        instAdd(cgBikeWheelGeo, cgBikeMat, eBikeWheelXf)
+        instAdd(trashGeo, trashMat, trashXf)
+        instAdd(cardboardGeo, cardboardMat, cardboardXf)
+        instAdd(coneGeo, coneMat, eConeXf)
+        instAdd(manholeGeo, manholeMat, manholeXf)
+
+        // ══ センター街 real-street Phase F: 装飾 (提灯・暖簾・横断幕・赤提灯) ══════════════
+        // Festival dressing, ALL non-colliding: rows of warm chōchin strung under the
+        // arcade (cords merge into the Phase D wire bucket), indigo/brown/red 暖簾 flush
+        // at the shopfronts, a few painted 横断幕 spanning the lane overhead, and red
+        // 赤提灯 marking each alley mouth. Lanterns/noren reuse the existing geos.
+        const lanternWarmMat = new THREE.MeshStandardMaterial({
+          color: 0xffe1a6,
+          emissive: 0xffc878,
+          emissiveIntensity: 1.5,
+        })
+        const norenMats2 = [
+          norenMat, // indigo (reused)
+          new THREE.MeshBasicMaterial({ color: 0x4a3526, side: THREE.DoubleSide }), // brown
+          new THREE.MeshBasicMaterial({ color: 0x6e2230, side: THREE.DoubleSide }), // dark red
+        ]
+        const arcLanternXf: Xf[] = []
+        const norenXf2: Xf[][] = norenMats2.map(() => [])
+        const redLanternXf: Xf[] = []
+        // Two rows of chōchin under the arcade (near each wall) + a cord per row.
+        for (const z of [CG_Z - (CG_HW - 1), CG_Z + (CG_HW - 1)] as const) {
+          for (let x = arcX0 - 1; x > arcX1 + 1; x -= 2.6) {
+            arcLanternXf.push({ pos: [x, 8.0, z], scl: 1.4 })
+          }
+          const lanternCord = new THREE.Mesh(new THREE.BoxGeometry(arcLen, 0.04, 0.04), wireMat)
+          lanternCord.position.set(arcMidX, 8.55, z)
+          mAdd(lanternCord)
+        }
+        const arcLanternMesh = instAdd(lanternGeo, lanternWarmMat, arcLanternXf)
+        // 暖簾 flush at shopfronts (unreachable → no clip), colour-varied.
+        for (const side of [-1, 1] as const) {
+          const innerZ = CG_Z + side * CG_HW
+          const nz = -side
+          for (let x = CG_X0 - 9; x > CG_X1 + 5; x -= 9.5) {
+            const ci = Math.floor(rnd() * norenMats2.length)
+            norenXf2[ci]?.push({ pos: [x, 2.1, innerZ + nz * 0.16], rotY: nz > 0 ? 0 : Math.PI })
+          }
+        }
+        const norenMeshes = norenMats2.map((m, i) => instAdd(norenGeo, m, norenXf2[i] ?? []))
+        // 赤提灯 marking each alley mouth + the lane mouth (overhead pairs).
+        for (const al of cgAlleys) {
+          const mz = CG_Z + al.side * CG_HW
+          redLanternXf.push({ pos: [al.x, 2.8, mz], scl: 1.9 })
+          redLanternXf.push({ pos: [al.x, 3.7, mz], scl: 1.9 })
+        }
+        for (const pz of [CG_Z - CG_HW + 1, CG_Z + CG_HW - 1] as const) {
+          redLanternXf.push({ pos: [CG_X0 - 1, 3.4, pz], scl: 2.1 })
+        }
+        instAdd(lanternGeo, lanternMat, redLanternXf)
+        // 横断幕: painted cloth banners spanning the lane (overhead), original names.
+        const makeBanner = (text: string, bg: string, fg: string) => {
+          const cv = document.createElement("canvas")
+          cv.width = 256
+          cv.height = 48
+          const c = cv.getContext("2d")
+          if (c) {
+            c.fillStyle = bg
+            c.fillRect(0, 0, 256, 48)
+            c.fillStyle = fg
+            c.font = "bold 30px sans-serif"
+            c.textAlign = "center"
+            c.textBaseline = "middle"
+            c.fillText(text, 128, 26)
+          }
+          const tex = new THREE.CanvasTexture(cv)
+          tex.colorSpace = THREE.SRGBColorSpace
+          return new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide })
+        }
+        for (const [bx, text, bg, fg] of [
+          [-32, "歳末大感謝祭", "#a01b2a", "#ffe6a0"],
+          [-72, "センター街 商店会", "#15306a", "#ffffff"],
+          [-112, "祝 渋谷ナイト", "#7a1840", "#ffd24a"],
+        ] as const) {
+          const crossBanner = new THREE.Mesh(
+            new THREE.PlaneGeometry(CG_HW * 2 + 1, 1.2),
+            makeBanner(text, bg, fg),
+          )
+          crossBanner.position.set(bx, 7.5, CG_Z)
+          crossBanner.rotation.y = Math.PI / 2 // width spans the lane (z); faces ±x
+          add(crossBanner)
+        }
+
+        // ══ センター街/駅前 real-street Phase G: 動き (軽量) — 静止群衆/車 + 揺れ + 光 ════
+        // Lightweight life. STATIC (never animated) distant crowd silhouettes + parked
+        // cars are built here; the *motion* (pendulum sway of noren/lanterns, a light bar
+        // running the arcade, richer neon jitter) is published to shibuyaAnim and driven
+        // by updateShibuyaMap — no new dynamic entities. (Moving crowds = STEP2.)
+        const figCv = document.createElement("canvas")
+        figCv.width = 32
+        figCv.height = 64
+        const figCtx = figCv.getContext("2d")
+        if (figCtx) {
+          figCtx.clearRect(0, 0, 32, 64)
+          figCtx.fillStyle = "#05060a"
+          figCtx.beginPath()
+          figCtx.arc(16, 11, 6, 0, Math.PI * 2)
+          figCtx.fill()
+          figCtx.fillRect(9, 17, 14, 27)
+          figCtx.fillRect(11, 43, 4, 19)
+          figCtx.fillRect(17, 43, 4, 19)
+        }
+        const figTex = new THREE.CanvasTexture(figCv)
+        const figMat = new THREE.MeshBasicMaterial({
+          map: figTex,
+          transparent: true,
+          depthWrite: false,
+          opacity: 0.92,
+        })
+        const figGeo = new THREE.PlaneGeometry(0.8, 1.7)
+        const figXf: Xf[] = []
+        for (let i = 0; i < dn(22); i++) {
+          const onNS = rnd() < 0.6
+          const along = (rnd() - 0.5) * 150
+          const cross = (rnd() - 0.5) * 14
+          const fx = onNS ? cross : along
+          const fz = onNS ? along : cross
+          if (Math.hypot(fx, fz) < 26) continue // keep them distant from the player start
+          figXf.push({ pos: [fx, 0.85, fz], rotY: Math.atan2(-fx, -fz) }) // face the centre
+        }
+        instAdd(figGeo, figMat, figXf)
+        // A few STATIC parked cars (never animated); tight axis-aligned AABBs.
+        const carGlassMat = new THREE.MeshStandardMaterial({
+          color: 0x0c1420,
+          roughness: 0.2,
+          metalness: 0.6,
+          emissive: 0x16202e,
+          emissiveIntensity: 0.4,
+        })
+        const carWheelMat = new THREE.MeshStandardMaterial({ color: 0x0a0a0c, roughness: 0.85 })
+        const carBodyMats = [0x9a2b2b, 0x223a6a, 0xcfcfd4].map(
+          (c) => new THREE.MeshStandardMaterial({ color: c, roughness: 0.35, metalness: 0.5 }),
+        )
+        const carLowGeo = new THREE.BoxGeometry(4.2, 1.0, 1.8)
+        const carCabGeo = new THREE.BoxGeometry(2.4, 0.9, 1.7)
+        const carGlassGeo = new THREE.BoxGeometry(2.2, 0.72, 1.72)
+        const carWheelGeo = new THREE.CylinderGeometry(0.42, 0.42, 0.3, 10)
+        const carPart = (
+          geo: THREE.BufferGeometry,
+          mat: THREE.Material,
+          cx: number,
+          cz: number,
+          ang: number,
+          ox: number,
+          oy: number,
+          oz: number,
+        ) => {
+          const m = new THREE.Mesh(geo, mat)
+          m.position.set(
+            cx + ox * Math.cos(ang) + oz * Math.sin(ang),
+            oy,
+            cz - ox * Math.sin(ang) + oz * Math.cos(ang),
+          )
+          m.rotation.y = ang
+          mAdd(m)
+        }
+        const makeParkedCar = (cx: number, cz: number, ang: number, bodyMat: THREE.Material) => {
+          carPart(carLowGeo, bodyMat, cx, cz, ang, 0, 0.6, 0)
+          carPart(carCabGeo, bodyMat, cx, cz, ang, -0.2, 1.45, 0)
+          carPart(carGlassGeo, carGlassMat, cx, cz, ang, -0.2, 1.45, 0)
+          for (const [wx, wz] of [
+            [1.3, 0.92],
+            [1.3, -0.92],
+            [-1.3, 0.92],
+            [-1.3, -0.92],
+          ] as const) {
+            const w = new THREE.Mesh(carWheelGeo, carWheelMat)
+            w.position.set(
+              cx + wx * Math.cos(ang) + wz * Math.sin(ang),
+              0.42,
+              cz - wx * Math.sin(ang) + wz * Math.cos(ang),
+            )
+            w.rotation.set(Math.PI / 2, 0, ang)
+            mAdd(w)
+          }
+          const hx = Math.abs(2.1 * Math.cos(ang)) + Math.abs(0.9 * Math.sin(ang))
+          const hz = Math.abs(2.1 * Math.sin(ang)) + Math.abs(0.9 * Math.cos(ang))
+          addShibuyaAABB(cx, cz, hx + 0.1, hz + 0.1, 1.6)
+        }
+        const HP = Math.PI / 2
+        makeParkedCar(8, 34, HP, carBodyMats[0] ?? carGlassMat)
+        makeParkedCar(-8, -40, HP, carBodyMats[1] ?? carGlassMat)
+        makeParkedCar(38, 8, 0, carBodyMats[2] ?? carGlassMat)
+        makeParkedCar(-44, -8, 0, carBodyMats[0] ?? carGlassMat)
+        // Arcade light-runner: one additive bar swept along the lane under the ridge.
+        const arcRunnerMat = new THREE.MeshBasicMaterial({
+          color: 0xbfe8ff,
+          transparent: true,
+          opacity: 0.5,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+        })
+        const arcLightRunner = new THREE.Mesh(new THREE.PlaneGeometry(3.4, CG_HW * 2), arcRunnerMat)
+        arcLightRunner.rotation.x = -Math.PI / 2
+        arcLightRunner.position.set(arcX0, arcRidgeY - 0.25, CG_Z)
+        add(arcLightRunner)
+        // Register the pendulum sway of the hanging noren + arcade lanterns (Phase F meshes).
+        const animSway: {
+          mesh: THREE.InstancedMesh
+          base: { x: number; y: number; z: number; s: number; ph: number; ry: number }[]
+          amp: number
+          freq: number
+          pv: number
+        }[] = []
+        const registerSway = (
+          mesh: THREE.InstancedMesh | null,
+          xfs: Xf[],
+          amp: number,
+          freq: number,
+          pv: number,
+        ) => {
+          if (!mesh || xfs.length === 0) return
+          const base = xfs.map((xf) => ({
+            x: xf.pos[0],
+            y: xf.pos[1],
+            z: xf.pos[2],
+            s: typeof xf.scl === "number" ? xf.scl : 1,
+            ph: rnd() * Math.PI * 2,
+            ry: xf.rotY ?? 0,
+          }))
+          animSway.push({ mesh, base, amp, freq, pv })
+        }
+        registerSway(arcLanternMesh, arcLanternXf, 0.08, 1.4, 0.55)
+        norenMeshes.forEach((m, i) => registerSway(m, norenXf2[i] ?? [], 0.13, 1.1, 0.42))
 
         // ══ Phase F: 渋谷の夜 — 環境・空気感 ════════════════════════════════════════
         // Night palette, distinct from OSAKA's warm/red. (Scramble-detail Phase A:
@@ -20796,11 +21488,87 @@ export default function ThreeWorld({
         neonGlowCyan.position.set(18, 10, -8)
         neonGlowCyan.castShadow = false
         add(neonGlowCyan)
-        // Fog: cool urban haze — lighter + pushed back so the surrounding skyline is
-        // visible (a too-dark/near fog hid the whole city). Reuses the shared save slot.
+        // ══ センター街/駅前 real-street Phase H: 空気感 (フォグ/ブルーム/陰影/映り込み) ══
+        // Fake "bloom": soft additive halos behind the brightest emitters so the neon
+        // bleeds into the haze (no postprocessing). One radial-glow texture instanced per
+        // colour, + faint reflection streaks on the arcade underside, + a dark gauze deep
+        // in each alley for 明暗 contrast. All additive/transparent, no collision; the
+        // unit plane (glowGeo) is shared by every set.
+        const glowCv = document.createElement("canvas")
+        glowCv.width = 64
+        glowCv.height = 64
+        const glowCtx = glowCv.getContext("2d")
+        if (glowCtx) {
+          const g = glowCtx.createRadialGradient(32, 32, 0, 32, 32, 32)
+          g.addColorStop(0, "rgba(255,255,255,0.9)")
+          g.addColorStop(0.4, "rgba(255,255,255,0.35)")
+          g.addColorStop(1, "rgba(255,255,255,0)")
+          glowCtx.fillStyle = g
+          glowCtx.fillRect(0, 0, 64, 64)
+        }
+        const glowTex = new THREE.CanvasTexture(glowCv)
+        const glowGeo = new THREE.PlaneGeometry(1, 1)
+        const glowMat = (hex: number) =>
+          new THREE.MeshBasicMaterial({
+            map: glowTex,
+            color: hex,
+            transparent: true,
+            opacity: 0.5,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false,
+          })
+        const haloSpecs: [number, number, number, number, number][] = [
+          [4, 19, -41, 22, 0], // 駅前 big-vision
+          [-42, 30, 28, 16, 1], // 109 prow
+          [46, 30, 18, 14, 0], // SE tower
+          [-8, 9, -38, 12, 0], // station front
+        ]
+        for (let x = CG_X0 - 6; x > CG_X1 + 6; x -= 16) haloSpecs.push([x, 6.5, CG_Z, 9, 1])
+        for (const al of cgAlleys) haloSpecs.push([al.x, 3.2, CG_Z + al.side * CG_HW, 5, 2])
+        const glowXfs: Xf[][] = [[], [], []]
+        for (const [gx, gy, gz, s, ci] of haloSpecs) {
+          glowXfs[ci]?.push({ pos: [gx, gy, gz], scl: [s, s, 1], rotY: Math.atan2(-gx, -gz) })
+        }
+        instAdd(glowGeo, glowMat(0x6fc8ff), glowXfs[0] ?? [])
+        instAdd(glowGeo, glowMat(0xff5aa8), glowXfs[1] ?? [])
+        instAdd(glowGeo, glowMat(0xffb060), glowXfs[2] ?? [])
+        // Neon reflecting on the arcade underside (faint additive, double-sided).
+        const arcReflMat = new THREE.MeshBasicMaterial({
+          color: 0x9fd4ff,
+          transparent: true,
+          opacity: 0.14,
+          blending: THREE.AdditiveBlending,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+        })
+        const arcReflXf: Xf[] = []
+        for (let x = arcX0 - 4; x > arcX1 + 4; x -= 7) {
+          arcReflXf.push({ pos: [x, arcRidgeY - 0.6, CG_Z], rotX: -Math.PI / 2, scl: [3.4, 6, 1] })
+        }
+        instAdd(glowGeo, arcReflMat, arcReflXf)
+        // Dark gauze deep in each alley — the recess reads darker than the lit lane.
+        const alleyDarkMat = new THREE.MeshBasicMaterial({
+          color: 0x04050a,
+          transparent: true,
+          opacity: 0.44,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+        })
+        const alleyDarkXf: Xf[] = []
+        for (const al of cgAlleys) {
+          const zEnd = CG_Z + al.side * (CG_HW + al.len)
+          alleyDarkXf.push({
+            pos: [al.x, CG_WALL_H / 2, zEnd - al.side * 1.5],
+            scl: [al.w, CG_WALL_H, 1],
+          })
+        }
+        instAdd(glowGeo, alleyDarkMat, alleyDarkXf)
+        // Fog: cool urban haze — pulled in slightly for more 奥行き depth (still light
+        // enough that the surrounding skyline stays visible — a near/dark fog once hid the
+        // whole city). Reuses the shared save slot.
         huntStageFogSaved = scene.fog
         huntStageFogWasSaved = true
-        scene.fog = new THREE.Fog(0x141b2e, isMobileDevice ? 75 : 115, isMobileDevice ? 260 : 380)
+        scene.fog = new THREE.Fog(0x121a2c, isMobileDevice ? 72 : 108, isMobileDevice ? 250 : 350)
         // Night sky behind the skyline (saved here, restored in clearShibuyaMap).
         shibuyaBgSaved = scene.background
         shibuyaBgWasSaved = true
@@ -20820,6 +21588,11 @@ export default function ThreeWorld({
           sealLight,
           neonMats: animNeon,
           cull: animCull,
+          sway: animSway,
+          lightRunner: arcLightRunner,
+          runnerMinX: arcX1,
+          runnerMaxX: arcX0,
+          dummy: new THREE.Object3D(),
         }
       }
       function clearShibuyaMap() {
@@ -20893,7 +21666,33 @@ export default function ThreeWorld({
           const m = a.neonMats[i]
           if (!m) continue
           const flick = Math.sin(t * (6 + i) + i * 1.7) > -0.92 ? 1 : 0.35
-          m.emissiveIntensity = (1.2 + 0.35 * Math.sin(t * 3 + i)) * flick
+          // Phase G: + a fast micro-jitter (ジラつき) on top of the slow breathe + dropout.
+          m.emissiveIntensity =
+            (1.2 + 0.35 * Math.sin(t * 3 + i)) * flick * (1 + 0.05 * Math.sin(t * 24 + i * 5))
+        }
+        // Phase G: a light bar runs along the arcade ridge (loops west→east).
+        if (a.lightRunner) {
+          let rx = a.lightRunner.position.x - dt * 14
+          if (rx < a.runnerMinX) rx = a.runnerMaxX
+          a.lightRunner.position.x = rx
+        }
+        // Phase G: pendulum sway of the hanging noren + lanterns (half rate — cheap).
+        if (a.frame % 2 === 0 && a.sway.length > 0) {
+          const d = a.dummy
+          for (const sw of a.sway) {
+            const mesh = sw.mesh
+            for (let i = 0; i < sw.base.length; i++) {
+              const b = sw.base[i]
+              if (!b) continue
+              const th = sw.amp * Math.sin(t * sw.freq + b.ph)
+              d.position.set(b.x + sw.pv * Math.sin(th), b.y + sw.pv * (1 - Math.cos(th)), b.z)
+              d.rotation.set(0, b.ry, th)
+              d.scale.setScalar(b.s)
+              d.updateMatrix()
+              mesh.setMatrixAt(i, d.matrix)
+            }
+            mesh.instanceMatrix.needsUpdate = true
+          }
         }
         // Distance cull the off-centre dressing ~3×/s (arena-local player position).
         if (a.frame % 20 === 0 && a.cull.length > 0) {
