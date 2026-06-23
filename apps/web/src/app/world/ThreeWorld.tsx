@@ -19153,8 +19153,12 @@ export default function ThreeWorld({
         // Window-grid emissive texture: lit windows glow, gaps + dark windows stay
         // black so only windows emit. Deterministic via the build PRNG.
         const makeWindowTex = (cols: number, rows: number, litHex: number, litChance: number) => {
-          const cw = 6
-          const ch = 9
+          // Larger panes (was 6×9) so distant facades read as windows, not TV static —
+          // the old fine grid aliased into "white noise" on the right-edge towers. Each
+          // lit pane also gets its own brightness so the field shimmers instead of
+          // being a flat sheet of identical bright dots.
+          const cw = 9
+          const ch = 13
           const cv = document.createElement("canvas")
           cv.width = cols * cw
           cv.height = rows * ch
@@ -19162,11 +19166,17 @@ export default function ThreeWorld({
           if (ctx) {
             ctx.fillStyle = "#000000"
             ctx.fillRect(0, 0, cv.width, cv.height)
-            const litCol = `#${litHex.toString(16).padStart(6, "0")}`
+            const lr = (litHex >> 16) & 0xff
+            const lg = (litHex >> 8) & 0xff
+            const lb = litHex & 0xff
             for (let r = 0; r < rows; r++) {
               for (let c = 0; c < cols; c++) {
-                const on = rnd() < litChance
-                ctx.fillStyle = on ? litCol : "#0a0d14"
+                if (rnd() < litChance) {
+                  const k = 0.45 + rnd() * 0.55 // per-pane brightness
+                  ctx.fillStyle = `rgb(${Math.round(lr * k)},${Math.round(lg * k)},${Math.round(lb * k)})`
+                } else {
+                  ctx.fillStyle = "#0a0d14"
+                }
                 ctx.fillRect(c * cw + 1, r * ch + 1, cw - 2, ch - 3)
               }
             }
@@ -19190,15 +19200,15 @@ export default function ThreeWorld({
           litChance: number,
           setback = 0,
         ) => {
-          const tex = makeWindowTex(16, 40, litHex, litChance)
-          tex.repeat.set(Math.max(2, Math.round(w / 4)), Math.max(3, Math.round(h / 4)))
+          const tex = makeWindowTex(12, 22, litHex, litChance)
+          tex.repeat.set(Math.max(2, Math.round(w / 7)), Math.max(2, Math.round(h / 7)))
           const mat = new THREE.MeshStandardMaterial({
             color: 0x0d111a,
             roughness: 0.42,
             metalness: 0.34,
             emissive: 0xffffff,
             emissiveMap: tex,
-            emissiveIntensity: 0.7,
+            emissiveIntensity: 0.55,
           })
           const body = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat)
           body.position.set(cx, baseY + h / 2, cz)
@@ -19216,14 +19226,14 @@ export default function ThreeWorld({
         makeTower(120, -20, 28, 32, 82, 0, 0xbfe0ff, 0.45, 10)
         // — Backdrop skyline ring climbing the スリバチ rim (shared material → 1 draw
         // call for the whole ring). Sits on the rising ground via shibuyaGroundY.
-        const rimWinTex = makeWindowTex(14, 44, 0x88a8d8, 0.4)
-        rimWinTex.repeat.set(4, 10)
+        const rimWinTex = makeWindowTex(12, 24, 0x7e9ccc, 0.34)
+        rimWinTex.repeat.set(3, 6)
         const rimMat = new THREE.MeshStandardMaterial({
           color: 0x090c14,
           roughness: 0.7,
-          emissive: 0x9fb6dc,
+          emissive: 0x8aa0c4,
           emissiveMap: rimWinTex,
-          emissiveIntensity: 0.5,
+          emissiveIntensity: 0.36,
         })
         for (let i = 0; i < dn(16); i++) {
           const ang = (i / 16) * Math.PI * 2 + rnd() * 0.3
@@ -19796,9 +19806,14 @@ export default function ThreeWorld({
         hBody.position.set(sx0, 2.6, sz0 - 13)
         mAdd(hBody)
         addShibuyaAABB(sx0, sz0 - 13, 4.5, 3, 4.7)
-        const hRoof = new THREE.Mesh(new THREE.ConeGeometry(7.6, 2.6, 4), roofMat)
+        // Honden hip-roof: warm dark tile. The old cold-slate, very wide+flat cone read
+        // from the scramble as a stray "mystery blue triangle" (it caught the cool night
+        // hemi + cyan seal light); recoloured warm and tightened (less eave overhang,
+        // a touch taller) so it reads as a shrine roof, not a floating artifact.
+        const hRoofMat = new THREE.MeshLambertMaterial({ color: 0x332a20 })
+        const hRoof = new THREE.Mesh(new THREE.ConeGeometry(6.0, 3.4, 4), hRoofMat)
         hRoof.rotation.y = Math.PI / 4
-        hRoof.position.set(sx0, 6.0, sz0 - 13)
+        hRoof.position.set(sx0, 6.2, sz0 - 13)
         mAdd(hRoof)
         // Grove: instanced trees (trunk + foliage) ringing the precinct.
         const trunkGeo = new THREE.CylinderGeometry(0.3, 0.4, 4, 6)
