@@ -21070,6 +21070,160 @@ export default function ThreeWorld({
         }
         instAdd(bollGeo, bollMat, bollXf)
 
+        // ══ センター街/駅前 real-street Phase E: 路上什器 (猥雑感の核) ══════════════════
+        // Lived-in clutter: standing signboards, vending clusters, 券売機 + 食品サンプル
+        // cases, abandoned bicycle piles, alley rubbish (ゴミ袋・段ボール・コーン), and
+        // street furniture (電柱・ガードレール・マンホール). Almost everything sits FLUSH to
+        // a wall/corner the player can't reach (player stops ~PLAYER_RADIUS off a wall),
+        // so it needs NO hitbox; only the free-standing bicycle piles in open ground get
+        // a tight AABB that exactly matches the pile (no #117 ghosts). All instanced;
+        // vending/cone/bike geos + concreteMat are reused.
+        const offWhiteMat = new THREE.MeshStandardMaterial({ color: 0xd8d4c8, roughness: 0.85 })
+        const warmPanelMat = new THREE.MeshBasicMaterial({ color: 0xffd9a0, toneMapped: false })
+        const cyanPanelMat = new THREE.MeshBasicMaterial({ color: 0x8fe8ff, toneMapped: false })
+        const trashMat = new THREE.MeshStandardMaterial({ color: 0x24271f, roughness: 0.95 })
+        const cardboardMat = new THREE.MeshStandardMaterial({ color: 0x6b5436, roughness: 0.95 })
+        const manholeMat = new THREE.MeshStandardMaterial({
+          color: 0x303236,
+          roughness: 0.85,
+          metalness: 0.5,
+        })
+        const vendRMat = new THREE.MeshStandardMaterial({
+          color: 0xc0392b,
+          emissive: 0x3a0f0a,
+          emissiveIntensity: 0.6,
+          roughness: 0.5,
+        })
+        const vendBMat = new THREE.MeshStandardMaterial({
+          color: 0x2456b0,
+          emissive: 0x0a1a3a,
+          emissiveIntensity: 0.6,
+          roughness: 0.5,
+        })
+        const furnMat = new THREE.MeshStandardMaterial({
+          color: 0x33343a,
+          roughness: 0.6,
+          metalness: 0.3,
+        })
+        const foodMat = new THREE.MeshStandardMaterial({
+          color: 0xcabfa0,
+          emissive: 0x5a4a2e,
+          emissiveIntensity: 0.6,
+          roughness: 0.4,
+        })
+        // Standing signboard (board + base) and utility pole (mast + crossarm) and
+        // guardrail (beam + 2 posts) are each merged ONCE into one geo, then instanced.
+        const _bdBoard = new THREE.BoxGeometry(0.85, 1.0, 0.05)
+        _bdBoard.translate(0, 0.62, 0)
+        const _bdBase = new THREE.BoxGeometry(0.85, 0.08, 0.5)
+        _bdBase.translate(0, 0.04, 0.12)
+        const boardGeo = mergeGeometries([_bdBoard, _bdBase], false) ?? _bdBoard
+        const boardPanelGeo = new THREE.PlaneGeometry(0.7, 0.78)
+        const trashGeo = new THREE.SphereGeometry(0.42, 7, 5)
+        const cardboardGeo = new THREE.BoxGeometry(0.6, 0.5, 0.5)
+        const manholeGeo = new THREE.CircleGeometry(0.5, 16)
+        const ticketGeo = new THREE.BoxGeometry(0.75, 1.5, 0.42)
+        const ticketPanelGeo = new THREE.PlaneGeometry(0.6, 0.5)
+        const foodCaseGeo = new THREE.BoxGeometry(1.0, 0.9, 0.55)
+        const boardXf: Xf[] = []
+        const boardPanelXf: Xf[] = []
+        const trashXf: Xf[] = []
+        const cardboardXf: Xf[] = []
+        const manholeXf: Xf[] = []
+        const ticketXf: Xf[] = []
+        const ticketPanelXf: Xf[] = []
+        const foodCaseXf: Xf[] = []
+        const vendRXf: Xf[] = []
+        const vendBXf: Xf[] = []
+        const eBikeFrameXf: Xf[] = []
+        const eBikeWheelXf: Xf[] = []
+        const eConeXf: Xf[] = []
+        // Zone 1 — lane storefronts: walk both walls, drop one item per stretch, FLUSH to
+        // the wall (unreachable → no AABB).
+        for (const side of [-1, 1] as const) {
+          const innerZ = CG_Z + side * CG_HW // -27 / -17
+          const nz = -side // into the lane
+          for (let x = CG_X0 - 6; x > CG_X1 + 6; x -= 7) {
+            const r = rnd()
+            if (r < 0.28) {
+              boardXf.push({ pos: [x, 0, innerZ + nz * 0.6], rotY: nz > 0 ? 0 : Math.PI })
+              boardPanelXf.push({ pos: [x, 0.66, innerZ + nz * 0.66], rotY: nz > 0 ? 0 : Math.PI })
+            } else if (r < 0.52) {
+              ;(rnd() < 0.5 ? vendRXf : vendBXf).push({ pos: [x - 0.6, 0.95, innerZ + nz * 0.45] })
+              ;(rnd() < 0.5 ? vendRXf : vendBXf).push({ pos: [x + 0.6, 0.95, innerZ + nz * 0.45] })
+            } else if (r < 0.7) {
+              ticketXf.push({ pos: [x, 0.75, innerZ + nz * 0.4], rotY: nz > 0 ? 0 : Math.PI })
+              ticketPanelXf.push({ pos: [x, 1.08, innerZ + nz * 0.62], rotY: nz > 0 ? 0 : Math.PI })
+            } else if (r < 0.84) {
+              foodCaseXf.push({ pos: [x, 0.95, innerZ + nz * 0.5] })
+            } else {
+              for (let b = 0; b < 2 + Math.floor(rnd() * 3); b++) {
+                const bx = x + b * 0.4
+                const bz = innerZ + nz * (0.7 + rnd() * 0.25)
+                eBikeFrameXf.push({ pos: [bx, 0.55, bz], rotY: 0.15 + rnd() * 0.2 })
+                eBikeWheelXf.push({ pos: [bx - 0.5, 0.32, bz], rotX: Math.PI / 2 })
+                eBikeWheelXf.push({ pos: [bx + 0.5, 0.32, bz], rotX: Math.PI / 2 })
+              }
+            }
+          }
+        }
+        // Zone 2 — alley rubbish piled at each dead-end (dark corners; small → no AABB).
+        for (const al of cgAlleys) {
+          const zEnd = CG_Z + al.side * (CG_HW + al.len)
+          for (let i = 0; i < dn(5); i++) {
+            const ax = al.x + (rnd() - 0.5) * (al.w - 1)
+            const az = zEnd - al.side * (0.8 + rnd() * 2.5)
+            const k = rnd()
+            if (k < 0.5) trashXf.push({ pos: [ax, 0.4, az], scl: 0.7 + rnd() * 0.6 })
+            else if (k < 0.8)
+              cardboardXf.push({ pos: [ax, 0.25, az], rotY: rnd() * 1.5, scl: 0.7 + rnd() * 0.7 })
+            else eConeXf.push({ pos: [ax, 0.45, az] })
+          }
+        }
+        // Zone 3 — flat manholes scattered on the plaza/roads/lane (no hitbox). Utility
+        // poles + guardrails already ring the main streets (built earlier in this fn), so
+        // they are NOT duplicated here.
+        for (const [mx, mz] of [
+          [3, 4],
+          [-6, -8],
+          [9, -3],
+          [0, 14],
+          [-12, 6],
+          [-30, -22],
+          [-60, -22],
+          [-95, -22],
+          [-120, -22],
+        ] as const) {
+          manholeXf.push({ pos: [mx, 0.045, mz], rotX: -Math.PI / 2 })
+        }
+        // A few free-standing bicycle piles in OPEN ground — these DO collide via a tight
+        // AABB matching the pile, so you can't walk through them (honours the brief's
+        // "bikes/standing-signs get a minimal hitbox").
+        for (const [px, pz] of [
+          [16, 14],
+          [-18, 16],
+        ] as const) {
+          for (let b = 0; b < 4; b++) {
+            eBikeFrameXf.push({ pos: [px + b * 0.42, 0.55, pz], rotY: 0.2 })
+            eBikeWheelXf.push({ pos: [px + b * 0.42 - 0.5, 0.32, pz], rotX: Math.PI / 2 })
+            eBikeWheelXf.push({ pos: [px + b * 0.42 + 0.5, 0.32, pz], rotX: Math.PI / 2 })
+          }
+          addShibuyaAABB(px + 0.8, pz, 1.2, 0.45, 1.0)
+        }
+        instAdd(boardGeo, offWhiteMat, boardXf)
+        instAdd(boardPanelGeo, warmPanelMat, boardPanelXf)
+        instAdd(vendGeo, vendRMat, vendRXf)
+        instAdd(vendGeo, vendBMat, vendBXf)
+        instAdd(ticketGeo, furnMat, ticketXf)
+        instAdd(ticketPanelGeo, cyanPanelMat, ticketPanelXf)
+        instAdd(foodCaseGeo, foodMat, foodCaseXf)
+        instAdd(cgBikeFrameGeo, cgBikeMat, eBikeFrameXf)
+        instAdd(cgBikeWheelGeo, cgBikeMat, eBikeWheelXf)
+        instAdd(trashGeo, trashMat, trashXf)
+        instAdd(cardboardGeo, cardboardMat, cardboardXf)
+        instAdd(coneGeo, coneMat, eConeXf)
+        instAdd(manholeGeo, manholeMat, manholeXf)
+
         // ══ Phase F: 渋谷の夜 — 環境・空気感 ════════════════════════════════════════
         // Night palette, distinct from OSAKA's warm/red. (Scramble-detail Phase A:
         // BRIGHTENED — the night must read as "夜だが街全体が見える", not a black void.
