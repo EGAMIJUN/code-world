@@ -21488,11 +21488,87 @@ export default function ThreeWorld({
         neonGlowCyan.position.set(18, 10, -8)
         neonGlowCyan.castShadow = false
         add(neonGlowCyan)
-        // Fog: cool urban haze — lighter + pushed back so the surrounding skyline is
-        // visible (a too-dark/near fog hid the whole city). Reuses the shared save slot.
+        // ══ センター街/駅前 real-street Phase H: 空気感 (フォグ/ブルーム/陰影/映り込み) ══
+        // Fake "bloom": soft additive halos behind the brightest emitters so the neon
+        // bleeds into the haze (no postprocessing). One radial-glow texture instanced per
+        // colour, + faint reflection streaks on the arcade underside, + a dark gauze deep
+        // in each alley for 明暗 contrast. All additive/transparent, no collision; the
+        // unit plane (glowGeo) is shared by every set.
+        const glowCv = document.createElement("canvas")
+        glowCv.width = 64
+        glowCv.height = 64
+        const glowCtx = glowCv.getContext("2d")
+        if (glowCtx) {
+          const g = glowCtx.createRadialGradient(32, 32, 0, 32, 32, 32)
+          g.addColorStop(0, "rgba(255,255,255,0.9)")
+          g.addColorStop(0.4, "rgba(255,255,255,0.35)")
+          g.addColorStop(1, "rgba(255,255,255,0)")
+          glowCtx.fillStyle = g
+          glowCtx.fillRect(0, 0, 64, 64)
+        }
+        const glowTex = new THREE.CanvasTexture(glowCv)
+        const glowGeo = new THREE.PlaneGeometry(1, 1)
+        const glowMat = (hex: number) =>
+          new THREE.MeshBasicMaterial({
+            map: glowTex,
+            color: hex,
+            transparent: true,
+            opacity: 0.5,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false,
+          })
+        const haloSpecs: [number, number, number, number, number][] = [
+          [4, 19, -41, 22, 0], // 駅前 big-vision
+          [-42, 30, 28, 16, 1], // 109 prow
+          [46, 30, 18, 14, 0], // SE tower
+          [-8, 9, -38, 12, 0], // station front
+        ]
+        for (let x = CG_X0 - 6; x > CG_X1 + 6; x -= 16) haloSpecs.push([x, 6.5, CG_Z, 9, 1])
+        for (const al of cgAlleys) haloSpecs.push([al.x, 3.2, CG_Z + al.side * CG_HW, 5, 2])
+        const glowXfs: Xf[][] = [[], [], []]
+        for (const [gx, gy, gz, s, ci] of haloSpecs) {
+          glowXfs[ci]?.push({ pos: [gx, gy, gz], scl: [s, s, 1], rotY: Math.atan2(-gx, -gz) })
+        }
+        instAdd(glowGeo, glowMat(0x6fc8ff), glowXfs[0] ?? [])
+        instAdd(glowGeo, glowMat(0xff5aa8), glowXfs[1] ?? [])
+        instAdd(glowGeo, glowMat(0xffb060), glowXfs[2] ?? [])
+        // Neon reflecting on the arcade underside (faint additive, double-sided).
+        const arcReflMat = new THREE.MeshBasicMaterial({
+          color: 0x9fd4ff,
+          transparent: true,
+          opacity: 0.14,
+          blending: THREE.AdditiveBlending,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+        })
+        const arcReflXf: Xf[] = []
+        for (let x = arcX0 - 4; x > arcX1 + 4; x -= 7) {
+          arcReflXf.push({ pos: [x, arcRidgeY - 0.6, CG_Z], rotX: -Math.PI / 2, scl: [3.4, 6, 1] })
+        }
+        instAdd(glowGeo, arcReflMat, arcReflXf)
+        // Dark gauze deep in each alley — the recess reads darker than the lit lane.
+        const alleyDarkMat = new THREE.MeshBasicMaterial({
+          color: 0x04050a,
+          transparent: true,
+          opacity: 0.44,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+        })
+        const alleyDarkXf: Xf[] = []
+        for (const al of cgAlleys) {
+          const zEnd = CG_Z + al.side * (CG_HW + al.len)
+          alleyDarkXf.push({
+            pos: [al.x, CG_WALL_H / 2, zEnd - al.side * 1.5],
+            scl: [al.w, CG_WALL_H, 1],
+          })
+        }
+        instAdd(glowGeo, alleyDarkMat, alleyDarkXf)
+        // Fog: cool urban haze — pulled in slightly for more 奥行き depth (still light
+        // enough that the surrounding skyline stays visible — a near/dark fog once hid the
+        // whole city). Reuses the shared save slot.
         huntStageFogSaved = scene.fog
         huntStageFogWasSaved = true
-        scene.fog = new THREE.Fog(0x141b2e, isMobileDevice ? 75 : 115, isMobileDevice ? 260 : 380)
+        scene.fog = new THREE.Fog(0x121a2c, isMobileDevice ? 72 : 108, isMobileDevice ? 250 : 350)
         // Night sky behind the skyline (saved here, restored in clearShibuyaMap).
         shibuyaBgSaved = scene.background
         shibuyaBgWasSaved = true
