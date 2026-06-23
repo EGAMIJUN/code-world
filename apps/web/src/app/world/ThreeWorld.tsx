@@ -21224,6 +21224,87 @@ export default function ThreeWorld({
         instAdd(coneGeo, coneMat, eConeXf)
         instAdd(manholeGeo, manholeMat, manholeXf)
 
+        // ══ センター街 real-street Phase F: 装飾 (提灯・暖簾・横断幕・赤提灯) ══════════════
+        // Festival dressing, ALL non-colliding: rows of warm chōchin strung under the
+        // arcade (cords merge into the Phase D wire bucket), indigo/brown/red 暖簾 flush
+        // at the shopfronts, a few painted 横断幕 spanning the lane overhead, and red
+        // 赤提灯 marking each alley mouth. Lanterns/noren reuse the existing geos.
+        const lanternWarmMat = new THREE.MeshStandardMaterial({
+          color: 0xffe1a6,
+          emissive: 0xffc878,
+          emissiveIntensity: 1.5,
+        })
+        const norenMats2 = [
+          norenMat, // indigo (reused)
+          new THREE.MeshBasicMaterial({ color: 0x4a3526, side: THREE.DoubleSide }), // brown
+          new THREE.MeshBasicMaterial({ color: 0x6e2230, side: THREE.DoubleSide }), // dark red
+        ]
+        const arcLanternXf: Xf[] = []
+        const norenXf2: Xf[][] = norenMats2.map(() => [])
+        const redLanternXf: Xf[] = []
+        // Two rows of chōchin under the arcade (near each wall) + a cord per row.
+        for (const z of [CG_Z - (CG_HW - 1), CG_Z + (CG_HW - 1)] as const) {
+          for (let x = arcX0 - 1; x > arcX1 + 1; x -= 2.6) {
+            arcLanternXf.push({ pos: [x, 8.0, z], scl: 1.4 })
+          }
+          const lanternCord = new THREE.Mesh(new THREE.BoxGeometry(arcLen, 0.04, 0.04), wireMat)
+          lanternCord.position.set(arcMidX, 8.55, z)
+          mAdd(lanternCord)
+        }
+        instAdd(lanternGeo, lanternWarmMat, arcLanternXf)
+        // 暖簾 flush at shopfronts (unreachable → no clip), colour-varied.
+        for (const side of [-1, 1] as const) {
+          const innerZ = CG_Z + side * CG_HW
+          const nz = -side
+          for (let x = CG_X0 - 9; x > CG_X1 + 5; x -= 9.5) {
+            const ci = Math.floor(rnd() * norenMats2.length)
+            norenXf2[ci]?.push({ pos: [x, 2.1, innerZ + nz * 0.16], rotY: nz > 0 ? 0 : Math.PI })
+          }
+        }
+        norenMats2.forEach((m, i) => instAdd(norenGeo, m, norenXf2[i] ?? []))
+        // 赤提灯 marking each alley mouth + the lane mouth (overhead pairs).
+        for (const al of cgAlleys) {
+          const mz = CG_Z + al.side * CG_HW
+          redLanternXf.push({ pos: [al.x, 2.8, mz], scl: 1.9 })
+          redLanternXf.push({ pos: [al.x, 3.7, mz], scl: 1.9 })
+        }
+        for (const pz of [CG_Z - CG_HW + 1, CG_Z + CG_HW - 1] as const) {
+          redLanternXf.push({ pos: [CG_X0 - 1, 3.4, pz], scl: 2.1 })
+        }
+        instAdd(lanternGeo, lanternMat, redLanternXf)
+        // 横断幕: painted cloth banners spanning the lane (overhead), original names.
+        const makeBanner = (text: string, bg: string, fg: string) => {
+          const cv = document.createElement("canvas")
+          cv.width = 256
+          cv.height = 48
+          const c = cv.getContext("2d")
+          if (c) {
+            c.fillStyle = bg
+            c.fillRect(0, 0, 256, 48)
+            c.fillStyle = fg
+            c.font = "bold 30px sans-serif"
+            c.textAlign = "center"
+            c.textBaseline = "middle"
+            c.fillText(text, 128, 26)
+          }
+          const tex = new THREE.CanvasTexture(cv)
+          tex.colorSpace = THREE.SRGBColorSpace
+          return new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide })
+        }
+        for (const [bx, text, bg, fg] of [
+          [-32, "歳末大感謝祭", "#a01b2a", "#ffe6a0"],
+          [-72, "センター街 商店会", "#15306a", "#ffffff"],
+          [-112, "祝 渋谷ナイト", "#7a1840", "#ffd24a"],
+        ] as const) {
+          const crossBanner = new THREE.Mesh(
+            new THREE.PlaneGeometry(CG_HW * 2 + 1, 1.2),
+            makeBanner(text, bg, fg),
+          )
+          crossBanner.position.set(bx, 7.5, CG_Z)
+          crossBanner.rotation.y = Math.PI / 2 // width spans the lane (z); faces ±x
+          add(crossBanner)
+        }
+
         // ══ Phase F: 渋谷の夜 — 環境・空気感 ════════════════════════════════════════
         // Night palette, distinct from OSAKA's warm/red. (Scramble-detail Phase A:
         // BRIGHTENED — the night must read as "夜だが街全体が見える", not a black void.
