@@ -16997,6 +16997,20 @@ export default function ThreeWorld({
         sealLight: THREE.PointLight | null
         neonMats: THREE.MeshStandardMaterial[]
         cull: { obj: THREE.Object3D; cx: number; cz: number; r: number }[]
+        // real-street Phase G: pendulum sway of hanging decor (noren/lanterns) + a light
+        // bar running the arcade. Geometry-light — a few instanced meshes re-stamped at
+        // half rate, plus one moving mesh. (Crowd + cars are STATIC, built into the map.)
+        sway: {
+          mesh: THREE.InstancedMesh
+          base: { x: number; y: number; z: number; s: number; ph: number; ry: number }[]
+          amp: number
+          freq: number
+          pv: number
+        }[]
+        lightRunner: THREE.Mesh | null
+        runnerMinX: number
+        runnerMaxX: number
+        dummy: THREE.Object3D
       }
       let shibuyaAnim: ShibuyaAnim | null = null
       // SHIBUYA night sky saved on build so it restores on teardown (fog reuses the
@@ -21251,7 +21265,7 @@ export default function ThreeWorld({
           lanternCord.position.set(arcMidX, 8.55, z)
           mAdd(lanternCord)
         }
-        instAdd(lanternGeo, lanternWarmMat, arcLanternXf)
+        const arcLanternMesh = instAdd(lanternGeo, lanternWarmMat, arcLanternXf)
         // 暖簾 flush at shopfronts (unreachable → no clip), colour-varied.
         for (const side of [-1, 1] as const) {
           const innerZ = CG_Z + side * CG_HW
@@ -21261,7 +21275,7 @@ export default function ThreeWorld({
             norenXf2[ci]?.push({ pos: [x, 2.1, innerZ + nz * 0.16], rotY: nz > 0 ? 0 : Math.PI })
           }
         }
-        norenMats2.forEach((m, i) => instAdd(norenGeo, m, norenXf2[i] ?? []))
+        const norenMeshes = norenMats2.map((m, i) => instAdd(norenGeo, m, norenXf2[i] ?? []))
         // 赤提灯 marking each alley mouth + the lane mouth (overhead pairs).
         for (const al of cgAlleys) {
           const mz = CG_Z + al.side * CG_HW
@@ -21304,6 +21318,148 @@ export default function ThreeWorld({
           crossBanner.rotation.y = Math.PI / 2 // width spans the lane (z); faces ±x
           add(crossBanner)
         }
+
+        // ══ センター街/駅前 real-street Phase G: 動き (軽量) — 静止群衆/車 + 揺れ + 光 ════
+        // Lightweight life. STATIC (never animated) distant crowd silhouettes + parked
+        // cars are built here; the *motion* (pendulum sway of noren/lanterns, a light bar
+        // running the arcade, richer neon jitter) is published to shibuyaAnim and driven
+        // by updateShibuyaMap — no new dynamic entities. (Moving crowds = STEP2.)
+        const figCv = document.createElement("canvas")
+        figCv.width = 32
+        figCv.height = 64
+        const figCtx = figCv.getContext("2d")
+        if (figCtx) {
+          figCtx.clearRect(0, 0, 32, 64)
+          figCtx.fillStyle = "#05060a"
+          figCtx.beginPath()
+          figCtx.arc(16, 11, 6, 0, Math.PI * 2)
+          figCtx.fill()
+          figCtx.fillRect(9, 17, 14, 27)
+          figCtx.fillRect(11, 43, 4, 19)
+          figCtx.fillRect(17, 43, 4, 19)
+        }
+        const figTex = new THREE.CanvasTexture(figCv)
+        const figMat = new THREE.MeshBasicMaterial({
+          map: figTex,
+          transparent: true,
+          depthWrite: false,
+          opacity: 0.92,
+        })
+        const figGeo = new THREE.PlaneGeometry(0.8, 1.7)
+        const figXf: Xf[] = []
+        for (let i = 0; i < dn(22); i++) {
+          const onNS = rnd() < 0.6
+          const along = (rnd() - 0.5) * 150
+          const cross = (rnd() - 0.5) * 14
+          const fx = onNS ? cross : along
+          const fz = onNS ? along : cross
+          if (Math.hypot(fx, fz) < 26) continue // keep them distant from the player start
+          figXf.push({ pos: [fx, 0.85, fz], rotY: Math.atan2(-fx, -fz) }) // face the centre
+        }
+        instAdd(figGeo, figMat, figXf)
+        // A few STATIC parked cars (never animated); tight axis-aligned AABBs.
+        const carGlassMat = new THREE.MeshStandardMaterial({
+          color: 0x0c1420,
+          roughness: 0.2,
+          metalness: 0.6,
+          emissive: 0x16202e,
+          emissiveIntensity: 0.4,
+        })
+        const carWheelMat = new THREE.MeshStandardMaterial({ color: 0x0a0a0c, roughness: 0.85 })
+        const carBodyMats = [0x9a2b2b, 0x223a6a, 0xcfcfd4].map(
+          (c) => new THREE.MeshStandardMaterial({ color: c, roughness: 0.35, metalness: 0.5 }),
+        )
+        const carLowGeo = new THREE.BoxGeometry(4.2, 1.0, 1.8)
+        const carCabGeo = new THREE.BoxGeometry(2.4, 0.9, 1.7)
+        const carGlassGeo = new THREE.BoxGeometry(2.2, 0.72, 1.72)
+        const carWheelGeo = new THREE.CylinderGeometry(0.42, 0.42, 0.3, 10)
+        const carPart = (
+          geo: THREE.BufferGeometry,
+          mat: THREE.Material,
+          cx: number,
+          cz: number,
+          ang: number,
+          ox: number,
+          oy: number,
+          oz: number,
+        ) => {
+          const m = new THREE.Mesh(geo, mat)
+          m.position.set(
+            cx + ox * Math.cos(ang) + oz * Math.sin(ang),
+            oy,
+            cz - ox * Math.sin(ang) + oz * Math.cos(ang),
+          )
+          m.rotation.y = ang
+          mAdd(m)
+        }
+        const makeParkedCar = (cx: number, cz: number, ang: number, bodyMat: THREE.Material) => {
+          carPart(carLowGeo, bodyMat, cx, cz, ang, 0, 0.6, 0)
+          carPart(carCabGeo, bodyMat, cx, cz, ang, -0.2, 1.45, 0)
+          carPart(carGlassGeo, carGlassMat, cx, cz, ang, -0.2, 1.45, 0)
+          for (const [wx, wz] of [
+            [1.3, 0.92],
+            [1.3, -0.92],
+            [-1.3, 0.92],
+            [-1.3, -0.92],
+          ] as const) {
+            const w = new THREE.Mesh(carWheelGeo, carWheelMat)
+            w.position.set(
+              cx + wx * Math.cos(ang) + wz * Math.sin(ang),
+              0.42,
+              cz - wx * Math.sin(ang) + wz * Math.cos(ang),
+            )
+            w.rotation.set(Math.PI / 2, 0, ang)
+            mAdd(w)
+          }
+          const hx = Math.abs(2.1 * Math.cos(ang)) + Math.abs(0.9 * Math.sin(ang))
+          const hz = Math.abs(2.1 * Math.sin(ang)) + Math.abs(0.9 * Math.cos(ang))
+          addShibuyaAABB(cx, cz, hx + 0.1, hz + 0.1, 1.6)
+        }
+        const HP = Math.PI / 2
+        makeParkedCar(8, 34, HP, carBodyMats[0] ?? carGlassMat)
+        makeParkedCar(-8, -40, HP, carBodyMats[1] ?? carGlassMat)
+        makeParkedCar(38, 8, 0, carBodyMats[2] ?? carGlassMat)
+        makeParkedCar(-44, -8, 0, carBodyMats[0] ?? carGlassMat)
+        // Arcade light-runner: one additive bar swept along the lane under the ridge.
+        const arcRunnerMat = new THREE.MeshBasicMaterial({
+          color: 0xbfe8ff,
+          transparent: true,
+          opacity: 0.5,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+        })
+        const arcLightRunner = new THREE.Mesh(new THREE.PlaneGeometry(3.4, CG_HW * 2), arcRunnerMat)
+        arcLightRunner.rotation.x = -Math.PI / 2
+        arcLightRunner.position.set(arcX0, arcRidgeY - 0.25, CG_Z)
+        add(arcLightRunner)
+        // Register the pendulum sway of the hanging noren + arcade lanterns (Phase F meshes).
+        const animSway: {
+          mesh: THREE.InstancedMesh
+          base: { x: number; y: number; z: number; s: number; ph: number; ry: number }[]
+          amp: number
+          freq: number
+          pv: number
+        }[] = []
+        const registerSway = (
+          mesh: THREE.InstancedMesh | null,
+          xfs: Xf[],
+          amp: number,
+          freq: number,
+          pv: number,
+        ) => {
+          if (!mesh || xfs.length === 0) return
+          const base = xfs.map((xf) => ({
+            x: xf.pos[0],
+            y: xf.pos[1],
+            z: xf.pos[2],
+            s: typeof xf.scl === "number" ? xf.scl : 1,
+            ph: rnd() * Math.PI * 2,
+            ry: xf.rotY ?? 0,
+          }))
+          animSway.push({ mesh, base, amp, freq, pv })
+        }
+        registerSway(arcLanternMesh, arcLanternXf, 0.08, 1.4, 0.55)
+        norenMeshes.forEach((m, i) => registerSway(m, norenXf2[i] ?? [], 0.13, 1.1, 0.42))
 
         // ══ Phase F: 渋谷の夜 — 環境・空気感 ════════════════════════════════════════
         // Night palette, distinct from OSAKA's warm/red. (Scramble-detail Phase A:
@@ -21356,6 +21512,11 @@ export default function ThreeWorld({
           sealLight,
           neonMats: animNeon,
           cull: animCull,
+          sway: animSway,
+          lightRunner: arcLightRunner,
+          runnerMinX: arcX1,
+          runnerMaxX: arcX0,
+          dummy: new THREE.Object3D(),
         }
       }
       function clearShibuyaMap() {
@@ -21429,7 +21590,33 @@ export default function ThreeWorld({
           const m = a.neonMats[i]
           if (!m) continue
           const flick = Math.sin(t * (6 + i) + i * 1.7) > -0.92 ? 1 : 0.35
-          m.emissiveIntensity = (1.2 + 0.35 * Math.sin(t * 3 + i)) * flick
+          // Phase G: + a fast micro-jitter (ジラつき) on top of the slow breathe + dropout.
+          m.emissiveIntensity =
+            (1.2 + 0.35 * Math.sin(t * 3 + i)) * flick * (1 + 0.05 * Math.sin(t * 24 + i * 5))
+        }
+        // Phase G: a light bar runs along the arcade ridge (loops west→east).
+        if (a.lightRunner) {
+          let rx = a.lightRunner.position.x - dt * 14
+          if (rx < a.runnerMinX) rx = a.runnerMaxX
+          a.lightRunner.position.x = rx
+        }
+        // Phase G: pendulum sway of the hanging noren + lanterns (half rate — cheap).
+        if (a.frame % 2 === 0 && a.sway.length > 0) {
+          const d = a.dummy
+          for (const sw of a.sway) {
+            const mesh = sw.mesh
+            for (let i = 0; i < sw.base.length; i++) {
+              const b = sw.base[i]
+              if (!b) continue
+              const th = sw.amp * Math.sin(t * sw.freq + b.ph)
+              d.position.set(b.x + sw.pv * Math.sin(th), b.y + sw.pv * (1 - Math.cos(th)), b.z)
+              d.rotation.set(0, b.ry, th)
+              d.scale.setScalar(b.s)
+              d.updateMatrix()
+              mesh.setMatrixAt(i, d.matrix)
+            }
+            mesh.instanceMatrix.needsUpdate = true
+          }
         }
         // Distance cull the off-centre dressing ~3×/s (arena-local player position).
         if (a.frame % 20 === 0 && a.cull.length > 0) {
