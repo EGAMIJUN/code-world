@@ -21130,7 +21130,7 @@ export default function ThreeWorld({
         const _bdBoard = new THREE.BoxGeometry(0.85, 1.0, 0.05)
         _bdBoard.translate(0, 0.62, 0)
         const _bdBase = new THREE.BoxGeometry(0.85, 0.08, 0.5)
-        _bdBase.translate(0, 0.04, 0.12)
+        _bdBase.translate(0, 0.04, -0.12) // kickstand toward wall, not lane
         const boardGeo = mergeGeometries([_bdBoard, _bdBase], false) ?? _bdBoard
         const boardPanelGeo = new THREE.PlaneGeometry(0.7, 0.78)
         const trashGeo = new THREE.SphereGeometry(0.42, 7, 5)
@@ -21152,28 +21152,34 @@ export default function ThreeWorld({
         const eBikeFrameXf: Xf[] = []
         const eBikeWheelXf: Xf[] = []
         const eConeXf: Xf[] = []
-        // Zone 1 — lane storefronts: walk both walls, drop one item per stretch, FLUSH to
-        // the wall (unreachable → no AABB).
+        // Zone 1 — lane storefronts: walk both walls, drop one item per stretch.
+        // All items are wall-flush: front face ≤ innerZ + PLAYER_RADIUS (0.35), so the
+        // lane-wall AABB stops the player before reaching any mesh surface — no AABB needed.
+        //   board base: center nz*0.2, deepest +0.33 ✓
+        //   vend:       center nz*0,   deepest +0.35 ✓
+        //   ticket:     center nz*0.1, deepest +0.31 ✓
+        //   foodCase:   center nz*0.06,deepest +0.335 ✓
+        //   bikes:      center nz*0.25,deepest +0.33 ✓
         for (const side of [-1, 1] as const) {
           const innerZ = CG_Z + side * CG_HW // -27 / -17
           const nz = -side // into the lane
           for (let x = CG_X0 - 6; x > CG_X1 + 6; x -= 7) {
             const r = rnd()
             if (r < 0.28) {
-              boardXf.push({ pos: [x, 0, innerZ + nz * 0.6], rotY: nz > 0 ? 0 : Math.PI })
-              boardPanelXf.push({ pos: [x, 0.66, innerZ + nz * 0.66], rotY: nz > 0 ? 0 : Math.PI })
+              boardXf.push({ pos: [x, 0, innerZ + nz * 0.2], rotY: nz > 0 ? 0 : Math.PI })
+              boardPanelXf.push({ pos: [x, 0.66, innerZ + nz * 0.23], rotY: nz > 0 ? 0 : Math.PI })
             } else if (r < 0.52) {
-              ;(rnd() < 0.5 ? vendRXf : vendBXf).push({ pos: [x - 0.6, 0.95, innerZ + nz * 0.45] })
-              ;(rnd() < 0.5 ? vendRXf : vendBXf).push({ pos: [x + 0.6, 0.95, innerZ + nz * 0.45] })
+              ;(rnd() < 0.5 ? vendRXf : vendBXf).push({ pos: [x - 0.6, 0.95, innerZ] })
+              ;(rnd() < 0.5 ? vendRXf : vendBXf).push({ pos: [x + 0.6, 0.95, innerZ] })
             } else if (r < 0.7) {
-              ticketXf.push({ pos: [x, 0.75, innerZ + nz * 0.4], rotY: nz > 0 ? 0 : Math.PI })
-              ticketPanelXf.push({ pos: [x, 1.08, innerZ + nz * 0.62], rotY: nz > 0 ? 0 : Math.PI })
+              ticketXf.push({ pos: [x, 0.75, innerZ + nz * 0.1], rotY: nz > 0 ? 0 : Math.PI })
+              ticketPanelXf.push({ pos: [x, 1.08, innerZ + nz * 0.32], rotY: nz > 0 ? 0 : Math.PI })
             } else if (r < 0.84) {
-              foodCaseXf.push({ pos: [x, 0.95, innerZ + nz * 0.5] })
+              foodCaseXf.push({ pos: [x, 0.95, innerZ + nz * 0.06] })
             } else {
               for (let b = 0; b < 2 + Math.floor(rnd() * 3); b++) {
                 const bx = x + b * 0.4
-                const bz = innerZ + nz * (0.7 + rnd() * 0.25)
+                const bz = innerZ + nz * (0.15 + rnd() * 0.1)
                 eBikeFrameXf.push({ pos: [bx, 0.55, bz], rotY: 0.15 + rnd() * 0.2 })
                 eBikeWheelXf.push({ pos: [bx - 0.5, 0.32, bz], rotX: Math.PI / 2 })
                 eBikeWheelXf.push({ pos: [bx + 0.5, 0.32, bz], rotX: Math.PI / 2 })
