@@ -843,6 +843,38 @@ const koenDoriGroundY = (lx: number, lz: number): number => {
   if (n.lat > KDR_HW) return 0
   return KDR_GRADE * n.s
 }
+const KDR_TOP_S = KDR_SEG.reduce((acc, s) => acc + s.len, 0) // 総弧長 (上端の s)
+// 回廊ゾーン (汎用ファサード/プロップを坂道から排除する判定用、少し広めにとる)。
+const inKoenDoriZone = (lx: number, lz: number): boolean => koenDoriNearest(lx, lz).lat < KDR_HW + 4
+// 弧長 s でのセンターライン上の点 + ランプ高さ h + 接線 (tx,tz) + 左直交 (px,pz)。道玄坂
+// dogenzakaAt と同じ役割で、build が坂に沿って物 (床/側壁/縁石/街灯/街路樹/看板) を置く共通
+// サンプラー。完全に独立した別関数 —— dogenzakaAt には一切触れない。
+type KdrPoint = {
+  cx: number
+  cz: number
+  h: number
+  tx: number
+  tz: number
+  px: number
+  pz: number
+}
+const koenDoriAt = (s: number): KdrPoint | null => {
+  let seg = KDR_SEG[0]
+  for (const sg of KDR_SEG) if (s >= sg.s0) seg = sg
+  if (!seg || seg.len <= 0) return null
+  const t = Math.max(0, Math.min(1, (s - seg.s0) / seg.len))
+  const tx = seg.dx / seg.len
+  const tz = seg.dz / seg.len
+  return {
+    cx: seg.ax + seg.dx * t,
+    cz: seg.az + seg.dz * t,
+    h: KDR_GRADE * s,
+    tx,
+    tz,
+    px: -tz,
+    pz: tx,
+  }
+}
 // Per-theme minion spec — reuse an existing enemy model with a colour/scale
 // tweak. base = model, tint = body recolour, eyes = eye-glow colour.
 type HuntCreatureKind =
@@ -19363,9 +19395,14 @@ export default function ThreeWorld({
         for (let d = -90; d <= 90; d += 24) {
           if (Math.abs(d) < 16) continue // leave the intersection itself clear
           for (const side of [-12, 12]) {
-            lampPoleXf.push({ pos: [side, 3, d] }) // along the N-S road
-            lampHeadXf.push({ pos: [side, 6.1, d] })
-            lampPoleXf.push({ pos: [d, 3, side] }) // along the E-W road
+            // N-S road lamp: skip any that the 公園通り slope would bury (the avenue
+            // relights its own corridor in Phase B). koenDoriGroundY is 0 off the slope,
+            // so every flat-ground scramble lamp is kept untouched.
+            if (koenDoriGroundY(side, d) < 0.2) {
+              lampPoleXf.push({ pos: [side, 3, d] }) // along the N-S road
+              lampHeadXf.push({ pos: [side, 6.1, d] })
+            }
+            lampPoleXf.push({ pos: [d, 3, side] }) // along the E-W road (never on the slope)
             lampHeadXf.push({ pos: [d, 6.1, side] })
           }
         }
@@ -20844,7 +20881,8 @@ export default function ThreeWorld({
         const sbBlocked = (x: number, z: number) =>
           sbAvoid.some(([ax, az, ar]) => Math.hypot(x - ax, z - az) < ar) ||
           inCentergaiZone(x, z) ||
-          inDogenzakaZone(x, z)
+          inDogenzakaZone(x, z) ||
+          inKoenDoriZone(x, z)
         // (1) Four corner clusters in the diagonal sectors (the road arms stay open).
         for (let k = 0; k < 4; k++) {
           const baseA = Math.PI / 4 + k * (Math.PI / 2)
@@ -22170,6 +22208,281 @@ export default function ThreeWorld({
           // from here. NOTE: the top is at r≈99 — just inside the flat core (r≤144), so
           // the ground stays flat there; pushing the next area further SW past r≈144
           // would need its own local floor slab + height function (cf. dogenzakaGroundY).
+        }
+
+        // ══ 公園通り (Koen-dori) Phase B: 車道・歩道・路面 (sloped corridor + surface) ══
+        // 道玄坂と同じ「床リボン + 側壁 (唯一の当たり判定) + 路面デカール」方式を koenDoriAt で
+        // 公園通り用に組む。道幅は広め (HW 11)・勾配は緩やか・街灯は密で明るい (北の落ち着いた
+        // 並木通り)。床リボンは衝突なし、側壁だけが当たり判定 —— これが横方向の崖を塞ぎ、入口を
+        // 谷底 (スクランブル側) の口だけに限定する。道玄坂のコード/マテリアルには触れない。
+        {
+          // ── (1) 登り床リボン: ONE BufferGeometry, koenDoriAt sampling, wet asphalt ──
+          // 既存スクランブル N-S 路面 (y≈0.015) の上にわずかに乗せて z-fight を避ける。
+          const KRIB_N = 64
+          const kribPos: number[] = []
+          const kribUv: number[] = []
+          const kribIdx: number[] = []
+          for (let i = 0; i <= KRIB_N; i++) {
+            const s = (i / KRIB_N) * KDR_TOP_S
+            const p = koenDoriAt(s)
+            if (!p) continue
+            const h = p.h + 0.02
+            kribPos.push(p.cx + p.px * KDR_HW, h, p.cz + p.pz * KDR_HW) // left edge
+            kribPos.push(p.cx - p.px * KDR_HW, h, p.cz - p.pz * KDR_HW) // right edge
+            const v = s / 6
+            kribUv.push(0, v, 1, v)
+          }
+          for (let i = 0; i < KRIB_N; i++) {
+            const a = i * 2
+            kribIdx.push(a, a + 2, a + 1, a + 1, a + 2, a + 3) // normals up (+Y)
+          }
+          const kribGeo = new THREE.BufferGeometry()
+          kribGeo.setAttribute("position", new THREE.Float32BufferAttribute(kribPos, 3))
+          kribGeo.setAttribute("uv", new THREE.Float32BufferAttribute(kribUv, 2))
+          kribGeo.setIndex(kribIdx)
+          kribGeo.computeVertexNormals()
+          // 公園通りは「夜でも街灯が多くて明るい通り」→ 道玄坂 (0x7c7e88) よりやや明るいアスファルト。
+          const kdrRoadMat = new THREE.MeshLambertMaterial({
+            color: 0x84868f,
+            map: makeNoiseTexture(128, 0x303139, 0.12, 8),
+            emissive: 0x1a2236,
+            emissiveIntensity: 1,
+          })
+          add(new THREE.Mesh(kribGeo, kdrRoadMat))
+          // ── (2) 側壁: 回廊の唯一の当たり判定。ランプと共にせり上がる回転ボックス。各 AABB は
+          // 回転ボックスの厳密な軸並行境界 (#117 の過大化なし)。これが横の崖を塞ぐ要。 ──
+          const KDR_WALL_T = 1.5 // 壁厚
+          const KDR_WALL_H = 8 // 店舗ベース高 (Phase D が背後に中層ビルを積む)
+          const kdrSegN = Math.max(1, Math.round(KDR_TOP_S / 5)) // ~5-unit 箱でカーブを追う
+          for (let i = 0; i < kdrSegN; i++) {
+            const sm = ((i + 0.5) / kdrSegN) * KDR_TOP_S
+            const a0 = koenDoriAt((i / kdrSegN) * KDR_TOP_S)
+            const a1 = koenDoriAt(((i + 1) / kdrSegN) * KDR_TOP_S)
+            const am = koenDoriAt(sm)
+            if (!a0 || !a1 || !am) continue
+            const segLen = Math.hypot(a1.cx - a0.cx, a1.cz - a0.cz) + 0.4 // joint overlap
+            const wallH = am.h + KDR_WALL_H // raised feetY に乗せて塞ぐ
+            const halfAbs = Math.abs(am.tx) * (segLen / 2) + Math.abs(am.tz) * (KDR_WALL_T / 2)
+            const depAbs = Math.abs(am.tz) * (segLen / 2) + Math.abs(am.tx) * (KDR_WALL_T / 2)
+            const rotY = Math.atan2(-am.tz, am.tx) // local +X (length) along the tangent
+            for (const side of [1, -1] as const) {
+              const cx = am.cx + am.px * side * (KDR_HW + KDR_WALL_T / 2)
+              const cz = am.cz + am.pz * side * (KDR_HW + KDR_WALL_T / 2)
+              const box = new THREE.Mesh(
+                new THREE.BoxGeometry(segLen, wallH, KDR_WALL_T),
+                concreteMat,
+              )
+              box.position.set(cx, wallH / 2, cz)
+              box.rotation.y = rotY
+              mAdd(box)
+              addShibuyaAABB(cx, cz, halfAbs, depAbs, wallH)
+            }
+          }
+          // ── (3) 上端の行き止まりキャップ (Phase F がバリケード + 代々木公園方面サインで化粧
+          // する。当たり判定の実体はここ)。全幅 + 両側壁分。 ──
+          const kcap = koenDoriAt(KDR_TOP_S)
+          if (kcap) {
+            const capH = kcap.h + KDR_WALL_H
+            const capW = KDR_HW * 2 + KDR_WALL_T * 2
+            const capCx = kcap.cx + kcap.tx * (KDR_WALL_T / 2 + 0.5)
+            const capCz = kcap.cz + kcap.tz * (KDR_WALL_T / 2 + 0.5)
+            const capMesh = new THREE.Mesh(
+              new THREE.BoxGeometry(KDR_WALL_T, capH, capW),
+              concreteMat,
+            )
+            capMesh.position.set(capCx, capH / 2, capCz)
+            capMesh.rotation.y = Math.atan2(-kcap.tz, kcap.tx)
+            mAdd(capMesh)
+            const capHalf = Math.abs(kcap.tx) * (KDR_WALL_T / 2) + Math.abs(kcap.tz) * (capW / 2)
+            const capDep = Math.abs(kcap.tz) * (KDR_WALL_T / 2) + Math.abs(kcap.tx) * (capW / 2)
+            addShibuyaAABB(capCx, capCz, capHalf, capDep, capH)
+          }
+          // ── (4) 路面デカール: 広めの車道 + 両側歩道タイル + 縁石 + 破線センターライン +
+          // 谷底の横断歩道 + 濡れた石畳の艶。すべて koenDoriAt の同一センターライン/高さに乗せ、
+          // 衝突なし (縁石は step-up 以下なので歩ける)。 ──
+          const KDR_CARRIAGE_HW = 6.5 // 車道半幅 (道玄坂 5.2 より広い)。歩道は 6.5→11 を埋める。
+          const kstrip = (
+            pos: number[],
+            uv: number[],
+            idx: number[],
+            s0: number,
+            s1: number,
+            latC: number,
+            latHW: number,
+            dy: number,
+            steps: number,
+            uRepeat = 1,
+            vRepeat = 0.25,
+          ) => {
+            const base = pos.length / 3
+            let pushed = 0
+            for (let k = 0; k <= steps; k++) {
+              const s = s0 + (s1 - s0) * (k / steps)
+              const p = koenDoriAt(s)
+              if (!p) continue
+              pos.push(p.cx + p.px * (latC + latHW), p.h + dy, p.cz + p.pz * (latC + latHW))
+              pos.push(p.cx + p.px * (latC - latHW), p.h + dy, p.cz + p.pz * (latC - latHW))
+              uv.push(0, s * vRepeat, uRepeat, s * vRepeat)
+              pushed++
+            }
+            for (let k = 0; k < pushed - 1; k++) {
+              const a = base + k * 2
+              idx.push(a, a + 2, a + 1, a + 1, a + 2, a + 3)
+            }
+          }
+          const kbuildGeo = (pos: number[], uv: number[], idx: number[]) => {
+            const g = new THREE.BufferGeometry()
+            g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3))
+            g.setAttribute("uv", new THREE.Float32BufferAttribute(uv, 2))
+            g.setIndex(idx)
+            g.computeVertexNormals()
+            return g
+          }
+          // (4a) 両側歩道タイル: 車道の外 (6.5→11) を埋める明るめのコンクリート板。低い段差。
+          {
+            const pos: number[] = []
+            const uv: number[] = []
+            const idx: number[] = []
+            for (const side of [1, -1] as const) {
+              kstrip(
+                pos,
+                uv,
+                idx,
+                0,
+                KDR_TOP_S,
+                side * ((KDR_CARRIAGE_HW + KDR_HW) / 2),
+                (KDR_HW - KDR_CARRIAGE_HW) / 2,
+                0.1,
+                60,
+                1,
+                0.5,
+              )
+            }
+            add(
+              new THREE.Mesh(
+                kbuildGeo(pos, uv, idx),
+                new THREE.MeshLambertMaterial({
+                  color: 0x787b85, // 道玄坂の歩道より明るい (おしゃれ・落ち着いた北の通り)
+                  map: makeNoiseTexture(64, 0x4a4c54, 0.1, 6),
+                }),
+              ),
+            )
+          }
+          // (4b) 縁石: 車道両縁の隆起ライトストリップ。step-up 以下 → 歩ける、AABB なし。
+          {
+            const pos: number[] = []
+            const uv: number[] = []
+            const idx: number[] = []
+            for (const side of [1, -1] as const) {
+              kstrip(pos, uv, idx, 0, KDR_TOP_S, side * KDR_CARRIAGE_HW, 0.34, 0.18, 48)
+            }
+            add(
+              new THREE.Mesh(
+                kbuildGeo(pos, uv, idx),
+                new THREE.MeshLambertMaterial({ color: 0x9296a0 }),
+              ),
+            )
+          }
+          // (4c) センターライン: 中央の破線 (横断歩道の先から)。夜に映える白寄りの淡色。
+          {
+            const pos: number[] = []
+            const uv: number[] = []
+            const idx: number[] = []
+            for (let s = 12; s < KDR_TOP_S - 3; s += 4.2) {
+              kstrip(pos, uv, idx, s, Math.min(s + 2.4, KDR_TOP_S), 0, 0.16, 0.06, 3)
+            }
+            add(
+              new THREE.Mesh(
+                kbuildGeo(pos, uv, idx),
+                new THREE.MeshBasicMaterial({ color: 0xe6ead0, toneMapped: false }),
+              ),
+            )
+          }
+          // (4d) 横断歩道 (谷底): 回廊基部の白いゼブラ帯。
+          {
+            const pos: number[] = []
+            const uv: number[] = []
+            const idx: number[] = []
+            for (let s = 3.5; s < 11; s += 1.3) {
+              kstrip(pos, uv, idx, s, s + 0.72, 0, KDR_CARRIAGE_HW + 1.5, 0.05, 2)
+            }
+            add(
+              new THREE.Mesh(
+                kbuildGeo(pos, uv, idx),
+                new THREE.MeshBasicMaterial({ color: 0xd2d6de, toneMapped: false }),
+              ),
+            )
+          }
+          // (4e) 濡れた石畳の艶: 坂全体に乗せる加法パビンググリッド (#122 のウェット路面技法)。
+          {
+            const seamCv = document.createElement("canvas")
+            seamCv.width = 64
+            seamCv.height = 64
+            const sctx = seamCv.getContext("2d")
+            if (sctx) {
+              sctx.clearRect(0, 0, 64, 64)
+              sctx.strokeStyle = "rgba(150,178,224,0.6)"
+              sctx.lineWidth = 2
+              sctx.strokeRect(1, 1, 62, 62)
+            }
+            const seamTex = new THREE.CanvasTexture(seamCv)
+            seamTex.wrapS = THREE.RepeatWrapping
+            seamTex.wrapT = THREE.RepeatWrapping
+            const pos: number[] = []
+            const uv: number[] = []
+            const idx: number[] = []
+            kstrip(pos, uv, idx, 0, KDR_TOP_S, 0, KDR_HW, 0.04, 60, 6, 1 / 3)
+            add(
+              new THREE.Mesh(
+                kbuildGeo(pos, uv, idx),
+                new THREE.MeshBasicMaterial({
+                  map: seamTex,
+                  transparent: true,
+                  opacity: 0.12,
+                  blending: THREE.AdditiveBlending,
+                  depthWrite: false,
+                }),
+              ),
+            )
+          }
+          // ── (5) 街灯: 道玄坂より密 (s+=9) で明るい、北の並木通りの灯り。アーム付き電柱を
+          // koenDoriAt に沿って両側に。ヘッドは大きめ・暖白で強め。AABB は電柱基部のみ。 ──
+          const kPoleGeo = new THREE.CylinderGeometry(0.15, 0.21, 9.5, 6)
+          const kArmGeo = new THREE.BoxGeometry(2.4, 0.13, 0.13)
+          const kLampGeo = new THREE.BoxGeometry(0.7, 0.24, 0.4)
+          const kPoleMat = new THREE.MeshStandardMaterial({
+            color: 0x3a3d44,
+            roughness: 0.55,
+            metalness: 0.45,
+          })
+          const kLampMat = new THREE.MeshBasicMaterial({ color: 0xfff1cc, toneMapped: false }) // 暖白・明るい
+          const kPoleXf: Xf[] = []
+          const kArmXf: Xf[] = []
+          const kLampXf: Xf[] = []
+          for (const side of [1, -1] as const) {
+            for (let s = 8; s < KDR_TOP_S - 3; s += 9) {
+              const p = koenDoriAt(s + (side > 0 ? 0 : 4.5)) // 両側を互い違いに
+              if (!p) continue
+              const baseY = p.h
+              const tangentRotY = Math.atan2(-p.tz, p.tx)
+              const plat = side * 7.6 // 歩道側 (車道 6.5 の外)
+              const px = p.cx + p.px * plat
+              const pz = p.cz + p.pz * plat
+              kPoleXf.push({ pos: [px, baseY + 4.75, pz] })
+              kArmXf.push({
+                pos: [px - side * p.px * 1.0, baseY + 8.6, pz - side * p.pz * 1.0],
+                rotY: tangentRotY,
+              })
+              kLampXf.push({
+                pos: [px - side * p.px * 2.1, baseY + 8.4, pz - side * p.pz * 2.1],
+                rotY: tangentRotY,
+              })
+              addShibuyaAABB(px, pz, 0.3, 0.3, baseY + 5, baseY) // pole base only
+            }
+          }
+          instAdd(kPoleGeo, kPoleMat, kPoleXf)
+          instAdd(kArmGeo, kPoleMat, kArmXf)
+          instAdd(kLampGeo, kLampMat, kLampXf)
         }
 
         // ══ Phase C (scramble-detail): 大型ビジョン群 (駅前の顔) ════════════════════
