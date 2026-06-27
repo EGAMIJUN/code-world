@@ -875,6 +875,107 @@ const koenDoriAt = (s: number): KdrPoint | null => {
     pz: tx,
   }
 }
+// ── 宮益坂 (Miyamasuzaka): スクランブル東から東へ登るビジネス街の坂 ───────────────
+// 道玄坂 (南西・猥雑・濃いネオン) / 公園通り (北・おしゃれ・緑) と対をなす「東の坂・
+// オフィス街」。E-W メインストリートの東延長として平坦なプラザ東縁から登り始め、東外周壁
+// (x=+100) に開けた 20 幅ギャップを抜けて駅東/ヒカリエ方向の手前 (x≈101) で行き止まる。
+// 道玄坂/公園通りとまったく同じ「回廊帯の内側だけ RISE、外では 0」方式だが、定数・関数は
+// すべて別系統 (MMZ_* / miyamasuzakaGroundY / miyamasuzakaAt) で dogenzakaGroundY /
+// koenDoriGroundY のロジックには一切触れない。床メッシュ (build) とプレイヤー Y (animate
+// ループ) の両方を駆動する純データ + 純関数。SE ガラスタワー (46,30,±12→z≤42) からは
+// 北へ十分クリア、HIKARIE 背景塔 (120,-20,西面 x=106) の手前で停止する。
+const MMZ_HW = 10 // 回廊半幅 (20 幅: 公園通り 22 よりやや狭い「広い片側2車線のオフィス街路」)
+const MMZ_GRADE = 0.1 // 弧長あたりの上昇 (~5.7°、道玄坂 0.12 と公園通り 0.075 の中間)
+const MMZ_PATH: readonly (readonly [number, number])[] = [
+  [30, -2], // 起点 — プラザ東縁/E-W メインストリート東端に開口 (h=0、平坦コアと段差なく接続)
+  [50, -5],
+  [68, -8], // 中腹 — miyamasuzaka 中心 (62,-8) 付近 (SE タワー z≤42 から北へ ~13u クリア)
+  [86, -8],
+  [101, -9], // 上端の行き止まり (h≈7.1、x=+100 ギャップを 1u 抜けた直後、HIKARIE 手前)
+]
+type MmzSeg = {
+  ax: number
+  az: number
+  dx: number
+  dz: number
+  len: number
+  len2: number
+  s0: number
+}
+// 道玄坂 DGZ_SEG / 公園通り KDR_SEG と同じ前計算: セグメントごとに起点からの累積弧長 s0。
+const MMZ_SEG: MmzSeg[] = (() => {
+  const segs: MmzSeg[] = []
+  let s0 = 0
+  for (let i = 0; i < MMZ_PATH.length - 1; i++) {
+    const a = MMZ_PATH[i]
+    const b = MMZ_PATH[i + 1]
+    if (!a || !b) continue
+    const dx = b[0] - a[0]
+    const dz = b[1] - a[1]
+    const len = Math.hypot(dx, dz)
+    segs.push({ ax: a[0], az: a[1], dx, dz, len, len2: dx * dx + dz * dz, s0 })
+    s0 += len
+  }
+  return segs
+})()
+// 折れ線センターラインへの最近点投影 → { s: 起点からの弧長, lat: 直交距離 }。
+const miyamasuzakaNearest = (lx: number, lz: number): { s: number; lat: number } => {
+  let bestD2 = Number.POSITIVE_INFINITY
+  let bestS = 0
+  for (const seg of MMZ_SEG) {
+    let t = ((lx - seg.ax) * seg.dx + (lz - seg.az) * seg.dz) / seg.len2
+    if (t < 0) t = 0
+    else if (t > 1) t = 1
+    const cx = seg.ax + seg.dx * t
+    const cz = seg.az + seg.dz * t
+    const d2 = (lx - cx) * (lx - cx) + (lz - cz) * (lz - cz)
+    if (d2 < bestD2) {
+      bestD2 = d2
+      bestS = seg.s0 + seg.len * t
+    }
+  }
+  return { s: bestS, lat: Math.sqrt(bestD2) }
+}
+// 歩行可能ランプ高さ (arena-local)。回廊帯の内側は grade·弧長、外側は 0 (平坦)。起点で
+// s=0→h=0 なので平坦なプラザ/E-W 通りと段差なく繋がり、東へ歩くほど緩やかにせり上がる。
+const miyamasuzakaGroundY = (lx: number, lz: number): number => {
+  const n = miyamasuzakaNearest(lx, lz)
+  if (n.lat > MMZ_HW) return 0
+  return MMZ_GRADE * n.s
+}
+const MMZ_TOP_S = MMZ_SEG.reduce((acc, s) => acc + s.len, 0) // 総弧長 (上端の s)
+// 回廊ゾーン (汎用ファサード/プロップを坂道から排除する判定用、少し広めにとる)。
+const inMiyamasuzakaZone = (lx: number, lz: number): boolean =>
+  miyamasuzakaNearest(lx, lz).lat < MMZ_HW + 4
+// 弧長 s でのセンターライン上の点 + ランプ高さ h + 接線 (tx,tz) + 左直交 (px,pz)。道玄坂
+// dogenzakaAt / 公園通り koenDoriAt と同じ役割で、build が坂に沿って物 (床/側壁/縁石/街灯/
+// 街路樹/看板) を置く共通サンプラー。完全に独立した別関数 —— 他坂の At には一切触れない。
+type MmzPoint = {
+  cx: number
+  cz: number
+  h: number
+  tx: number
+  tz: number
+  px: number
+  pz: number
+}
+const miyamasuzakaAt = (s: number): MmzPoint | null => {
+  let seg = MMZ_SEG[0]
+  for (const sg of MMZ_SEG) if (s >= sg.s0) seg = sg
+  if (!seg || seg.len <= 0) return null
+  const t = Math.max(0, Math.min(1, (s - seg.s0) / seg.len))
+  const tx = seg.dx / seg.len
+  const tz = seg.dz / seg.len
+  return {
+    cx: seg.ax + seg.dx * t,
+    cz: seg.az + seg.dz * t,
+    h: MMZ_GRADE * s,
+    tx,
+    tz,
+    px: -tz,
+    pz: tx,
+  }
+}
 // Per-theme minion spec — reuse an existing enemy model with a colour/scale
 // tweak. base = model, tint = body recolour, eyes = eye-glow colour.
 type HuntCreatureKind =
@@ -19160,7 +19261,13 @@ export default function ThreeWorld({
         for (const [x, z, w, d] of [
           [0, H, 2 * H, 2],
           [0, -H, 2 * H, 2],
-          [H, 0, 2, 2 * H],
+          [H, -60.5, 2, 79], // east wall — segment NORTH of the 宮益坂 mouth (z<-21)
+          [H, 51.5, 2, 97], // east wall — segment SOUTH of the 宮益坂 mouth (z>+3)
+          // ↑ east wall split: 24-wide gap at z∈[-21,+3] is the 宮益坂 (Miyamasuzaka)
+          //   corridor mouth — the ramp punches out through here toward 駅東/HIKARIE on the
+          //   still-flat core (r≤FLAT_R holds past x=100). Its own side walls seal the sides
+          //   (built in the 宮益坂 Phase A section), so the gap never leaks — same recipe as
+          //   the west-wall split for センター街.
           [-H, -63.5, 2, 73], // west wall — segment NORTH of the centre-gai mouth
           [-H, 41.5, 2, 117], // west wall — segment SOUTH of the centre-gai mouth
         ] as const) {
@@ -20881,11 +20988,15 @@ export default function ThreeWorld({
           [40, -28, 20],
         ]
         // inCentergaiZone keeps generic facades out of the walkable センター街 lane.
+        // inMiyamasuzakaZone added so the axis-facing facade rows (loop (2), the +x/EAST
+        // axis at z=±16) never drop a building into the 宮益坂 corridor (centreline z≈-8) —
+        // the #126-class trap that would block the new climbing street with a phantom wall.
         const sbBlocked = (x: number, z: number) =>
           sbAvoid.some(([ax, az, ar]) => Math.hypot(x - ax, z - az) < ar) ||
           inCentergaiZone(x, z) ||
           inDogenzakaZone(x, z) ||
-          inKoenDoriZone(x, z)
+          inKoenDoriZone(x, z) ||
+          inMiyamasuzakaZone(x, z)
         // (1) Four corner clusters in the diagonal sectors (the road arms stay open).
         for (let k = 0; k < 4; k++) {
           const baseA = Math.PI / 4 + k * (Math.PI / 2)
@@ -23037,6 +23148,101 @@ export default function ThreeWorld({
             }
           }
           instAdd(figGeo, figMat, figXf)
+        }
+
+        // ══ 宮益坂 (Miyamasuzaka) Phase A: sloped walkable corridor ═══════════════════
+        // The EAST climbing street: extends the E-W main road past the scramble plaza,
+        // rises with arc-length via the module-level miyamasuzakaGroundY (the SAME function
+        // the player's Y follows in animate, so floor and footing always agree), punches
+        // through a 20-wide gap cut in the east perimeter wall (split below), and dead-ends
+        // at x≈101 just short of the HIKARIE backdrop. The two side walls are the SINGLE
+        // collision source (like 道玄坂/公園通り); the ramp floor carries NO hitbox.
+        {
+          // ── (1) Climbing floor ribbon: ONE BufferGeometry, left/right edge verts at
+          // each sample, heights from MMZ_GRADE·s. Up-facing winding. Own asphalt material
+          // (a touch cooler/cleaner than 道玄坂 — business street) → one isolated draw call.
+          const MRIB_N = 56
+          const mribPos: number[] = []
+          const mribUv: number[] = []
+          const mribIdx: number[] = []
+          for (let i = 0; i <= MRIB_N; i++) {
+            const s = (i / MRIB_N) * MMZ_TOP_S
+            const p = miyamasuzakaAt(s)
+            if (!p) continue
+            const h = MMZ_GRADE * s
+            mribPos.push(p.cx + p.px * MMZ_HW, h, p.cz + p.pz * MMZ_HW) // left edge
+            mribPos.push(p.cx - p.px * MMZ_HW, h, p.cz - p.pz * MMZ_HW) // right edge
+            const v = s / 6
+            mribUv.push(0, v, 1, v)
+          }
+          for (let i = 0; i < MRIB_N; i++) {
+            const a = i * 2
+            mribIdx.push(a, a + 2, a + 1, a + 1, a + 2, a + 3)
+          }
+          const mribGeo = new THREE.BufferGeometry()
+          mribGeo.setAttribute("position", new THREE.Float32BufferAttribute(mribPos, 3))
+          mribGeo.setAttribute("uv", new THREE.Float32BufferAttribute(mribUv, 2))
+          mribGeo.setIndex(mribIdx)
+          mribGeo.computeVertexNormals()
+          const mmzRoadMat = new THREE.MeshLambertMaterial({
+            color: 0x82858f, // cool clean asphalt — corporate street vs 道玄坂's warmer grime
+            map: makeNoiseTexture(128, 0x303139, 0.1, 9),
+            emissive: 0x182032, // faint cool sheen
+            emissiveIntensity: 1,
+          })
+          add(new THREE.Mesh(mribGeo, mmzRoadMat))
+          // ── (2) Side walls: short rotated boxes hugging both band edges, rising with the
+          // ramp. The corridor's ONLY collision; each AABB is the EXACT axis-aligned bound of
+          // its rotated box (≥2u corridor clearance built into MMZ_HW + wall offset).
+          const MMZ_WALL_T = 1.5
+          const MMZ_WALL_H = 9 // office-base height (Phase C stacks towers behind)
+          const mmzSegN = Math.max(1, Math.round(MMZ_TOP_S / 5))
+          for (let i = 0; i < mmzSegN; i++) {
+            const sm = ((i + 0.5) / mmzSegN) * MMZ_TOP_S
+            const a0 = miyamasuzakaAt((i / mmzSegN) * MMZ_TOP_S)
+            const a1 = miyamasuzakaAt(((i + 1) / mmzSegN) * MMZ_TOP_S)
+            const am = miyamasuzakaAt(sm)
+            if (!a0 || !a1 || !am) continue
+            const segLen = Math.hypot(a1.cx - a0.cx, a1.cz - a0.cz) + 1.5 // joint overlap
+            // (1.5, wider than 道玄坂's 0.4: closes the small outer-edge notch at the
+            // (68,-8) path bend so the side wall AABBs seal with no ghost gap — the lane
+            // stays clear because the extra length runs ALONG the tangent, not laterally.)
+            const wallH = MMZ_GRADE * sm + MMZ_WALL_H
+            const halfAbs = Math.abs(am.tx) * (segLen / 2) + Math.abs(am.tz) * (MMZ_WALL_T / 2)
+            const depAbs = Math.abs(am.tz) * (segLen / 2) + Math.abs(am.tx) * (MMZ_WALL_T / 2)
+            const rotY = Math.atan2(-am.tz, am.tx)
+            for (const side of [1, -1] as const) {
+              const cx = am.cx + am.px * side * (MMZ_HW + MMZ_WALL_T / 2)
+              const cz = am.cz + am.pz * side * (MMZ_HW + MMZ_WALL_T / 2)
+              const box = new THREE.Mesh(
+                new THREE.BoxGeometry(segLen, wallH, MMZ_WALL_T),
+                concreteMat,
+              )
+              box.position.set(cx, wallH / 2, cz)
+              box.rotation.y = rotY
+              mAdd(box)
+              addShibuyaAABB(cx, cz, halfAbs, depAbs, wallH)
+            }
+          }
+          // ── (3) Dead-end cap across the top (Phase G dresses it as a 駅東再開発 hoarding).
+          // Spans the full corridor width + both walls.
+          const mcap = miyamasuzakaAt(MMZ_TOP_S)
+          if (mcap) {
+            const mcapH = MMZ_GRADE * MMZ_TOP_S + MMZ_WALL_H
+            const mcapW = MMZ_HW * 2 + MMZ_WALL_T * 2
+            const mcapCx = mcap.cx + mcap.tx * (MMZ_WALL_T / 2 + 0.5)
+            const mcapCz = mcap.cz + mcap.tz * (MMZ_WALL_T / 2 + 0.5)
+            const mcapMesh = new THREE.Mesh(
+              new THREE.BoxGeometry(MMZ_WALL_T, mcapH, mcapW),
+              concreteMat,
+            )
+            mcapMesh.position.set(mcapCx, mcapH / 2, mcapCz)
+            mcapMesh.rotation.y = Math.atan2(-mcap.tz, mcap.tx)
+            mAdd(mcapMesh)
+            const mcapHalf = Math.abs(mcap.tx) * (MMZ_WALL_T / 2) + Math.abs(mcap.tz) * (mcapW / 2)
+            const mcapDep = Math.abs(mcap.tz) * (MMZ_WALL_T / 2) + Math.abs(mcap.tx) * (mcapW / 2)
+            addShibuyaAABB(mcapCx, mcapCz, mcapHalf, mcapDep, mcapH)
+          }
         }
 
         // ══ Phase C (scramble-detail): 大型ビジョン群 (駅前の顔) ════════════════════
@@ -27491,10 +27697,14 @@ export default function ThreeWorld({
           if (isShibuyaStage(huntMissionConfigRef.current.stage)) {
             const lx = refs.focalPoint.x - HUNT_ARENA.x
             const lz = refs.focalPoint.z - HUNT_ARENA.z
-            // 道玄坂 (南西) と 公園通り (北) は重ならない別回廊。各々が帯の外では 0 を返すので
-            // max を取れば「いま乗っている坂」の高さだけ拾える。両坂の平坦域も従来通り 0 で、
-            // onDgzSlope の吸着分岐 (DGZ_SNAP_MAX) は両方の下り坂で共通に効く。
-            const slopeY = Math.max(dogenzakaGroundY(lx, lz), koenDoriGroundY(lx, lz))
+            // 道玄坂 (南西) / 公園通り (北) / 宮益坂 (東) は重ならない別回廊。各々が帯の外では
+            // 0 を返すので max を取れば「いま乗っている坂」の高さだけ拾える。各坂の平坦域も従来
+            // 通り 0 で、onDgzSlope の吸着分岐 (DGZ_SNAP_MAX) は全ての下り坂で共通に効く。
+            const slopeY = Math.max(
+              dogenzakaGroundY(lx, lz),
+              koenDoriGroundY(lx, lz),
+              miyamasuzakaGroundY(lx, lz),
+            )
             if (slopeY > 0) {
               onDgzSlope = true
               if (slopeY > groundY) groundY = slopeY
