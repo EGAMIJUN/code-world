@@ -19509,8 +19509,13 @@ export default function ThreeWorld({
               lampPoleXf.push({ pos: [side, 3, d] }) // along the N-S road
               lampHeadXf.push({ pos: [side, 6.1, d] })
             }
-            lampPoleXf.push({ pos: [d, 3, side] }) // along the E-W road (never on the slope)
-            lampHeadXf.push({ pos: [d, 6.1, side] })
+            // E-W road lamp: skip any the 宮益坂 slope would bury (the avenue relights its
+            // own corridor in its Phase B). miyamasuzakaGroundY is 0 off the slope, so every
+            // flat-ground scramble lamp on the E-W road is kept untouched.
+            if (miyamasuzakaGroundY(d, side) < 0.2) {
+              lampPoleXf.push({ pos: [d, 3, side] }) // along the E-W road
+              lampHeadXf.push({ pos: [d, 6.1, side] })
+            }
           }
         }
         instAdd(lampPoleGeo, sigPoleMat, lampPoleXf)
@@ -23243,6 +23248,199 @@ export default function ThreeWorld({
             const mcapDep = Math.abs(mcap.tz) * (MMZ_WALL_T / 2) + Math.abs(mcap.tx) * (mcapW / 2)
             addShibuyaAABB(mcapCx, mcapCz, mcapHalf, mcapDep, mcapH)
           }
+        }
+
+        // ══ 宮益坂 (Miyamasuzaka) Phase B: 車道・歩道・路面 + 街灯 ════════════════════
+        // Road decals layered on the Phase A ramp via miyamasuzakaAt: carriageway +
+        // sidewalk tiles + curbs + dashed centre line + a crosswalk at the base + a faint
+        // cool sheen, then clean modern cool-white lamps (business street, not 道玄坂's
+        // grime). NONE collide except the lamp pole bases. The existing E-W road lamps the
+        // ramp would bury are culled at the scramble lamp pass (miyamasuzakaGroundY gate).
+        {
+          const MMZ_CARRIAGE_HW = 6.0 // carriageway half-width (sidewalks fill 6.0→10)
+          const mstrip = (
+            pos: number[],
+            uv: number[],
+            idx: number[],
+            s0: number,
+            s1: number,
+            latC: number,
+            latHW: number,
+            dy: number,
+            steps: number,
+            uRepeat = 1,
+            vRepeat = 0.25,
+          ) => {
+            const base = pos.length / 3
+            let pushed = 0
+            for (let k = 0; k <= steps; k++) {
+              const s = s0 + (s1 - s0) * (k / steps)
+              const p = miyamasuzakaAt(s)
+              if (!p) continue
+              pos.push(p.cx + p.px * (latC + latHW), p.h + dy, p.cz + p.pz * (latC + latHW))
+              pos.push(p.cx + p.px * (latC - latHW), p.h + dy, p.cz + p.pz * (latC - latHW))
+              uv.push(0, s * vRepeat, uRepeat, s * vRepeat)
+              pushed++
+            }
+            for (let k = 0; k < pushed - 1; k++) {
+              const a = base + k * 2
+              idx.push(a, a + 2, a + 1, a + 1, a + 2, a + 3)
+            }
+          }
+          const mbuildGeo = (pos: number[], uv: number[], idx: number[]) => {
+            const gg = new THREE.BufferGeometry()
+            gg.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3))
+            gg.setAttribute("uv", new THREE.Float32BufferAttribute(uv, 2))
+            gg.setIndex(idx)
+            gg.computeVertexNormals()
+            return gg
+          }
+          // (4a) Sidewalk tiles: fill the carriage→HW band with clean pale concrete.
+          {
+            const pos: number[] = []
+            const uv: number[] = []
+            const idx: number[] = []
+            for (const side of [1, -1] as const) {
+              mstrip(
+                pos,
+                uv,
+                idx,
+                0,
+                MMZ_TOP_S,
+                side * ((MMZ_CARRIAGE_HW + MMZ_HW) / 2),
+                (MMZ_HW - MMZ_CARRIAGE_HW) / 2,
+                0.1,
+                56,
+                1,
+                0.5,
+              )
+            }
+            add(
+              new THREE.Mesh(
+                mbuildGeo(pos, uv, idx),
+                new THREE.MeshLambertMaterial({
+                  color: 0x7e818b, // clean pale concrete (corporate pavement)
+                  map: makeNoiseTexture(64, 0x4a4c54, 0.08, 6),
+                }),
+              ),
+            )
+          }
+          // (4b) Curbs: raised light strips at both carriage edges. Below step-up → walkable.
+          {
+            const pos: number[] = []
+            const uv: number[] = []
+            const idx: number[] = []
+            for (const side of [1, -1] as const) {
+              mstrip(pos, uv, idx, 0, MMZ_TOP_S, side * MMZ_CARRIAGE_HW, 0.32, 0.18, 44)
+            }
+            add(
+              new THREE.Mesh(
+                mbuildGeo(pos, uv, idx),
+                new THREE.MeshLambertMaterial({ color: 0x969aa4 }),
+              ),
+            )
+          }
+          // (4c) Centre line: cool-white dashes from past the crosswalk to the top.
+          {
+            const pos: number[] = []
+            const uv: number[] = []
+            const idx: number[] = []
+            for (let s = 12; s < MMZ_TOP_S - 3; s += 4.2) {
+              mstrip(pos, uv, idx, s, Math.min(s + 2.4, MMZ_TOP_S), 0, 0.16, 0.06, 3)
+            }
+            add(
+              new THREE.Mesh(
+                mbuildGeo(pos, uv, idx),
+                new THREE.MeshBasicMaterial({ color: 0xdfe6f0, toneMapped: false }),
+              ),
+            )
+          }
+          // (4d) Crosswalk at the base: white zebra band where the ramp meets the plaza.
+          {
+            const pos: number[] = []
+            const uv: number[] = []
+            const idx: number[] = []
+            for (let s = 3.5; s < 11; s += 1.3) {
+              mstrip(pos, uv, idx, s, s + 0.72, 0, MMZ_CARRIAGE_HW + 1.4, 0.05, 2)
+            }
+            add(
+              new THREE.Mesh(
+                mbuildGeo(pos, uv, idx),
+                new THREE.MeshBasicMaterial({ color: 0xd6dae2, toneMapped: false }),
+              ),
+            )
+          }
+          // (4e) Faint cool sheen over the whole ramp (subtle — business street reads clean,
+          // not rain-grimy like 道玄坂). One additive paving grid.
+          {
+            const seamCv = document.createElement("canvas")
+            seamCv.width = 64
+            seamCv.height = 64
+            const sctx = seamCv.getContext("2d")
+            if (sctx) {
+              sctx.clearRect(0, 0, 64, 64)
+              sctx.strokeStyle = "rgba(150,170,210,0.5)"
+              sctx.lineWidth = 2
+              sctx.strokeRect(1, 1, 62, 62)
+            }
+            const seamTex = new THREE.CanvasTexture(seamCv)
+            seamTex.wrapS = THREE.RepeatWrapping
+            seamTex.wrapT = THREE.RepeatWrapping
+            const pos: number[] = []
+            const uv: number[] = []
+            const idx: number[] = []
+            mstrip(pos, uv, idx, 0, MMZ_TOP_S, 0, MMZ_HW, 0.04, 56, 6, 1 / 3)
+            add(
+              new THREE.Mesh(
+                mbuildGeo(pos, uv, idx),
+                new THREE.MeshBasicMaterial({
+                  map: seamTex,
+                  transparent: true,
+                  opacity: 0.09,
+                  blending: THREE.AdditiveBlending,
+                  depthWrite: false,
+                }),
+              ),
+            )
+          }
+          // ── (5) 街灯: clean modern arm-poles along miyamasuzakaAt, both sides, cool-white
+          // heads (corporate street lighting). AABB on the pole base only.
+          const mPoleGeo = new THREE.CylinderGeometry(0.14, 0.2, 9.8, 6)
+          const mArmGeo = new THREE.BoxGeometry(2.3, 0.13, 0.13)
+          const mLampGeo = new THREE.BoxGeometry(0.66, 0.22, 0.4)
+          const mPoleMat = new THREE.MeshStandardMaterial({
+            color: 0x40434b,
+            roughness: 0.5,
+            metalness: 0.5,
+          })
+          const mLampMat = new THREE.MeshBasicMaterial({ color: 0xf0f4ff, toneMapped: false }) // 冷白
+          const mPoleXf: Xf[] = []
+          const mArmXf: Xf[] = []
+          const mLampXf: Xf[] = []
+          for (const side of [1, -1] as const) {
+            for (let s = 8; s < MMZ_TOP_S - 3; s += 10) {
+              const p = miyamasuzakaAt(s + (side > 0 ? 0 : 5))
+              if (!p) continue
+              const baseY = p.h
+              const tangentRotY = Math.atan2(-p.tz, p.tx)
+              const plat = side * 7.2 // sidewalk side (outside the 6.0 carriageway)
+              const px = p.cx + p.px * plat
+              const pz = p.cz + p.pz * plat
+              mPoleXf.push({ pos: [px, baseY + 4.9, pz] })
+              mArmXf.push({
+                pos: [px - side * p.px * 1.0, baseY + 8.8, pz - side * p.pz * 1.0],
+                rotY: tangentRotY,
+              })
+              mLampXf.push({
+                pos: [px - side * p.px * 2.05, baseY + 8.6, pz - side * p.pz * 2.05],
+                rotY: tangentRotY,
+              })
+              addShibuyaAABB(px, pz, 0.3, 0.3, baseY + 5, baseY) // pole base only
+            }
+          }
+          instAdd(mPoleGeo, mPoleMat, mPoleXf)
+          instAdd(mArmGeo, mPoleMat, mArmXf)
+          instAdd(mLampGeo, mLampMat, mLampXf)
         }
 
         // ══ Phase C (scramble-detail): 大型ビジョン群 (駅前の顔) ════════════════════
