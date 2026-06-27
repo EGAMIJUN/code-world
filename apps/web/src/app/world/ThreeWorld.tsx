@@ -21409,6 +21409,114 @@ export default function ThreeWorld({
           instAdd(railBarGeo, railMat, railBarXf)
         }
 
+        // ══ 道玄坂 (Dogenzaka) Phase F: neon + sign flood ══════════════════════════
+        // Drown the slope in light: a forest of vertical neon 縦看板 projecting over the
+        // lane (4 colours, instanced, registered into animNeon so they flicker), big
+        // club/hotel light-boxes on the walls, and cross-street 横断幕 banners spanning
+        // the climb. All emissive, all multi-colour, none collide (mounted above the
+        // storefront / overhead). The carriageway is untouched.
+        {
+          // (1) Vertical neon 縦看板 林立 — thin emissive bars on both walls, facing the
+          // lane, at varied heights. Instanced per colour; mats pushed to animNeon.
+          const neonBarGeo = new THREE.BoxGeometry(0.26, 1, 0.16)
+          const neonCols = [0xff3a7a, 0x2ce6ff, 0x53ff8a, 0xffb43a]
+          const neonMats = neonCols.map(
+            (c) =>
+              new THREE.MeshStandardMaterial({ color: c, emissive: c, emissiveIntensity: 1.2 }),
+          )
+          const neonXf: Xf[][] = neonCols.map(() => [])
+          for (const side of [1, -1] as const) {
+            for (let s = 6; s < DGZ_TOP_S - 3; s += 2.4) {
+              if (rnd() < 0.4) continue
+              const p = dogenzakaAt(s)
+              if (!p) continue
+              const baseY = p.h
+              const faceRotY = Math.atan2(-p.tz, p.tx) + (side > 0 ? Math.PI : 0)
+              const lat = side * (DGZ_HW - 0.25)
+              const barH = 2.2 + rnd() * 2.6
+              const yC = baseY + 3.4 + rnd() * 4.5
+              const ci = Math.floor(rnd() * neonCols.length)
+              neonXf[ci]?.push({
+                pos: [p.cx + p.px * lat, yC, p.cz + p.pz * lat],
+                rotY: faceRotY,
+                scl: [1, barH, 1],
+              })
+            }
+          }
+          neonMats.forEach((m, i) => {
+            if (instAdd(neonBarGeo, m, neonXf[i] ?? [])) animNeon.push(m) // flickers in Phase G
+          })
+          // (2) Big club / hotel light-boxes — large bright emissive panels on the walls.
+          const boxGeo = new THREE.PlaneGeometry(2.4, 1.3)
+          const boxMats = [
+            new THREE.MeshBasicMaterial({ color: 0xff2d8e, toneMapped: false }),
+            new THREE.MeshBasicMaterial({ color: 0x2cc8ff, toneMapped: false }),
+            new THREE.MeshBasicMaterial({ color: 0xffd24a, toneMapped: false }),
+          ]
+          const boxXf: Xf[][] = boxMats.map(() => [])
+          for (const side of [1, -1] as const) {
+            for (let s = 10; s < DGZ_TOP_S - 4; s += 9) {
+              const p = dogenzakaAt(s + (side > 0 ? 4 : 0))
+              if (!p) continue
+              const faceRotY = Math.atan2(-p.tz, p.tx) + (side > 0 ? Math.PI : 0)
+              const lat = side * (DGZ_HW - 0.12)
+              const bi = Math.floor(rnd() * boxMats.length)
+              boxXf[bi]?.push({
+                pos: [p.cx + p.px * lat, p.h + 5.5 + rnd() * 3, p.cz + p.pz * lat],
+                rotY: faceRotY,
+                scl: [0.7 + rnd() * 0.6, 0.7 + rnd() * 0.7, 1],
+              })
+            }
+          }
+          boxMats.forEach((m, i) => instAdd(boxGeo, m, boxXf[i] ?? []))
+          // (3) Cross-street 横断幕 banners spanning the climb (original event text).
+          const bannerTex = (text: string, bg: string, fg: string) => {
+            const cv = document.createElement("canvas")
+            cv.width = 512
+            cv.height = 64
+            const c = cv.getContext("2d")
+            if (c) {
+              c.fillStyle = bg
+              c.fillRect(0, 0, 512, 64)
+              c.fillStyle = fg
+              c.font = "bold 38px sans-serif"
+              c.textAlign = "center"
+              c.textBaseline = "middle"
+              c.fillText(text, 256, 36)
+            }
+            const t = new THREE.CanvasTexture(cv)
+            t.colorSpace = THREE.SRGBColorSpace
+            return t
+          }
+          const bannerSpecs: [string, string, string][] = [
+            ["道玄坂 WELCOME", "#0a1230", "#ffd24a"],
+            ["夜祭 NIGHT FES", "#2a0820", "#2ce6ff"],
+            ["渋谷再開発 PROJECT", "#08220e", "#53ff8a"],
+          ]
+          const bannerMats = bannerSpecs.map(
+            ([t, bg, fg]) =>
+              new THREE.MeshBasicMaterial({
+                map: bannerTex(t, bg, fg),
+                side: THREE.DoubleSide,
+                transparent: true,
+              }),
+          )
+          const bannerGeo = new THREE.PlaneGeometry(DGZ_HW * 2 + 1, 1.3)
+          const bannerXf: Xf[][] = bannerMats.map(() => [])
+          let bi = 0
+          for (const s of [14, 27, 40, 52, 64] as const) {
+            const p = dogenzakaAt(s)
+            if (!p) continue
+            const mi = bi % bannerMats.length
+            bannerXf[mi]?.push({
+              pos: [p.cx, p.h + 7.6, p.cz],
+              rotY: Math.atan2(p.tx, p.tz),
+            })
+            bi++
+          }
+          bannerMats.forEach((m, i) => instAdd(bannerGeo, m, bannerXf[i] ?? []))
+        }
+
         // ══ Phase C (scramble-detail): 大型ビジョン群 (駅前の顔) ════════════════════
         // The 駅前 video-wall look: several giant fictional-ad screens facing the
         // crossing + a round vision crowning the 渋谷MODE cylinder. Each screen is one
