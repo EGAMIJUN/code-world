@@ -23342,6 +23342,200 @@ export default function ThreeWorld({
           }
         }
 
+        // ══ 文化村通り (Bunkamura-dori) Phase C: 街路樹・什器・看板 + 動き (落ち着いた西の通り) ══
+        // Calm dressing for the cultural street: a few street trees, vintage warm lamps,
+        // benches/planters, a 文化村通り gate at the mouth, plus quiet life (art-goer figures,
+        // a couple of parked cars, warm restrained sign glow). Central lane stays open.
+        {
+          // ── (1) 街路樹 (落ち着いた並木、歩道側 lat 8.4)。trunk のみ AABB、canopy は風揺れ。──
+          const bTrunkGeo = new THREE.CylinderGeometry(0.24, 0.36, 5.0, 6)
+          const bLeafGeo = new THREE.SphereGeometry(2.3, 8, 6)
+          const bLeafMat = new THREE.MeshLambertMaterial({
+            color: 0x3f5a36, // calm muted green
+            emissive: 0x0e180c,
+            emissiveIntensity: 0.45,
+          })
+          const bTrunkXf: Xf[] = []
+          const bLeafXf: Xf[] = []
+          for (const side of [1, -1] as const) {
+            for (let s = 6; s < BKM_TOP_S - 3; s += 8) {
+              const p = bunkamuraAt(s + (side > 0 ? 0 : 4))
+              if (!p) continue
+              const tx = p.cx + p.px * side * 8.4
+              const tz = p.cz + p.pz * side * 8.4
+              bTrunkXf.push({ pos: [tx, 2.5, tz] })
+              bLeafXf.push({ pos: [tx, 5.1, tz], scl: 0.9 + rnd() * 0.2 })
+              addShibuyaAABB(tx, tz, 0.45, 0.45, 4)
+            }
+          }
+          instAdd(bTrunkGeo, woodMat, bTrunkXf)
+          registerSway(instAdd(bLeafGeo, bLeafMat, bLeafXf), bLeafXf, 0.04, 0.8, 0.6)
+          // ── (2) ヴィンテージ街灯 (暖色、歩道 lat 7.4)。AABB は基部のみ。──
+          const bPoleGeo = new THREE.CylinderGeometry(0.13, 0.2, 5.2, 6)
+          const bPoleMat = new THREE.MeshStandardMaterial({
+            color: 0x2e2a26,
+            roughness: 0.6,
+            metalness: 0.4,
+          })
+          const bGlobeGeo = new THREE.SphereGeometry(0.34, 8, 6)
+          const bGlobeMat = new THREE.MeshBasicMaterial({ color: 0xffe6b0, toneMapped: false }) // 暖色
+          const bPoleXf: Xf[] = []
+          const bGlobeXf: Xf[] = []
+          for (const side of [1, -1] as const) {
+            for (let s = 9; s < BKM_TOP_S - 2; s += 9) {
+              const p = bunkamuraAt(s + (side > 0 ? 4.5 : 0))
+              if (!p) continue
+              const lx = p.cx + p.px * side * 7.4
+              const lz = p.cz + p.pz * side * 7.4
+              bPoleXf.push({ pos: [lx, 2.6, lz] })
+              bGlobeXf.push({ pos: [lx, 5.5, lz] })
+              addShibuyaAABB(lx, lz, 0.3, 0.3, 3)
+            }
+          }
+          instAdd(bPoleGeo, bPoleMat, bPoleXf)
+          instAdd(bGlobeGeo, bGlobeMat, bGlobeXf)
+          // ── (3) ベンチ + プランター (低い → 衝突なし)。──
+          const bBenchGeo = new THREE.BoxGeometry(1.9, 0.45, 0.55)
+          const bBenchMat = new THREE.MeshStandardMaterial({ color: 0x4a4038, roughness: 0.8 })
+          const bPlanterGeo = new THREE.BoxGeometry(1.3, 0.45, 1.3)
+          const bPlanterMat = new THREE.MeshLambertMaterial({ color: 0x4a3d30 })
+          const bBenchXf: Xf[] = []
+          const bPlanterXf: Xf[] = []
+          for (const side of [1, -1] as const) {
+            for (let s = 11; s < BKM_TOP_S - 4; s += 13) {
+              const p = bunkamuraAt(s + (side > 0 ? 6 : 0))
+              if (!p) continue
+              const rotY = Math.atan2(-p.tz, p.tx)
+              bBenchXf.push({
+                pos: [p.cx + p.px * side * 7.0, 0.22, p.cz + p.pz * side * 7.0],
+                rotY,
+              })
+              bPlanterXf.push({ pos: [p.cx + p.px * side * 9.2, 0.22, p.cz + p.pz * side * 9.2] })
+            }
+          }
+          instAdd(bBenchGeo, bBenchMat, bBenchXf)
+          instAdd(bPlanterGeo, bPlanterMat, bPlanterXf)
+          // ── (4) 谷底の口: 文化村通りゲート横梁 + サイン (スクランブルへ向ける)。歩行は塞がない。──
+          const m = bunkamuraAt(1.5)
+          if (m) {
+            const beamMat = new THREE.MeshStandardMaterial({
+              color: 0x3a322a,
+              roughness: 0.6,
+              metalness: 0.35,
+            })
+            const beam = new THREE.Mesh(new THREE.BoxGeometry(BKM_HW * 2 + 3, 0.6, 0.6), beamMat)
+            beam.position.set(m.cx, 6.4, m.cz)
+            beam.rotation.y = Math.atan2(-m.tz, m.tx)
+            mAdd(beam)
+            const gateCv = document.createElement("canvas")
+            gateCv.width = 256
+            gateCv.height = 64
+            const gc = gateCv.getContext("2d")
+            if (gc) {
+              gc.fillStyle = "#1a140e"
+              gc.fillRect(0, 0, 256, 64)
+              gc.fillStyle = "#caa45a"
+              gc.font = "bold 30px serif"
+              gc.textAlign = "center"
+              gc.textBaseline = "middle"
+              gc.fillText("文化村通り", 128, 24)
+              gc.font = "16px serif"
+              gc.fillText("BUNKAMURA-DORI", 128, 48)
+            }
+            const gateSign = new THREE.Mesh(
+              new THREE.PlaneGeometry(BKM_HW * 1.5, 2.0),
+              new THREE.MeshBasicMaterial({
+                map: new THREE.CanvasTexture(gateCv),
+                toneMapped: false,
+                side: THREE.DoubleSide,
+              }),
+            )
+            gateSign.position.set(m.cx + m.tx * 0.4, 7.2, m.cz + m.tz * 0.4)
+            gateSign.rotation.y = Math.atan2(-m.tx, -m.tz) // face approaching scramble players
+            add(gateSign)
+          }
+          // ── (5) 動き: 人影 (アート客風)、駐車車両、暖色のサイン光 (animNeon)。──
+          const bFigMat = new THREE.MeshBasicMaterial({
+            color: 0x0d0b08,
+            transparent: true,
+            opacity: 0.85,
+            side: THREE.DoubleSide,
+          })
+          const bFigGeo = new THREE.PlaneGeometry(0.7, 1.8)
+          const bFigXf: Xf[] = []
+          for (const side of [1, -1] as const) {
+            for (let s = 8; s < BKM_TOP_S - 4; s += 7) {
+              if (rnd() < 0.5) continue
+              const p = bunkamuraAt(s + rnd() * 2)
+              if (!p) continue
+              const lat = side * (6.6 + rnd() * 1.6)
+              bFigXf.push({
+                pos: [p.cx + p.px * lat, 0.9, p.cz + p.pz * lat],
+                rotY: rnd() * Math.PI,
+              })
+            }
+          }
+          instAdd(bFigGeo, bFigMat, bFigXf)
+          // 駐車車両 2台 (縁石際 lat 6.2、中央レーンは空ける)。
+          const bCarBodyMat = new THREE.MeshStandardMaterial({
+            color: 0x2a2622,
+            roughness: 0.55,
+            metalness: 0.4,
+          })
+          const bCarCabMat = new THREE.MeshStandardMaterial({
+            color: 0x0c0a08,
+            emissive: 0x2a1e12,
+            emissiveIntensity: 0.3,
+          })
+          for (const [s, side] of [
+            [12, 1],
+            [24, -1],
+          ] as const) {
+            const p = bunkamuraAt(s)
+            if (!p) continue
+            const lat = side * 6.2
+            const cx = p.cx + p.px * lat
+            const cz = p.cz + p.pz * lat
+            const rotY = Math.atan2(p.tx, p.tz)
+            const body = new THREE.Mesh(new THREE.BoxGeometry(2.0, 1.1, 4.4), bCarBodyMat)
+            body.position.set(cx, 0.7, cz)
+            body.rotation.y = rotY
+            mAdd(body)
+            const cab = new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.78, 2.2), bCarCabMat)
+            cab.position.set(cx, 1.55, cz)
+            cab.rotation.y = rotY
+            mAdd(cab)
+            const hw = Math.abs(p.tz) * 1.0 + Math.abs(p.tx) * 2.2
+            const hd = Math.abs(p.tx) * 1.0 + Math.abs(p.tz) * 2.2
+            addShibuyaAABB(cx, cz, hw, hd, 1.4, 0)
+          }
+          // 暖色のサイン光バー (animNeon フリッカー、控えめ)。
+          const bNeonGeo = new THREE.BoxGeometry(0.22, 1, 0.12)
+          const bNeonCols = [0xffcf8a, 0xe8a85a]
+          const bNeonMats = bNeonCols.map(
+            (c) =>
+              new THREE.MeshStandardMaterial({ color: c, emissive: c, emissiveIntensity: 1.0 }),
+          )
+          const bNeonXf: Xf[][] = bNeonCols.map(() => [])
+          for (const side of [1, -1] as const) {
+            for (let s = 8; s < BKM_TOP_S - 3; s += 7) {
+              if (rnd() < 0.6) continue
+              const p = bunkamuraAt(s)
+              if (!p) continue
+              const lat = side * (BKM_HW - 0.4)
+              const ci = Math.floor(rnd() * bNeonCols.length)
+              bNeonXf[ci]?.push({
+                pos: [p.cx + p.px * lat, 5.0 + rnd() * 2, p.cz + p.pz * lat],
+                rotY: Math.atan2(-p.tz, p.tx),
+                scl: [1, 1.4 + rnd() * 1.6, 1],
+              })
+            }
+          }
+          bNeonMats.forEach((mm, i) => {
+            if (instAdd(bNeonGeo, mm, bNeonXf[i] ?? [])) animNeon.push(mm)
+          })
+        }
+
         // ══ Phase C (scramble-detail): 大型ビジョン群 (駅前の顔) ════════════════════
         // The 駅前 video-wall look: several giant fictional-ad screens facing the
         // crossing + a round vision crowning the 渋谷MODE cylinder. Each screen is one
