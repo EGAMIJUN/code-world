@@ -23699,6 +23699,213 @@ export default function ThreeWorld({
           }
         }
 
+        // ══ 宮益坂 (Miyamasuzaka) Phase E: 動き・空気感 + 突き当り (駅東/HIKARIE 方面) ══════
+        // 道玄坂のネオン洪水とは対照的に「整然・控えめ・冷たい」ビジネス街の動き: 冷白/青の
+        // 控えめなサイン光 (animNeon フリッカー)、縁石脇の駐車車両、歩道のビジネスマン風人影。
+        // 上端は工事 (駅東再開発) バリケード + 「駅東/HIKARIE 方面」サイン + 壁の先に HIKARIE 風
+        // ガラス高層のシルエットを覗かせて エリア2 (駅東) への接続を予約。谷底の口に宮益坂ゲート。
+        {
+          // ── (1) 控えめな冷色サイン光: ビル前面に縦の細い発光バーを疎らに。animNeon でゆらぎ。──
+          const mNeonGeo = new THREE.BoxGeometry(0.22, 1, 0.12)
+          const mNeonCols = [0x9fc8ff, 0xdfe8f4, 0x7fb0e0] // cool blue / white / steel-blue
+          const mNeonMats = mNeonCols.map(
+            (c) =>
+              new THREE.MeshStandardMaterial({ color: c, emissive: c, emissiveIntensity: 1.0 }),
+          )
+          const mNeonXf: Xf[][] = mNeonCols.map(() => [])
+          for (const side of [1, -1] as const) {
+            for (let s = 9; s < MMZ_TOP_S - 4; s += 7) {
+              if (rnd() < 0.62) continue // sparse (corporate restraint, no flood)
+              const p = miyamasuzakaAt(s)
+              if (!p) continue
+              const lat = side * (MMZ_HW - 0.4)
+              const barH = 1.4 + rnd() * 2.2
+              const yC = p.h + 5.0 + rnd() * 3.5
+              const ci = Math.floor(rnd() * mNeonCols.length)
+              mNeonXf[ci]?.push({
+                pos: [p.cx + p.px * lat, yC, p.cz + p.pz * lat],
+                rotY: Math.atan2(-p.tz, p.tx),
+                scl: [1, barH, 1],
+              })
+            }
+          }
+          mNeonMats.forEach((mm, i) => {
+            if (instAdd(mNeonGeo, mm, mNeonXf[i] ?? [])) animNeon.push(mm) // updateShibuyaMap flicker
+          })
+          // ── (2) 駐車車両 (静止): 縁石脇に数台。固い → AABB。lat 6.4 で中央車道 ±5 は開ける。──
+          const mCarBodyMat = new THREE.MeshStandardMaterial({
+            color: 0x2c303a,
+            roughness: 0.5,
+            metalness: 0.45,
+          })
+          const mCarCabMat = new THREE.MeshStandardMaterial({
+            color: 0x0b0e14,
+            emissive: 0x1e2a3e,
+            emissiveIntensity: 0.3,
+          })
+          const mCarBodyGeo = new THREE.BoxGeometry(2.0, 1.1, 4.4)
+          const mCarCabGeo = new THREE.BoxGeometry(1.8, 0.78, 2.2)
+          for (const [s, side] of [
+            [20, 1],
+            [40, -1],
+            [58, 1],
+          ] as const) {
+            const p = miyamasuzakaAt(s)
+            if (!p) continue
+            const lat = side * 6.2 // at the kerb (inside the bollards); central lane stays open
+            const cx = p.cx + p.px * lat
+            const cz = p.cz + p.pz * lat
+            const rotY = Math.atan2(p.tx, p.tz) // park lengthwise along the tangent
+            const body = new THREE.Mesh(mCarBodyGeo, mCarBodyMat)
+            body.position.set(cx, p.h + 0.7, cz)
+            body.rotation.y = rotY
+            mAdd(body)
+            const cab = new THREE.Mesh(mCarCabGeo, mCarCabMat)
+            cab.position.set(cx, p.h + 1.55, cz)
+            cab.rotation.y = rotY
+            mAdd(cab)
+            const hw = Math.abs(p.tz) * 1.0 + Math.abs(p.tx) * 2.2
+            const hd = Math.abs(p.tx) * 1.0 + Math.abs(p.tz) * 2.2
+            addShibuyaAABB(cx, cz, hw, hd, p.h + 1.4, p.h)
+          }
+          // ── (3) 人影 (静止): 歩道にビジネスマン風の暗いシルエット。AABB なし。──
+          const mFigMat = new THREE.MeshBasicMaterial({
+            color: 0x0b0d13,
+            transparent: true,
+            opacity: 0.85,
+            side: THREE.DoubleSide,
+          })
+          const mFigGeo = new THREE.PlaneGeometry(0.7, 1.8)
+          const mFigXf: Xf[] = []
+          for (const side of [1, -1] as const) {
+            for (let s = 10; s < MMZ_TOP_S - 5; s += 9) {
+              if (rnd() < 0.55) continue
+              const p = miyamasuzakaAt(s + rnd() * 3)
+              if (!p) continue
+              const lat = side * (7.0 + rnd() * 1.8)
+              mFigXf.push({
+                pos: [p.cx + p.px * lat, p.h + 0.9, p.cz + p.pz * lat],
+                rotY: rnd() * Math.PI,
+              })
+            }
+          }
+          instAdd(mFigGeo, mFigMat, mFigXf)
+          // ── (4) 突き当り (上端): 駅東再開発バリケード + 「駅東/HIKARIE 方面」サイン。当たり判定の
+          // 実体は Phase A の cap。壁の先 (東、平地 y=0) に HIKARIE 風ガラス高層のシルエットを覗かせ
+          // 「この先に駅東の高層街が広がる」読みにして エリア2 への接続を予約。 ──
+          const mSignTex2 = (l1: string, l2: string, bg: string, fg: string) => {
+            const cv = document.createElement("canvas")
+            cv.width = 256
+            cv.height = 96
+            const c = cv.getContext("2d")
+            if (c) {
+              c.fillStyle = bg
+              c.fillRect(0, 0, 256, 96)
+              c.fillStyle = fg
+              c.textAlign = "center"
+              c.textBaseline = "middle"
+              c.font = "bold 28px sans-serif"
+              c.fillText(l1, 128, 36)
+              c.font = "19px sans-serif"
+              c.fillText(l2, 128, 70)
+            }
+            return new THREE.CanvasTexture(cv)
+          }
+          const e = miyamasuzakaAt(MMZ_TOP_S - 0.5)
+          if (e) {
+            const barRotY = Math.atan2(e.tx, e.tz)
+            const fenceMat = new THREE.MeshStandardMaterial({
+              color: 0x6a6e75,
+              roughness: 0.5,
+              metalness: 0.5,
+            })
+            const fence = new THREE.Mesh(new THREE.BoxGeometry(MMZ_HW * 2, 2.8, 0.2), fenceMat)
+            fence.position.set(e.cx - e.tx * 1.6, e.h + 1.4, e.cz - e.tz * 1.6)
+            fence.rotation.y = barRotY
+            mAdd(fence)
+            const barrierMat = new THREE.MeshStandardMaterial({
+              color: 0xe0a020,
+              emissive: 0x5a3c08,
+              emissiveIntensity: 0.8,
+            })
+            const warnLampMat = new THREE.MeshBasicMaterial({ color: 0xff8a30, toneMapped: false })
+            const barXf: Xf[] = []
+            const warnXf: Xf[] = []
+            for (const off of [-6, -2, 2, 6] as const) {
+              const bx = e.cx - e.tx * 2.7 + e.px * off
+              const bz = e.cz - e.tz * 2.7 + e.pz * off
+              barXf.push({ pos: [bx, e.h + 0.55, bz], rotY: barRotY })
+              warnXf.push({ pos: [bx, e.h + 1.25, bz] })
+            }
+            instAdd(new THREE.BoxGeometry(2.4, 1.1, 0.3), barrierMat, barXf)
+            instAdd(new THREE.SphereGeometry(0.17, 8, 6), warnLampMat, warnXf)
+            const dirSign = new THREE.Mesh(
+              new THREE.PlaneGeometry(MMZ_HW * 1.4, 2.6),
+              new THREE.MeshBasicMaterial({
+                map: mSignTex2("駅東 / HIKARIE 方面", "EKI-HIGASHI →", "#0a1426", "#bcd6f4"),
+                toneMapped: false,
+                side: THREE.DoubleSide,
+              }),
+            )
+            dirSign.position.set(e.cx - e.tx * 1.5, e.h + 4.6, e.cz - e.tz * 1.5)
+            dirSign.rotation.y = barRotY
+            add(dirSign)
+            // HIKARIE-direction glass high-rise silhouettes peeking over the cap (east, flat
+            // y=0). Cool emissive glass slabs → suggests the 駅東 high-rise district beyond.
+            const hintMat = new THREE.MeshStandardMaterial({
+              color: 0x0c1420,
+              emissive: 0x3a5578,
+              emissiveIntensity: 0.5,
+              roughness: 0.5,
+            })
+            const hintGeo = new THREE.BoxGeometry(4.5, 26, 4.5)
+            const hintXf: Xf[] = []
+            for (let i = 0; i < 6; i++) {
+              const off = -11 + i * 4.4
+              const depth = 8 + (i % 3) * 4
+              hintXf.push({
+                pos: [
+                  e.cx + e.tx * depth + e.px * off,
+                  10 + (i % 3) * 6, // tall slabs poking above the cap (≈16) toward the sky
+                  e.cz + e.tz * depth + e.pz * off,
+                ],
+                scl: [1, 1 + (i % 3) * 0.5, 1],
+              })
+            }
+            instAdd(hintGeo, hintMat, hintXf)
+          }
+          // ── (5) 谷底の口: 宮益坂ゲート横梁 + サイン (スクランブルへ向ける)。歩行は塞がない。──
+          const m = miyamasuzakaAt(1.5)
+          if (m) {
+            const beamMat = new THREE.MeshStandardMaterial({
+              color: 0x3a3d44,
+              roughness: 0.6,
+              metalness: 0.4,
+            })
+            const beam = new THREE.Mesh(new THREE.BoxGeometry(MMZ_HW * 2 + 3, 0.6, 0.6), beamMat)
+            beam.position.set(m.cx, m.h + 6.6, m.cz)
+            beam.rotation.y = Math.atan2(-m.tz, m.tx)
+            mAdd(beam)
+            const gateSign = new THREE.Mesh(
+              new THREE.PlaneGeometry(MMZ_HW * 1.5, 2.0),
+              new THREE.MeshBasicMaterial({
+                map: mSignTex2("宮益坂", "MIYAMASUZAKA", "#101a2a", "#dfe7f2"),
+                toneMapped: false,
+                side: THREE.DoubleSide,
+              }),
+            )
+            gateSign.position.set(m.cx + m.tx * 0.4, m.h + 7.4, m.cz + m.tz * 0.4)
+            // atan2(-tx,-tz) faces the sign back down-slope (west, toward approaching players).
+            gateSign.rotation.y = Math.atan2(-m.tx, -m.tz)
+            add(gateSign)
+          }
+          // ── FUTURE / 接続予約 ──────────────────────────────────────────────────────
+          // 上端 cap (MMZ_PATH 終点 ≈local(101,-9)、東外周壁の 1u 外、HIKARIE 背景塔 x=106 の手前)
+          // は エリア2「駅東/ヒカリエ」への引き渡し点。実装時は cap + バリケードを開口に置換し、駅東
+          // 広場 + SHIBUYA RISE 高層街へ歩行レーンを継ぐ。谷底の口 (s=0, h=0) は平坦なプラザ/E-W
+          // メインストリートと地続きで自然に入れることを Phase A 独立sim で確認済み。
+        }
+
         // ══ Phase C (scramble-detail): 大型ビジョン群 (駅前の顔) ════════════════════
         // The 駅前 video-wall look: several giant fictional-ad screens facing the
         // crossing + a round vision crowning the 渋谷MODE cylinder. Each screen is one
