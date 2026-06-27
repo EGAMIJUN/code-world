@@ -21238,6 +21238,44 @@ export default function ThreeWorld({
           })
         }
 
+        // ══ 道玄坂 (Dogenzaka) Phase D: street trees ═══════════════════════════════
+        // Rows of street trees down both sidewalks (lateral ±7.3 — outside the ±5.2
+        // carriageway, so the main path stays clear). Trunk + dark night foliage +
+        // a planter at each base, all instanced (3 draw calls). Each trunk gets a
+        // TIGHT footprint AABB (ground obstacle per the brief); the foliage overhead
+        // and the planters do not collide. Feet sit on the ramp so the rows climb.
+        {
+          const treeTrunkGeo = new THREE.CylinderGeometry(0.22, 0.32, 4, 6)
+          const treeLeafGeo = new THREE.SphereGeometry(2, 8, 6)
+          const planterGeo = new THREE.CylinderGeometry(0.7, 0.82, 0.34, 8)
+          const treeLeafMat = new THREE.MeshLambertMaterial({
+            color: 0x223a22,
+            emissive: 0x0a160a,
+            emissiveIntensity: 0.45,
+          })
+          const planterMat = new THREE.MeshLambertMaterial({ color: 0x2a2c30 })
+          const trunkXf: Xf[] = []
+          const leafXf: Xf[] = []
+          const planterXf: Xf[] = []
+          for (const side of [1, -1] as const) {
+            for (let s = 8; s < DGZ_TOP_S - 4; s += 9.5) {
+              const p = dogenzakaAt(s + (side > 0 ? 0 : 4.75)) // stagger the two rows
+              if (!p) continue
+              const lat = side * 7.3
+              const tx = p.cx + p.px * lat
+              const tz = p.cz + p.pz * lat
+              const baseY = p.h
+              trunkXf.push({ pos: [tx, baseY + 2, tz] })
+              leafXf.push({ pos: [tx, baseY + 5, tz], scl: 0.85 + rnd() * 0.4 })
+              planterXf.push({ pos: [tx, baseY + 0.18, tz] })
+              addShibuyaAABB(tx, tz, 0.4, 0.4, baseY + 4, baseY) // tight trunk hitbox
+            }
+          }
+          instAdd(treeTrunkGeo, woodMat, trunkXf)
+          instAdd(treeLeafGeo, treeLeafMat, leafXf)
+          instAdd(planterGeo, planterMat, planterXf)
+        }
+
         // ══ Phase C (scramble-detail): 大型ビジョン群 (駅前の顔) ════════════════════
         // The 駅前 video-wall look: several giant fictional-ad screens facing the
         // crossing + a round vision crowning the 渋谷MODE cylinder. Each screen is one
