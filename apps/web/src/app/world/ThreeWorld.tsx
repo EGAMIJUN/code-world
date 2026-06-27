@@ -22700,6 +22700,96 @@ export default function ThreeWorld({
           }
         }
 
+        // ══ 公園通り (Koen-dori) Phase E: 街路樹・緑 (差別化の核 — 道玄坂より緑が多い) ══
+        // 公園通りを道玄坂と分ける核。両側に「大きめ・多め」の街路樹を並べ、上ほど密にして緑の
+        // トンネル感を出す。歩道沿いに花壇、SHIBUYA PARK 屋上に植樹。canopy は instAdd 後に
+        // registerSway で道玄坂と同じ揺れを登録 (Phase G が neon/霧/車などの残りの動きを足す)。
+        {
+          const kTrunkGeo = new THREE.CylinderGeometry(0.26, 0.4, 5.6, 6) // 道玄坂 (高4) より大
+          const kLeafGeo = new THREE.SphereGeometry(2.7, 8, 6) // 道玄坂 (2.0) より大きい樹冠
+          const kLeafMat = new THREE.MeshLambertMaterial({
+            color: 0x356b2e, // 道玄坂の暗い夜緑より瑞々しい緑 (公園通り=緑)
+            emissive: 0x0e1f0c,
+            emissiveIntensity: 0.5,
+          })
+          const kPlanterGeo = new THREE.CylinderGeometry(0.82, 0.95, 0.36, 8)
+          const kPlanterMat = new THREE.MeshLambertMaterial({ color: 0x34373d })
+          const trunkXf: Xf[] = []
+          const leafXf: Xf[] = []
+          const planterXf: Xf[] = []
+          const TREE_LAT = 8.6 // 歩道 (車道 ±6.5 の外、壁 11 の内)。中央車道は常に開けておく。
+          const addTree = (s: number, side: 1 | -1) => {
+            const p = koenDoriAt(s)
+            if (!p) return
+            const baseY = p.h
+            const tx = p.cx + p.px * side * TREE_LAT
+            const tz = p.cz + p.pz * side * TREE_LAT
+            const frac = s / KDR_TOP_S // 谷底0 → 上端1
+            const scl = (1.0 + 0.55 * frac) * (0.9 + rnd() * 0.3) // 上ほど大 → 緑のトンネル
+            trunkXf.push({ pos: [tx, baseY + 2.8, tz] })
+            leafXf.push({ pos: [tx, baseY + 5.7, tz], scl })
+            planterXf.push({ pos: [tx, baseY + 0.18, tz] })
+            addShibuyaAABB(tx, tz, 0.5, 0.5, baseY + 4, baseY) // tight trunk hitbox (floats w/ ramp)
+          }
+          for (const side of [1, -1] as const) {
+            // メイン列: 道玄坂 (s+=9.5) より密 (s+=7)、左右互い違い。
+            for (let s = 7; s < KDR_TOP_S - 3; s += 7) addTree(s + (side > 0 ? 0 : 3.5), side)
+            // 緑のトンネル: 上半分に infill して密度を上げる。
+            for (let s = KDR_TOP_S * 0.45; s < KDR_TOP_S - 3; s += 6) addTree(s + 3, side)
+          }
+          // 屋上の植樹: SHIBUYA PARK (Phase C と同じ pMid/parkLat) の芝生デッキに小ぶりの緑。
+          const pPark = koenDoriAt(41)
+          if (pPark) {
+            const bcx = pPark.cx + pPark.px * -1 * 20
+            const bcz = pPark.cz + pPark.pz * -1 * 20
+            const sxv = -pPark.pz // 接線 (long軸) 単位
+            const szv = pPark.px
+            const axv = pPark.px // 奥行 (perp) 単位
+            const azv = pPark.pz
+            for (let u = -1; u <= 1; u++) {
+              for (const v of [-3.5, 3.5]) {
+                const rx = bcx + sxv * (u * 7) + axv * v
+                const rz = bcz + szv * (u * 7) + azv * v
+                trunkXf.push({ pos: [rx, 21.5, rz] }) // 芝生デッキ (y≈20.5) の上
+                leafXf.push({ pos: [rx, 24.0, rz], scl: 0.8 })
+              }
+            }
+          }
+          instAdd(kTrunkGeo, woodMat, trunkXf)
+          const kLeafMesh = instAdd(kLeafGeo, kLeafMat, leafXf)
+          instAdd(kPlanterGeo, kPlanterMat, planterXf)
+          registerSway(kLeafMesh, leafXf, 0.05, 0.9, 0.6) // 道玄坂と同じ手法の風揺れ
+          // ── 花壇 (植え込み): 歩道の外寄りに低い土箱 + 色とりどりの花トップ。低い → 衝突なし。──
+          const bedGeo = new THREE.BoxGeometry(2.4, 0.42, 0.95)
+          const bedSoilMat = new THREE.MeshLambertMaterial({ color: 0x3a2c20 })
+          const flowerGeo = new THREE.BoxGeometry(2.2, 0.2, 0.78)
+          const flowerCols = [0xd8688c, 0xe6c84e, 0x9a7ed4, 0xeae4ea]
+          const bedXf: Xf[] = []
+          const flowerXf: Xf[][] = flowerCols.map(() => [])
+          for (const side of [1, -1] as const) {
+            for (let s = 11; s < KDR_TOP_S - 4; s += 11) {
+              const p = koenDoriAt(s + (side > 0 ? 5 : 0))
+              if (!p) continue
+              const baseY = p.h
+              const lat = side * 9.7
+              const bx = p.cx + p.px * lat
+              const bz = p.cz + p.pz * lat
+              const rotY = Math.atan2(-p.tz, p.tx)
+              bedXf.push({ pos: [bx, baseY + 0.21, bz], rotY })
+              const ci = Math.floor(rnd() * flowerCols.length)
+              flowerXf[ci]?.push({ pos: [bx, baseY + 0.44, bz], rotY })
+            }
+          }
+          instAdd(bedGeo, bedSoilMat, bedXf)
+          flowerCols.forEach((c, i) =>
+            instAdd(
+              flowerGeo,
+              new THREE.MeshLambertMaterial({ color: c, emissive: c, emissiveIntensity: 0.25 }),
+              flowerXf[i] ?? [],
+            ),
+          )
+        }
+
         // ══ Phase C (scramble-detail): 大型ビジョン群 (駅前の顔) ════════════════════
         // The 駅前 video-wall look: several giant fictional-ad screens facing the
         // crossing + a round vision crowning the 渋谷MODE cylinder. Each screen is one
