@@ -23210,6 +23210,138 @@ export default function ThreeWorld({
           }
         }
 
+        // ══ 文化村通り (Bunkamura-dori) Phase B: 文化施設・劇場・古い商店 ════════════════
+        // The calm cultural frontages behind the side walls (lat≥11.5 → corridor ±9.6 clear),
+        // each with a footprint AABB. Warmer/older palette than the cool 駅東/宮益坂 glass.
+        // Original names: 文化村ホール (a wide low hall at the dead-end) / シアター渋谷 / シネマ
+        // ルミエ / 古書 西村 / ギャラリー文谷 / 喫茶 文. Restrained warm signage.
+        {
+          const bkmWarmMat = new THREE.MeshStandardMaterial({
+            color: 0x6a5f52, // warm older stone/brick
+            roughness: 0.85,
+            metalness: 0.05,
+          })
+          const bBodyMats = [bkmWarmMat, midMat, concreteMat]
+          const cultNames = [
+            "シアター渋谷",
+            "シネマ ルミエ",
+            "古書 西村",
+            "ギャラリー文谷",
+            "喫茶 文",
+          ]
+          const bSignCache = new Map<string, THREE.CanvasTexture>()
+          const cultSignTex = (name: string, accent: string) => {
+            const cached = bSignCache.get(name)
+            if (cached) return cached
+            const cv = document.createElement("canvas")
+            cv.width = 256
+            cv.height = 44
+            const c = cv.getContext("2d")
+            if (c) {
+              c.fillStyle = "#1a140e" // warm dark ground (older signage)
+              c.fillRect(0, 0, 256, 44)
+              c.fillStyle = accent
+              c.fillRect(10, 34, 236, 2)
+              c.fillStyle = "#efe6d8"
+              c.font = "600 22px serif" // serif → older / cultural
+              c.textAlign = "center"
+              c.textBaseline = "middle"
+              c.fillText(name, 128, 18)
+            }
+            const tex = new THREE.CanvasTexture(cv)
+            bSignCache.set(name, tex)
+            return tex
+          }
+          const cultAccents = ["#caa45a", "#b8704a", "#a8895a", "#9a6a48", "#c4b48a"] // warm
+          let bSignIdx = 0
+          for (const side of [1, -1] as const) {
+            let s = 3
+            let guard = 0
+            while (s < BKM_TOP_S - 3 && guard++ < 20) {
+              const sw = 6 + rnd() * 5 // narrower, older frontages
+              const p = bunkamuraAt(s + sw / 2)
+              if (!p) {
+                s += sw
+                continue
+              }
+              const bd = 7 + rnd() * 5
+              const frontLat = BKM_HW + 1.5
+              const cx = p.cx + p.px * side * (frontLat + bd / 2)
+              const cz = p.cz + p.pz * side * (frontLat + bd / 2)
+              const bh = 9 + rnd() * 8 // low-to-mid (calm, older — not high-rise)
+              const mat = bBodyMats[Math.floor(rnd() * bBodyMats.length)] ?? midMat
+              const rotY = Math.atan2(-p.tz, p.tx)
+              const body = new THREE.Mesh(new THREE.BoxGeometry(sw - 0.4, bh, bd), mat)
+              body.position.set(cx, bh / 2, cz)
+              body.rotation.y = rotY
+              mAdd(body)
+              const hw = Math.abs(p.tx) * (sw / 2) + Math.abs(p.tz) * (bd / 2)
+              const hd = Math.abs(p.tz) * (sw / 2) + Math.abs(p.tx) * (bd / 2)
+              addShibuyaAABB(cx, cz, hw, hd, bh)
+              // A warm cultural sign on ~half the frontages (two-sided, above the wall).
+              if (rnd() < 0.5 && bh > 8) {
+                const name = cultNames[bSignIdx % cultNames.length] ?? "シアター渋谷"
+                const accent = cultAccents[bSignIdx % cultAccents.length] ?? "#caa45a"
+                bSignIdx++
+                const sign = new THREE.Mesh(
+                  new THREE.PlaneGeometry(Math.min(sw * 0.8, 7), 1.5),
+                  new THREE.MeshBasicMaterial({
+                    map: cultSignTex(name, accent),
+                    toneMapped: false,
+                    side: THREE.DoubleSide,
+                    transparent: true,
+                  }),
+                )
+                sign.position.set(p.cx + p.px * side * frontLat, 8.4, p.cz + p.pz * side * frontLat)
+                // Same proven facing rule as 公園通り/宮益坂: side==1 → flip π toward the road.
+                sign.rotation.y = side === 1 ? rotY + Math.PI : rotY
+                add(sign)
+              }
+              s += sw + 0.6
+            }
+          }
+          // ── 文化村ホール: a wide low grand hall spanning the dead-end frontage, facing the
+          // approaching player. Behind the cap (lat 0 at the west end). Columned base. ──
+          const hallP = bunkamuraAt(BKM_TOP_S)
+          if (hallP) {
+            const hx = hallP.cx + hallP.tx * 6 // 6u behind the cap (keeps the hall within r≤144)
+            const hz = hallP.cz + hallP.tz * 6
+            const hRotY = Math.atan2(-hallP.tz, hallP.tx)
+            const hall = new THREE.Mesh(new THREE.BoxGeometry(BKM_HW * 2 + 6, 16, 10), bkmWarmMat)
+            hall.position.set(hx, 8, hz)
+            hall.rotation.y = hRotY
+            mAdd(hall)
+            const hallHw = Math.abs(hallP.tx) * 5 + Math.abs(hallP.tz) * (BKM_HW + 3)
+            const hallHd = Math.abs(hallP.tz) * 5 + Math.abs(hallP.tx) * (BKM_HW + 3)
+            addShibuyaAABB(hx, hz, hallHw, hallHd, 16)
+            // A row of columns across the east face (facing the player).
+            const colGeo = new THREE.CylinderGeometry(0.5, 0.5, 9, 8)
+            const colXf: Xf[] = []
+            for (let cI = -4; cI <= 4; cI++) {
+              colXf.push({
+                pos: [
+                  hallP.cx + hallP.tx * 2.5 + hallP.px * (cI * 2.4),
+                  4.5,
+                  hallP.cz + hallP.tz * 2.5 + hallP.pz * (cI * 2.4),
+                ],
+              })
+            }
+            instAdd(colGeo, concreteMat, colXf)
+            // The hall sign 文化村ホール, facing east toward the player.
+            const hallSign = new THREE.Mesh(
+              new THREE.PlaneGeometry(14, 2.2),
+              new THREE.MeshBasicMaterial({
+                map: cultSignTex("文化村ホール", "#caa45a"),
+                toneMapped: false,
+                side: THREE.DoubleSide,
+              }),
+            )
+            hallSign.position.set(hallP.cx + hallP.tx * 1.5, 11, hallP.cz + hallP.tz * 1.5)
+            hallSign.rotation.y = Math.atan2(-hallP.tx, -hallP.tz) // face back down the street
+            add(hallSign)
+          }
+        }
+
         // ══ Phase C (scramble-detail): 大型ビジョン群 (駅前の顔) ════════════════════
         // The 駅前 video-wall look: several giant fictional-ad screens facing the
         // crossing + a round vision crowning the 渋谷MODE cylinder. Each screen is one
