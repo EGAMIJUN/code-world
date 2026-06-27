@@ -22790,6 +22790,128 @@ export default function ThreeWorld({
           )
         }
 
+        // ══ 公園通り (Koen-dori) Phase F: 突き当り (代々木公園方面) + 接続予約 ════════════
+        // 坂上の行き止まりを工事バリケード + 「代々木公園方面」サインで化粧 (当たり判定の実体は
+        // Phase B の cap)。cap の上に背の高い暗緑の樹冠シルエットを覗かせて「代々木公園の広さ /
+        // 開けた感じ」を暗示する。谷底の口には公園通りのゲートサイン。将来 宮下公園/代々木公園 へ
+        // 繋ぐための接続予約コメント付き。スクランブル北口の地続き接続は Phase A 独立sim で確認済み。
+        {
+          const kSignTex = (l1: string, l2: string, bg: string, fg: string) => {
+            const cv = document.createElement("canvas")
+            cv.width = 256
+            cv.height = 96
+            const c = cv.getContext("2d")
+            if (c) {
+              c.fillStyle = bg
+              c.fillRect(0, 0, 256, 96)
+              c.fillStyle = fg
+              c.textAlign = "center"
+              c.textBaseline = "middle"
+              c.font = "bold 30px sans-serif"
+              c.fillText(l1, 128, 36)
+              c.font = "20px sans-serif"
+              c.fillText(l2, 128, 70)
+            }
+            return new THREE.CanvasTexture(cv)
+          }
+          // ── (1) 行き止まりバリケード + 代々木公園方面サイン (上端) ──
+          const e = koenDoriAt(KDR_TOP_S - 0.5)
+          if (e) {
+            const barRotY = Math.atan2(e.tx, e.tz)
+            const fenceMat = new THREE.MeshStandardMaterial({
+              color: 0x6a6e75,
+              roughness: 0.5,
+              metalness: 0.5,
+            })
+            const fence = new THREE.Mesh(new THREE.BoxGeometry(KDR_HW * 2, 2.8, 0.2), fenceMat)
+            fence.position.set(e.cx - e.tx * 1.6, e.h + 1.4, e.cz - e.tz * 1.6)
+            fence.rotation.y = barRotY
+            mAdd(fence)
+            const barrierMat = new THREE.MeshStandardMaterial({
+              color: 0xe0a020,
+              emissive: 0x5a3c08,
+              emissiveIntensity: 0.8,
+            })
+            const lampMat = new THREE.MeshBasicMaterial({ color: 0xff8a30, toneMapped: false })
+            const barXf: Xf[] = []
+            const lampXf: Xf[] = []
+            for (const off of [-6, -2, 2, 6] as const) {
+              const bx = e.cx - e.tx * 2.7 + e.px * off
+              const bz = e.cz - e.tz * 2.7 + e.pz * off
+              barXf.push({ pos: [bx, e.h + 0.55, bz], rotY: barRotY })
+              lampXf.push({ pos: [bx, e.h + 1.25, bz] })
+            }
+            instAdd(new THREE.BoxGeometry(2.4, 1.1, 0.3), barrierMat, barXf)
+            instAdd(new THREE.SphereGeometry(0.17, 8, 6), lampMat, lampXf)
+            const dirSign = new THREE.Mesh(
+              new THREE.PlaneGeometry(KDR_HW * 1.4, 2.6),
+              new THREE.MeshBasicMaterial({
+                map: kSignTex("代々木公園 方面", "YOYOGI PARK →", "#0c2412", "#bfe8c0"),
+                toneMapped: false,
+                side: THREE.DoubleSide,
+              }),
+            )
+            dirSign.position.set(e.cx - e.tx * 1.5, e.h + 4.6, e.cz - e.tz * 1.5)
+            dirSign.rotation.y = barRotY
+            add(dirSign)
+            // ── (2) 開けた感じ: cap の先 (北、平地 y=0) に代々木公園を暗示する背の高い暗緑の
+            // 樹冠シルエット。cap (高≈12.8) の上から覗くので「壁の向こうに緑地が広がる」読み。──
+            const hintLeafMat = new THREE.MeshLambertMaterial({
+              color: 0x214d24,
+              emissive: 0x0a1a0c,
+              emissiveIntensity: 0.4,
+            })
+            const hintLeafGeo = new THREE.SphereGeometry(3.6, 7, 5)
+            const hintXf: Xf[] = []
+            for (let i = 0; i < 9; i++) {
+              const off = -13 + i * 3.2
+              const depth = 4 + (i % 3) * 2.2
+              hintXf.push({
+                pos: [
+                  e.cx + e.tx * depth + e.px * off,
+                  12.5 + (i % 3) * 2.4, // cap (≈12.8) の天端付近〜上に覗かせる
+                  e.cz + e.tz * depth + e.pz * off,
+                ],
+                scl: 1.6 + (i % 3) * 0.35,
+              })
+            }
+            instAdd(hintLeafGeo, hintLeafMat, hintXf)
+          }
+          // ── (3) 谷底の口: 公園通りのゲート横梁 + サイン (スクランブルへ向ける)。歩行は塞がない
+          // (横梁は頭上、柱は既存側壁の上)。 ──
+          const m = koenDoriAt(1.5)
+          if (m) {
+            const beamMat = new THREE.MeshStandardMaterial({
+              color: 0x3a3d44,
+              roughness: 0.6,
+              metalness: 0.4,
+            })
+            const beam = new THREE.Mesh(new THREE.BoxGeometry(KDR_HW * 2 + 3, 0.6, 0.6), beamMat)
+            beam.position.set(m.cx, m.h + 6.6, m.cz)
+            beam.rotation.y = Math.atan2(-m.tz, m.tx)
+            mAdd(beam)
+            const gateSign = new THREE.Mesh(
+              new THREE.PlaneGeometry(KDR_HW * 1.5, 2.0),
+              new THREE.MeshBasicMaterial({
+                map: kSignTex("公園通り", "KOEN-DORI", "#101826", "#e6ead0"),
+                toneMapped: false,
+                side: THREE.DoubleSide,
+              }),
+            )
+            gateSign.position.set(m.cx + m.tx * 0.4, m.h + 7.4, m.cz + m.tz * 0.4)
+            gateSign.rotation.y = Math.atan2(m.tx, m.tz)
+            add(gateSign)
+          }
+          // ── FUTURE / 接続予約 ──────────────────────────────────────────────────────
+          // 上端 cap (KDR_PATH 終点 ≈local(-9,-90)、r≈90、北外周壁 z=-100 の手前) は将来エリア
+          // への引き渡し点:
+          //   ・宮下公園  — 中腹 SHIBUYA PARK の屋上公園へ階段/デッキで接続
+          //   ・代々木公園 — この突き当りの先、北外周壁を開口して広い緑地ステージへ
+          // 実装時は cap + バリケードを開口に置換し、新しい歩行レーン (koenDoriGroundY と同型の
+          // 専用 floor + height 関数) を継ぐ。谷底の口 (s=0, h=0) は既に平坦なスクランブルと地続き
+          // で自然に入れることを Phase A 独立sim で確認済み (max per-step 0.0075 ≪ snap 1.5)。
+        }
+
         // ══ Phase C (scramble-detail): 大型ビジョン群 (駅前の顔) ════════════════════
         // The 駅前 video-wall look: several giant fictional-ad screens facing the
         // crossing + a round vision crowning the 渋谷MODE cylinder. Each screen is one
