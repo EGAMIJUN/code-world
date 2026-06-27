@@ -22598,6 +22598,108 @@ export default function ThreeWorld({
           }
         }
 
+        // ══ 公園通り (Koen-dori) Phase D: 沿道の建物・店舗 (段々ビル + シックな店名看板) ══
+        // 道玄坂 Phase C の段々ビル手法を流用。ただし公園通りの両側外面はスクランブル側から
+        // 到達可能なので、道玄坂と違い各棟に footprint AABB を付けて貫通を防ぐ (lat≥12 で歩行
+        // 回廊 ±9.6 には掛からない)。足元は y=0 (浮かない)、高さに p.h を足してシルエットが坂と
+        // 共に段々とせり上がる。業態は全てオリジナルの「おしゃれ系」、看板は少なめ・シック。
+        {
+          const dBodyMats = [midMat, concreteMat, facGlassMat]
+          const shopNames = ["CAFÉ BEAM", "NORTE", "CLUB RISE", "GALLERY AOI", "SALON KÔ"]
+          const signTexCache = new Map<string, THREE.CanvasTexture>()
+          const shopSignTex = (name: string, accent: string) => {
+            const cached = signTexCache.get(name)
+            if (cached) return cached
+            const cv = document.createElement("canvas")
+            cv.width = 256
+            cv.height = 40
+            const c = cv.getContext("2d")
+            if (c) {
+              c.fillStyle = "#0b0d12" // 暗い下地 (シック)
+              c.fillRect(0, 0, 256, 40)
+              c.fillStyle = accent
+              c.fillRect(10, 30, 236, 2) // 細いアクセントライン1本だけ
+              c.fillStyle = "#e8ecf0"
+              c.font = "600 22px sans-serif"
+              c.textAlign = "center"
+              c.textBaseline = "middle"
+              c.fillText(name, 128, 16)
+            }
+            const tex = new THREE.CanvasTexture(cv)
+            signTexCache.set(name, tex)
+            return tex
+          }
+          const shopAccents = ["#e8a04a", "#dfe4ea", "#c85a9a", "#5aa0d8", "#9ad0a0"]
+          let signIdx = 0
+          for (const side of [1, -1] as const) {
+            let s = 5
+            let guard = 0
+            while (s < KDR_TOP_S - 3 && guard++ < 30) {
+              const sw = 7 + rnd() * 6 // 間口
+              const p = koenDoriAt(s + sw / 2)
+              if (!p) {
+                s += sw
+                continue
+              }
+              // SHIBUYA PARK (西側中腹) を避ける。
+              if (side === -1 && s > 26 && s < 56) {
+                s += sw
+                continue
+              }
+              const bd = 8 + rnd() * 5 // 奥行
+              const frontLat = KDR_HW + 1 // 壁 (lat≤12.5) のすぐ背後
+              const cx = p.cx + p.px * side * (frontLat + bd / 2)
+              const cz = p.cz + p.pz * side * (frontLat + bd / 2)
+              let bh = 15 + rnd() * 11 + p.h // 中層が中心、坂で段々とせり上がる
+              if (rnd() < 0.18) bh += 15 + rnd() * 13 // 一部高層
+              const mat = dBodyMats[Math.floor(rnd() * dBodyMats.length)] ?? midMat
+              const rotY = Math.atan2(-p.tz, p.tx)
+              const body = new THREE.Mesh(new THREE.BoxGeometry(sw - 0.4, bh, bd), mat)
+              body.position.set(cx, bh / 2, cz)
+              body.rotation.y = rotY
+              mAdd(body)
+              // footprint AABB (到達可能な外面 → 貫通防止)。lat≥12 なので回廊は素通り。
+              const hw = Math.abs(p.tx) * (sw / 2) + Math.abs(p.tz) * (bd / 2)
+              const hd = Math.abs(p.tz) * (sw / 2) + Math.abs(p.tx) * (bd / 2)
+              addShibuyaAABB(cx, cz, hw, hd, bh)
+              // 段々のセットバック屋上 (たまに)。
+              if (rnd() < 0.4) {
+                const th = 4 + rnd() * 6
+                const top = new THREE.Mesh(
+                  new THREE.BoxGeometry((sw - 0.4) * 0.6, th, bd * 0.6),
+                  mat,
+                )
+                top.position.set(cx, bh + th / 2, cz)
+                top.rotation.y = rotY
+                mAdd(top)
+              }
+              // シックな店名看板を 1/3 ほどの棟に1枚 (壁の上に出る高さ、両面)。看板洪水にしない。
+              if (rnd() < 0.42 && bh > 12) {
+                const name = shopNames[signIdx % shopNames.length] ?? "BEAM"
+                const accent = shopAccents[signIdx % shopAccents.length] ?? "#dfe4ea"
+                signIdx++
+                const sign = new THREE.Mesh(
+                  new THREE.PlaneGeometry(Math.min(sw * 0.8, 8), 1.5),
+                  new THREE.MeshBasicMaterial({
+                    map: shopSignTex(name, accent),
+                    toneMapped: false,
+                    side: THREE.DoubleSide,
+                    transparent: true,
+                  }),
+                )
+                sign.position.set(
+                  p.cx + p.px * side * frontLat,
+                  p.h + 9.4,
+                  p.cz + p.pz * side * frontLat,
+                )
+                sign.rotation.y = rotY
+                add(sign)
+              }
+              s += sw + 0.6
+            }
+          }
+        }
+
         // ══ Phase C (scramble-detail): 大型ビジョン群 (駅前の顔) ════════════════════
         // The 駅前 video-wall look: several giant fictional-ad screens facing the
         // crossing + a round vision crowning the 渋谷MODE cylinder. Each screen is one
