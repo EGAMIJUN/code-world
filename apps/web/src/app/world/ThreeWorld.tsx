@@ -7545,6 +7545,12 @@ export default function ThreeWorld({
         let bestD = VEHICLE_ENTER_RADIUS
         for (const v of vehicles) {
           if (v.dead || v.aiDriver || v.riderEnemy) continue // occupied → can't board
+          // A hidden vehicle can't be boarded. In Shibuya/OSAKA, osakaHideBaseWorld
+          // flips the base-world cars/tanks/jets invisible but leaves them in
+          // vehicles[]; without this you could board an unseen base-world car (only
+          // its wheels poke into view = the "ghost car"). OSAKA's 鉄輪, built AFTER
+          // the hide pass, stays visible and boardable.
+          if (!v.group.visible) continue
           const d = Math.hypot(v.x - focalPoint.x, v.z - focalPoint.z)
           if (d < bestD) {
             bestD = d
