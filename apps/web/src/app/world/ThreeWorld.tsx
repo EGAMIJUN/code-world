@@ -16553,9 +16553,21 @@ export default function ThreeWorld({
           )
             continue
           // Only hide things that actually render (skip empty pivots/helpers).
+          // THREE.Sprite must be included: the base-world landmark/roof towers add
+          // floating "[E] CLIMB" / "[E] ELEVATOR" label Sprites straight to the scene
+          // (makeEntrySign). They are NOT Mesh/Points/Line, so without this they stay
+          // visible under the Shibuya/OSAKA overlay — the phantom climb marks that the
+          // #117 HUD-only guard never touched. Sprites land in osakaHiddenBase, so
+          // osakaShowBaseWorld() restores them on exit (OSAKA's own elevator, built
+          // AFTER this pass, is unaffected).
           let renders = false
           child.traverse((o) => {
-            if (o instanceof THREE.Mesh || o instanceof THREE.Points || o instanceof THREE.Line)
+            if (
+              o instanceof THREE.Mesh ||
+              o instanceof THREE.Points ||
+              o instanceof THREE.Line ||
+              o instanceof THREE.Sprite
+            )
               renders = true
           })
           if (renders) {
