@@ -22485,6 +22485,119 @@ export default function ThreeWorld({
           instAdd(kLampGeo, kLampMat, kLampXf)
         }
 
+        // ══ 公園通り (Koen-dori) Phase C: 宮下公園風ランドマーク「SHIBUYA PARK」 ══════════
+        // 坂の中腹 (koendori 中心付近) の横長・中層の商業施設。道玄坂の猥雑なビル群とは対照的
+        // に、外壁の緑化 + 屋上公園 + 控えめな1看板で「おしゃれ・落ち着いた北の通り」を象徴する。
+        // 西側 (谷の外=平地 y=0) に据えるので浮かない。下層は西壁の背後、上部マス + 緑化壁 + 屋上が
+        // 壁の上から見えるランドマークになる。到達可能な外面を持つので footprint AABB を登録。
+        {
+          const pMid = koenDoriAt(41) // 中腹 (z≈-67)
+          if (pMid) {
+            const PARK_L = 24 // 坂方向の長さ (横長)
+            const PARK_D = 14 // 奥行
+            const PARK_H = 20 // 中層
+            const parkLat = 20 // 西側中心 lat (footprint 13→27、壁 (lat≤12.5) の背後)
+            const bcx = pMid.cx + pMid.px * -1 * parkLat
+            const bcz = pMid.cz + pMid.pz * -1 * parkLat
+            const rotY = Math.atan2(-pMid.tz, pMid.tx)
+            // avenue 向き (+px 方向) の面: 緑化ルーバー・看板・店舗をここに付ける。
+            const ax = pMid.px
+            const az = pMid.pz
+            // ── (1) 本体マス: 既存の窓付き midMat を流用 (街と馴染ませ draw call も統合)。──
+            const mass = new THREE.Mesh(new THREE.BoxGeometry(PARK_L, PARK_H, PARK_D), midMat)
+            mass.position.set(bcx, PARK_H / 2, bcz)
+            mass.rotation.y = rotY
+            mAdd(mass)
+            const pHalf = Math.abs(pMid.tx) * (PARK_L / 2) + Math.abs(pMid.tz) * (PARK_D / 2)
+            const pDep = Math.abs(pMid.tz) * (PARK_L / 2) + Math.abs(pMid.tx) * (PARK_D / 2)
+            addShibuyaAABB(bcx, bcz, pHalf, pDep, PARK_H) // 到達可能な外面 → footprint 登録
+            // ── (2) 緑化壁: avenue 面に張り出す水平プランター帯 (宮下公園の植栽外壁)。──
+            const greenMat = new THREE.MeshLambertMaterial({ color: 0x3c6b2e })
+            const planterGeo = new THREE.BoxGeometry(PARK_L * 0.92, 0.7, 1.3)
+            for (const ly of [5.5, 9.5, 13.5, 17.5]) {
+              const pl = new THREE.Mesh(planterGeo, greenMat)
+              pl.position.set(bcx + ax * (PARK_D / 2 + 0.4), ly, bcz + az * (PARK_D / 2 + 0.4))
+              pl.rotation.y = rotY
+              mAdd(pl)
+            }
+            // ── (3) 屋上公園: 芝生デッキ + 周囲フェンス (屋上の緑面。植樹は Phase E が足す)。──
+            const grassMat = new THREE.MeshLambertMaterial({
+              color: 0x4d7a3c,
+              map: makeNoiseTexture(64, 0x3a5f2c, 0.16, 8),
+            })
+            const deck = new THREE.Mesh(
+              new THREE.BoxGeometry(PARK_L + 1, 0.5, PARK_D + 1),
+              grassMat,
+            )
+            deck.position.set(bcx, PARK_H + 0.25, bcz)
+            deck.rotation.y = rotY
+            mAdd(deck)
+            const fenceMat = new THREE.MeshStandardMaterial({
+              color: 0x6c7076,
+              roughness: 0.5,
+              metalness: 0.5,
+            })
+            const railLong = new THREE.BoxGeometry(PARK_L + 1, 1.0, 0.1)
+            const railShort = new THREE.BoxGeometry(0.1, 1.0, PARK_D + 1)
+            for (const sd of [1, -1] as const) {
+              const fl = new THREE.Mesh(railLong, fenceMat)
+              fl.position.set(
+                bcx + ax * sd * (PARK_D / 2 + 0.5),
+                PARK_H + 1.0,
+                bcz + az * sd * (PARK_D / 2 + 0.5),
+              )
+              fl.rotation.y = rotY
+              mAdd(fl)
+              const fs = new THREE.Mesh(railShort, fenceMat)
+              const sx = -az // 接線方向 (long 軸) の単位
+              const sz = ax
+              fs.position.set(
+                bcx + sx * sd * (PARK_L / 2 + 0.5),
+                PARK_H + 1.0,
+                bcz + sz * sd * (PARK_L / 2 + 0.5),
+              )
+              fs.rotation.y = rotY
+              mAdd(fs)
+            }
+            // ── (4) 店舗 (1〜2F): avenue 面の明るいガラス帯。控えめ・シック。──
+            const shopMat = new THREE.MeshStandardMaterial({
+              color: 0x2a2f38,
+              emissive: 0xffe9c0,
+              emissiveIntensity: 0.6,
+            })
+            const shop = new THREE.Mesh(new THREE.BoxGeometry(PARK_L * 0.9, 4.2, 0.4), shopMat)
+            shop.position.set(bcx + ax * (PARK_D / 2 + 0.2), 3.2, bcz + az * (PARK_D / 2 + 0.2))
+            shop.rotation.y = rotY
+            mAdd(shop)
+            // ── (5) 控えめな看板「SHIBUYA PARK」: 壁の上に出る高さに1枚だけ (道玄坂の看板洪水と差別化)。──
+            const sgCv = document.createElement("canvas")
+            sgCv.width = 256
+            sgCv.height = 48
+            const sgx = sgCv.getContext("2d")
+            if (sgx) {
+              sgx.fillStyle = "#0d1410"
+              sgx.fillRect(0, 0, 256, 48)
+              sgx.fillStyle = "#cfe6c2"
+              sgx.font = "bold 28px sans-serif"
+              sgx.textAlign = "center"
+              sgx.textBaseline = "middle"
+              sgx.fillText("SHIBUYA PARK", 128, 25)
+            }
+            const sgTex = new THREE.CanvasTexture(sgCv)
+            const sign = new THREE.Mesh(
+              new THREE.PlaneGeometry(10, 1.9),
+              new THREE.MeshBasicMaterial({
+                map: sgTex,
+                toneMapped: false,
+                side: THREE.DoubleSide,
+              }),
+            )
+            sign.position.set(bcx + ax * (PARK_D / 2 + 0.5), 16.5, bcz + az * (PARK_D / 2 + 0.5))
+            sign.rotation.y = rotY
+            add(sign)
+          }
+        }
+
         // ══ Phase C (scramble-detail): 大型ビジョン群 (駅前の顔) ════════════════════
         // The 駅前 video-wall look: several giant fictional-ad screens facing the
         // crossing + a round vision crowning the 渋谷MODE cylinder. Each screen is one
