@@ -21276,6 +21276,139 @@ export default function ThreeWorld({
           instAdd(planterGeo, planterMat, planterXf)
         }
 
+        // ══ 道玄坂 (Dogenzaka) Phase E: storefront clutter ═════════════════════════
+        // Ground-level 猥雑感 on the sidewalks: glowing vending machines + A-board
+        // standing signs flush to the walls, utility poles carrying lane streetlamps,
+        // and curb guardrails on the lower slope. Items the player can reach get a
+        // TIGHT rotated-rect footprint AABB (exact bound, like the walls — no #117
+        // ghost); the overhead arms/lamps and the low guardrails do NOT collide. The
+        // ±5.2 carriageway stays clear (props sit at lateral ≥6).
+        {
+          const vendGeo = new THREE.BoxGeometry(1.0, 1.9, 0.7)
+          const vendFrontGeo = new THREE.PlaneGeometry(0.82, 1.45)
+          const aPanelGeo = new THREE.BoxGeometry(0.9, 1.1, 0.07)
+          const aBaseGeo = new THREE.BoxGeometry(0.9, 0.12, 0.55)
+          const poleGeo = new THREE.CylinderGeometry(0.16, 0.22, 9, 6)
+          const armGeo = new THREE.BoxGeometry(2.2, 0.13, 0.13)
+          const lampGeo = new THREE.BoxGeometry(0.55, 0.2, 0.32)
+          const railPostGeo = new THREE.BoxGeometry(0.1, 0.9, 0.1)
+          const railBarGeo = new THREE.BoxGeometry(2.5, 0.1, 0.08)
+          const vendBodyMat = new THREE.MeshStandardMaterial({ color: 0x2a2d33, roughness: 0.5 })
+          const vendGlowMats = [
+            new THREE.MeshBasicMaterial({ color: 0xff5a8c, toneMapped: false }),
+            new THREE.MeshBasicMaterial({ color: 0x46d4ff, toneMapped: false }),
+          ]
+          const aPanelMats = [
+            new THREE.MeshStandardMaterial({
+              color: 0xc83a5a,
+              emissive: 0x5a1020,
+              emissiveIntensity: 0.7,
+            }),
+            new THREE.MeshStandardMaterial({
+              color: 0x2a6cc8,
+              emissive: 0x0a2050,
+              emissiveIntensity: 0.7,
+            }),
+            new THREE.MeshStandardMaterial({
+              color: 0xd8b020,
+              emissive: 0x4a3808,
+              emissiveIntensity: 0.7,
+            }),
+          ]
+          const darkMetalMat = new THREE.MeshStandardMaterial({
+            color: 0x33353c,
+            roughness: 0.6,
+            metalness: 0.4,
+          })
+          const lampMat = new THREE.MeshBasicMaterial({ color: 0xffe6b0, toneMapped: false })
+          const railMat = new THREE.MeshStandardMaterial({
+            color: 0x55585f,
+            roughness: 0.5,
+            metalness: 0.5,
+          })
+          const vendXf: Xf[] = []
+          const vendFrontXf: Xf[][] = [[], []]
+          const aPanelXf: Xf[][] = [[], [], []]
+          const aBaseXf: Xf[] = []
+          const poleXf: Xf[] = []
+          const armXf: Xf[] = []
+          const lampXf: Xf[] = []
+          const railPostXf: Xf[] = []
+          const railBarXf: Xf[] = []
+          for (const side of [1, -1] as const) {
+            // Poles + lane streetlamps (overhead arm, no collision; pole base solid).
+            for (let s = 11; s < DGZ_TOP_S - 4; s += 13) {
+              const p = dogenzakaAt(s + (side > 0 ? 0 : 6.5))
+              if (!p) continue
+              const baseY = p.h
+              const tangentRotY = Math.atan2(-p.tz, p.tx)
+              const plat = side * 6.0
+              const px = p.cx + p.px * plat
+              const pz = p.cz + p.pz * plat
+              poleXf.push({ pos: [px, baseY + 4.5, pz] })
+              armXf.push({
+                pos: [px - side * p.px * 1.0, baseY + 8.2, pz - side * p.pz * 1.0],
+                rotY: tangentRotY,
+              })
+              lampXf.push({
+                pos: [px - side * p.px * 2.0, baseY + 8.0, pz - side * p.pz * 2.0],
+                rotY: tangentRotY,
+              })
+              addShibuyaAABB(px, pz, 0.3, 0.3, baseY + 5, baseY) // pole base only
+            }
+            // Curb guardrails on the lower slope (decorative — low, no collision).
+            for (let s = 5; s < 32; s += 2.6) {
+              const p = dogenzakaAt(s)
+              if (!p) continue
+              const baseY = p.h
+              const rotY = Math.atan2(-p.tz, p.tx)
+              const glat = side * 5.4
+              railPostXf.push({ pos: [p.cx + p.px * glat, baseY + 0.45, p.cz + p.pz * glat], rotY })
+              railBarXf.push({ pos: [p.cx + p.px * glat, baseY + 0.8, p.cz + p.pz * glat], rotY })
+            }
+            // Vending machines + A-boards flush to the walls (solid, tight AABB).
+            for (let s = 8; s < DGZ_TOP_S - 4; s += 6.5) {
+              const p = dogenzakaAt(s + (side > 0 ? 3.2 : 0))
+              if (!p) continue
+              const baseY = p.h
+              const faceRotY = Math.atan2(-p.tz, p.tx) + (side > 0 ? Math.PI : 0)
+              if (rnd() < 0.55) {
+                const vlat = side * 8.3
+                const vx = p.cx + p.px * vlat
+                const vz = p.cz + p.pz * vlat
+                vendXf.push({ pos: [vx, baseY + 0.95, vz], rotY: faceRotY })
+                const gi = rnd() < 0.5 ? 0 : 1
+                vendFrontXf[gi]?.push({
+                  pos: [vx - side * p.px * 0.37, baseY + 1.05, vz - side * p.pz * 0.37],
+                  rotY: faceRotY,
+                })
+                const hw = Math.abs(p.tx) * 0.5 + Math.abs(p.tz) * 0.35
+                const hd = Math.abs(p.tz) * 0.5 + Math.abs(p.tx) * 0.35
+                addShibuyaAABB(vx, vz, hw, hd, baseY + 1.9, baseY)
+              } else {
+                const slat = side * 6.9
+                const sx = p.cx + p.px * slat
+                const sz = p.cz + p.pz * slat
+                const ai = Math.floor(rnd() * 3)
+                aPanelXf[ai]?.push({ pos: [sx, baseY + 0.72, sz], rotY: faceRotY })
+                aBaseXf.push({ pos: [sx, baseY + 0.06, sz], rotY: faceRotY })
+                const hw = Math.abs(p.tx) * 0.45 + Math.abs(p.tz) * 0.28
+                const hd = Math.abs(p.tz) * 0.45 + Math.abs(p.tx) * 0.28
+                addShibuyaAABB(sx, sz, hw, hd, baseY + 1.2, baseY)
+              }
+            }
+          }
+          instAdd(vendGeo, vendBodyMat, vendXf)
+          vendGlowMats.forEach((m, i) => instAdd(vendFrontGeo, m, vendFrontXf[i] ?? []))
+          aPanelMats.forEach((m, i) => instAdd(aPanelGeo, m, aPanelXf[i] ?? []))
+          instAdd(aBaseGeo, darkMetalMat, aBaseXf)
+          instAdd(poleGeo, darkMetalMat, poleXf)
+          instAdd(armGeo, darkMetalMat, armXf)
+          instAdd(lampGeo, lampMat, lampXf)
+          instAdd(railPostGeo, railMat, railPostXf)
+          instAdd(railBarGeo, railMat, railBarXf)
+        }
+
         // ══ Phase C (scramble-detail): 大型ビジョン群 (駅前の顔) ════════════════════
         // The 駅前 video-wall look: several giant fictional-ad screens facing the
         // crossing + a round vision crowning the 渋谷MODE cylinder. Each screen is one
