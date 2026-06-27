@@ -679,6 +679,105 @@ const shibuyaAreaCenter = (area: ShibuyaArea): { x: number; z: number } => {
   const [dx, dz] = off[area]
   return { x: HUNT_ARENA.x + dx, z: HUNT_ARENA.z + dz }
 }
+// ── 道玄坂 (Dogenzaka): 南西へ登る歩行可能な坂道回廊 ───────────────────────────
+// スクランブル交差点の南西 (109/渋谷MODE の南脇) から始まり、緩いカーブを描いて
+// 登り、上端で行き止まる。センター街と違い地面が弧長に応じて RISE する。±100 の
+// 外周内に完全収容 (上端 r≈98) するので外周壁の改変は不要 —— 自己完結した登りランプ。
+// dogenzakaGroundY は回廊帯の内側だけランプ高さを返し、外では 0 を返すので、平坦な
+// 交差点/センター街、および渋谷以外の全ステージは一切影響を受けない。床メッシュ (build)
+// とプレイヤー Y (animate ループ) の両方を駆動する純データ + 純関数。
+const DGZ_HW = 9 // 回廊半幅 (18 幅: 車道 + 両側歩道。センター街の 10 幅より広い)
+const DGZ_GRADE = 0.12 // 弧長あたりの上昇 (~7°、緩やかだが明確な登り)
+const DGZ_SNAP_MAX = 1.5 // ランプ吸着の最大段差 (これ以内なら歩行中とみなし接地維持)
+const DGZ_PATH: readonly (readonly [number, number])[] = [
+  [-8, 30], // 起点 — スクランブルプラザ南西縁に開口 (h=0)
+  [-22, 51],
+  [-42, 61], // 109/渋谷MODE の南を巻く (footprint を 12.3 クリア、回廊帯 9 に余裕)
+  [-58, 67],
+  [-70, 70], // 上端の行き止まり (h≈9、r≈99 で外周内)
+]
+type DgzSeg = {
+  ax: number
+  az: number
+  dx: number
+  dz: number
+  len: number
+  len2: number
+  s0: number
+}
+// セグメントを起点からの累積弧長つきで前計算 → 高さ = grade·s が O(セグメント数)。
+const DGZ_SEG: DgzSeg[] = (() => {
+  const segs: DgzSeg[] = []
+  let s0 = 0
+  for (let i = 0; i < DGZ_PATH.length - 1; i++) {
+    const a = DGZ_PATH[i]
+    const b = DGZ_PATH[i + 1]
+    if (!a || !b) continue
+    const dx = b[0] - a[0]
+    const dz = b[1] - a[1]
+    const len = Math.hypot(dx, dz)
+    segs.push({ ax: a[0], az: a[1], dx, dz, len, len2: dx * dx + dz * dz, s0 })
+    s0 += len
+  }
+  return segs
+})()
+const DGZ_TOP_S = DGZ_SEG.reduce((acc, s) => acc + s.len, 0) // 総弧長 (上端の s)
+// 折れ線センターラインへの最近点投影 → { s: 起点からの弧長, lat: 直交距離 }。
+const dogenzakaNearest = (lx: number, lz: number): { s: number; lat: number } => {
+  let bestD2 = Number.POSITIVE_INFINITY
+  let bestS = 0
+  for (const seg of DGZ_SEG) {
+    let t = ((lx - seg.ax) * seg.dx + (lz - seg.az) * seg.dz) / seg.len2
+    if (t < 0) t = 0
+    else if (t > 1) t = 1
+    const cx = seg.ax + seg.dx * t
+    const cz = seg.az + seg.dz * t
+    const d2 = (lx - cx) * (lx - cx) + (lz - cz) * (lz - cz)
+    if (d2 < bestD2) {
+      bestD2 = d2
+      bestS = seg.s0 + seg.len * t
+    }
+  }
+  return { s: bestS, lat: Math.sqrt(bestD2) }
+}
+// 歩行可能ランプ高さ (arena-local)。回廊帯の内側は grade·弧長、外側は 0 (平坦)。
+// 帯端での 0 への段差は体験されない —— 側壁が PLAYER_RADIUS 手前で止めるため。
+const dogenzakaGroundY = (lx: number, lz: number): number => {
+  const n = dogenzakaNearest(lx, lz)
+  if (n.lat > DGZ_HW) return 0
+  return DGZ_GRADE * n.s
+}
+// 回廊ゾーン (汎用ファサードを坂道から排除する判定用、少し広めにとる)。
+const inDogenzakaZone = (lx: number, lz: number): boolean =>
+  dogenzakaNearest(lx, lz).lat < DGZ_HW + 4
+// 弧長 s でのセンターライン上の点 + ランプ高さ h + 接線 (tx,tz) + 左直交 (px,pz)。
+// build が坂に沿って物を置く共通サンプラー (床/縁石/センターライン/横断歩道/街路樹/看板)。
+type DgzPoint = {
+  cx: number
+  cz: number
+  h: number
+  tx: number
+  tz: number
+  px: number
+  pz: number
+}
+const dogenzakaAt = (s: number): DgzPoint | null => {
+  let seg = DGZ_SEG[0]
+  for (const sg of DGZ_SEG) if (s >= sg.s0) seg = sg
+  if (!seg || seg.len <= 0) return null
+  const t = Math.max(0, Math.min(1, (s - seg.s0) / seg.len))
+  const tx = seg.dx / seg.len
+  const tz = seg.dz / seg.len
+  return {
+    cx: seg.ax + seg.dx * t,
+    cz: seg.az + seg.dz * t,
+    h: DGZ_GRADE * s,
+    tx,
+    tz,
+    px: -tz,
+    pz: tx,
+  }
+}
 // Per-theme minion spec — reuse an existing enemy model with a colour/scale
 // tweak. base = model, tint = body recolour, eyes = eye-glow colour.
 type HuntCreatureKind =
@@ -18785,6 +18884,33 @@ export default function ThreeWorld({
         // when shibuyaAnim is assigned at the very end (off-centre detail is culled).
         const animNeon: THREE.MeshStandardMaterial[] = []
         const animCull: { obj: THREE.Object3D; cx: number; cz: number; r: number }[] = []
+        // Pendulum-sway registry (declared here, beside the other anim collectors, so
+        // BOTH the センター街 real-street section AND the 道玄坂 phases can register sway).
+        const animSway: {
+          mesh: THREE.InstancedMesh
+          base: { x: number; y: number; z: number; s: number; ph: number; ry: number }[]
+          amp: number
+          freq: number
+          pv: number
+        }[] = []
+        const registerSway = (
+          mesh: THREE.InstancedMesh | null,
+          xfs: Xf[],
+          amp: number,
+          freq: number,
+          pv: number,
+        ) => {
+          if (!mesh || xfs.length === 0) return
+          const base = xfs.map((xf) => ({
+            x: xf.pos[0],
+            y: xf.pos[1],
+            z: xf.pos[2],
+            s: typeof xf.scl === "number" ? xf.scl : 1,
+            ph: rnd() * Math.PI * 2,
+            ry: xf.rotY ?? 0,
+          }))
+          animSway.push({ mesh, base, amp, freq, pv })
+        }
         // ── SHIBUYA collision registry ─────────────────────────────────────────
         // Mirrors addOsakaAABB: only MAJOR structures (perimeter walls + later the
         // landmark footprints) get a hitbox so the scramble stays freely walkable.
@@ -20303,7 +20429,9 @@ export default function ThreeWorld({
         ]
         // inCentergaiZone keeps generic facades out of the walkable センター街 lane.
         const sbBlocked = (x: number, z: number) =>
-          sbAvoid.some(([ax, az, ar]) => Math.hypot(x - ax, z - az) < ar) || inCentergaiZone(x, z)
+          sbAvoid.some(([ax, az, ar]) => Math.hypot(x - ax, z - az) < ar) ||
+          inCentergaiZone(x, z) ||
+          inDogenzakaZone(x, z)
         // (1) Four corner clusters in the diagonal sectors (the road arms stay open).
         for (let k = 0; k < 4; k++) {
           const baseA = Math.PI / 4 + k * (Math.PI / 2)
@@ -20755,6 +20883,882 @@ export default function ThreeWorld({
           if (m) instAdd(bladeGeo, m, bladeXf[i] ?? [])
         })
 
+        // ══ 道玄坂 (Dogenzaka) Phase A: sloped walkable corridor ════════════════════
+        // A curved street that CLIMBS from the SW edge of the scramble plaza (south of
+        // the 109) to a dead-end at the top — entirely inside the ±100 perimeter (top
+        // r≈98), so NO perimeter-wall surgery. The ground rises with arc-length via the
+        // module-level dogenzakaGroundY — the SAME function the player's Y follows in the
+        // animate loop, so the floor and the footing always agree. The two side walls are
+        // the SINGLE collision source (like センター街); the ramp floor carries NO hitbox.
+        // Phase B dresses the road, C stacks the slope-side buildings, H caps the end.
+        {
+          // ── (1) Climbing floor ribbon: ONE BufferGeometry, left/right edge verts at
+          // each sample, heights from dogenzakaGroundY. Up-facing winding so the top is
+          // lit. Its own wet-asphalt material → exactly one isolated draw call.
+          const RIB_N = 60
+          const ribPos: number[] = []
+          const ribUv: number[] = []
+          const ribIdx: number[] = []
+          for (let i = 0; i <= RIB_N; i++) {
+            const s = (i / RIB_N) * DGZ_TOP_S
+            const p = dogenzakaAt(s)
+            if (!p) continue
+            const h = DGZ_GRADE * s
+            ribPos.push(p.cx + p.px * DGZ_HW, h, p.cz + p.pz * DGZ_HW) // left edge
+            ribPos.push(p.cx - p.px * DGZ_HW, h, p.cz - p.pz * DGZ_HW) // right edge
+            const v = s / 6 // ~6-unit asphalt tiles up the slope
+            ribUv.push(0, v, 1, v)
+          }
+          for (let i = 0; i < RIB_N; i++) {
+            const a = i * 2
+            ribIdx.push(a, a + 2, a + 1, a + 1, a + 2, a + 3) // normals up (+Y)
+          }
+          const ribGeo = new THREE.BufferGeometry()
+          ribGeo.setAttribute("position", new THREE.Float32BufferAttribute(ribPos, 3))
+          ribGeo.setAttribute("uv", new THREE.Float32BufferAttribute(ribUv, 2))
+          ribGeo.setIndex(ribIdx)
+          ribGeo.computeVertexNormals()
+          const dgzRoadMat = new THREE.MeshLambertMaterial({
+            color: 0x7c7e88,
+            map: makeNoiseTexture(128, 0x303139, 0.12, 8),
+            emissive: 0x141826,
+            emissiveIntensity: 1,
+          })
+          add(new THREE.Mesh(ribGeo, dgzRoadMat))
+          // ── (2) Side walls: short rotated boxes hugging both band edges, rising with
+          // the ramp. The corridor's ONLY collision; each AABB is the EXACT axis-aligned
+          // bound of its rotated box (no #117 over-size, no ghost walls).
+          const DGZ_WALL_T = 1.5 // wall thickness
+          const DGZ_WALL_H = 9 // shopfront-base height above the ramp (Phase C stacks behind)
+          const dgzSegN = Math.max(1, Math.round(DGZ_TOP_S / 5)) // ~5-unit boxes follow the curve
+          for (let i = 0; i < dgzSegN; i++) {
+            const sm = ((i + 0.5) / dgzSegN) * DGZ_TOP_S
+            const a0 = dogenzakaAt((i / dgzSegN) * DGZ_TOP_S)
+            const a1 = dogenzakaAt(((i + 1) / dgzSegN) * DGZ_TOP_S)
+            const am = dogenzakaAt(sm)
+            if (!a0 || !a1 || !am) continue
+            const segLen = Math.hypot(a1.cx - a0.cx, a1.cz - a0.cz) + 0.4 // overlap at joints
+            const wallH = DGZ_GRADE * sm + DGZ_WALL_H // blocks at the raised feetY
+            const halfAbs = Math.abs(am.tx) * (segLen / 2) + Math.abs(am.tz) * (DGZ_WALL_T / 2)
+            const depAbs = Math.abs(am.tz) * (segLen / 2) + Math.abs(am.tx) * (DGZ_WALL_T / 2)
+            const rotY = Math.atan2(-am.tz, am.tx) // local +X (length) along the tangent
+            for (const side of [1, -1] as const) {
+              const cx = am.cx + am.px * side * (DGZ_HW + DGZ_WALL_T / 2)
+              const cz = am.cz + am.pz * side * (DGZ_HW + DGZ_WALL_T / 2)
+              const box = new THREE.Mesh(
+                new THREE.BoxGeometry(segLen, wallH, DGZ_WALL_T),
+                concreteMat,
+              )
+              box.position.set(cx, wallH / 2, cz)
+              box.rotation.y = rotY
+              mAdd(box)
+              addShibuyaAABB(cx, cz, halfAbs, depAbs, wallH)
+            }
+          }
+          // ── (3) Dead-end cap across the top (Phase H dresses it as a redevelopment
+          // hoarding). Spans the full corridor width + both walls.
+          const cap = dogenzakaAt(DGZ_TOP_S)
+          if (cap) {
+            const capH = DGZ_GRADE * DGZ_TOP_S + DGZ_WALL_H
+            const capW = DGZ_HW * 2 + DGZ_WALL_T * 2
+            const capCx = cap.cx + cap.tx * (DGZ_WALL_T / 2 + 0.5)
+            const capCz = cap.cz + cap.tz * (DGZ_WALL_T / 2 + 0.5)
+            const capMesh = new THREE.Mesh(
+              new THREE.BoxGeometry(DGZ_WALL_T, capH, capW),
+              concreteMat,
+            )
+            capMesh.position.set(capCx, capH / 2, capCz)
+            capMesh.rotation.y = Math.atan2(-cap.tz, cap.tx)
+            mAdd(capMesh)
+            const capHalf = Math.abs(cap.tx) * (DGZ_WALL_T / 2) + Math.abs(cap.tz) * (capW / 2)
+            const capDep = Math.abs(cap.tz) * (DGZ_WALL_T / 2) + Math.abs(cap.tx) * (capW / 2)
+            addShibuyaAABB(capCx, capCz, capHalf, capDep, capH)
+          }
+        }
+
+        // ══ 道玄坂 (Dogenzaka) Phase B: road surface ════════════════════════════════
+        // Carriageway + sidewalks (wider than センター街), curbs, dashed centre line,
+        // a crosswalk at the base, and a wet 石畳 seam sheen — all following the SAME
+        // centreline/heights as the ramp (via dogenzakaAt), sitting just above the
+        // surface. NONE collide (curbs are below the step-up height → walkable).
+        {
+          const DGZ_CARRIAGE_HW = 5.2 // carriageway half-width (sidewalks fill 5.2→9)
+          // Append a lateral band [latC±latHW] over arc [s0,s1] at height + dy, up-facing.
+          const strip = (
+            pos: number[],
+            uv: number[],
+            idx: number[],
+            s0: number,
+            s1: number,
+            latC: number,
+            latHW: number,
+            dy: number,
+            steps: number,
+            uRepeat = 1,
+            vRepeat = 0.25,
+          ) => {
+            const base = pos.length / 3
+            let pushed = 0
+            for (let k = 0; k <= steps; k++) {
+              const s = s0 + (s1 - s0) * (k / steps)
+              const p = dogenzakaAt(s)
+              if (!p) continue
+              pos.push(p.cx + p.px * (latC + latHW), p.h + dy, p.cz + p.pz * (latC + latHW))
+              pos.push(p.cx + p.px * (latC - latHW), p.h + dy, p.cz + p.pz * (latC - latHW))
+              uv.push(0, s * vRepeat, uRepeat, s * vRepeat)
+              pushed++
+            }
+            for (let k = 0; k < pushed - 1; k++) {
+              const a = base + k * 2
+              idx.push(a, a + 2, a + 1, a + 1, a + 2, a + 3)
+            }
+          }
+          const buildGeo = (pos: number[], uv: number[], idx: number[]) => {
+            const g = new THREE.BufferGeometry()
+            g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3))
+            g.setAttribute("uv", new THREE.Float32BufferAttribute(uv, 2))
+            g.setIndex(idx)
+            g.computeVertexNormals()
+            return g
+          }
+          // (1) Curbs: raised light strips along both carriageway edges. Low (≤ step-up)
+          // → walkable, no AABB. One geometry → one draw call.
+          {
+            const pos: number[] = []
+            const uv: number[] = []
+            const idx: number[] = []
+            for (const side of [1, -1] as const) {
+              strip(pos, uv, idx, 0, DGZ_TOP_S, side * DGZ_CARRIAGE_HW, 0.34, 0.18, 48)
+            }
+            add(
+              new THREE.Mesh(
+                buildGeo(pos, uv, idx),
+                new THREE.MeshLambertMaterial({ color: 0x8a8d96 }),
+              ),
+            )
+          }
+          // (2) Centre line: dashed warm strip down the middle (starts past the
+          // crosswalk), glowing at night.
+          {
+            const pos: number[] = []
+            const uv: number[] = []
+            const idx: number[] = []
+            for (let s = 13; s < DGZ_TOP_S - 3; s += 4) {
+              strip(pos, uv, idx, s, Math.min(s + 2.2, DGZ_TOP_S), 0, 0.16, 0.06, 3)
+            }
+            add(
+              new THREE.Mesh(
+                buildGeo(pos, uv, idx),
+                new THREE.MeshBasicMaterial({ color: 0xd9c87a, toneMapped: false }),
+              ),
+            )
+          }
+          // (3) Crosswalk (横断歩道): white bars across the corridor near the base.
+          {
+            const pos: number[] = []
+            const uv: number[] = []
+            const idx: number[] = []
+            for (let s = 4; s < 11; s += 1.3) {
+              strip(pos, uv, idx, s, s + 0.7, 0, 7, 0.05, 2)
+            }
+            add(
+              new THREE.Mesh(
+                buildGeo(pos, uv, idx),
+                new THREE.MeshBasicMaterial({ color: 0xcdd2da, toneMapped: false }),
+              ),
+            )
+          }
+          // (4) Wet 石畳 seam sheen over the whole ramp — cool additive paving grid
+          // catching the neon (the センター街 wet-deck technique, mapped up the slope).
+          {
+            const seamCv = document.createElement("canvas")
+            seamCv.width = 64
+            seamCv.height = 64
+            const sctx = seamCv.getContext("2d")
+            if (sctx) {
+              sctx.clearRect(0, 0, 64, 64)
+              sctx.strokeStyle = "rgba(150,178,224,0.6)"
+              sctx.lineWidth = 2
+              sctx.strokeRect(1, 1, 62, 62)
+            }
+            const seamTex = new THREE.CanvasTexture(seamCv)
+            seamTex.wrapS = THREE.RepeatWrapping
+            seamTex.wrapT = THREE.RepeatWrapping
+            const pos: number[] = []
+            const uv: number[] = []
+            const idx: number[] = []
+            strip(pos, uv, idx, 0, DGZ_TOP_S, 0, DGZ_HW, 0.04, 60, 6, 1 / 3)
+            add(
+              new THREE.Mesh(
+                buildGeo(pos, uv, idx),
+                new THREE.MeshBasicMaterial({
+                  map: seamTex,
+                  transparent: true,
+                  opacity: 0.12,
+                  blending: THREE.AdditiveBlending,
+                  depthWrite: false,
+                }),
+              ),
+            )
+          }
+        }
+
+        // ══ 道玄坂 (Dogenzaka) Phase C: slope-side buildings ════════════════════════
+        // Zatkyo buildings packed BEHIND the side walls down both sides of the slope.
+        // Each building's FEET sit at the ramp height at its s (baseY = ramp h), so the
+        // skyline STEPS up the hill — the core visual slope cue. They are unreachable
+        // behind the wall, so they carry NO collision (the wall is the only hitbox, like
+        // センター街). Inner faces are flooded with signs (original names — reuse the
+        // existing sign set; flushed in THIS block so the scramble's instances aren't
+        // double-rendered). Redevelopment glass towers crown the top.
+        {
+          const dgzFlatXf: Xf[][] = flatSpec.map(() => [])
+          const dgzBladeXf: Xf[][] = bladeSpec.map(() => [])
+          // Sign flood onto a lane-facing wall (nx,nz = outward normal toward the lane).
+          const dgzClad = (
+            cx: number,
+            cz: number,
+            nx: number,
+            nz: number,
+            wallW: number,
+            wallH: number,
+            y0: number,
+            density: number,
+          ) => {
+            const ax = -nz
+            const az = nx
+            const rotY = Math.atan2(nx, nz)
+            const cols = Math.max(1, Math.floor(wallW / 3))
+            const rows = Math.max(1, Math.floor((wallH - y0) / 2.6))
+            for (let r = 0; r < rows; r++) {
+              for (let cI = 0; cI < cols; cI++) {
+                if (rnd() > density) continue
+                if (rnd() < 0.12) continue // occasional gap
+                const si = Math.floor(rnd() * flatSpec.length)
+                const sp = flatSpec[si]
+                if (!sp) continue
+                const hOff = (-0.5 + (cI + 0.5) / cols) * wallW
+                const vOff = y0 + (r + 0.5) * 2.6
+                const fit = Math.min(2.9 / sp.w, 2.4 / sp.h) * (0.85 + rnd() * 0.25)
+                dgzFlatXf[si]?.push({
+                  pos: [cx + ax * hOff + nx * 0.35, vOff, cz + az * hOff + nz * 0.35],
+                  rotY,
+                  scl: [sp.w * fit, sp.h * fit, 1],
+                })
+              }
+            }
+          }
+          const dgzBlades = (
+            cx: number,
+            cz: number,
+            nx: number,
+            nz: number,
+            count: number,
+            y0: number,
+          ) => {
+            const rotY = Math.atan2(nx, nz)
+            let y = y0 + 0.5
+            for (let i = 0; i < count; i++) {
+              const bi = Math.floor(rnd() * bladeSpec.length)
+              const sp = bladeSpec[bi]
+              if (!sp) break
+              const h = sp.h * (0.8 + rnd() * 0.5)
+              const proj = sp.w
+              dgzBladeXf[bi]?.push({
+                pos: [cx + nx * (0.2 + proj / 2), y + h / 2, cz + nz * (0.2 + proj / 2)],
+                rotY,
+                scl: [0.28, h, proj],
+              })
+              y += h + 0.5
+            }
+          }
+          const dgzBodyMats = [midMat, concreteMat, facGlassMat] as const
+          const buildFrontLat = DGZ_HW + 1.8 // just behind the wall's outer face
+          for (const side of [1, -1] as const) {
+            let s = 4
+            let guard = 0
+            while (s < DGZ_TOP_S - 2 && guard++ < 40) {
+              const sw = 7 + rnd() * 7 // building width along the slope (arc length)
+              const p = dogenzakaAt(s + sw / 2)
+              if (!p) {
+                s += sw
+                continue
+              }
+              const cxF = p.cx + p.px * side * (buildFrontLat + 4)
+              const czF = p.cz + p.pz * side * (buildFrontLat + 4)
+              // Skip slots that would collide with a landmark footprint (esp. the 109).
+              if (sbAvoid.some(([ax, az, ar]) => Math.hypot(cxF - ax, czF - az) < ar)) {
+                s += sw
+                continue
+              }
+              const baseY = p.h // feet on the ramp → the skyline steps up the hill
+              const bh = 13 + rnd() * 18 // 13..31 varied
+              const bd = 7 + rnd() * 5
+              const mat = dgzBodyMats[Math.floor(rnd() * dgzBodyMats.length)] ?? midMat
+              const rotY = Math.atan2(-p.tz, p.tx)
+              const body = new THREE.Mesh(new THREE.BoxGeometry(sw - 0.5, bh, bd), mat)
+              body.position.set(
+                p.cx + p.px * side * (buildFrontLat + bd / 2),
+                baseY + bh / 2,
+                p.cz + p.pz * side * (buildFrontLat + bd / 2),
+              )
+              body.rotation.y = rotY
+              mAdd(body) // behind the wall → NO AABB
+              if (rnd() < 0.42) {
+                const th = bh * (0.2 + rnd() * 0.2) // stepped setback for silhouette variety
+                const top = new THREE.Mesh(
+                  new THREE.BoxGeometry((sw - 0.5) * 0.6, th, bd * 0.6),
+                  mat,
+                )
+                top.position.set(
+                  p.cx + p.px * side * (buildFrontLat + bd / 2),
+                  baseY + bh + th / 2,
+                  p.cz + p.pz * side * (buildFrontLat + bd / 2),
+                )
+                top.rotation.y = rotY
+                mAdd(top)
+              }
+              // Lane-facing flood + a blade stack at the storefront edge.
+              const nx = -side * p.px
+              const nz = -side * p.pz
+              const fcx = p.cx + p.px * side * (DGZ_HW - 0.15)
+              const fcz = p.cz + p.pz * side * (DGZ_HW - 0.15)
+              dgzClad(fcx, fcz, nx, nz, sw * 0.9, baseY + Math.min(bh, 22), baseY + 2.6, 0.85)
+              if (rnd() < 0.6) {
+                dgzBlades(
+                  fcx + p.tx * (sw * 0.3),
+                  fcz + p.tz * (sw * 0.3),
+                  nx,
+                  nz,
+                  2 + Math.floor(rnd() * 3),
+                  baseY + 3,
+                )
+              }
+              s += sw
+            }
+          }
+          // Redevelopment glass towers crowning the top of the slope (再開発の高層ビル).
+          const topP = dogenzakaAt(DGZ_TOP_S - 6)
+          if (topP) {
+            for (const side of [1, -1] as const) {
+              makeTower(
+                topP.cx + topP.px * side * 17,
+                topP.cz + topP.pz * side * 17,
+                11,
+                11,
+                32 + rnd() * 12,
+                topP.h,
+                side > 0 ? 0xbfe0ff : 0xffe0b0,
+                0.5,
+                4,
+              )
+            }
+          }
+          // Flush the local sign buckets (the scramble's already flushed above).
+          flatSpec.forEach((_s, i) => {
+            const m = flatMats[i]
+            if (m) instAdd(flatGeo, m, dgzFlatXf[i] ?? [])
+          })
+          bladeSpec.forEach((_s, i) => {
+            const m = bladeMats[i]
+            if (m) instAdd(bladeGeo, m, dgzBladeXf[i] ?? [])
+          })
+        }
+
+        // ══ 道玄坂 (Dogenzaka) Phase D: street trees ═══════════════════════════════
+        // Rows of street trees down both sidewalks (lateral ±7.3 — outside the ±5.2
+        // carriageway, so the main path stays clear). Trunk + dark night foliage +
+        // a planter at each base, all instanced (3 draw calls). Each trunk gets a
+        // TIGHT footprint AABB (ground obstacle per the brief); the foliage overhead
+        // and the planters do not collide. Feet sit on the ramp so the rows climb.
+        {
+          const treeTrunkGeo = new THREE.CylinderGeometry(0.22, 0.32, 4, 6)
+          const treeLeafGeo = new THREE.SphereGeometry(2, 8, 6)
+          const planterGeo = new THREE.CylinderGeometry(0.7, 0.82, 0.34, 8)
+          const treeLeafMat = new THREE.MeshLambertMaterial({
+            color: 0x223a22,
+            emissive: 0x0a160a,
+            emissiveIntensity: 0.45,
+          })
+          const planterMat = new THREE.MeshLambertMaterial({ color: 0x2a2c30 })
+          const trunkXf: Xf[] = []
+          const leafXf: Xf[] = []
+          const planterXf: Xf[] = []
+          for (const side of [1, -1] as const) {
+            for (let s = 8; s < DGZ_TOP_S - 4; s += 9.5) {
+              const p = dogenzakaAt(s + (side > 0 ? 0 : 4.75)) // stagger the two rows
+              if (!p) continue
+              const lat = side * 7.3
+              const tx = p.cx + p.px * lat
+              const tz = p.cz + p.pz * lat
+              const baseY = p.h
+              trunkXf.push({ pos: [tx, baseY + 2, tz] })
+              leafXf.push({ pos: [tx, baseY + 5, tz], scl: 0.85 + rnd() * 0.4 })
+              planterXf.push({ pos: [tx, baseY + 0.18, tz] })
+              addShibuyaAABB(tx, tz, 0.4, 0.4, baseY + 4, baseY) // tight trunk hitbox
+            }
+          }
+          instAdd(treeTrunkGeo, woodMat, trunkXf)
+          // Phase G: the foliage sways gently in the wind (registered into animSway).
+          registerSway(instAdd(treeLeafGeo, treeLeafMat, leafXf), leafXf, 0.05, 1.0, 0.6)
+          instAdd(planterGeo, planterMat, planterXf)
+        }
+
+        // ══ 道玄坂 (Dogenzaka) Phase E: storefront clutter ═════════════════════════
+        // Ground-level 猥雑感 on the sidewalks: glowing vending machines + A-board
+        // standing signs flush to the walls, utility poles carrying lane streetlamps,
+        // and curb guardrails on the lower slope. Items the player can reach get a
+        // TIGHT rotated-rect footprint AABB (exact bound, like the walls — no #117
+        // ghost); the overhead arms/lamps and the low guardrails do NOT collide. The
+        // ±5.2 carriageway stays clear (props sit at lateral ≥6).
+        {
+          const vendGeo = new THREE.BoxGeometry(1.0, 1.9, 0.7)
+          const vendFrontGeo = new THREE.PlaneGeometry(0.82, 1.45)
+          const aPanelGeo = new THREE.BoxGeometry(0.9, 1.1, 0.07)
+          const aBaseGeo = new THREE.BoxGeometry(0.9, 0.12, 0.55)
+          const poleGeo = new THREE.CylinderGeometry(0.16, 0.22, 9, 6)
+          const armGeo = new THREE.BoxGeometry(2.2, 0.13, 0.13)
+          const lampGeo = new THREE.BoxGeometry(0.55, 0.2, 0.32)
+          const railPostGeo = new THREE.BoxGeometry(0.1, 0.9, 0.1)
+          const railBarGeo = new THREE.BoxGeometry(2.5, 0.1, 0.08)
+          const vendBodyMat = new THREE.MeshStandardMaterial({ color: 0x2a2d33, roughness: 0.5 })
+          const vendGlowMats = [
+            new THREE.MeshBasicMaterial({ color: 0xff5a8c, toneMapped: false }),
+            new THREE.MeshBasicMaterial({ color: 0x46d4ff, toneMapped: false }),
+          ]
+          const aPanelMats = [
+            new THREE.MeshStandardMaterial({
+              color: 0xc83a5a,
+              emissive: 0x5a1020,
+              emissiveIntensity: 0.7,
+            }),
+            new THREE.MeshStandardMaterial({
+              color: 0x2a6cc8,
+              emissive: 0x0a2050,
+              emissiveIntensity: 0.7,
+            }),
+            new THREE.MeshStandardMaterial({
+              color: 0xd8b020,
+              emissive: 0x4a3808,
+              emissiveIntensity: 0.7,
+            }),
+          ]
+          const darkMetalMat = new THREE.MeshStandardMaterial({
+            color: 0x33353c,
+            roughness: 0.6,
+            metalness: 0.4,
+          })
+          const lampMat = new THREE.MeshBasicMaterial({ color: 0xffe6b0, toneMapped: false })
+          const railMat = new THREE.MeshStandardMaterial({
+            color: 0x55585f,
+            roughness: 0.5,
+            metalness: 0.5,
+          })
+          const vendXf: Xf[] = []
+          const vendFrontXf: Xf[][] = [[], []]
+          const aPanelXf: Xf[][] = [[], [], []]
+          const aBaseXf: Xf[] = []
+          const poleXf: Xf[] = []
+          const armXf: Xf[] = []
+          const lampXf: Xf[] = []
+          const railPostXf: Xf[] = []
+          const railBarXf: Xf[] = []
+          for (const side of [1, -1] as const) {
+            // Poles + lane streetlamps (overhead arm, no collision; pole base solid).
+            for (let s = 11; s < DGZ_TOP_S - 4; s += 13) {
+              const p = dogenzakaAt(s + (side > 0 ? 0 : 6.5))
+              if (!p) continue
+              const baseY = p.h
+              const tangentRotY = Math.atan2(-p.tz, p.tx)
+              const plat = side * 6.0
+              const px = p.cx + p.px * plat
+              const pz = p.cz + p.pz * plat
+              poleXf.push({ pos: [px, baseY + 4.5, pz] })
+              armXf.push({
+                pos: [px - side * p.px * 1.0, baseY + 8.2, pz - side * p.pz * 1.0],
+                rotY: tangentRotY,
+              })
+              lampXf.push({
+                pos: [px - side * p.px * 2.0, baseY + 8.0, pz - side * p.pz * 2.0],
+                rotY: tangentRotY,
+              })
+              addShibuyaAABB(px, pz, 0.3, 0.3, baseY + 5, baseY) // pole base only
+            }
+            // Curb guardrails on the lower slope (decorative — low, no collision).
+            for (let s = 5; s < 32; s += 2.6) {
+              const p = dogenzakaAt(s)
+              if (!p) continue
+              const baseY = p.h
+              const rotY = Math.atan2(-p.tz, p.tx)
+              const glat = side * 5.4
+              railPostXf.push({ pos: [p.cx + p.px * glat, baseY + 0.45, p.cz + p.pz * glat], rotY })
+              railBarXf.push({ pos: [p.cx + p.px * glat, baseY + 0.8, p.cz + p.pz * glat], rotY })
+            }
+            // Vending machines + A-boards flush to the walls (solid, tight AABB).
+            for (let s = 8; s < DGZ_TOP_S - 4; s += 6.5) {
+              const p = dogenzakaAt(s + (side > 0 ? 3.2 : 0))
+              if (!p) continue
+              const baseY = p.h
+              const faceRotY = Math.atan2(-p.tz, p.tx) + (side > 0 ? Math.PI : 0)
+              if (rnd() < 0.55) {
+                const vlat = side * 8.3
+                const vx = p.cx + p.px * vlat
+                const vz = p.cz + p.pz * vlat
+                vendXf.push({ pos: [vx, baseY + 0.95, vz], rotY: faceRotY })
+                const gi = rnd() < 0.5 ? 0 : 1
+                vendFrontXf[gi]?.push({
+                  pos: [vx - side * p.px * 0.37, baseY + 1.05, vz - side * p.pz * 0.37],
+                  rotY: faceRotY,
+                })
+                const hw = Math.abs(p.tx) * 0.5 + Math.abs(p.tz) * 0.35
+                const hd = Math.abs(p.tz) * 0.5 + Math.abs(p.tx) * 0.35
+                addShibuyaAABB(vx, vz, hw, hd, baseY + 1.9, baseY)
+              } else {
+                const slat = side * 6.9
+                const sx = p.cx + p.px * slat
+                const sz = p.cz + p.pz * slat
+                const ai = Math.floor(rnd() * 3)
+                aPanelXf[ai]?.push({ pos: [sx, baseY + 0.72, sz], rotY: faceRotY })
+                aBaseXf.push({ pos: [sx, baseY + 0.06, sz], rotY: faceRotY })
+                const hw = Math.abs(p.tx) * 0.45 + Math.abs(p.tz) * 0.28
+                const hd = Math.abs(p.tz) * 0.45 + Math.abs(p.tx) * 0.28
+                addShibuyaAABB(sx, sz, hw, hd, baseY + 1.2, baseY)
+              }
+            }
+          }
+          instAdd(vendGeo, vendBodyMat, vendXf)
+          vendGlowMats.forEach((m, i) => instAdd(vendFrontGeo, m, vendFrontXf[i] ?? []))
+          aPanelMats.forEach((m, i) => instAdd(aPanelGeo, m, aPanelXf[i] ?? []))
+          instAdd(aBaseGeo, darkMetalMat, aBaseXf)
+          instAdd(poleGeo, darkMetalMat, poleXf)
+          instAdd(armGeo, darkMetalMat, armXf)
+          instAdd(lampGeo, lampMat, lampXf)
+          instAdd(railPostGeo, railMat, railPostXf)
+          instAdd(railBarGeo, railMat, railBarXf)
+        }
+
+        // ══ 道玄坂 (Dogenzaka) Phase F: neon + sign flood ══════════════════════════
+        // Drown the slope in light: a forest of vertical neon 縦看板 projecting over the
+        // lane (4 colours, instanced, registered into animNeon so they flicker), big
+        // club/hotel light-boxes on the walls, and cross-street 横断幕 banners spanning
+        // the climb. All emissive, all multi-colour, none collide (mounted above the
+        // storefront / overhead). The carriageway is untouched.
+        {
+          // (1) Vertical neon 縦看板 林立 — thin emissive bars on both walls, facing the
+          // lane, at varied heights. Instanced per colour; mats pushed to animNeon.
+          const neonBarGeo = new THREE.BoxGeometry(0.26, 1, 0.16)
+          const neonCols = [0xff3a7a, 0x2ce6ff, 0x53ff8a, 0xffb43a]
+          const neonMats = neonCols.map(
+            (c) =>
+              new THREE.MeshStandardMaterial({ color: c, emissive: c, emissiveIntensity: 1.2 }),
+          )
+          const neonXf: Xf[][] = neonCols.map(() => [])
+          for (const side of [1, -1] as const) {
+            for (let s = 6; s < DGZ_TOP_S - 3; s += 2.4) {
+              if (rnd() < 0.4) continue
+              const p = dogenzakaAt(s)
+              if (!p) continue
+              const baseY = p.h
+              const faceRotY = Math.atan2(-p.tz, p.tx) + (side > 0 ? Math.PI : 0)
+              const lat = side * (DGZ_HW - 0.25)
+              const barH = 2.2 + rnd() * 2.6
+              const yC = baseY + 3.4 + rnd() * 4.5
+              const ci = Math.floor(rnd() * neonCols.length)
+              neonXf[ci]?.push({
+                pos: [p.cx + p.px * lat, yC, p.cz + p.pz * lat],
+                rotY: faceRotY,
+                scl: [1, barH, 1],
+              })
+            }
+          }
+          neonMats.forEach((m, i) => {
+            if (instAdd(neonBarGeo, m, neonXf[i] ?? [])) animNeon.push(m) // flickers in Phase G
+          })
+          // (2) Big club / hotel light-boxes — large bright emissive panels on the walls.
+          const boxGeo = new THREE.PlaneGeometry(2.4, 1.3)
+          const boxMats = [
+            new THREE.MeshBasicMaterial({ color: 0xff2d8e, toneMapped: false }),
+            new THREE.MeshBasicMaterial({ color: 0x2cc8ff, toneMapped: false }),
+            new THREE.MeshBasicMaterial({ color: 0xffd24a, toneMapped: false }),
+          ]
+          const boxXf: Xf[][] = boxMats.map(() => [])
+          for (const side of [1, -1] as const) {
+            for (let s = 10; s < DGZ_TOP_S - 4; s += 9) {
+              const p = dogenzakaAt(s + (side > 0 ? 4 : 0))
+              if (!p) continue
+              const faceRotY = Math.atan2(-p.tz, p.tx) + (side > 0 ? Math.PI : 0)
+              const lat = side * (DGZ_HW - 0.12)
+              const bi = Math.floor(rnd() * boxMats.length)
+              boxXf[bi]?.push({
+                pos: [p.cx + p.px * lat, p.h + 5.5 + rnd() * 3, p.cz + p.pz * lat],
+                rotY: faceRotY,
+                scl: [0.7 + rnd() * 0.6, 0.7 + rnd() * 0.7, 1],
+              })
+            }
+          }
+          boxMats.forEach((m, i) => instAdd(boxGeo, m, boxXf[i] ?? []))
+          // (3) Cross-street 横断幕 banners spanning the climb (original event text).
+          const bannerTex = (text: string, bg: string, fg: string) => {
+            const cv = document.createElement("canvas")
+            cv.width = 512
+            cv.height = 64
+            const c = cv.getContext("2d")
+            if (c) {
+              c.fillStyle = bg
+              c.fillRect(0, 0, 512, 64)
+              c.fillStyle = fg
+              c.font = "bold 38px sans-serif"
+              c.textAlign = "center"
+              c.textBaseline = "middle"
+              c.fillText(text, 256, 36)
+            }
+            const t = new THREE.CanvasTexture(cv)
+            t.colorSpace = THREE.SRGBColorSpace
+            return t
+          }
+          const bannerSpecs: [string, string, string][] = [
+            ["道玄坂 WELCOME", "#0a1230", "#ffd24a"],
+            ["夜祭 NIGHT FES", "#2a0820", "#2ce6ff"],
+            ["渋谷再開発 PROJECT", "#08220e", "#53ff8a"],
+          ]
+          const bannerMats = bannerSpecs.map(
+            ([t, bg, fg]) =>
+              new THREE.MeshBasicMaterial({
+                map: bannerTex(t, bg, fg),
+                side: THREE.DoubleSide,
+                transparent: true,
+              }),
+          )
+          const bannerGeo = new THREE.PlaneGeometry(DGZ_HW * 2 + 1, 1.3)
+          const bannerXf: Xf[][] = bannerMats.map(() => [])
+          let bi = 0
+          for (const s of [14, 27, 40, 52, 64] as const) {
+            const p = dogenzakaAt(s)
+            if (!p) continue
+            const mi = bi % bannerMats.length
+            bannerXf[mi]?.push({
+              pos: [p.cx, p.h + 7.6, p.cz],
+              rotY: Math.atan2(p.tx, p.tz),
+            })
+            bi++
+          }
+          bannerMats.forEach((m, i) => instAdd(bannerGeo, m, bannerXf[i] ?? []))
+        }
+
+        // ══ 道玄坂 (Dogenzaka) Phase G: motion + atmosphere ════════════════════════
+        // Lightweight life: neon BLOOM halos behind the signs, a STATIC crowd of figure
+        // silhouettes, and STATIC parked cars (kept still — moving traffic/crowd is
+        // STEP2). The street-tree sway is wired in Phase D (registerSway), and the neon
+        // flicker in Phase F (animNeon). Depth haze up the slope is the existing global
+        // Shibuya fog. Bloom/crowd/cars are overhead or off the carriageway → no collide.
+        {
+          // (1) Neon bloom — soft additive halos behind the brightest signs.
+          const glowCv = document.createElement("canvas")
+          glowCv.width = 64
+          glowCv.height = 64
+          const ggx = glowCv.getContext("2d")
+          if (ggx) {
+            const grad = ggx.createRadialGradient(32, 32, 0, 32, 32, 32)
+            grad.addColorStop(0, "rgba(255,255,255,0.9)")
+            grad.addColorStop(1, "rgba(255,255,255,0)")
+            ggx.fillStyle = grad
+            ggx.fillRect(0, 0, 64, 64)
+          }
+          const glowTex = new THREE.CanvasTexture(glowCv)
+          const glowGeo = new THREE.PlaneGeometry(1, 1)
+          const glowCols = [0xff5a9a, 0x46d4ff, 0xffd24a]
+          const glowMats = glowCols.map(
+            (hex) =>
+              new THREE.MeshBasicMaterial({
+                map: glowTex,
+                color: hex,
+                transparent: true,
+                opacity: 0.5,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false,
+              }),
+          )
+          const glowXf: Xf[][] = glowCols.map(() => [])
+          for (const side of [1, -1] as const) {
+            for (let s = 8; s < DGZ_TOP_S - 4; s += 6) {
+              if (rnd() < 0.3) continue
+              const p = dogenzakaAt(s)
+              if (!p) continue
+              const lat = side * (DGZ_HW - 0.5)
+              const gi = Math.floor(rnd() * glowCols.length)
+              glowXf[gi]?.push({
+                pos: [p.cx + p.px * lat, p.h + 5 + rnd() * 4, p.cz + p.pz * lat],
+                scl: 3 + rnd() * 2.5,
+              })
+            }
+          }
+          glowMats.forEach((m, i) => instAdd(glowGeo, m, glowXf[i] ?? []))
+          // (2) Static crowd silhouettes — dark figure boards on the sidewalks (no anim).
+          const personGeo = new THREE.PlaneGeometry(0.7, 1.7)
+          const personMat = new THREE.MeshBasicMaterial({
+            color: 0x0a0c12,
+            transparent: true,
+            opacity: 0.85,
+            side: THREE.DoubleSide,
+          })
+          const personXf: Xf[] = []
+          for (const side of [1, -1] as const) {
+            for (let s = 6; s < DGZ_TOP_S - 4; s += 4.5) {
+              if (rnd() < 0.5) continue
+              const p = dogenzakaAt(s)
+              if (!p) continue
+              const lat = side * (6 + rnd() * 2)
+              personXf.push({
+                pos: [p.cx + p.px * lat, p.h + 0.85, p.cz + p.pz * lat],
+                rotY: rnd() * Math.PI,
+              })
+            }
+          }
+          instAdd(personGeo, personMat, personXf)
+          // (3) Static parked cars — decorative (no collision), parallel at the lower curb.
+          const carBodyGeo = new THREE.BoxGeometry(1.8, 1.0, 4.0)
+          const carCabinGeo = new THREE.BoxGeometry(1.6, 0.7, 2.0)
+          const carCols = [0x884048, 0x2a3a55, 0x3a3a40]
+          const carMats = carCols.map(
+            (c) => new THREE.MeshStandardMaterial({ color: c, roughness: 0.4, metalness: 0.5 }),
+          )
+          const carBodyXf: Xf[][] = carCols.map(() => [])
+          const carCabinXf: Xf[][] = carCols.map(() => [])
+          for (const [s, side] of [
+            [16, 1],
+            [30, -1],
+            [46, 1],
+          ] as const) {
+            const p = dogenzakaAt(s)
+            if (!p) continue
+            const lat = side * 6.6
+            const ci = Math.floor(rnd() * carCols.length)
+            const rotY = Math.atan2(p.tx, p.tz) // length along the tangent (parallel parking)
+            carBodyXf[ci]?.push({ pos: [p.cx + p.px * lat, p.h + 0.5, p.cz + p.pz * lat], rotY })
+            carCabinXf[ci]?.push({ pos: [p.cx + p.px * lat, p.h + 1.15, p.cz + p.pz * lat], rotY })
+          }
+          carMats.forEach((m, i) => {
+            instAdd(carBodyGeo, m, carBodyXf[i] ?? [])
+            instAdd(carCabinGeo, m, carCabinXf[i] ?? [])
+          })
+        }
+
+        // ══ 道玄坂 (Dogenzaka) Phase H: connection + dead-end ══════════════════════
+        // Make the base read as an entrance off the crossing (gate + 道玄坂 sign facing
+        // the plaza) and dress the Phase A dead-end cap at the top as a 再開発 hoarding.
+        // The corridor already opens onto the flat plaza near the 109 (the mouth is the
+        // open end at s=0), so the player walks in naturally; this is the signage.
+        {
+          const signTex = (l1: string, l2: string, bg: string, fg: string) => {
+            const cv = document.createElement("canvas")
+            cv.width = 512
+            cv.height = 128
+            const c = cv.getContext("2d")
+            if (c) {
+              c.fillStyle = bg
+              c.fillRect(0, 0, 512, 128)
+              c.fillStyle = fg
+              c.font = "bold 56px sans-serif"
+              c.textAlign = "center"
+              c.textBaseline = "middle"
+              c.fillText(l1, 256, 46)
+              c.font = "bold 26px sans-serif"
+              c.fillText(l2, 256, 96)
+            }
+            const t = new THREE.CanvasTexture(cv)
+            t.colorSpace = THREE.SRGBColorSpace
+            return t
+          }
+          // (1) Mouth gate — pillars on the wall line (already collision → no new hitbox),
+          // an overhead beam, and a 道玄坂 sign facing the plaza.
+          const g = dogenzakaAt(1.5)
+          if (g) {
+            const pillarGeo = new THREE.BoxGeometry(1.0, 6.6, 1.0)
+            for (const side of [1, -1] as const) {
+              const pillar = new THREE.Mesh(pillarGeo, concreteMat)
+              pillar.position.set(
+                g.cx + g.px * side * (DGZ_HW + 0.2),
+                g.h + 3.3,
+                g.cz + g.pz * side * (DGZ_HW + 0.2),
+              )
+              pillar.rotation.y = Math.atan2(-g.tz, g.tx)
+              mAdd(pillar)
+            }
+            const beam = new THREE.Mesh(
+              new THREE.BoxGeometry(DGZ_HW * 2 + 2, 1.5, 1.0),
+              concreteMat,
+            )
+            beam.position.set(g.cx, g.h + 6.7, g.cz)
+            beam.rotation.y = Math.atan2(g.tx, g.tz)
+            mAdd(beam)
+            const gateSign = new THREE.Mesh(
+              new THREE.PlaneGeometry(DGZ_HW * 2 - 1, 1.7),
+              new THREE.MeshBasicMaterial({
+                map: signTex("道玄坂", "DOGENZAKA", "#0a1230", "#ffd24a"),
+                toneMapped: false,
+                transparent: true,
+                side: THREE.DoubleSide,
+              }),
+            )
+            gateSign.position.set(g.cx, g.h + 6.7, g.cz)
+            gateSign.rotation.y = Math.atan2(g.tx, g.tz)
+            add(gateSign)
+          }
+          // (2) Dead-end barricade — dress the cap as a 再開発 / 工事中 hoarding (decorative;
+          // the cap is the actual collision). Fence + striped barriers + warning lamps +
+          // a sign facing the climbing player.
+          const e = dogenzakaAt(DGZ_TOP_S - 0.5)
+          if (e) {
+            const barRotY = Math.atan2(e.tx, e.tz)
+            const fenceMat = new THREE.MeshStandardMaterial({
+              color: 0x9aa0aa,
+              roughness: 0.7,
+              metalness: 0.3,
+            })
+            const barrierMat = new THREE.MeshStandardMaterial({
+              color: 0xe8a02a,
+              emissive: 0x3a2606,
+              emissiveIntensity: 0.5,
+              roughness: 0.6,
+            })
+            const lampMat = new THREE.MeshBasicMaterial({ color: 0xff7a1a, toneMapped: false })
+            const fence = new THREE.Mesh(new THREE.BoxGeometry(DGZ_HW * 2, 2.6, 0.2), fenceMat)
+            fence.position.set(e.cx - e.tx * 1.5, e.h + 1.3, e.cz - e.tz * 1.5)
+            fence.rotation.y = barRotY
+            mAdd(fence)
+            const barXf: Xf[] = []
+            const lampXf: Xf[] = []
+            for (const off of [-4, 0, 4] as const) {
+              const bx = e.cx - e.tx * 2.6 + e.px * off
+              const bz = e.cz - e.tz * 2.6 + e.pz * off
+              barXf.push({ pos: [bx, e.h + 0.5, bz], rotY: barRotY })
+              lampXf.push({ pos: [bx, e.h + 1.15, bz] })
+            }
+            instAdd(new THREE.BoxGeometry(2.2, 1.0, 0.3), barrierMat, barXf)
+            instAdd(new THREE.SphereGeometry(0.16, 8, 6), lampMat, lampXf)
+            const barSign = new THREE.Mesh(
+              new THREE.PlaneGeometry(DGZ_HW * 2 - 2, 1.5),
+              new THREE.MeshBasicMaterial({
+                map: signTex("この先 再開発", "UNDER REDEVELOPMENT", "#2a0a06", "#ff9a3a"),
+                toneMapped: false,
+                transparent: true,
+                side: THREE.DoubleSide,
+              }),
+            )
+            barSign.position.set(e.cx - e.tx * 1.4, e.h + 4.2, e.cz - e.tz * 1.4)
+            barSign.rotation.y = barRotY
+            add(barSign)
+          }
+          // ── FUTURE / 接続予約 ────────────────────────────────────────────────────
+          // The dead-end cap at the top of the slope (DGZ_PATH's last node, local
+          // ≈(-70,70), ramp h≈9) is the reserved hand-off to the next SW area (奥渋谷 /
+          // 神泉 方面). When it lands, replace the cap + this hoarding with an open mouth
+          // (same recipe as the センター街 west-wall gap) and run a new walkable lane on
+          // from here. NOTE: the top is at r≈99 — just inside the flat core (r≤144), so
+          // the ground stays flat there; pushing the next area further SW past r≈144
+          // would need its own local floor slab + height function (cf. dogenzakaGroundY).
+        }
+
         // ══ Phase C (scramble-detail): 大型ビジョン群 (駅前の顔) ════════════════════
         // The 駅前 video-wall look: several giant fictional-ad screens facing the
         // crossing + a round vision crowning the 渋谷MODE cylinder. Each screen is one
@@ -21130,7 +22134,7 @@ export default function ThreeWorld({
         const _bdBoard = new THREE.BoxGeometry(0.85, 1.0, 0.05)
         _bdBoard.translate(0, 0.62, 0)
         const _bdBase = new THREE.BoxGeometry(0.85, 0.08, 0.5)
-        _bdBase.translate(0, 0.04, 0.12)
+        _bdBase.translate(0, 0.04, -0.12) // kickstand toward wall, not lane
         const boardGeo = mergeGeometries([_bdBoard, _bdBase], false) ?? _bdBoard
         const boardPanelGeo = new THREE.PlaneGeometry(0.7, 0.78)
         const trashGeo = new THREE.SphereGeometry(0.42, 7, 5)
@@ -21152,28 +22156,34 @@ export default function ThreeWorld({
         const eBikeFrameXf: Xf[] = []
         const eBikeWheelXf: Xf[] = []
         const eConeXf: Xf[] = []
-        // Zone 1 — lane storefronts: walk both walls, drop one item per stretch, FLUSH to
-        // the wall (unreachable → no AABB).
+        // Zone 1 — lane storefronts: walk both walls, drop one item per stretch.
+        // All items are wall-flush: front face ≤ innerZ + PLAYER_RADIUS (0.35), so the
+        // lane-wall AABB stops the player before reaching any mesh surface — no AABB needed.
+        //   board base: center nz*0.2, deepest +0.33 ✓
+        //   vend:       center nz*0,   deepest +0.35 ✓
+        //   ticket:     center nz*0.1, deepest +0.31 ✓
+        //   foodCase:   center nz*0.06,deepest +0.335 ✓
+        //   bikes:      center nz*0.25,deepest +0.33 ✓
         for (const side of [-1, 1] as const) {
           const innerZ = CG_Z + side * CG_HW // -27 / -17
           const nz = -side // into the lane
           for (let x = CG_X0 - 6; x > CG_X1 + 6; x -= 7) {
             const r = rnd()
             if (r < 0.28) {
-              boardXf.push({ pos: [x, 0, innerZ + nz * 0.6], rotY: nz > 0 ? 0 : Math.PI })
-              boardPanelXf.push({ pos: [x, 0.66, innerZ + nz * 0.66], rotY: nz > 0 ? 0 : Math.PI })
+              boardXf.push({ pos: [x, 0, innerZ + nz * 0.2], rotY: nz > 0 ? 0 : Math.PI })
+              boardPanelXf.push({ pos: [x, 0.66, innerZ + nz * 0.23], rotY: nz > 0 ? 0 : Math.PI })
             } else if (r < 0.52) {
-              ;(rnd() < 0.5 ? vendRXf : vendBXf).push({ pos: [x - 0.6, 0.95, innerZ + nz * 0.45] })
-              ;(rnd() < 0.5 ? vendRXf : vendBXf).push({ pos: [x + 0.6, 0.95, innerZ + nz * 0.45] })
+              ;(rnd() < 0.5 ? vendRXf : vendBXf).push({ pos: [x - 0.6, 0.95, innerZ] })
+              ;(rnd() < 0.5 ? vendRXf : vendBXf).push({ pos: [x + 0.6, 0.95, innerZ] })
             } else if (r < 0.7) {
-              ticketXf.push({ pos: [x, 0.75, innerZ + nz * 0.4], rotY: nz > 0 ? 0 : Math.PI })
-              ticketPanelXf.push({ pos: [x, 1.08, innerZ + nz * 0.62], rotY: nz > 0 ? 0 : Math.PI })
+              ticketXf.push({ pos: [x, 0.75, innerZ + nz * 0.1], rotY: nz > 0 ? 0 : Math.PI })
+              ticketPanelXf.push({ pos: [x, 1.08, innerZ + nz * 0.32], rotY: nz > 0 ? 0 : Math.PI })
             } else if (r < 0.84) {
-              foodCaseXf.push({ pos: [x, 0.95, innerZ + nz * 0.5] })
+              foodCaseXf.push({ pos: [x, 0.95, innerZ + nz * 0.06] })
             } else {
               for (let b = 0; b < 2 + Math.floor(rnd() * 3); b++) {
                 const bx = x + b * 0.4
-                const bz = innerZ + nz * (0.7 + rnd() * 0.25)
+                const bz = innerZ + nz * (0.15 + rnd() * 0.1)
                 eBikeFrameXf.push({ pos: [bx, 0.55, bz], rotY: 0.15 + rnd() * 0.2 })
                 eBikeWheelXf.push({ pos: [bx - 0.5, 0.32, bz], rotX: Math.PI / 2 })
                 eBikeWheelXf.push({ pos: [bx + 0.5, 0.32, bz], rotX: Math.PI / 2 })
@@ -21433,31 +22443,8 @@ export default function ThreeWorld({
         arcLightRunner.position.set(arcX0, arcRidgeY - 0.25, CG_Z)
         add(arcLightRunner)
         // Register the pendulum sway of the hanging noren + arcade lanterns (Phase F meshes).
-        const animSway: {
-          mesh: THREE.InstancedMesh
-          base: { x: number; y: number; z: number; s: number; ph: number; ry: number }[]
-          amp: number
-          freq: number
-          pv: number
-        }[] = []
-        const registerSway = (
-          mesh: THREE.InstancedMesh | null,
-          xfs: Xf[],
-          amp: number,
-          freq: number,
-          pv: number,
-        ) => {
-          if (!mesh || xfs.length === 0) return
-          const base = xfs.map((xf) => ({
-            x: xf.pos[0],
-            y: xf.pos[1],
-            z: xf.pos[2],
-            s: typeof xf.scl === "number" ? xf.scl : 1,
-            ph: rnd() * Math.PI * 2,
-            ry: xf.rotY ?? 0,
-          }))
-          animSway.push({ mesh, base, amp, freq, pv })
-        }
+        // (animSway + registerSway are declared earlier — beside animNeon — so the 道玄坂
+        // phases can register sway too.)
         registerSway(arcLanternMesh, arcLanternXf, 0.08, 1.4, 0.55)
         norenMeshes.forEach((m, i) => registerSway(m, norenXf2[i] ?? [], 0.13, 1.1, 0.42))
 
@@ -25190,6 +26177,24 @@ export default function ThreeWorld({
             }
           }
 
+          // ── 道玄坂 sloped walkable surface (Shibuya stage only) ──────────────
+          // Inside the 道玄坂 corridor the walkable ground RISES with distance up
+          // the slope; dogenzakaGroundY returns 0 everywhere else, so the flat
+          // crossing / センター街 and every non-Shibuya stage are untouched. Gated
+          // on the stage so other hunts never pay for it. onDgzSlope drives the
+          // "glue to the ramp" branch below (keeps descending from going airborne).
+          let onDgzSlope = false
+          if (isShibuyaStage(huntMissionConfigRef.current.stage)) {
+            const slopeY = dogenzakaGroundY(
+              refs.focalPoint.x - HUNT_ARENA.x,
+              refs.focalPoint.z - HUNT_ARENA.z,
+            )
+            if (slopeY > 0) {
+              onDgzSlope = true
+              if (slopeY > groundY) groundY = slopeY
+            }
+          }
+
           // Is the player standing inside any climb zone right now? Powers
           // the bottom-of-screen "[E] 登る" prompt. We push to React state
           // only on boundary changes (entering / leaving the zone) so the
@@ -25320,6 +26325,23 @@ export default function ThreeWorld({
                 refs.focalPoint.z,
               )
             }
+          }
+          // 道玄坂: while WALKING the ramp — grounded last frame, not trying to
+          // jump, and within snap range of the surface — glue the player to it.
+          // This handles BOTH climbing and descending; a gentle downslope would
+          // otherwise read as "airborne" every frame and trip the gravity/fall
+          // path (spurious jitter + fall damage). Genuine jumps (space held) and
+          // real falls from a height (wasAirborne, or a big gap to the ramp) fail
+          // this test and run the normal jump / gravity branches below.
+          else if (
+            onDgzSlope &&
+            !wasAirborneRef.current &&
+            !(keysRef.current.has(" ") && !huntInputLockRef.current) &&
+            refs.focalPoint.y - groundY < DGZ_SNAP_MAX
+          ) {
+            refs.focalPoint.y = groundY
+            playerVelYRef.current = 0
+            wasAirborneRef.current = false
           }
           // Apply gravity / floor snap. Fall damage is computed from the drop
           // height (the Y the player became airborne at, minus the landing Y) —
