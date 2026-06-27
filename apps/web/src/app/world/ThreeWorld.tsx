@@ -23571,6 +23571,134 @@ export default function ThreeWorld({
           }
         }
 
+        // ══ 宮益坂 (Miyamasuzaka) Phase D: 街路樹・什器 (整然としたオフィス街路) ══════════
+        // 公園通りの「緑のトンネル」とは対照的に、宮益坂は整然と等間隔の街路樹 + ビジネス街の
+        // 什器 (プランター・ベンチ・バス停シェルター・駐輪ラック・ボラード)。すべて歩道 (車道 ±6
+        // の外、壁 10 の内) に置き、中央車道は常に開ける。街路樹は trunk のみ細い AABB、低い什器は
+        // 衝突なし。canopy は registerSway で他坂と同じ風揺れ。
+        {
+          const mTrunkGeo = new THREE.CylinderGeometry(0.22, 0.34, 5.2, 6)
+          const mLeafGeo = new THREE.SphereGeometry(2.2, 8, 6) // neat, uniform (not 公園通り's big tunnel)
+          const mLeafMat = new THREE.MeshLambertMaterial({
+            color: 0x3a5f3a, // slightly cooler, tidier green than 公園通り
+            emissive: 0x0e1a0e,
+            emissiveIntensity: 0.45,
+          })
+          const mTreePlanterGeo = new THREE.BoxGeometry(1.5, 0.34, 1.5)
+          const mTreePlanterMat = new THREE.MeshLambertMaterial({ color: 0x3a3d44 })
+          const mTrunkXf: Xf[] = []
+          const mLeafXf: Xf[] = []
+          const mTreePlanterXf: Xf[] = []
+          const M_TREE_LAT = 8.4 // sidewalk (outside the ±6 carriageway, inside the 10 wall)
+          for (const side of [1, -1] as const) {
+            for (let s = 8; s < MMZ_TOP_S - 3; s += 8.5) {
+              const p = miyamasuzakaAt(s + (side > 0 ? 0 : 4.25)) // stagger the two rows
+              if (!p) continue
+              const baseY = p.h
+              const tx = p.cx + p.px * side * M_TREE_LAT
+              const tz = p.cz + p.pz * side * M_TREE_LAT
+              const scl = 0.92 + rnd() * 0.22 // uniform (corporate tidiness, no tunnel ramp-up)
+              mTrunkXf.push({ pos: [tx, baseY + 2.6, tz] })
+              mLeafXf.push({ pos: [tx, baseY + 5.2, tz], scl })
+              mTreePlanterXf.push({ pos: [tx, baseY + 0.17, tz] })
+              addShibuyaAABB(tx, tz, 0.45, 0.45, baseY + 4, baseY) // tight trunk hitbox
+            }
+          }
+          instAdd(mTrunkGeo, woodMat, mTrunkXf)
+          const mLeafMesh = instAdd(mLeafGeo, mLeafMat, mLeafXf)
+          instAdd(mTreePlanterGeo, mTreePlanterMat, mTreePlanterXf)
+          registerSway(mLeafMesh, mLeafXf, 0.04, 0.85, 0.6) // same wind sway as the other slopes
+          // ── Furniture: benches + bollards + bike racks + a couple of bus shelters. All on
+          // the sidewalk, all low (no collision) except the shelter posts (tiny AABBs). ──
+          const benchGeo = new THREE.BoxGeometry(2.0, 0.45, 0.6)
+          const benchMat = new THREE.MeshStandardMaterial({ color: 0x55585f, roughness: 0.7 })
+          const bollardGeo = new THREE.CylinderGeometry(0.12, 0.14, 0.7, 6)
+          const bollardMat = new THREE.MeshStandardMaterial({
+            color: 0x9aa0aa,
+            roughness: 0.5,
+            metalness: 0.5,
+          })
+          const rackGeo = new THREE.BoxGeometry(0.06, 0.7, 1.8) // bike-rack hoop bar (low)
+          const rackMat = bollardMat
+          const benchXf: Xf[] = []
+          const bollardXf: Xf[] = []
+          const rackXf: Xf[] = []
+          for (const side of [1, -1] as const) {
+            for (let s = 12; s < MMZ_TOP_S - 5; s += 12) {
+              const p = miyamasuzakaAt(s + (side > 0 ? 6 : 0))
+              if (!p) continue
+              const baseY = p.h
+              const rotY = Math.atan2(-p.tz, p.tx)
+              const benchLat = side * 7.4
+              benchXf.push({
+                pos: [p.cx + p.px * benchLat, baseY + 0.22, p.cz + p.pz * benchLat],
+                rotY,
+              })
+              // a small cluster of bollards at the carriage edge
+              for (const bo of [-1.4, 0, 1.4]) {
+                const bl = side * 6.4
+                bollardXf.push({
+                  pos: [p.cx + p.px * bl + p.tx * bo, baseY + 0.35, p.cz + p.pz * bl + p.tz * bo],
+                })
+              }
+            }
+            // bike racks halfway up, on the wide sidewalk
+            for (let s = 18; s < MMZ_TOP_S - 6; s += 22) {
+              const p = miyamasuzakaAt(s + (side > 0 ? 0 : 11))
+              if (!p) continue
+              const rl = side * 8.6
+              rackXf.push({
+                pos: [p.cx + p.px * rl, p.h + 0.35, p.cz + p.pz * rl],
+                rotY: Math.atan2(-p.tz, p.tx),
+              })
+            }
+          }
+          instAdd(benchGeo, benchMat, benchXf)
+          instAdd(bollardGeo, bollardMat, bollardXf)
+          instAdd(rackGeo, rackMat, rackXf)
+          // Two bus-stop shelters near the base (a flat roof on two posts + a back panel).
+          const shelterRoofMat = new THREE.MeshStandardMaterial({
+            color: 0x2a2d34,
+            roughness: 0.5,
+            metalness: 0.4,
+          })
+          const shelterGlassMat = new THREE.MeshStandardMaterial({
+            color: 0x1a2230,
+            transparent: true,
+            opacity: 0.4,
+            emissive: 0x2a3a52,
+            emissiveIntensity: 0.3,
+          })
+          for (const [s, side] of [
+            [16, 1],
+            [30, -1],
+          ] as const) {
+            const p = miyamasuzakaAt(s)
+            if (!p) continue
+            const baseY = p.h
+            const rotY = Math.atan2(-p.tz, p.tx)
+            const lat = side * 8.2
+            const bx = p.cx + p.px * lat
+            const bz = p.cz + p.pz * lat
+            const roof = new THREE.Mesh(new THREE.BoxGeometry(4.2, 0.16, 1.6), shelterRoofMat)
+            roof.position.set(bx, baseY + 2.5, bz)
+            roof.rotation.y = rotY
+            mAdd(roof)
+            const back = new THREE.Mesh(new THREE.BoxGeometry(4.2, 2.0, 0.08), shelterGlassMat)
+            back.position.set(bx + p.px * side * 0.7, baseY + 1.25, bz + p.pz * side * 0.7)
+            back.rotation.y = rotY
+            mAdd(back)
+            for (const po of [-1.9, 1.9]) {
+              const post = new THREE.Mesh(
+                new THREE.CylinderGeometry(0.08, 0.08, 2.5, 6),
+                shelterRoofMat,
+              )
+              post.position.set(bx + p.tx * po, baseY + 1.25, bz + p.tz * po)
+              mAdd(post)
+            }
+          }
+        }
+
         // ══ Phase C (scramble-detail): 大型ビジョン群 (駅前の顔) ════════════════════
         // The 駅前 video-wall look: several giant fictional-ad screens facing the
         // crossing + a round vision crowning the 渋谷MODE cylinder. Each screen is one
