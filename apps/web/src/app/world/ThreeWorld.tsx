@@ -21076,6 +21076,168 @@ export default function ThreeWorld({
           }
         }
 
+        // ══ 道玄坂 (Dogenzaka) Phase C: slope-side buildings ════════════════════════
+        // Zatkyo buildings packed BEHIND the side walls down both sides of the slope.
+        // Each building's FEET sit at the ramp height at its s (baseY = ramp h), so the
+        // skyline STEPS up the hill — the core visual slope cue. They are unreachable
+        // behind the wall, so they carry NO collision (the wall is the only hitbox, like
+        // センター街). Inner faces are flooded with signs (original names — reuse the
+        // existing sign set; flushed in THIS block so the scramble's instances aren't
+        // double-rendered). Redevelopment glass towers crown the top.
+        {
+          const dgzFlatXf: Xf[][] = flatSpec.map(() => [])
+          const dgzBladeXf: Xf[][] = bladeSpec.map(() => [])
+          // Sign flood onto a lane-facing wall (nx,nz = outward normal toward the lane).
+          const dgzClad = (
+            cx: number,
+            cz: number,
+            nx: number,
+            nz: number,
+            wallW: number,
+            wallH: number,
+            y0: number,
+            density: number,
+          ) => {
+            const ax = -nz
+            const az = nx
+            const rotY = Math.atan2(nx, nz)
+            const cols = Math.max(1, Math.floor(wallW / 3))
+            const rows = Math.max(1, Math.floor((wallH - y0) / 2.6))
+            for (let r = 0; r < rows; r++) {
+              for (let cI = 0; cI < cols; cI++) {
+                if (rnd() > density) continue
+                if (rnd() < 0.12) continue // occasional gap
+                const si = Math.floor(rnd() * flatSpec.length)
+                const sp = flatSpec[si]
+                if (!sp) continue
+                const hOff = (-0.5 + (cI + 0.5) / cols) * wallW
+                const vOff = y0 + (r + 0.5) * 2.6
+                const fit = Math.min(2.9 / sp.w, 2.4 / sp.h) * (0.85 + rnd() * 0.25)
+                dgzFlatXf[si]?.push({
+                  pos: [cx + ax * hOff + nx * 0.35, vOff, cz + az * hOff + nz * 0.35],
+                  rotY,
+                  scl: [sp.w * fit, sp.h * fit, 1],
+                })
+              }
+            }
+          }
+          const dgzBlades = (
+            cx: number,
+            cz: number,
+            nx: number,
+            nz: number,
+            count: number,
+            y0: number,
+          ) => {
+            const rotY = Math.atan2(nx, nz)
+            let y = y0 + 0.5
+            for (let i = 0; i < count; i++) {
+              const bi = Math.floor(rnd() * bladeSpec.length)
+              const sp = bladeSpec[bi]
+              if (!sp) break
+              const h = sp.h * (0.8 + rnd() * 0.5)
+              const proj = sp.w
+              dgzBladeXf[bi]?.push({
+                pos: [cx + nx * (0.2 + proj / 2), y + h / 2, cz + nz * (0.2 + proj / 2)],
+                rotY,
+                scl: [0.28, h, proj],
+              })
+              y += h + 0.5
+            }
+          }
+          const dgzBodyMats = [midMat, concreteMat, facGlassMat] as const
+          const buildFrontLat = DGZ_HW + 1.8 // just behind the wall's outer face
+          for (const side of [1, -1] as const) {
+            let s = 4
+            let guard = 0
+            while (s < DGZ_TOP_S - 2 && guard++ < 40) {
+              const sw = 7 + rnd() * 7 // building width along the slope (arc length)
+              const p = dogenzakaAt(s + sw / 2)
+              if (!p) {
+                s += sw
+                continue
+              }
+              const cxF = p.cx + p.px * side * (buildFrontLat + 4)
+              const czF = p.cz + p.pz * side * (buildFrontLat + 4)
+              // Skip slots that would collide with a landmark footprint (esp. the 109).
+              if (sbAvoid.some(([ax, az, ar]) => Math.hypot(cxF - ax, czF - az) < ar)) {
+                s += sw
+                continue
+              }
+              const baseY = p.h // feet on the ramp → the skyline steps up the hill
+              const bh = 13 + rnd() * 18 // 13..31 varied
+              const bd = 7 + rnd() * 5
+              const mat = dgzBodyMats[Math.floor(rnd() * dgzBodyMats.length)] ?? midMat
+              const rotY = Math.atan2(-p.tz, p.tx)
+              const body = new THREE.Mesh(new THREE.BoxGeometry(sw - 0.5, bh, bd), mat)
+              body.position.set(
+                p.cx + p.px * side * (buildFrontLat + bd / 2),
+                baseY + bh / 2,
+                p.cz + p.pz * side * (buildFrontLat + bd / 2),
+              )
+              body.rotation.y = rotY
+              mAdd(body) // behind the wall → NO AABB
+              if (rnd() < 0.42) {
+                const th = bh * (0.2 + rnd() * 0.2) // stepped setback for silhouette variety
+                const top = new THREE.Mesh(
+                  new THREE.BoxGeometry((sw - 0.5) * 0.6, th, bd * 0.6),
+                  mat,
+                )
+                top.position.set(
+                  p.cx + p.px * side * (buildFrontLat + bd / 2),
+                  baseY + bh + th / 2,
+                  p.cz + p.pz * side * (buildFrontLat + bd / 2),
+                )
+                top.rotation.y = rotY
+                mAdd(top)
+              }
+              // Lane-facing flood + a blade stack at the storefront edge.
+              const nx = -side * p.px
+              const nz = -side * p.pz
+              const fcx = p.cx + p.px * side * (DGZ_HW - 0.15)
+              const fcz = p.cz + p.pz * side * (DGZ_HW - 0.15)
+              dgzClad(fcx, fcz, nx, nz, sw * 0.9, baseY + Math.min(bh, 22), baseY + 2.6, 0.85)
+              if (rnd() < 0.6) {
+                dgzBlades(
+                  fcx + p.tx * (sw * 0.3),
+                  fcz + p.tz * (sw * 0.3),
+                  nx,
+                  nz,
+                  2 + Math.floor(rnd() * 3),
+                  baseY + 3,
+                )
+              }
+              s += sw
+            }
+          }
+          // Redevelopment glass towers crowning the top of the slope (再開発の高層ビル).
+          const topP = dogenzakaAt(DGZ_TOP_S - 6)
+          if (topP) {
+            for (const side of [1, -1] as const) {
+              makeTower(
+                topP.cx + topP.px * side * 17,
+                topP.cz + topP.pz * side * 17,
+                11,
+                11,
+                32 + rnd() * 12,
+                topP.h,
+                side > 0 ? 0xbfe0ff : 0xffe0b0,
+                0.5,
+                4,
+              )
+            }
+          }
+          // Flush the local sign buckets (the scramble's already flushed above).
+          flatSpec.forEach((_s, i) => {
+            const m = flatMats[i]
+            if (m) instAdd(flatGeo, m, dgzFlatXf[i] ?? [])
+          })
+          bladeSpec.forEach((_s, i) => {
+            const m = bladeMats[i]
+            if (m) instAdd(bladeGeo, m, dgzBladeXf[i] ?? [])
+          })
+        }
+
         // ══ Phase C (scramble-detail): 大型ビジョン群 (駅前の顔) ════════════════════
         // The 駅前 video-wall look: several giant fictional-ad screens facing the
         // crossing + a round vision crowning the 渋谷MODE cylinder. Each screen is one
