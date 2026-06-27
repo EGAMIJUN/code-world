@@ -22993,7 +22993,7 @@ export default function ThreeWorld({
           ] as const) {
             const p = koenDoriAt(s)
             if (!p) continue
-            const lat = side * 8.0
+            const lat = side * 6.3 // 縁石 (±6.5) ぎわの車道に縦列駐車 — 歩道の街路樹と被らず中央車道も開く
             const cx = p.cx + p.px * lat
             const cz = p.cz + p.pz * lat
             const rotY = Math.atan2(p.tx, p.tz) // 車長 (z) を接線に沿わせ縦列駐車
