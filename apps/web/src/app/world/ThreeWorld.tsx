@@ -19160,7 +19160,13 @@ export default function ThreeWorld({
         for (const [x, z, w, d] of [
           [0, H, 2 * H, 2],
           [0, -H, 2 * H, 2],
-          [H, 0, 2, 2 * H],
+          [H, -46, 2, 92], // east wall — segment NORTH of the 駅東 (eki-higashi) mouth (z<+8)
+          [H, 66, 2, 68], // east wall — segment SOUTH of the 駅東 mouth (z>+32)
+          // ↑ east wall split: 24-wide gap at z∈[+8,+32] is the 駅東/ヒカリエ district mouth —
+          //   the player passes through onto the flat core (r≤FLAT_R holds past x=100) into a
+          //   walled high-rise plaza beyond. Same recipe as the センター街 / 宮益坂 splits. The
+          //   wall stays SOLID at z∈[-21,+3] so a future 宮益坂 area can open its own gap there
+          //   without colliding with this one.
           [-H, -63.5, 2, 73], // west wall — segment NORTH of the centre-gai mouth
           [-H, 41.5, 2, 117], // west wall — segment SOUTH of the centre-gai mouth
         ] as const) {
@@ -19777,6 +19783,7 @@ export default function ThreeWorld({
           const bz = Math.sin(ang) * rr
           if (Math.max(Math.abs(bx), Math.abs(bz)) < 104) continue // inside walls → skip
           if (bx < -104 && Math.abs(bz + 22) < 14) continue // centre-gai west dead-end
+          if (bx > 96 && bx < 140 && Math.abs(bz) < 40) continue // 駅東 (eki-higashi) district
           const bw = 11 + rnd() * 14
           const bh = 36 + rnd() * 56 // 36..92
           const tw = new THREE.Mesh(new THREE.BoxGeometry(bw, bh, bw), rimMat)
@@ -23038,6 +23045,58 @@ export default function ThreeWorld({
           }
           instAdd(figGeo, figMat, figXf)
         }
+
+        // ══ 駅東/ヒカリエ (Eki-higashi) Phase A: 区画シェル (接続 + 確定壁 + 広場路面) ══════
+        // A FLAT high-rise district reached through the east-wall gap (z∈[+8,+32], cut above)
+        // and confined by its own walls into a box x∈[100,136] × z∈[-36,+36]. The スリバチ bowl
+        // floor is already flat (y=0) out to r≤144 (district corner r≈141), so no new floor
+        // mesh — just a 駅東広場 paving deck on top + the perimeter walls that contain the
+        // player. The wall stays SOLID at z∈[-21,+3] (handled by the east-wall split) so a
+        // future 宮益坂 area can open its own gap there; x∈[100,106]×z∈[-21,+3] is left as open
+        // plaza so that hand-off connects cleanly.
+        {
+          // ── (1) District confining walls (east / north / south). Reuse wallMat → merge
+          // into the perimeter-wall bucket (no new draw call). Each gets an exact AABB. ──
+          for (const [wx, wz, ww, wd] of [
+            [136, 0, 2, 74], // far-east wall (z spans the box + corner overlap)
+            [118, -36, 38, 2], // north wall (x[100,136])
+            [118, 36, 38, 2], // south wall (x[100,136])
+          ] as const) {
+            const wall = new THREE.Mesh(new THREE.BoxGeometry(ww, 11, wd), wallMat)
+            wall.position.set(wx, 5.5, wz)
+            mAdd(wall)
+            addShibuyaAABB(wx, wz, ww / 2, wd / 2, 11)
+          }
+          // ── (2) 駅東広場 paving deck: a clean lighter slab over the dark bowl floor, so the
+          // district reads as a plaza, not bare asphalt. Reuse roadMat (merges). ──
+          const ekiPlaza = new THREE.Mesh(new THREE.PlaneGeometry(36, 72), roadMat)
+          ekiPlaza.rotation.x = -Math.PI / 2
+          ekiPlaza.position.set(118, 0.02, 0)
+          mAdd(ekiPlaza)
+          // A brighter granite apron right at the entrance throat (z∈[+8,+32]) so the mouth
+          // from the scramble reads as a welcoming plaza floor.
+          const ekiApronMat = new THREE.MeshLambertMaterial({
+            color: 0x9498a2,
+            map: makeNoiseTexture(64, 0x55585f, 0.08, 6),
+          })
+          const ekiApron = new THREE.Mesh(new THREE.PlaneGeometry(20, 24), ekiApronMat)
+          ekiApron.rotation.x = -Math.PI / 2
+          ekiApron.position.set(110, 0.03, 20)
+          mAdd(ekiApron)
+        }
+        // ── ヒカリエ昇格: 既存背景塔 (120,-20,82) に footprint AABB を与えて街区の主役に。──
+        addShibuyaAABB(120, -20, 14, 16, 82) // x[106,134] × z[-36,-4] (NE block)
+        // ── SHIBUYA RISE: 区画最高層 (h98) の段々ガラス塔。南東に据える hero。──
+        makeTower(124, 24, 20, 20, 98, 0, 0xcfe8ff, 0.55, 18)
+        addShibuyaAABB(124, 24, 10, 10, 98) // x[114,134] × z[14,34] (SE block)
+        // ── 東中央のスクランブルスクエア風ステップ塔 (pocket between ヒカリエ & RISE)。──
+        makeTower(130, 5, 11, 13, 70, 0, 0x9fd0ff, 0.5, 12)
+        addShibuyaAABB(130, 5, 5.5, 6.5, 70) // x[124.5,135.5] × z[-1.5,11.5]
+        // ── 多様なガラス高層フィラー (makeFacade → 既存 facGlassMat/midMat バケットに統合、
+        // 各棟が自前の AABB を持つ)。壁際・南西に置き、中央プラザは塞がない。 ──
+        makeFacade(106, 31, 11, 9, 44, Math.PI / 2, "glass") // 南西の壁際
+        makeFacade(120, 32, 12, 8, 56, Math.PI / 2, "stepped") // 南壁ぎわ中央
+        makeFacade(133, -28, 7, 12, 60, 0, "glass") // 北東の壁際 (ヒカリエ東脇)
 
         // ══ Phase C (scramble-detail): 大型ビジョン群 (駅前の顔) ════════════════════
         // The 駅前 video-wall look: several giant fictional-ad screens facing the
