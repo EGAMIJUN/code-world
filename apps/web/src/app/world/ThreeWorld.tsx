@@ -19445,13 +19445,32 @@ export default function ThreeWorld({
           emissiveMap: rimWinTex,
           emissiveIntensity: 0.54,
         })
-        for (let i = 0; i < dn(16); i++) {
-          const ang = (i / 16) * Math.PI * 2 + rnd() * 0.3
-          const rr = 150 + rnd() * 30
+        for (let i = 0; i < dn(26); i++) {
+          const ang = (i / 26) * Math.PI * 2 + rnd() * 0.26
+          const rr = 150 + rnd() * 56 // r150..206 — deeper skyline band
           const bx = Math.cos(ang) * rr
           const bz = Math.sin(ang) * rr
-          const bw = 12 + rnd() * 12
-          const bh = 30 + rnd() * 46
+          const bw = 13 + rnd() * 16
+          const bh = 48 + rnd() * 64 // 48..112 — real high-rises fill the sky
+          const tw = new THREE.Mesh(new THREE.BoxGeometry(bw, bh, bw), rimMat)
+          tw.position.set(bx, shibuyaGroundY(bx, bz) + bh / 2, bz)
+          mAdd(tw)
+        }
+        // — Mid-distance silhouette ring filling the empty annulus between the ±100
+        // perimeter walls and the far rim, so looking down the open radiating roads no
+        // longer shows bare sky. Shares rimMat → still ONE draw call. Placed ONLY where
+        // max(|x|,|z|) > 104 (strictly OUTSIDE the square walls) so it can never become
+        // a phantom obstacle in the playable box; the centre-gai corridor pokes west to
+        // x≈-138, so that lane is carved out.
+        for (let i = 0; i < dn(30); i++) {
+          const ang = (i / 30) * Math.PI * 2 + rnd() * 0.18
+          const rr = 108 + rnd() * 40 // r108..148
+          const bx = Math.cos(ang) * rr
+          const bz = Math.sin(ang) * rr
+          if (Math.max(Math.abs(bx), Math.abs(bz)) < 104) continue // inside walls → skip
+          if (bx < -104 && Math.abs(bz + 22) < 14) continue // centre-gai west dead-end
+          const bw = 11 + rnd() * 14
+          const bh = 36 + rnd() * 56 // 36..92
           const tw = new THREE.Mesh(new THREE.BoxGeometry(bw, bh, bw), rimMat)
           tw.position.set(bx, shibuyaGroundY(bx, bz) + bh / 2, bz)
           mAdd(tw)
@@ -19886,7 +19905,7 @@ export default function ThreeWorld({
           )
             continue
           const bw = 9 + rnd() * 9
-          const bh = 12 + rnd() * 22
+          const bh = 18 + rnd() * 32 // 18..50 — denser, taller zatkyo ring
           makeMidRise(bx, bz, bw, bw, bh, Math.atan2(-bz, -bx)) // face the centre
         }
         neonCols.forEach((c, i) => {
@@ -20517,7 +20536,7 @@ export default function ThreeWorld({
               cz,
               10 + rnd() * 9,
               9 + rnd() * 7,
-              16 + rnd() * 30,
+              26 + rnd() * 40, // 26..66 — corner clusters become real high-rises
               Math.atan2(-cz, -cx),
               shape,
             )
@@ -20545,7 +20564,7 @@ export default function ThreeWorld({
                 cz,
                 9 + rnd() * 7,
                 8 + rnd() * 5,
-                13 + rnd() * 22,
+                20 + rnd() * 32, // 20..52 — frontage canyon walls rise to fill the sky
                 Math.atan2(-pz * side, -px * side),
                 shape,
               )
@@ -20591,7 +20610,7 @@ export default function ThreeWorld({
           while (x > CG_X1 + 3 && guard++ < 64) {
             const sw = 7 + rnd() * 8 // shop width 7..15
             const cx = x - sw / 2
-            const bh = 9 + rnd() * 19 // 9..28 → varied skyline silhouette
+            const bh = 14 + rnd() * 26 // 14..40 → taller センター街 walls close the sky
             const bd = 6 + rnd() * 6
             const mat = cgBodyMats[Math.floor(rnd() * cgBodyMats.length)] ?? midMat
             const body = new THREE.Mesh(new THREE.BoxGeometry(sw - 0.4, bh, bd), mat)
@@ -21262,7 +21281,7 @@ export default function ThreeWorld({
                 continue
               }
               const baseY = p.h // feet on the ramp → the skyline steps up the hill
-              const bh = 13 + rnd() * 18 // 13..31 varied
+              const bh = 17 + rnd() * 24 // 17..41 varied — 道玄坂 walls rise with the hill
               const bd = 7 + rnd() * 5
               const mat = dgzBodyMats[Math.floor(rnd() * dgzBodyMats.length)] ?? midMat
               const rotY = Math.atan2(-p.tz, p.tx)
