@@ -19801,9 +19801,10 @@ export default function ThreeWorld({
         const bvBody = new THREE.Mesh(new THREE.BoxGeometry(bvW, bvH, bvD), bvMat)
         bvBody.position.set(bvX, bvH / 2, bvZ)
         mAdd(bvBody)
-        // East portion only — KDR corridor runs on the west side (local x<8), so only
-        // block the eastern half to avoid creating an invisible wall inside the corridor.
-        addShibuyaAABB(bvX + 8.5, bvZ, bvW / 2 - 8.5, bvD / 2, bvH)
+        // East face only (local x[12,17]). The KDR corridor east edge reaches x≈+10 at the
+        // BV south wall (z=-32), so the AABB west edge must be ≥x=12 (2u clearance) to avoid
+        // an invisible wall inside the corridor. x=12→17 still blocks the eastern approach.
+        addShibuyaAABB(bvX + 10.5, bvZ, bvW / 2 - 10.5, bvD / 2, bvH)
         // The giant screen: a bright fake-ad CanvasTexture (fictional brands). Scroll
         // animation arrives in Phase F; for now it's a static lit billboard. Its own
         // material → kept as its own draw call (emissive, frustum-culled off).
