@@ -19342,7 +19342,7 @@ export default function ThreeWorld({
               floorLit.push(u < 0.32 ? 0.12 : u > 0.74 ? 0.95 : 0.45 + rnd() * 0.35)
             }
             for (let r = 0; r < rows; r++) {
-              const fl = floorLit[r]
+              const fl = floorLit[r] ?? 0.5
               for (let c = 0; c < cols; c++) {
                 const gx = c * cw + 2
                 const gy = r * ch + 2
