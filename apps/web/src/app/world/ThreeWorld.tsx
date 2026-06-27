@@ -19293,33 +19293,85 @@ export default function ThreeWorld({
         // Window-grid emissive texture: lit windows glow, gaps + dark windows stay
         // black so only windows emit. Deterministic via the build PRNG.
         const makeWindowTex = (cols: number, rows: number, litHex: number, litChance: number) => {
-          // Larger panes (was 6×9) so distant facades read as windows, not TV static —
-          // the old fine grid aliased into "white noise" on the right-edge towers. Each
-          // lit pane also gets its own brightness so the field shimmers instead of
-          // being a flat sheet of identical bright dots.
-          const cw = 9
-          const ch = 13
+          // Real night-tower glass, not a uniform dot grid. Three things kill the
+          // "white-noise / TV-static" look the old fine grid had:
+          //   1. Big panes with a clear dark mullion frame around each window, so
+          //      the eye reads "glass divided by structure", not random pixels.
+          //   2. Lighting clusters by FLOOR — whole storeys run bright or dark and
+          //      the per-window chance rides on that, the way a real building has a
+          //      lit office floor above a dark one, never an even speckle.
+          //   3. Colour-temperature scatter — most lit panes carry the building tint
+          //      but ~1/3 drift warm (incandescent) or cool (fluorescent), plus a
+          //      top-down ceiling-light gradient inside each pane for depth.
+          // A few full-height vertical reflection streaks finish the curtain-wall look.
+          const cw = 16
+          const ch = 20
           const cv = document.createElement("canvas")
           cv.width = cols * cw
           cv.height = rows * ch
           const ctx = cv.getContext("2d")
+          const lr = (litHex >> 16) & 0xff
+          const lg = (litHex >> 8) & 0xff
+          const lb = litHex & 0xff
           if (ctx) {
-            ctx.fillStyle = "#000000"
+            // Structure: dark frame/spandrel the windows sit in.
+            ctx.fillStyle = "#05070c"
             ctx.fillRect(0, 0, cv.width, cv.height)
-            const lr = (litHex >> 16) & 0xff
-            const lg = (litHex >> 8) & 0xff
-            const lb = litHex & 0xff
+            // Per-floor brightness — a few storeys mostly dark, a few mostly lit.
+            const floorLit: number[] = []
             for (let r = 0; r < rows; r++) {
+              const u = rnd()
+              floorLit.push(u < 0.32 ? 0.12 : u > 0.74 ? 0.95 : 0.45 + rnd() * 0.35)
+            }
+            for (let r = 0; r < rows; r++) {
+              const fl = floorLit[r]
               for (let c = 0; c < cols; c++) {
-                if (rnd() < litChance) {
-                  const k = 0.45 + rnd() * 0.55 // per-pane brightness
-                  ctx.fillStyle = `rgb(${Math.round(lr * k)},${Math.round(lg * k)},${Math.round(lb * k)})`
+                const gx = c * cw + 2
+                const gy = r * ch + 2
+                const gw = cw - 4
+                const gh = ch - 5 // taller mullion below = floor slab
+                if (rnd() < litChance * fl) {
+                  // Lit pane — start from building tint, drift warm/cool sometimes.
+                  let rr = lr
+                  let gg = lg
+                  let bb = lb
+                  const drift = rnd()
+                  if (drift < 0.18) {
+                    rr = (rr + 255) >> 1
+                    gg = (gg + 188) >> 1
+                    bb = (bb + 120) >> 1 // warm tungsten
+                  } else if (drift < 0.34) {
+                    rr = (rr + 150) >> 1
+                    gg = (gg + 205) >> 1
+                    bb = (bb + 255) >> 1 // cool fluorescent
+                  }
+                  const k = 0.5 + rnd() * 0.5
+                  // Vertical ceiling-light gradient: brighter at the pane top.
+                  const g = ctx.createLinearGradient(0, gy, 0, gy + gh)
+                  const hi = (v: number) => Math.min(255, Math.round(v * k * 1.18))
+                  const lo = (v: number) => Math.round(v * k * 0.62)
+                  g.addColorStop(0, `rgb(${hi(rr)},${hi(gg)},${hi(bb)})`)
+                  g.addColorStop(1, `rgb(${lo(rr)},${lo(gg)},${lo(bb)})`)
+                  ctx.fillStyle = g
                 } else {
-                  ctx.fillStyle = "#0a0d14"
+                  // Dark glass — faint cool sky reflection, not pure black.
+                  const d = 0.6 + rnd() * 0.8
+                  ctx.fillStyle = `rgb(${Math.round(9 * d)},${Math.round(13 * d)},${Math.round(22 * d)})`
                 }
-                ctx.fillRect(c * cw + 1, r * ch + 1, cw - 2, ch - 3)
+                ctx.fillRect(gx, gy, gw, gh)
+                // Centre mullion split — divides the pane into two lights.
+                ctx.fillStyle = "#05070c"
+                ctx.fillRect(gx + gw / 2 - 0.5, gy, 1, gh)
               }
             }
+            // Curtain-wall reflection: a few translucent vertical streaks.
+            ctx.globalAlpha = 0.05
+            for (let s = 0; s < Math.max(2, Math.round(cols / 5)); s++) {
+              const sx = Math.floor(rnd() * cols) * cw
+              ctx.fillStyle = s % 2 ? "#bfe0ff" : "#ffffff"
+              ctx.fillRect(sx, 0, cw, cv.height)
+            }
+            ctx.globalAlpha = 1
           }
           const t = new THREE.CanvasTexture(cv)
           t.wrapS = THREE.RepeatWrapping
