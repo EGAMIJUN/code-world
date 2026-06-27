@@ -19801,7 +19801,9 @@ export default function ThreeWorld({
         const bvBody = new THREE.Mesh(new THREE.BoxGeometry(bvW, bvH, bvD), bvMat)
         bvBody.position.set(bvX, bvH / 2, bvZ)
         mAdd(bvBody)
-        addShibuyaAABB(bvX, bvZ, bvW / 2, bvD / 2, bvH)
+        // East portion only — KDR corridor runs on the west side (local x<8), so only
+        // block the eastern half to avoid creating an invisible wall inside the corridor.
+        addShibuyaAABB(bvX + 8.5, bvZ, bvW / 2 - 8.5, bvD / 2, bvH)
         // The giant screen: a bright fake-ad CanvasTexture (fictional brands). Scroll
         // animation arrives in Phase F; for now it's a static lit billboard. Its own
         // material → kept as its own draw call (emissive, frustum-culled off).
@@ -22692,7 +22694,9 @@ export default function ThreeWorld({
                   p.h + 9.4,
                   p.cz + p.pz * side * frontLat,
                 )
-                sign.rotation.y = rotY
+                // side=1 is east (right of northward travel); its front must face west
+                // (toward road) so flip π. side=-1 is west; rotY already faces east. ✓
+                sign.rotation.y = side === 1 ? rotY + Math.PI : rotY
                 add(sign)
               }
               s += sw + 0.6
@@ -22899,7 +22903,8 @@ export default function ThreeWorld({
               }),
             )
             gateSign.position.set(m.cx + m.tx * 0.4, m.h + 7.4, m.cz + m.tz * 0.4)
-            gateSign.rotation.y = Math.atan2(m.tx, m.tz)
+            // atan2(-tx,-tz) makes the sign face south (toward approaching scramble players)
+            gateSign.rotation.y = Math.atan2(-m.tx, -m.tz)
             add(gateSign)
           }
           // ── FUTURE / 接続予約 ──────────────────────────────────────────────────────
@@ -23134,7 +23139,9 @@ export default function ThreeWorld({
         const faceCross = Math.PI / 2 // normal (0,+1)
         makeBigVision(bvX, bvH - 3, bvZ + bvD / 2 + 0.18, bvW * 0.8, 5.5, faceCross, adFest, 0.05)
         for (const [sx, sz, sw, sh, tex] of [
-          [-18, -46, 13, 15, adGear],
+          // west slab moved from x=-18 → x=-24 so its right edge (x=-16) clears the
+          // KDR corridor west wall (lat≈11, local x≈-14) by 2 units.
+          [-24, -46, 13, 15, adGear],
           [26, -44, 12, 14, adWanted],
         ] as const) {
           const slab = new THREE.Mesh(new THREE.BoxGeometry(sw + 3, sh + 9, 5), midMat)
@@ -23169,7 +23176,10 @@ export default function ThreeWorld({
         const staBody = new THREE.Mesh(new THREE.BoxGeometry(70, 22, 14), midMat)
         staBody.position.set(0, 11, staZ)
         mAdd(staBody)
-        addShibuyaAABB(0, staZ, 35, 7, 22)
+        // Split into west + east halves, leaving local x [-21, +4] open for the
+        // KDR corridor (which ends at local (-9,-90), spanning x≈-20 to +2 here).
+        addShibuyaAABB(-28, staZ, 7, 7, 22) // west: local x [-35, -21]
+        addShibuyaAABB(19.5, staZ, 15.5, 7, 22) // east: local x [+4, +35]
         const staRoof = new THREE.Mesh(new THREE.BoxGeometry(74, 1.4, 18), roofMat)
         staRoof.position.set(0, 22.4, staZ)
         mAdd(staRoof)
