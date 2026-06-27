@@ -21643,6 +21643,122 @@ export default function ThreeWorld({
           })
         }
 
+        // ══ 道玄坂 (Dogenzaka) Phase H: connection + dead-end ══════════════════════
+        // Make the base read as an entrance off the crossing (gate + 道玄坂 sign facing
+        // the plaza) and dress the Phase A dead-end cap at the top as a 再開発 hoarding.
+        // The corridor already opens onto the flat plaza near the 109 (the mouth is the
+        // open end at s=0), so the player walks in naturally; this is the signage.
+        {
+          const signTex = (l1: string, l2: string, bg: string, fg: string) => {
+            const cv = document.createElement("canvas")
+            cv.width = 512
+            cv.height = 128
+            const c = cv.getContext("2d")
+            if (c) {
+              c.fillStyle = bg
+              c.fillRect(0, 0, 512, 128)
+              c.fillStyle = fg
+              c.font = "bold 56px sans-serif"
+              c.textAlign = "center"
+              c.textBaseline = "middle"
+              c.fillText(l1, 256, 46)
+              c.font = "bold 26px sans-serif"
+              c.fillText(l2, 256, 96)
+            }
+            const t = new THREE.CanvasTexture(cv)
+            t.colorSpace = THREE.SRGBColorSpace
+            return t
+          }
+          // (1) Mouth gate — pillars on the wall line (already collision → no new hitbox),
+          // an overhead beam, and a 道玄坂 sign facing the plaza.
+          const g = dogenzakaAt(1.5)
+          if (g) {
+            const pillarGeo = new THREE.BoxGeometry(1.0, 6.6, 1.0)
+            for (const side of [1, -1] as const) {
+              const pillar = new THREE.Mesh(pillarGeo, concreteMat)
+              pillar.position.set(
+                g.cx + g.px * side * (DGZ_HW + 0.2),
+                g.h + 3.3,
+                g.cz + g.pz * side * (DGZ_HW + 0.2),
+              )
+              pillar.rotation.y = Math.atan2(-g.tz, g.tx)
+              mAdd(pillar)
+            }
+            const beam = new THREE.Mesh(
+              new THREE.BoxGeometry(DGZ_HW * 2 + 2, 1.5, 1.0),
+              concreteMat,
+            )
+            beam.position.set(g.cx, g.h + 6.7, g.cz)
+            beam.rotation.y = Math.atan2(g.tx, g.tz)
+            mAdd(beam)
+            const gateSign = new THREE.Mesh(
+              new THREE.PlaneGeometry(DGZ_HW * 2 - 1, 1.7),
+              new THREE.MeshBasicMaterial({
+                map: signTex("道玄坂", "DOGENZAKA", "#0a1230", "#ffd24a"),
+                toneMapped: false,
+                transparent: true,
+                side: THREE.DoubleSide,
+              }),
+            )
+            gateSign.position.set(g.cx, g.h + 6.7, g.cz)
+            gateSign.rotation.y = Math.atan2(g.tx, g.tz)
+            add(gateSign)
+          }
+          // (2) Dead-end barricade — dress the cap as a 再開発 / 工事中 hoarding (decorative;
+          // the cap is the actual collision). Fence + striped barriers + warning lamps +
+          // a sign facing the climbing player.
+          const e = dogenzakaAt(DGZ_TOP_S - 0.5)
+          if (e) {
+            const barRotY = Math.atan2(e.tx, e.tz)
+            const fenceMat = new THREE.MeshStandardMaterial({
+              color: 0x9aa0aa,
+              roughness: 0.7,
+              metalness: 0.3,
+            })
+            const barrierMat = new THREE.MeshStandardMaterial({
+              color: 0xe8a02a,
+              emissive: 0x3a2606,
+              emissiveIntensity: 0.5,
+              roughness: 0.6,
+            })
+            const lampMat = new THREE.MeshBasicMaterial({ color: 0xff7a1a, toneMapped: false })
+            const fence = new THREE.Mesh(new THREE.BoxGeometry(DGZ_HW * 2, 2.6, 0.2), fenceMat)
+            fence.position.set(e.cx - e.tx * 1.5, e.h + 1.3, e.cz - e.tz * 1.5)
+            fence.rotation.y = barRotY
+            mAdd(fence)
+            const barXf: Xf[] = []
+            const lampXf: Xf[] = []
+            for (const off of [-4, 0, 4] as const) {
+              const bx = e.cx - e.tx * 2.6 + e.px * off
+              const bz = e.cz - e.tz * 2.6 + e.pz * off
+              barXf.push({ pos: [bx, e.h + 0.5, bz], rotY: barRotY })
+              lampXf.push({ pos: [bx, e.h + 1.15, bz] })
+            }
+            instAdd(new THREE.BoxGeometry(2.2, 1.0, 0.3), barrierMat, barXf)
+            instAdd(new THREE.SphereGeometry(0.16, 8, 6), lampMat, lampXf)
+            const barSign = new THREE.Mesh(
+              new THREE.PlaneGeometry(DGZ_HW * 2 - 2, 1.5),
+              new THREE.MeshBasicMaterial({
+                map: signTex("この先 再開発", "UNDER REDEVELOPMENT", "#2a0a06", "#ff9a3a"),
+                toneMapped: false,
+                transparent: true,
+                side: THREE.DoubleSide,
+              }),
+            )
+            barSign.position.set(e.cx - e.tx * 1.4, e.h + 4.2, e.cz - e.tz * 1.4)
+            barSign.rotation.y = barRotY
+            add(barSign)
+          }
+          // ── FUTURE / 接続予約 ────────────────────────────────────────────────────
+          // The dead-end cap at the top of the slope (DGZ_PATH's last node, local
+          // ≈(-70,70), ramp h≈9) is the reserved hand-off to the next SW area (奥渋谷 /
+          // 神泉 方面). When it lands, replace the cap + this hoarding with an open mouth
+          // (same recipe as the センター街 west-wall gap) and run a new walkable lane on
+          // from here. NOTE: the top is at r≈99 — just inside the flat core (r≤144), so
+          // the ground stays flat there; pushing the next area further SW past r≈144
+          // would need its own local floor slab + height function (cf. dogenzakaGroundY).
+        }
+
         // ══ Phase C (scramble-detail): 大型ビジョン群 (駅前の顔) ════════════════════
         // The 駅前 video-wall look: several giant fictional-ad screens facing the
         // crossing + a round vision crowning the 渋谷MODE cylinder. Each screen is one
