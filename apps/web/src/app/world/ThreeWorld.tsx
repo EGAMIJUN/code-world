@@ -23443,6 +23443,134 @@ export default function ThreeWorld({
           instAdd(mLampGeo, mLampMat, mLampXf)
         }
 
+        // ══ 宮益坂 (Miyamasuzaka) Phase C: オフィスビル群 (段々ビル + 控えめな企業サイン) ══
+        // 道玄坂 Phase C / 公園通り Phase D の段々ビル手法を流用。宮益坂は東のビジネス街なので、
+        // 道玄坂の猥雑な雑居ビルでも公園通りのおしゃれ店でもなく、ガラス主体の高めのオフィス
+        // タワー + 銀行 + カフェ + 書店。サインは青白グレーの企業系で控えめ (看板洪水にしない)。
+        // 各棟は側壁 (lat≤11.5) の背後に置き、到達可能な外面なので footprint AABB を付ける
+        // (lat≥11.5 → 歩行回廊 ±9.6 には掛からない)。足元 y=0、高さに p.h を足して坂と共に
+        // 段々とせり上がる。SE ガラスタワー (46,30) と センター街路地 (40,-28) を回避する。
+        {
+          const mBodyMats = [facGlassMat, midMat, facGlassMat, concreteMat] // glass-weighted (corporate)
+          const officeNames = [
+            "MIYAMASU TOWER",
+            "TOA SHINKIN",
+            "DOOR COFFEE",
+            "青林堂",
+            "MEISEI OFFICE",
+            "ARC SYSTEMS",
+            "渋谷東口ビル",
+          ]
+          const mSignCache = new Map<string, THREE.CanvasTexture>()
+          const officeSignTex = (name: string, accent: string) => {
+            const cached = mSignCache.get(name)
+            if (cached) return cached
+            const cv = document.createElement("canvas")
+            cv.width = 256
+            cv.height = 40
+            const c = cv.getContext("2d")
+            if (c) {
+              c.fillStyle = "#0c1018" // dark cool ground (corporate, sober)
+              c.fillRect(0, 0, 256, 40)
+              c.fillStyle = accent
+              c.fillRect(10, 7, 3, 26) // a single thin accent bar at the left
+              c.fillStyle = "#dfe7f2"
+              c.font = "600 21px sans-serif"
+              c.textAlign = "left"
+              c.textBaseline = "middle"
+              c.fillText(name, 24, 21)
+            }
+            const tex = new THREE.CanvasTexture(cv)
+            mSignCache.set(name, tex)
+            return tex
+          }
+          // Blue-white-grey corporate accents only (restrained vs 道玄坂's primary flood).
+          const mAccents = ["#9fc0e8", "#cfe0ff", "#b8c0cc", "#dfe4ea", "#7fa8d8"]
+          // Skip zones (local): SE glass tower, センター街 alley. North-side bodies only past
+          // the alley's east end (cx≥70) so they never sit on the nomiya lane.
+          const mmzAvoid: [number, number, number][] = [
+            [46, 30, 21],
+            [40, -28, 24],
+          ]
+          let mSignIdx = 0
+          for (const side of [1, -1] as const) {
+            let s = 5
+            let guard = 0
+            while (s < MMZ_TOP_S - 3 && guard++ < 30) {
+              const sw = 8 + rnd() * 7 // frontage
+              const p = miyamasuzakaAt(s + sw / 2)
+              if (!p) {
+                s += sw
+                continue
+              }
+              const bd = 9 + rnd() * 6 // depth
+              const frontLat = MMZ_HW + 1.5 // just behind the side wall (lat≤11.5)
+              const cx = p.cx + p.px * side * (frontLat + bd / 2)
+              const cz = p.cz + p.pz * side * (frontLat + bd / 2)
+              // North side (side=-1 → −z): keep clear of the centre-gai alley (x≤64) until
+              // the body's west edge is past it (cx≥74 with the ≤15 frontage). South side
+              // (side=+1 → +z): keep clear of the SE glass tower (handled by mmzAvoid).
+              if (side === -1 && p.cx < 74) {
+                s += sw
+                continue
+              }
+              if (mmzAvoid.some(([ax, az, ar]) => Math.hypot(cx - ax, cz - az) < ar)) {
+                s += sw
+                continue
+              }
+              let bh = 20 + rnd() * 16 + p.h // taller office towers, stepping up the slope
+              if (rnd() < 0.3) bh += 14 + rnd() * 16 // some genuine high-rises
+              const mat = mBodyMats[Math.floor(rnd() * mBodyMats.length)] ?? midMat
+              const rotY = Math.atan2(-p.tz, p.tx)
+              const body = new THREE.Mesh(new THREE.BoxGeometry(sw - 0.4, bh, bd), mat)
+              body.position.set(cx, bh / 2, cz)
+              body.rotation.y = rotY
+              mAdd(body)
+              const hw = Math.abs(p.tx) * (sw / 2) + Math.abs(p.tz) * (bd / 2)
+              const hd = Math.abs(p.tz) * (sw / 2) + Math.abs(p.tx) * (bd / 2)
+              addShibuyaAABB(cx, cz, hw, hd, bh)
+              // Occasional stepped-back crown (corporate tower silhouette).
+              if (rnd() < 0.45) {
+                const th = 5 + rnd() * 7
+                const top = new THREE.Mesh(
+                  new THREE.BoxGeometry((sw - 0.4) * 0.62, th, bd * 0.62),
+                  mat,
+                )
+                top.position.set(cx, bh + th / 2, cz)
+                top.rotation.y = rotY
+                mAdd(top)
+              }
+              // A restrained corporate sign on ~1/3 of the towers (above the wall, two-sided).
+              if (rnd() < 0.36 && bh > 16) {
+                const name = officeNames[mSignIdx % officeNames.length] ?? "MIYAMASU TOWER"
+                const accent = mAccents[mSignIdx % mAccents.length] ?? "#cfe0ff"
+                mSignIdx++
+                const sign = new THREE.Mesh(
+                  new THREE.PlaneGeometry(Math.min(sw * 0.78, 8), 1.4),
+                  new THREE.MeshBasicMaterial({
+                    map: officeSignTex(name, accent),
+                    toneMapped: false,
+                    side: THREE.DoubleSide,
+                    transparent: true,
+                  }),
+                )
+                sign.position.set(
+                  p.cx + p.px * side * frontLat,
+                  p.h + 9.6,
+                  p.cz + p.pz * side * frontLat,
+                )
+                // Sign normal must face the road (toward the centreline). The plane's default
+                // +z normal rotates to +(px,pz) = the +side direction; a body on side=+1 needs
+                // it flipped π to face back toward the centre, side=-1 already faces inward.
+                // (Same proven facing rule as 公園通り Phase D.)
+                sign.rotation.y = side === 1 ? rotY + Math.PI : rotY
+                add(sign)
+              }
+              s += sw + 0.6
+            }
+          }
+        }
+
         // ══ Phase C (scramble-detail): 大型ビジョン群 (駅前の顔) ════════════════════
         // The 駅前 video-wall look: several giant fictional-ad screens facing the
         // crossing + a round vision crowning the 渋谷MODE cylinder. Each screen is one
