@@ -19307,6 +19307,212 @@ export default function ThreeWorld({
         instAdd(lampPoleGeo, sigPoleMat, lampPoleXf)
         instAdd(lampHeadGeo, lampHeadMat, lampHeadXf)
 
+        // ══ Phase E: 路面ディテール (lane markings / arrows / manholes / studs / 反射) ══
+        // Pure flat decals layered on the existing road network — NO geometry the player
+        // can stand on or clip (every piece sits at a distinct sub-0.1 y so it never
+        // z-fights the road/seam/stripe layers below) and NO AABBs. The two 20-wide main
+        // streets (N-S along x=0, E-W along z=0) run to ±96; markings stay OUTSIDE the
+        // scramble box (|coord|>20) so the crossing itself reads clean. Everything is
+        // instanced/merged → ~8 extra draw calls for the whole pass.
+        {
+          // Reuse the thin unit bar (1×0.04×1) the zebra uses, with its own materials so
+          // the lane paint reads cooler/duller than the bright crosswalk white.
+          const laneBarGeo = stripeGeo
+          const laneWhiteMat = new THREE.MeshStandardMaterial({
+            color: 0xd8dde2,
+            emissive: 0x23262c,
+            emissiveIntensity: 0.45,
+            roughness: 0.9,
+          })
+          const laneYellowMat = new THREE.MeshStandardMaterial({
+            color: 0xe6c33a, // センターライン (no-passing) — warm against the cool deck
+            emissive: 0x3a2f0a,
+            emissiveIntensity: 0.5,
+            roughness: 0.9,
+          })
+          const whiteXf: Xf[] = []
+          const yellowXf: Xf[] = []
+          const studXf: Xf[] = []
+          const arrowXf: Xf[] = []
+          // Per main street (axis "z" = N-S road, "x" = E-W road): dashed yellow centre
+          // line + solid white edge lines + a stud (cat's-eye) every other dash.
+          const buildLanes = (axis: "z" | "x") => {
+            for (let t = 22; t <= 92; t += 4) {
+              for (const s of [1, -1]) {
+                const along = s * t
+                // yellow centre dash (skip ~1/3 for the dashed look)
+                if ((t / 4) % 3 !== 0) {
+                  yellowXf.push(
+                    axis === "z"
+                      ? { pos: [0, 0.055, along], scl: [0.4, 1, 2.4] }
+                      : { pos: [along, 0.055, 0], rotY: Math.PI / 2, scl: [0.4, 1, 2.4] },
+                  )
+                }
+                // reflective road stud straddling the centre line every 2nd slot
+                if ((t / 4) % 2 === 0) {
+                  studXf.push(
+                    axis === "z" ? { pos: [0, 0.075, along] } : { pos: [along, 0.075, 0] },
+                  )
+                }
+                // solid white edge lines just inside the curbs (road is ±10, curb at ±11)
+                for (const e of [9.3, -9.3]) {
+                  whiteXf.push(
+                    axis === "z"
+                      ? { pos: [e, 0.052, along], scl: [0.32, 1, 3.6] }
+                      : { pos: [along, 0.052, e], rotY: Math.PI / 2, scl: [0.32, 1, 3.6] },
+                  )
+                }
+              }
+            }
+          }
+          buildLanes("z")
+          buildLanes("x")
+          instAdd(laneBarGeo, laneYellowMat, yellowXf)
+          instAdd(laneBarGeo, laneWhiteMat, whiteXf)
+          // Reflective studs: tiny emissive amber discs that read as wet cat's-eyes.
+          const studGeo = new THREE.CircleGeometry(0.13, 8)
+          const studMat = new THREE.MeshStandardMaterial({
+            color: 0xffd27a,
+            emissive: 0xffbe55,
+            emissiveIntensity: 1.4,
+          })
+          instAdd(
+            studGeo,
+            studMat,
+            studXf.map((xf) => ({ ...xf, rotX: -Math.PI / 2 })),
+          )
+
+          // 進行方向矢印: a flat white arrow decal on each approach lane, aimed at the
+          // crossing. Built once as a ShapeGeometry laid flat (front +z → world -z after
+          // the X-rotation), so per-instance rotY just turns it toward centre.
+          const arShape = new THREE.Shape()
+          arShape.moveTo(-0.22, -1.1)
+          arShape.lineTo(0.22, -1.1)
+          arShape.lineTo(0.22, 0.15)
+          arShape.lineTo(0.62, 0.15)
+          arShape.lineTo(0, 1.1)
+          arShape.lineTo(-0.62, 0.15)
+          arShape.lineTo(-0.22, 0.15)
+          arShape.closePath()
+          const arrowGeo = new THREE.ShapeGeometry(arShape)
+          arrowGeo.rotateX(-Math.PI / 2) // shape +y → world -z (lies flat on the deck)
+          const arrowMat = new THREE.MeshStandardMaterial({
+            color: 0xe9edf0,
+            emissive: 0x26292f,
+            emissiveIntensity: 0.5,
+            roughness: 0.9,
+            side: THREE.DoubleSide,
+          })
+          // One arrow per approach lane (offset to the in-bound side), pointing inward.
+          // N-S road: lanes at x=±5; E-W road: lanes at z=±5. rotY aims the -z tip at 0.
+          for (const d of [34, 62]) {
+            arrowXf.push({ pos: [5, 0.058, d], rotY: 0 }) // from north, heading south (-z)
+            arrowXf.push({ pos: [-5, 0.058, -d], rotY: Math.PI }) // from south, heading +z
+            arrowXf.push({ pos: [d, 0.058, -5], rotY: -Math.PI / 2 }) // from east, heading -x
+            arrowXf.push({ pos: [-d, 0.058, 5], rotY: Math.PI / 2 }) // from west, heading +x
+          }
+          instAdd(arrowGeo, arrowMat, arrowXf)
+
+          // マンホール: instanced steel discs with a baked concentric/grid lid, scattered
+          // along the carriageways (kept off the painted lines). Slightly raised, dull
+          // metal so they catch a hint of neon without glowing.
+          const lidCanvas = document.createElement("canvas")
+          lidCanvas.width = 64
+          lidCanvas.height = 64
+          const lctx = lidCanvas.getContext("2d")
+          if (lctx) {
+            lctx.fillStyle = "#34363d"
+            lctx.fillRect(0, 0, 64, 64)
+            lctx.strokeStyle = "#1c1e24"
+            lctx.lineWidth = 2
+            for (const r of [30, 23, 16]) {
+              lctx.beginPath()
+              lctx.arc(32, 32, r, 0, Math.PI * 2)
+              lctx.stroke()
+            }
+            lctx.globalAlpha = 0.5
+            for (let g = 8; g < 64; g += 8) {
+              lctx.beginPath()
+              lctx.moveTo(g, 4)
+              lctx.lineTo(g, 60)
+              lctx.moveTo(4, g)
+              lctx.lineTo(60, g)
+              lctx.stroke()
+            }
+          }
+          const lidTex = new THREE.CanvasTexture(lidCanvas)
+          const manholeGeo = new THREE.CircleGeometry(0.7, 16)
+          const manholeMat = new THREE.MeshStandardMaterial({
+            map: lidTex,
+            color: 0x6a6d75,
+            roughness: 0.5,
+            metalness: 0.6,
+          })
+          const manholeXf: Xf[] = []
+          for (let i = 0; i < dn(10); i++) {
+            const onNS = rnd() < 0.5
+            const along = (rnd() < 0.5 ? 1 : -1) * (22 + rnd() * 68)
+            const lane = (rnd() < 0.5 ? 1 : -1) * (3 + rnd() * 4)
+            manholeXf.push({
+              pos: onNS ? [lane, 0.05, along] : [along, 0.05, lane],
+              rotX: -Math.PI / 2,
+              rotZ: rnd() * Math.PI,
+            })
+          }
+          instAdd(manholeGeo, manholeMat, manholeXf)
+
+          // 濡れたアスファルトの反射: the signature wet-Shibuya cue. Soft neon smears
+          // streaked along the streets (additive, depthWrite off → they wash over the
+          // deck like reflections of the signs above, not solid paint). One radial-falloff
+          // sprite stretched long-and-thin; grouped by neon hue so it stays a few draws.
+          const glowCanvas = document.createElement("canvas")
+          glowCanvas.width = 64
+          glowCanvas.height = 64
+          const gctx = glowCanvas.getContext("2d")
+          if (gctx) {
+            const grad = gctx.createRadialGradient(32, 32, 0, 32, 32, 32)
+            grad.addColorStop(0, "rgba(255,255,255,1)")
+            grad.addColorStop(0.5, "rgba(255,255,255,0.35)")
+            grad.addColorStop(1, "rgba(255,255,255,0)")
+            gctx.fillStyle = grad
+            gctx.fillRect(0, 0, 64, 64)
+          }
+          const glowTex = new THREE.CanvasTexture(glowCanvas)
+          const reflGeo = new THREE.PlaneGeometry(1, 1)
+          const neonHues = [0xff2d95, 0x29e0ff, 0xffb13b, 0x3dff9e, 0xb06bff]
+          const reflByHue: Xf[][] = neonHues.map(() => [])
+          for (let i = 0; i < dn(26); i++) {
+            const onNS = rnd() < 0.5
+            const along = (rnd() < 0.5 ? 1 : -1) * (16 + rnd() * 78)
+            const lane = -9 + rnd() * 18
+            const len = 4 + rnd() * 9 // streaks run ALONG the street (toward the viewer)
+            const wid = 0.8 + rnd() * 1.8
+            const hue = Math.floor(rnd() * neonHues.length)
+            reflByHue[hue]?.push({
+              pos: onNS ? [lane, 0.035, along] : [along, 0.035, lane],
+              rotX: -Math.PI / 2,
+              rotZ: onNS ? 0 : Math.PI / 2,
+              scl: [wid, len, 1],
+            })
+          }
+          neonHues.forEach((hue, i) => {
+            const xfs = reflByHue[i]
+            if (!xfs || xfs.length === 0) return
+            instAdd(
+              reflGeo,
+              new THREE.MeshBasicMaterial({
+                map: glowTex,
+                color: hue,
+                transparent: true,
+                opacity: 0.16,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false,
+              }),
+              xfs,
+            )
+          })
+        }
+
         // ══ Phase C: 駅前ランドマークビル群 (シルエットで渋谷を想起・全てオリジナル) ══
         // Window-grid emissive texture: lit windows glow, gaps + dark windows stay
         // black so only windows emit. Deterministic via the build PRNG.
