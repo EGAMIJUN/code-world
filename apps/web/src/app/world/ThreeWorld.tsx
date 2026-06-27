@@ -19930,6 +19930,15 @@ export default function ThreeWorld({
           ;(rnd() < 0.5 ? vendRedXf : vendBlueXf).push({ pos: [13.5, 0.95, d] })
           poleXf.push({ pos: [d, 3.5, -14.5] })
           poleXf.push({ pos: [d, 3.5, 14.5] })
+          // Collision parity (Phase C): these free-standing crossing props sat OUT in the
+          // open with no hitbox — you walked straight through 1.9m vending machines and
+          // 7m poles. Give them tight AABBs (matches how 道玄坂 vending/poles already
+          // collide). Vending = solid body; poles = thin full-height. Bullets stop on
+          // both via pointInsideWall, so they double as edge cover for the crossing.
+          addShibuyaAABB(-13.5, d, 0.55, 0.4, 1.9)
+          addShibuyaAABB(13.5, d, 0.55, 0.4, 1.9)
+          addShibuyaAABB(d, -14.5, 0.2, 0.2, 7)
+          addShibuyaAABB(d, 14.5, 0.2, 0.2, 7)
         }
         instAdd(
           vendGeo,
