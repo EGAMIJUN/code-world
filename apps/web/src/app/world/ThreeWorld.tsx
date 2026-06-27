@@ -778,6 +778,71 @@ const dogenzakaAt = (s: number): DgzPoint | null => {
     pz: tx,
   }
 }
+// ── 公園通り (Koen-dori): スクランブル北側から代々木公園方向へ緩やかに登る並木通り ──
+// 道玄坂 (南西・猥雑・濃いネオン) と対をなす「北の坂」。道幅は広め・勾配は緩やか・緑が多い。
+// 道玄坂とまったく同じ「回廊帯の内側だけ RISE、外では 0」方式 (koenDoriGroundY)。平坦な
+// 交差点/センター街/道玄坂、および渋谷以外の全ステージは一切影響を受けない。床メッシュ
+// (build) とプレイヤー Y (animate ループ) の両方を駆動する純データ + 純関数。道玄坂とは
+// 完全に独立した別の定数/関数 —— dogenzakaGroundY のロジックには一切触れない。
+const KDR_HW = 11 // 回廊半幅 (22 幅: 道玄坂 18 より広い「広めの車道 + 両側歩道」)
+const KDR_GRADE = 0.075 // 弧長あたりの上昇 (~4.3°、道玄坂 0.12 より明確に緩い登り)
+const KDR_PATH: readonly (readonly [number, number])[] = [
+  [0, -26], // 起点 — スクランブルプラザ北縁に開口 (h=0、北行きの既存 N-S 通りへ自然接続)
+  [-3, -45],
+  [-6, -62], // 中腹 — 宮下公園風ランドマーク (SHIBUYA PARK) を据える高さ (koendori 中心付近)
+  [-8, -78],
+  [-9, -90], // 上端の行き止まり (h≈4.9、r≈90 で北外周壁 z=-100 の内側に完全収容)
+]
+type KdrSeg = {
+  ax: number
+  az: number
+  dx: number
+  dz: number
+  len: number
+  len2: number
+  s0: number
+}
+// 道玄坂 DGZ_SEG と同じ前計算: セグメントごとに起点からの累積弧長 s0 を持たせる。
+const KDR_SEG: KdrSeg[] = (() => {
+  const segs: KdrSeg[] = []
+  let s0 = 0
+  for (let i = 0; i < KDR_PATH.length - 1; i++) {
+    const a = KDR_PATH[i]
+    const b = KDR_PATH[i + 1]
+    if (!a || !b) continue
+    const dx = b[0] - a[0]
+    const dz = b[1] - a[1]
+    const len = Math.hypot(dx, dz)
+    segs.push({ ax: a[0], az: a[1], dx, dz, len, len2: dx * dx + dz * dz, s0 })
+    s0 += len
+  }
+  return segs
+})()
+// 折れ線センターラインへの最近点投影 → { s: 起点からの弧長, lat: 直交距離 }。
+const koenDoriNearest = (lx: number, lz: number): { s: number; lat: number } => {
+  let bestD2 = Number.POSITIVE_INFINITY
+  let bestS = 0
+  for (const seg of KDR_SEG) {
+    let t = ((lx - seg.ax) * seg.dx + (lz - seg.az) * seg.dz) / seg.len2
+    if (t < 0) t = 0
+    else if (t > 1) t = 1
+    const cx = seg.ax + seg.dx * t
+    const cz = seg.az + seg.dz * t
+    const d2 = (lx - cx) * (lx - cx) + (lz - cz) * (lz - cz)
+    if (d2 < bestD2) {
+      bestD2 = d2
+      bestS = seg.s0 + seg.len * t
+    }
+  }
+  return { s: bestS, lat: Math.sqrt(bestD2) }
+}
+// 歩行可能ランプ高さ (arena-local)。回廊帯の内側は grade·弧長、外側は 0 (平坦)。起点で
+// s=0→h=0 なので平坦なスクランブルと段差なく繋がり、北へ歩くほど緩やかにせり上がる。
+const koenDoriGroundY = (lx: number, lz: number): number => {
+  const n = koenDoriNearest(lx, lz)
+  if (n.lat > KDR_HW) return 0
+  return KDR_GRADE * n.s
+}
 // Per-theme minion spec — reuse an existing enemy model with a colour/scale
 // tweak. base = model, tint = body recolour, eyes = eye-glow colour.
 type HuntCreatureKind =
@@ -26552,10 +26617,12 @@ export default function ThreeWorld({
           // "glue to the ramp" branch below (keeps descending from going airborne).
           let onDgzSlope = false
           if (isShibuyaStage(huntMissionConfigRef.current.stage)) {
-            const slopeY = dogenzakaGroundY(
-              refs.focalPoint.x - HUNT_ARENA.x,
-              refs.focalPoint.z - HUNT_ARENA.z,
-            )
+            const lx = refs.focalPoint.x - HUNT_ARENA.x
+            const lz = refs.focalPoint.z - HUNT_ARENA.z
+            // 道玄坂 (南西) と 公園通り (北) は重ならない別回廊。各々が帯の外では 0 を返すので
+            // max を取れば「いま乗っている坂」の高さだけ拾える。両坂の平坦域も従来通り 0 で、
+            // onDgzSlope の吸着分岐 (DGZ_SNAP_MAX) は両方の下り坂で共通に効く。
+            const slopeY = Math.max(dogenzakaGroundY(lx, lz), koenDoriGroundY(lx, lz))
             if (slopeY > 0) {
               onDgzSlope = true
               if (slopeY > groundY) groundY = slopeY
