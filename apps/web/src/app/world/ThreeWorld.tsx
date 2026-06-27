@@ -19042,8 +19042,8 @@ export default function ThreeWorld({
           floorGeo,
           new THREE.MeshLambertMaterial({
             map: asphaltTex,
-            color: 0x70727c,
-            emissive: 0x101420,
+            color: 0x83858f, // lifted from 0x70727c — wet deck catches more neon
+            emissive: 0x1a2234, // lifted from 0x101420 — street glows back, not a black hole
             emissiveIntensity: 1,
           }),
         )
@@ -19080,9 +19080,9 @@ export default function ThreeWorld({
         // Wet asphalt for the roads/lane/alleys (kept a touch lighter than the deck so
         // the street network still reads), reused for the センター街 lane + alleys.
         const roadMat = new THREE.MeshLambertMaterial({
-          color: 0x7c7e88,
+          color: 0x8c8e98, // lifted from 0x7c7e88 — the scramble road reads brighter
           map: makeNoiseTexture(128, 0x303139, 0.12, 18),
-          emissive: 0x141826,
+          emissive: 0x1c2236, // lifted from 0x141826 — radiating plaza
           emissiveIntensity: 1,
         })
         const plaza = new THREE.Mesh(new THREE.PlaneGeometry(44, 44), roadMat)
@@ -19418,7 +19418,7 @@ export default function ThreeWorld({
             metalness: 0.34,
             emissive: 0xffffff,
             emissiveMap: tex,
-            emissiveIntensity: 0.55,
+            emissiveIntensity: 0.78,
           })
           const body = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat)
           body.position.set(cx, baseY + h / 2, cz)
@@ -19443,15 +19443,34 @@ export default function ThreeWorld({
           roughness: 0.7,
           emissive: 0x8aa0c4,
           emissiveMap: rimWinTex,
-          emissiveIntensity: 0.36,
+          emissiveIntensity: 0.54,
         })
-        for (let i = 0; i < dn(16); i++) {
-          const ang = (i / 16) * Math.PI * 2 + rnd() * 0.3
-          const rr = 150 + rnd() * 30
+        for (let i = 0; i < dn(26); i++) {
+          const ang = (i / 26) * Math.PI * 2 + rnd() * 0.26
+          const rr = 150 + rnd() * 56 // r150..206 — deeper skyline band
           const bx = Math.cos(ang) * rr
           const bz = Math.sin(ang) * rr
-          const bw = 12 + rnd() * 12
-          const bh = 30 + rnd() * 46
+          const bw = 13 + rnd() * 16
+          const bh = 48 + rnd() * 64 // 48..112 — real high-rises fill the sky
+          const tw = new THREE.Mesh(new THREE.BoxGeometry(bw, bh, bw), rimMat)
+          tw.position.set(bx, shibuyaGroundY(bx, bz) + bh / 2, bz)
+          mAdd(tw)
+        }
+        // — Mid-distance silhouette ring filling the empty annulus between the ±100
+        // perimeter walls and the far rim, so looking down the open radiating roads no
+        // longer shows bare sky. Shares rimMat → still ONE draw call. Placed ONLY where
+        // max(|x|,|z|) > 104 (strictly OUTSIDE the square walls) so it can never become
+        // a phantom obstacle in the playable box; the centre-gai corridor pokes west to
+        // x≈-138, so that lane is carved out.
+        for (let i = 0; i < dn(30); i++) {
+          const ang = (i / 30) * Math.PI * 2 + rnd() * 0.18
+          const rr = 108 + rnd() * 40 // r108..148
+          const bx = Math.cos(ang) * rr
+          const bz = Math.sin(ang) * rr
+          if (Math.max(Math.abs(bx), Math.abs(bz)) < 104) continue // inside walls → skip
+          if (bx < -104 && Math.abs(bz + 22) < 14) continue // centre-gai west dead-end
+          const bw = 11 + rnd() * 14
+          const bh = 36 + rnd() * 56 // 36..92
           const tw = new THREE.Mesh(new THREE.BoxGeometry(bw, bh, bw), rimMat)
           tw.position.set(bx, shibuyaGroundY(bx, bz) + bh / 2, bz)
           mAdd(tw)
@@ -19469,7 +19488,7 @@ export default function ThreeWorld({
           roughness: 0.6,
           emissive: 0xffffff,
           emissiveMap: bvWinTex,
-          emissiveIntensity: 0.55,
+          emissiveIntensity: 0.74,
         })
         const bvBody = new THREE.Mesh(new THREE.BoxGeometry(bvW, bvH, bvD), bvMat)
         bvBody.position.set(bvX, bvH / 2, bvZ)
@@ -19522,7 +19541,7 @@ export default function ThreeWorld({
           metalness: 0.2,
           emissive: 0xffffff,
           emissiveMap: cylWinTex,
-          emissiveIntensity: 0.6,
+          emissiveIntensity: 0.8,
         })
         const cyl = new THREE.Mesh(new THREE.CylinderGeometry(9.5, 11.5, 42, 18), cylMat)
         cyl.position.set(cylX, 21, cylZ)
@@ -19567,7 +19586,7 @@ export default function ThreeWorld({
           roughness: 0.6,
           emissive: 0xffffff,
           emissiveMap: midWinTex,
-          emissiveIntensity: 0.5,
+          emissiveIntensity: 0.7,
         })
         // Neon-sign instanced sets (one InstancedMesh per colour).
         const neonGeo = new THREE.BoxGeometry(1, 1, 0.3)
@@ -19886,7 +19905,7 @@ export default function ThreeWorld({
           )
             continue
           const bw = 9 + rnd() * 9
-          const bh = 12 + rnd() * 22
+          const bh = 18 + rnd() * 32 // 18..50 — denser, taller zatkyo ring
           makeMidRise(bx, bz, bw, bw, bh, Math.atan2(-bz, -bx)) // face the centre
         }
         neonCols.forEach((c, i) => {
@@ -19911,6 +19930,15 @@ export default function ThreeWorld({
           ;(rnd() < 0.5 ? vendRedXf : vendBlueXf).push({ pos: [13.5, 0.95, d] })
           poleXf.push({ pos: [d, 3.5, -14.5] })
           poleXf.push({ pos: [d, 3.5, 14.5] })
+          // Collision parity (Phase C): these free-standing crossing props sat OUT in the
+          // open with no hitbox — you walked straight through 1.9m vending machines and
+          // 7m poles. Give them tight AABBs (matches how 道玄坂 vending/poles already
+          // collide). Vending = solid body; poles = thin full-height. Bullets stop on
+          // both via pointInsideWall, so they double as edge cover for the crossing.
+          addShibuyaAABB(-13.5, d, 0.55, 0.4, 1.9)
+          addShibuyaAABB(13.5, d, 0.55, 0.4, 1.9)
+          addShibuyaAABB(d, -14.5, 0.2, 0.2, 7)
+          addShibuyaAABB(d, 14.5, 0.2, 0.2, 7)
         }
         instAdd(
           vendGeo,
@@ -19946,6 +19974,50 @@ export default function ThreeWorld({
           railXf.push({ pos: [d, 0.5, 10.6] })
         }
         instAdd(railGeo, railMat, railXf)
+
+        // ── Phase D combat cover: waist-high concrete planters scattered across the
+        // OPEN crossing. The scramble stays a wide shooting plaza (good sightlines for
+        // ranged duels), but the centre killzone gets duck-behind cover — the edges
+        // already have the vending/pole ring. Low h≈1.05 → shoot/look over the top,
+        // break line-of-sight when crouched/pushing. Each is a real mesh + a matching
+        // low AABB (paired footprint, no phantom). Bodies share planterMat/hedgeMat →
+        // 2 merge buckets total (~2 draw calls for all 8).
+        const planterMat = new THREE.MeshStandardMaterial({
+          color: 0x40434b,
+          roughness: 0.92,
+          metalness: 0.05,
+        })
+        const hedgeMat = new THREE.MeshStandardMaterial({
+          color: 0x223f28,
+          emissive: 0x0c1a10,
+          emissiveIntensity: 0.5,
+          roughness: 1,
+        })
+        const planterGeo = new THREE.BoxGeometry(2.3, 0.95, 1.05)
+        const hedgeGeo = new THREE.BoxGeometry(2.1, 0.4, 0.86)
+        for (const [cx, cz, rotY] of [
+          [9, 7, 0],
+          [-9, 7, 0],
+          [9, -7, 0],
+          [-9, -7, 0],
+          [0, 12, Math.PI / 2],
+          [0, -12, Math.PI / 2],
+          [13, 1, Math.PI / 2],
+          [-13, -1, Math.PI / 2],
+        ] as const) {
+          const pl = new THREE.Mesh(planterGeo, planterMat)
+          pl.position.set(cx, 0.475, cz)
+          pl.rotation.y = rotY
+          mAdd(pl)
+          const hg = new THREE.Mesh(hedgeGeo, hedgeMat)
+          hg.position.set(cx, 1.0, cz)
+          hg.rotation.y = rotY
+          mAdd(hg)
+          // Footprint AABB (rotated → swap half-extents). Top 1.05 = waist cover.
+          const hw = rotY === 0 ? 1.2 : 0.58
+          const hd = rotY === 0 ? 0.58 : 1.2
+          addShibuyaAABB(cx, cz, hw, hd, 1.05)
+        }
 
         // ══ Phase E: 渋谷の神社 (封印の舞台・ストーリーの核) ══════════════════════
         // A small original shrine grove ringed by the zatkyo buildings (NE). Torii →
@@ -20409,7 +20481,7 @@ export default function ThreeWorld({
           metalness: 0.35,
           emissive: 0xffffff,
           emissiveMap: facGlassWin,
-          emissiveIntensity: 0.6,
+          emissiveIntensity: 0.8,
         })
         const matForShape = (shape: FacadeShape): THREE.Material =>
           shape === "glass" ? facGlassMat : shape === "box" ? concreteMat : midMat
@@ -20517,7 +20589,7 @@ export default function ThreeWorld({
               cz,
               10 + rnd() * 9,
               9 + rnd() * 7,
-              16 + rnd() * 30,
+              26 + rnd() * 40, // 26..66 — corner clusters become real high-rises
               Math.atan2(-cz, -cx),
               shape,
             )
@@ -20545,7 +20617,7 @@ export default function ThreeWorld({
                 cz,
                 9 + rnd() * 7,
                 8 + rnd() * 5,
-                13 + rnd() * 22,
+                20 + rnd() * 32, // 20..52 — frontage canyon walls rise to fill the sky
                 Math.atan2(-pz * side, -px * side),
                 shape,
               )
@@ -20591,7 +20663,7 @@ export default function ThreeWorld({
           while (x > CG_X1 + 3 && guard++ < 64) {
             const sw = 7 + rnd() * 8 // shop width 7..15
             const cx = x - sw / 2
-            const bh = 9 + rnd() * 19 // 9..28 → varied skyline silhouette
+            const bh = 14 + rnd() * 26 // 14..40 → taller センター街 walls close the sky
             const bd = 6 + rnd() * 6
             const mat = cgBodyMats[Math.floor(rnd() * cgBodyMats.length)] ?? midMat
             const body = new THREE.Mesh(new THREE.BoxGeometry(sw - 0.4, bh, bd), mat)
@@ -21262,7 +21334,7 @@ export default function ThreeWorld({
                 continue
               }
               const baseY = p.h // feet on the ramp → the skyline steps up the hill
-              const bh = 13 + rnd() * 18 // 13..31 varied
+              const bh = 17 + rnd() * 24 // 17..41 varied — 道玄坂 walls rise with the hill
               const bd = 7 + rnd() * 5
               const mat = dgzBodyMats[Math.floor(rnd() * dgzBodyMats.length)] ?? midMat
               const rotY = Math.atan2(-p.tz, p.tx)
@@ -22529,22 +22601,39 @@ export default function ThreeWorld({
         for (const light of [worldAmbient, hemi, sun, fillLight]) {
           huntStageLightSaved.push({ light, intensity: light.intensity })
         }
-        worldAmbient.intensity = 0.46 // was 0.16 — lift the deep shadows off the deck
-        hemi.intensity = 0.55 // was 0.22
-        sun.intensity = 0.32 // was 0.12 — a soft cool key, still night
-        fillLight.intensity = 0.3 // was 0.1 — bounce so the far walls aren't black
-        // Strong cool night hemisphere: bluish sky term, near-black ground term, so
-        // the city is legible top-to-bottom without washing out the neon.
-        const nightHemi = new THREE.HemisphereLight(0x33426e, 0x0a0c14, 1.15)
+        // Real-Shibuya-night brightness pass: the city should read as a bright neon
+        // basin, not a black pit with floating signs. Lift the whole rig ~35–50%
+        // while keeping the cool night cast (no daylight). All Shibuya-scoped — these
+        // are restored from huntStageLightSaved on exit, so OSAKA is untouched.
+        worldAmbient.intensity = 0.66 // was 0.46 — lift the deep shadows off the deck
+        hemi.intensity = 0.78 // was 0.55
+        sun.intensity = 0.42 // was 0.32 — a soft cool key, still night
+        fillLight.intensity = 0.44 // was 0.3 — bounce so the far walls aren't black
+        // Strong cool night hemisphere: bluish sky term + a lifted (no longer near-
+        // black) ground term so the wet deck glows back instead of swallowing light.
+        const nightHemi = new THREE.HemisphereLight(0x42548a, 0x161b28, 1.55)
         add(nightHemi)
-        const neonGlowMag = new THREE.PointLight(0xff2d8e, 1.1, 92, 2)
+        // Neon spill: brighter + longer reach so the magenta/cyan wash actually lands
+        // on the ground and the neighbouring facades (real Shibuya colour bounce).
+        const neonGlowMag = new THREE.PointLight(0xff2d8e, 1.7, 120, 2)
         neonGlowMag.position.set(-16, 10, 8)
         neonGlowMag.castShadow = false
         add(neonGlowMag)
-        const neonGlowCyan = new THREE.PointLight(0x28e0ff, 1.1, 92, 2)
+        const neonGlowCyan = new THREE.PointLight(0x28e0ff, 1.7, 120, 2)
         neonGlowCyan.position.set(18, 10, -8)
         neonGlowCyan.castShadow = false
         add(neonGlowCyan)
+        // A warm sodium spill from the SW (109/center-gai throat) + a cool key from the
+        // station side, so the basin isn't a single flat tint and players can read
+        // depth/cover while moving. Cheap (2 point lights, no shadow).
+        const neonGlowWarm = new THREE.PointLight(0xffb15a, 1.3, 110, 2)
+        neonGlowWarm.position.set(-30, 12, 26)
+        neonGlowWarm.castShadow = false
+        add(neonGlowWarm)
+        const stationKey = new THREE.PointLight(0xbfe0ff, 1.2, 130, 2)
+        stationKey.position.set(20, 16, -34)
+        stationKey.castShadow = false
+        add(stationKey)
         // ══ センター街/駅前 real-street Phase H: 空気感 (フォグ/ブルーム/陰影/映り込み) ══
         // Fake "bloom": soft additive halos behind the brightest emitters so the neon
         // bleeds into the haze (no postprocessing). One radial-glow texture instanced per
@@ -22625,11 +22714,13 @@ export default function ThreeWorld({
         // whole city). Reuses the shared save slot.
         huntStageFogSaved = scene.fog
         huntStageFogWasSaved = true
-        scene.fog = new THREE.Fog(0x121a2c, isMobileDevice ? 72 : 108, isMobileDevice ? 250 : 350)
+        // Warmer, lighter neon-lit haze pushed further out so the navy wash no longer
+        // eats the mid-distance — the skyline reads as a glowing basin, not a void.
+        scene.fog = new THREE.Fog(0x1d2740, isMobileDevice ? 96 : 150, isMobileDevice ? 300 : 440)
         // Night sky behind the skyline (saved here, restored in clearShibuyaMap).
         shibuyaBgSaved = scene.background
         shibuyaBgWasSaved = true
-        scene.background = new THREE.Color(0x10172a) // lifted from 0x080b14 (deep void)
+        scene.background = new THREE.Color(0x1b2540) // lifted neon night (was 0x10172a navy void)
 
         flushMerges() // collapse all static buckets → one mesh per material
         scene.add(group)
