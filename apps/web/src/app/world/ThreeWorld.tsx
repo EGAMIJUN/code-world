@@ -875,6 +875,84 @@ const koenDoriAt = (s: number): KdrPoint | null => {
     pz: tx,
   }
 }
+// ── 文化村通り (Bunkamura-dori): スクランブル西へ抜ける平坦な文化施設の通り ──────────
+// 道玄坂(南西・猥雑)/公園通り(北・おしゃれ)/宮益坂(東・ビジネス) と異なり、これは坂ではなく
+// **平坦**な西の通り。劇場・ホール・落ち着いた古い商店の文化街。床は谷底のまま (y=0) なので
+// groundY も animate override も不要 —— センター街と同じ「平坦な壁付き回廊」方式。西外周壁の
+// 南セグメントに開けたギャップ (z∈[-12,+12]) から西へ抜け、x≈-132 で行き止まる。センター街
+// (z≈-22) の南、渋谷MODE シリンダー (-42,30,z≥18.5) の手前を縫う。回廊判定 inBunkamuraZone は
+// scramble の汎用ファサードを締め出すのに使う (他坂と同じ #126 ガード)。
+const BKM_HW = 10 // 回廊半幅 (20 幅: 落ち着いた文化通り)
+const BKM_PATH: readonly (readonly [number, number])[] = [
+  [-100, 0], // 東の口 — 西外周壁ギャップ (E-W メインストリート西端の延長、h=0 平坦)
+  [-112, 1],
+  [-124, 3], // 渋谷MODE (z≥18.5) の手前・センター街 (z≈-22) の南を縫う
+  [-132, 4], // 西の行き止まり (文化村プラザ、r≈132 で平坦コア内)
+]
+type BkmSeg = {
+  ax: number
+  az: number
+  dx: number
+  dz: number
+  len: number
+  len2: number
+  s0: number
+}
+const BKM_SEG: BkmSeg[] = (() => {
+  const segs: BkmSeg[] = []
+  let s0 = 0
+  for (let i = 0; i < BKM_PATH.length - 1; i++) {
+    const a = BKM_PATH[i]
+    const b = BKM_PATH[i + 1]
+    if (!a || !b) continue
+    const dx = b[0] - a[0]
+    const dz = b[1] - a[1]
+    const len = Math.hypot(dx, dz)
+    segs.push({ ax: a[0], az: a[1], dx, dz, len, len2: dx * dx + dz * dz, s0 })
+    s0 += len
+  }
+  return segs
+})()
+const BKM_TOP_S = BKM_SEG.reduce((acc, s) => acc + s.len, 0)
+const bunkamuraNearest = (lx: number, lz: number): { s: number; lat: number } => {
+  let bestD2 = Number.POSITIVE_INFINITY
+  let bestS = 0
+  for (const seg of BKM_SEG) {
+    let t = ((lx - seg.ax) * seg.dx + (lz - seg.az) * seg.dz) / seg.len2
+    if (t < 0) t = 0
+    else if (t > 1) t = 1
+    const cx = seg.ax + seg.dx * t
+    const cz = seg.az + seg.dz * t
+    const d2 = (lx - cx) * (lx - cx) + (lz - cz) * (lz - cz)
+    if (d2 < bestD2) {
+      bestD2 = d2
+      bestS = seg.s0 + seg.len * t
+    }
+  }
+  return { s: bestS, lat: Math.sqrt(bestD2) }
+}
+// 回廊ゾーン (汎用ファサードを通りから締め出す判定用、少し広めにとる)。平坦なので高さ判定なし。
+const inBunkamuraZone = (lx: number, lz: number): boolean =>
+  bunkamuraNearest(lx, lz).lat < BKM_HW + 4
+// 弧長 s でのセンターライン上の点 + 接線 (tx,tz) + 左直交 (px,pz)。平坦なので h は常に 0。
+type BkmPoint = {
+  cx: number
+  cz: number
+  h: number
+  tx: number
+  tz: number
+  px: number
+  pz: number
+}
+const bunkamuraAt = (s: number): BkmPoint | null => {
+  let seg = BKM_SEG[0]
+  for (const sg of BKM_SEG) if (s >= sg.s0) seg = sg
+  if (!seg || seg.len <= 0) return null
+  const t = Math.max(0, Math.min(1, (s - seg.s0) / seg.len))
+  const tx = seg.dx / seg.len
+  const tz = seg.dz / seg.len
+  return { cx: seg.ax + seg.dx * t, cz: seg.az + seg.dz * t, h: 0, tx, tz, px: -tz, pz: tx }
+}
 // Per-theme minion spec — reuse an existing enemy model with a colour/scale
 // tweak. base = model, tint = body recolour, eyes = eye-glow colour.
 type HuntCreatureKind =
@@ -19162,7 +19240,13 @@ export default function ThreeWorld({
           [0, -H, 2 * H, 2],
           [H, 0, 2, 2 * H],
           [-H, -63.5, 2, 73], // west wall — segment NORTH of the centre-gai mouth
-          [-H, 41.5, 2, 117], // west wall — segment SOUTH of the centre-gai mouth
+          [-H, -14.5, 2, 5], // west wall — sliver between センター街 mouth (z=-17) and 文化村通り gap
+          [-H, 56, 2, 88], // west wall — segment SOUTH of the 文化村通り mouth (z>+12)
+          // ↑ the old single south segment [-H,41.5,2,117] (z[-17,+100]) is split to open a
+          //   24-wide gap at z∈[-12,+12] — the 文化村通り (Bunkamura-dori) mouth. The flat
+          //   cultural street punches west through here onto the still-flat core (r≤144 holds
+          //   to x≈-138). Its own side walls seal the sides. Threads south of センター街
+          //   (z≈-22) and east of 渋谷MODE (z≥18.5).
         ] as const) {
           const wall = new THREE.Mesh(new THREE.BoxGeometry(w, 10, d), wallMat)
           wall.position.set(x, 5, z)
@@ -19777,6 +19861,7 @@ export default function ThreeWorld({
           const bz = Math.sin(ang) * rr
           if (Math.max(Math.abs(bx), Math.abs(bz)) < 104) continue // inside walls → skip
           if (bx < -104 && Math.abs(bz + 22) < 14) continue // centre-gai west dead-end
+          if (bx < -96 && bz > -14 && bz < 18) continue // 文化村通り (Bunkamura) west corridor
           const bw = 11 + rnd() * 14
           const bh = 36 + rnd() * 56 // 36..92
           const tw = new THREE.Mesh(new THREE.BoxGeometry(bw, bh, bw), rimMat)
@@ -20881,11 +20966,14 @@ export default function ThreeWorld({
           [40, -28, 20],
         ]
         // inCentergaiZone keeps generic facades out of the walkable センター街 lane.
+        // inBunkamuraZone added so the west-axis facade row never drops a building into the
+        // 文化村通り corridor (centreline z≈0) — the #126-class trap (cf. 宮益坂/eki-higashi).
         const sbBlocked = (x: number, z: number) =>
           sbAvoid.some(([ax, az, ar]) => Math.hypot(x - ax, z - az) < ar) ||
           inCentergaiZone(x, z) ||
           inDogenzakaZone(x, z) ||
-          inKoenDoriZone(x, z)
+          inKoenDoriZone(x, z) ||
+          inBunkamuraZone(x, z)
         // (1) Four corner clusters in the diagonal sectors (the road arms stay open).
         for (let k = 0; k < 4; k++) {
           const baseA = Math.PI / 4 + k * (Math.PI / 2)
@@ -23037,6 +23125,89 @@ export default function ThreeWorld({
             }
           }
           instAdd(figGeo, figMat, figXf)
+        }
+
+        // ══ 文化村通り (Bunkamura-dori) Phase A: 平坦な壁付き回廊 (西へ) ════════════════
+        // A FLAT cultural street west of the scramble — no ramp (groundY/animate untouched).
+        // The bowl floor is already flat (y=0) out to r≤144 (dead-end r≈132), so it's just a
+        // paving ribbon following bunkamuraAt + two side walls (the SINGLE collision, like
+        // センター街) that seal the corridor and tuck into the west-wall gap. Warmer, older
+        // palette than the cool 駅東/宮益坂 — a calm theatre street.
+        {
+          // ── (1) Flat paving ribbon (h=0) along bunkamuraAt. Own warm-grey material → 1 draw. ──
+          const BRIB_N = 40
+          const bribPos: number[] = []
+          const bribUv: number[] = []
+          const bribIdx: number[] = []
+          for (let i = 0; i <= BRIB_N; i++) {
+            const s = (i / BRIB_N) * BKM_TOP_S
+            const p = bunkamuraAt(s)
+            if (!p) continue
+            bribPos.push(p.cx + p.px * BKM_HW, 0.02, p.cz + p.pz * BKM_HW)
+            bribPos.push(p.cx - p.px * BKM_HW, 0.02, p.cz - p.pz * BKM_HW)
+            bribUv.push(0, s / 6, 1, s / 6)
+          }
+          for (let i = 0; i < BRIB_N; i++) {
+            const a = i * 2
+            bribIdx.push(a, a + 2, a + 1, a + 1, a + 2, a + 3)
+          }
+          const bribGeo = new THREE.BufferGeometry()
+          bribGeo.setAttribute("position", new THREE.Float32BufferAttribute(bribPos, 3))
+          bribGeo.setAttribute("uv", new THREE.Float32BufferAttribute(bribUv, 2))
+          bribGeo.setIndex(bribIdx)
+          bribGeo.computeVertexNormals()
+          const bkmRoadMat = new THREE.MeshLambertMaterial({
+            color: 0x7b7670, // warm older-street grey (vs the cool business streets)
+            map: makeNoiseTexture(128, 0x34302c, 0.12, 10),
+            emissive: 0x201a14, // faint warm sheen
+            emissiveIntensity: 1,
+          })
+          add(new THREE.Mesh(bribGeo, bkmRoadMat))
+          // ── (2) Side walls: the corridor's ONLY collision. Flat (h=0), exact AABBs. They
+          // tuck into the west-wall gap (z∈[-12,+12]) and seal the sides. ──
+          const BKM_WALL_T = 1.5
+          const BKM_WALL_H = 8
+          const bkmSegN = Math.max(1, Math.round(BKM_TOP_S / 5))
+          for (let i = 0; i < bkmSegN; i++) {
+            const sm = ((i + 0.5) / bkmSegN) * BKM_TOP_S
+            const a0 = bunkamuraAt((i / bkmSegN) * BKM_TOP_S)
+            const a1 = bunkamuraAt(((i + 1) / bkmSegN) * BKM_TOP_S)
+            const am = bunkamuraAt(sm)
+            if (!a0 || !a1 || !am) continue
+            const segLen = Math.hypot(a1.cx - a0.cx, a1.cz - a0.cz) + 1.2 // joint overlap
+            const halfAbs = Math.abs(am.tx) * (segLen / 2) + Math.abs(am.tz) * (BKM_WALL_T / 2)
+            const depAbs = Math.abs(am.tz) * (segLen / 2) + Math.abs(am.tx) * (BKM_WALL_T / 2)
+            const rotY = Math.atan2(-am.tz, am.tx)
+            for (const side of [1, -1] as const) {
+              const cx = am.cx + am.px * side * (BKM_HW + BKM_WALL_T / 2)
+              const cz = am.cz + am.pz * side * (BKM_HW + BKM_WALL_T / 2)
+              const box = new THREE.Mesh(
+                new THREE.BoxGeometry(segLen, BKM_WALL_H, BKM_WALL_T),
+                concreteMat,
+              )
+              box.position.set(cx, BKM_WALL_H / 2, cz)
+              box.rotation.y = rotY
+              mAdd(box)
+              addShibuyaAABB(cx, cz, halfAbs, depAbs, BKM_WALL_H)
+            }
+          }
+          // ── (3) Dead-end cap at the west end (Phase D dresses it as the 文化村 frontage). ──
+          const bcap = bunkamuraAt(BKM_TOP_S)
+          if (bcap) {
+            const bcapW = BKM_HW * 2 + BKM_WALL_T * 2
+            const bcapCx = bcap.cx + bcap.tx * (BKM_WALL_T / 2 + 0.5)
+            const bcapCz = bcap.cz + bcap.tz * (BKM_WALL_T / 2 + 0.5)
+            const bcapMesh = new THREE.Mesh(
+              new THREE.BoxGeometry(BKM_WALL_T, BKM_WALL_H, bcapW),
+              concreteMat,
+            )
+            bcapMesh.position.set(bcapCx, BKM_WALL_H / 2, bcapCz)
+            bcapMesh.rotation.y = Math.atan2(-bcap.tz, bcap.tx)
+            mAdd(bcapMesh)
+            const bcapHalf = Math.abs(bcap.tx) * (BKM_WALL_T / 2) + Math.abs(bcap.tz) * (bcapW / 2)
+            const bcapDep = Math.abs(bcap.tz) * (BKM_WALL_T / 2) + Math.abs(bcap.tx) * (bcapW / 2)
+            addShibuyaAABB(bcapCx, bcapCz, bcapHalf, bcapDep, BKM_WALL_H)
+          }
         }
 
         // ══ Phase C (scramble-detail): 大型ビジョン群 (駅前の顔) ════════════════════
