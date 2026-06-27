@@ -19042,8 +19042,8 @@ export default function ThreeWorld({
           floorGeo,
           new THREE.MeshLambertMaterial({
             map: asphaltTex,
-            color: 0x70727c,
-            emissive: 0x101420,
+            color: 0x83858f, // lifted from 0x70727c — wet deck catches more neon
+            emissive: 0x1a2234, // lifted from 0x101420 — street glows back, not a black hole
             emissiveIntensity: 1,
           }),
         )
@@ -19080,9 +19080,9 @@ export default function ThreeWorld({
         // Wet asphalt for the roads/lane/alleys (kept a touch lighter than the deck so
         // the street network still reads), reused for the センター街 lane + alleys.
         const roadMat = new THREE.MeshLambertMaterial({
-          color: 0x7c7e88,
+          color: 0x8c8e98, // lifted from 0x7c7e88 — the scramble road reads brighter
           map: makeNoiseTexture(128, 0x303139, 0.12, 18),
-          emissive: 0x141826,
+          emissive: 0x1c2236, // lifted from 0x141826 — radiating plaza
           emissiveIntensity: 1,
         })
         const plaza = new THREE.Mesh(new THREE.PlaneGeometry(44, 44), roadMat)
@@ -19418,7 +19418,7 @@ export default function ThreeWorld({
             metalness: 0.34,
             emissive: 0xffffff,
             emissiveMap: tex,
-            emissiveIntensity: 0.55,
+            emissiveIntensity: 0.78,
           })
           const body = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat)
           body.position.set(cx, baseY + h / 2, cz)
@@ -19443,7 +19443,7 @@ export default function ThreeWorld({
           roughness: 0.7,
           emissive: 0x8aa0c4,
           emissiveMap: rimWinTex,
-          emissiveIntensity: 0.36,
+          emissiveIntensity: 0.54,
         })
         for (let i = 0; i < dn(16); i++) {
           const ang = (i / 16) * Math.PI * 2 + rnd() * 0.3
@@ -19469,7 +19469,7 @@ export default function ThreeWorld({
           roughness: 0.6,
           emissive: 0xffffff,
           emissiveMap: bvWinTex,
-          emissiveIntensity: 0.55,
+          emissiveIntensity: 0.74,
         })
         const bvBody = new THREE.Mesh(new THREE.BoxGeometry(bvW, bvH, bvD), bvMat)
         bvBody.position.set(bvX, bvH / 2, bvZ)
@@ -19522,7 +19522,7 @@ export default function ThreeWorld({
           metalness: 0.2,
           emissive: 0xffffff,
           emissiveMap: cylWinTex,
-          emissiveIntensity: 0.6,
+          emissiveIntensity: 0.8,
         })
         const cyl = new THREE.Mesh(new THREE.CylinderGeometry(9.5, 11.5, 42, 18), cylMat)
         cyl.position.set(cylX, 21, cylZ)
@@ -19567,7 +19567,7 @@ export default function ThreeWorld({
           roughness: 0.6,
           emissive: 0xffffff,
           emissiveMap: midWinTex,
-          emissiveIntensity: 0.5,
+          emissiveIntensity: 0.7,
         })
         // Neon-sign instanced sets (one InstancedMesh per colour).
         const neonGeo = new THREE.BoxGeometry(1, 1, 0.3)
@@ -20409,7 +20409,7 @@ export default function ThreeWorld({
           metalness: 0.35,
           emissive: 0xffffff,
           emissiveMap: facGlassWin,
-          emissiveIntensity: 0.6,
+          emissiveIntensity: 0.8,
         })
         const matForShape = (shape: FacadeShape): THREE.Material =>
           shape === "glass" ? facGlassMat : shape === "box" ? concreteMat : midMat
@@ -22529,22 +22529,39 @@ export default function ThreeWorld({
         for (const light of [worldAmbient, hemi, sun, fillLight]) {
           huntStageLightSaved.push({ light, intensity: light.intensity })
         }
-        worldAmbient.intensity = 0.46 // was 0.16 — lift the deep shadows off the deck
-        hemi.intensity = 0.55 // was 0.22
-        sun.intensity = 0.32 // was 0.12 — a soft cool key, still night
-        fillLight.intensity = 0.3 // was 0.1 — bounce so the far walls aren't black
-        // Strong cool night hemisphere: bluish sky term, near-black ground term, so
-        // the city is legible top-to-bottom without washing out the neon.
-        const nightHemi = new THREE.HemisphereLight(0x33426e, 0x0a0c14, 1.15)
+        // Real-Shibuya-night brightness pass: the city should read as a bright neon
+        // basin, not a black pit with floating signs. Lift the whole rig ~35–50%
+        // while keeping the cool night cast (no daylight). All Shibuya-scoped — these
+        // are restored from huntStageLightSaved on exit, so OSAKA is untouched.
+        worldAmbient.intensity = 0.66 // was 0.46 — lift the deep shadows off the deck
+        hemi.intensity = 0.78 // was 0.55
+        sun.intensity = 0.42 // was 0.32 — a soft cool key, still night
+        fillLight.intensity = 0.44 // was 0.3 — bounce so the far walls aren't black
+        // Strong cool night hemisphere: bluish sky term + a lifted (no longer near-
+        // black) ground term so the wet deck glows back instead of swallowing light.
+        const nightHemi = new THREE.HemisphereLight(0x42548a, 0x161b28, 1.55)
         add(nightHemi)
-        const neonGlowMag = new THREE.PointLight(0xff2d8e, 1.1, 92, 2)
+        // Neon spill: brighter + longer reach so the magenta/cyan wash actually lands
+        // on the ground and the neighbouring facades (real Shibuya colour bounce).
+        const neonGlowMag = new THREE.PointLight(0xff2d8e, 1.7, 120, 2)
         neonGlowMag.position.set(-16, 10, 8)
         neonGlowMag.castShadow = false
         add(neonGlowMag)
-        const neonGlowCyan = new THREE.PointLight(0x28e0ff, 1.1, 92, 2)
+        const neonGlowCyan = new THREE.PointLight(0x28e0ff, 1.7, 120, 2)
         neonGlowCyan.position.set(18, 10, -8)
         neonGlowCyan.castShadow = false
         add(neonGlowCyan)
+        // A warm sodium spill from the SW (109/center-gai throat) + a cool key from the
+        // station side, so the basin isn't a single flat tint and players can read
+        // depth/cover while moving. Cheap (2 point lights, no shadow).
+        const neonGlowWarm = new THREE.PointLight(0xffb15a, 1.3, 110, 2)
+        neonGlowWarm.position.set(-30, 12, 26)
+        neonGlowWarm.castShadow = false
+        add(neonGlowWarm)
+        const stationKey = new THREE.PointLight(0xbfe0ff, 1.2, 130, 2)
+        stationKey.position.set(20, 16, -34)
+        stationKey.castShadow = false
+        add(stationKey)
         // ══ センター街/駅前 real-street Phase H: 空気感 (フォグ/ブルーム/陰影/映り込み) ══
         // Fake "bloom": soft additive halos behind the brightest emitters so the neon
         // bleeds into the haze (no postprocessing). One radial-glow texture instanced per
@@ -22625,11 +22642,13 @@ export default function ThreeWorld({
         // whole city). Reuses the shared save slot.
         huntStageFogSaved = scene.fog
         huntStageFogWasSaved = true
-        scene.fog = new THREE.Fog(0x121a2c, isMobileDevice ? 72 : 108, isMobileDevice ? 250 : 350)
+        // Warmer, lighter neon-lit haze pushed further out so the navy wash no longer
+        // eats the mid-distance — the skyline reads as a glowing basin, not a void.
+        scene.fog = new THREE.Fog(0x1d2740, isMobileDevice ? 96 : 150, isMobileDevice ? 300 : 440)
         // Night sky behind the skyline (saved here, restored in clearShibuyaMap).
         shibuyaBgSaved = scene.background
         shibuyaBgWasSaved = true
-        scene.background = new THREE.Color(0x10172a) // lifted from 0x080b14 (deep void)
+        scene.background = new THREE.Color(0x1b2540) // lifted neon night (was 0x10172a navy void)
 
         flushMerges() // collapse all static buckets → one mesh per material
         scene.add(group)
