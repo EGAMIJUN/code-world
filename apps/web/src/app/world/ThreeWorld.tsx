@@ -19975,6 +19975,50 @@ export default function ThreeWorld({
         }
         instAdd(railGeo, railMat, railXf)
 
+        // ── Phase D combat cover: waist-high concrete planters scattered across the
+        // OPEN crossing. The scramble stays a wide shooting plaza (good sightlines for
+        // ranged duels), but the centre killzone gets duck-behind cover — the edges
+        // already have the vending/pole ring. Low h≈1.05 → shoot/look over the top,
+        // break line-of-sight when crouched/pushing. Each is a real mesh + a matching
+        // low AABB (paired footprint, no phantom). Bodies share planterMat/hedgeMat →
+        // 2 merge buckets total (~2 draw calls for all 8).
+        const planterMat = new THREE.MeshStandardMaterial({
+          color: 0x40434b,
+          roughness: 0.92,
+          metalness: 0.05,
+        })
+        const hedgeMat = new THREE.MeshStandardMaterial({
+          color: 0x223f28,
+          emissive: 0x0c1a10,
+          emissiveIntensity: 0.5,
+          roughness: 1,
+        })
+        const planterGeo = new THREE.BoxGeometry(2.3, 0.95, 1.05)
+        const hedgeGeo = new THREE.BoxGeometry(2.1, 0.4, 0.86)
+        for (const [cx, cz, rotY] of [
+          [9, 7, 0],
+          [-9, 7, 0],
+          [9, -7, 0],
+          [-9, -7, 0],
+          [0, 12, Math.PI / 2],
+          [0, -12, Math.PI / 2],
+          [13, 1, Math.PI / 2],
+          [-13, -1, Math.PI / 2],
+        ] as const) {
+          const pl = new THREE.Mesh(planterGeo, planterMat)
+          pl.position.set(cx, 0.475, cz)
+          pl.rotation.y = rotY
+          mAdd(pl)
+          const hg = new THREE.Mesh(hedgeGeo, hedgeMat)
+          hg.position.set(cx, 1.0, cz)
+          hg.rotation.y = rotY
+          mAdd(hg)
+          // Footprint AABB (rotated → swap half-extents). Top 1.05 = waist cover.
+          const hw = rotY === 0 ? 1.2 : 0.58
+          const hd = rotY === 0 ? 0.58 : 1.2
+          addShibuyaAABB(cx, cz, hw, hd, 1.05)
+        }
+
         // ══ Phase E: 渋谷の神社 (封印の舞台・ストーリーの核) ══════════════════════
         // A small original shrine grove ringed by the zatkyo buildings (NE). Torii →
         // komainu → stone steps → seal altar → honden along a north approach. The
