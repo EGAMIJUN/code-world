@@ -679,6 +679,77 @@ const shibuyaAreaCenter = (area: ShibuyaArea): { x: number; z: number } => {
   const [dx, dz] = off[area]
   return { x: HUNT_ARENA.x + dx, z: HUNT_ARENA.z + dz }
 }
+// ── 道玄坂 (Dogenzaka): 南西へ登る歩行可能な坂道回廊 ───────────────────────────
+// スクランブル交差点の南西 (109/渋谷MODE の南脇) から始まり、緩いカーブを描いて
+// 登り、上端で行き止まる。センター街と違い地面が弧長に応じて RISE する。±100 の
+// 外周内に完全収容 (上端 r≈98) するので外周壁の改変は不要 —— 自己完結した登りランプ。
+// dogenzakaGroundY は回廊帯の内側だけランプ高さを返し、外では 0 を返すので、平坦な
+// 交差点/センター街、および渋谷以外の全ステージは一切影響を受けない。床メッシュ (build)
+// とプレイヤー Y (animate ループ) の両方を駆動する純データ + 純関数。
+const DGZ_HW = 9 // 回廊半幅 (18 幅: 車道 + 両側歩道。センター街の 10 幅より広い)
+const DGZ_GRADE = 0.12 // 弧長あたりの上昇 (~7°、緩やかだが明確な登り)
+const DGZ_SNAP_MAX = 1.5 // ランプ吸着の最大段差 (これ以内なら歩行中とみなし接地維持)
+const DGZ_PATH: readonly (readonly [number, number])[] = [
+  [-8, 30], // 起点 — スクランブルプラザ南西縁に開口 (h=0)
+  [-22, 51],
+  [-42, 61], // 109/渋谷MODE の南を巻く (footprint を 12.3 クリア、回廊帯 9 に余裕)
+  [-58, 67],
+  [-70, 70], // 上端の行き止まり (h≈9、r≈99 で外周内)
+]
+type DgzSeg = {
+  ax: number
+  az: number
+  dx: number
+  dz: number
+  len: number
+  len2: number
+  s0: number
+}
+// セグメントを起点からの累積弧長つきで前計算 → 高さ = grade·s が O(セグメント数)。
+const DGZ_SEG: DgzSeg[] = (() => {
+  const segs: DgzSeg[] = []
+  let s0 = 0
+  for (let i = 0; i < DGZ_PATH.length - 1; i++) {
+    const a = DGZ_PATH[i]
+    const b = DGZ_PATH[i + 1]
+    if (!a || !b) continue
+    const dx = b[0] - a[0]
+    const dz = b[1] - a[1]
+    const len = Math.hypot(dx, dz)
+    segs.push({ ax: a[0], az: a[1], dx, dz, len, len2: dx * dx + dz * dz, s0 })
+    s0 += len
+  }
+  return segs
+})()
+const DGZ_TOP_S = DGZ_SEG.reduce((acc, s) => acc + s.len, 0) // 総弧長 (上端の s)
+// 折れ線センターラインへの最近点投影 → { s: 起点からの弧長, lat: 直交距離 }。
+const dogenzakaNearest = (lx: number, lz: number): { s: number; lat: number } => {
+  let bestD2 = Number.POSITIVE_INFINITY
+  let bestS = 0
+  for (const seg of DGZ_SEG) {
+    let t = ((lx - seg.ax) * seg.dx + (lz - seg.az) * seg.dz) / seg.len2
+    if (t < 0) t = 0
+    else if (t > 1) t = 1
+    const cx = seg.ax + seg.dx * t
+    const cz = seg.az + seg.dz * t
+    const d2 = (lx - cx) * (lx - cx) + (lz - cz) * (lz - cz)
+    if (d2 < bestD2) {
+      bestD2 = d2
+      bestS = seg.s0 + seg.len * t
+    }
+  }
+  return { s: bestS, lat: Math.sqrt(bestD2) }
+}
+// 歩行可能ランプ高さ (arena-local)。回廊帯の内側は grade·弧長、外側は 0 (平坦)。
+// 帯端での 0 への段差は体験されない —— 側壁が PLAYER_RADIUS 手前で止めるため。
+const dogenzakaGroundY = (lx: number, lz: number): number => {
+  const n = dogenzakaNearest(lx, lz)
+  if (n.lat > DGZ_HW) return 0
+  return DGZ_GRADE * n.s
+}
+// 回廊ゾーン (汎用ファサードを坂道から排除する判定用、少し広めにとる)。
+const inDogenzakaZone = (lx: number, lz: number): boolean =>
+  dogenzakaNearest(lx, lz).lat < DGZ_HW + 4
 // Per-theme minion spec — reuse an existing enemy model with a colour/scale
 // tweak. base = model, tint = body recolour, eyes = eye-glow colour.
 type HuntCreatureKind =
@@ -20303,7 +20374,9 @@ export default function ThreeWorld({
         ]
         // inCentergaiZone keeps generic facades out of the walkable センター街 lane.
         const sbBlocked = (x: number, z: number) =>
-          sbAvoid.some(([ax, az, ar]) => Math.hypot(x - ax, z - az) < ar) || inCentergaiZone(x, z)
+          sbAvoid.some(([ax, az, ar]) => Math.hypot(x - ax, z - az) < ar) ||
+          inCentergaiZone(x, z) ||
+          inDogenzakaZone(x, z)
         // (1) Four corner clusters in the diagonal sectors (the road arms stay open).
         for (let k = 0; k < 4; k++) {
           const baseA = Math.PI / 4 + k * (Math.PI / 2)
@@ -20754,6 +20827,109 @@ export default function ThreeWorld({
           const m = bladeMats[i]
           if (m) instAdd(bladeGeo, m, bladeXf[i] ?? [])
         })
+
+        // ══ 道玄坂 (Dogenzaka) Phase A: sloped walkable corridor ════════════════════
+        // A curved street that CLIMBS from the SW edge of the scramble plaza (south of
+        // the 109) to a dead-end at the top — entirely inside the ±100 perimeter (top
+        // r≈98), so NO perimeter-wall surgery. The ground rises with arc-length via the
+        // module-level dogenzakaGroundY — the SAME function the player's Y follows in the
+        // animate loop, so the floor and the footing always agree. The two side walls are
+        // the SINGLE collision source (like センター街); the ramp floor carries NO hitbox.
+        // Phase B dresses the road, C stacks the slope-side buildings, H caps the end.
+        {
+          // Centre point + unit tangent + unit perpendicular (left of travel) at arc s.
+          const dgzAt = (s: number) => {
+            let seg = DGZ_SEG[0]
+            for (const sg of DGZ_SEG) if (s >= sg.s0) seg = sg
+            if (!seg || seg.len <= 0) return null
+            const t = Math.max(0, Math.min(1, (s - seg.s0) / seg.len))
+            const tx = seg.dx / seg.len
+            const tz = seg.dz / seg.len
+            return { cx: seg.ax + seg.dx * t, cz: seg.az + seg.dz * t, tx, tz, px: -tz, pz: tx }
+          }
+          // ── (1) Climbing floor ribbon: ONE BufferGeometry, left/right edge verts at
+          // each sample, heights from dogenzakaGroundY. Up-facing winding so the top is
+          // lit. Its own wet-asphalt material → exactly one isolated draw call.
+          const RIB_N = 60
+          const ribPos: number[] = []
+          const ribUv: number[] = []
+          const ribIdx: number[] = []
+          for (let i = 0; i <= RIB_N; i++) {
+            const s = (i / RIB_N) * DGZ_TOP_S
+            const p = dgzAt(s)
+            if (!p) continue
+            const h = DGZ_GRADE * s
+            ribPos.push(p.cx + p.px * DGZ_HW, h, p.cz + p.pz * DGZ_HW) // left edge
+            ribPos.push(p.cx - p.px * DGZ_HW, h, p.cz - p.pz * DGZ_HW) // right edge
+            const v = s / 6 // ~6-unit asphalt tiles up the slope
+            ribUv.push(0, v, 1, v)
+          }
+          for (let i = 0; i < RIB_N; i++) {
+            const a = i * 2
+            ribIdx.push(a, a + 2, a + 1, a + 1, a + 2, a + 3) // normals up (+Y)
+          }
+          const ribGeo = new THREE.BufferGeometry()
+          ribGeo.setAttribute("position", new THREE.Float32BufferAttribute(ribPos, 3))
+          ribGeo.setAttribute("uv", new THREE.Float32BufferAttribute(ribUv, 2))
+          ribGeo.setIndex(ribIdx)
+          ribGeo.computeVertexNormals()
+          const dgzRoadMat = new THREE.MeshLambertMaterial({
+            color: 0x7c7e88,
+            map: makeNoiseTexture(128, 0x303139, 0.12, 8),
+            emissive: 0x141826,
+            emissiveIntensity: 1,
+          })
+          add(new THREE.Mesh(ribGeo, dgzRoadMat))
+          // ── (2) Side walls: short rotated boxes hugging both band edges, rising with
+          // the ramp. The corridor's ONLY collision; each AABB is the EXACT axis-aligned
+          // bound of its rotated box (no #117 over-size, no ghost walls).
+          const DGZ_WALL_T = 1.5 // wall thickness
+          const DGZ_WALL_H = 9 // shopfront-base height above the ramp (Phase C stacks behind)
+          const dgzSegN = Math.max(1, Math.round(DGZ_TOP_S / 5)) // ~5-unit boxes follow the curve
+          for (let i = 0; i < dgzSegN; i++) {
+            const sm = ((i + 0.5) / dgzSegN) * DGZ_TOP_S
+            const a0 = dgzAt((i / dgzSegN) * DGZ_TOP_S)
+            const a1 = dgzAt(((i + 1) / dgzSegN) * DGZ_TOP_S)
+            const am = dgzAt(sm)
+            if (!a0 || !a1 || !am) continue
+            const segLen = Math.hypot(a1.cx - a0.cx, a1.cz - a0.cz) + 0.4 // overlap at joints
+            const wallH = DGZ_GRADE * sm + DGZ_WALL_H // blocks at the raised feetY
+            const halfAbs = Math.abs(am.tx) * (segLen / 2) + Math.abs(am.tz) * (DGZ_WALL_T / 2)
+            const depAbs = Math.abs(am.tz) * (segLen / 2) + Math.abs(am.tx) * (DGZ_WALL_T / 2)
+            const rotY = Math.atan2(-am.tz, am.tx) // local +X (length) along the tangent
+            for (const side of [1, -1] as const) {
+              const cx = am.cx + am.px * side * (DGZ_HW + DGZ_WALL_T / 2)
+              const cz = am.cz + am.pz * side * (DGZ_HW + DGZ_WALL_T / 2)
+              const box = new THREE.Mesh(
+                new THREE.BoxGeometry(segLen, wallH, DGZ_WALL_T),
+                concreteMat,
+              )
+              box.position.set(cx, wallH / 2, cz)
+              box.rotation.y = rotY
+              mAdd(box)
+              addShibuyaAABB(cx, cz, halfAbs, depAbs, wallH)
+            }
+          }
+          // ── (3) Dead-end cap across the top (Phase H dresses it as a redevelopment
+          // hoarding). Spans the full corridor width + both walls.
+          const cap = dgzAt(DGZ_TOP_S)
+          if (cap) {
+            const capH = DGZ_GRADE * DGZ_TOP_S + DGZ_WALL_H
+            const capW = DGZ_HW * 2 + DGZ_WALL_T * 2
+            const capCx = cap.cx + cap.tx * (DGZ_WALL_T / 2 + 0.5)
+            const capCz = cap.cz + cap.tz * (DGZ_WALL_T / 2 + 0.5)
+            const capMesh = new THREE.Mesh(
+              new THREE.BoxGeometry(DGZ_WALL_T, capH, capW),
+              concreteMat,
+            )
+            capMesh.position.set(capCx, capH / 2, capCz)
+            capMesh.rotation.y = Math.atan2(-cap.tz, cap.tx)
+            mAdd(capMesh)
+            const capHalf = Math.abs(cap.tx) * (DGZ_WALL_T / 2) + Math.abs(cap.tz) * (capW / 2)
+            const capDep = Math.abs(cap.tz) * (DGZ_WALL_T / 2) + Math.abs(cap.tx) * (capW / 2)
+            addShibuyaAABB(capCx, capCz, capHalf, capDep, capH)
+          }
+        }
 
         // ══ Phase C (scramble-detail): 大型ビジョン群 (駅前の顔) ════════════════════
         // The 駅前 video-wall look: several giant fictional-ad screens facing the
@@ -25196,6 +25372,24 @@ export default function ThreeWorld({
             }
           }
 
+          // ── 道玄坂 sloped walkable surface (Shibuya stage only) ──────────────
+          // Inside the 道玄坂 corridor the walkable ground RISES with distance up
+          // the slope; dogenzakaGroundY returns 0 everywhere else, so the flat
+          // crossing / センター街 and every non-Shibuya stage are untouched. Gated
+          // on the stage so other hunts never pay for it. onDgzSlope drives the
+          // "glue to the ramp" branch below (keeps descending from going airborne).
+          let onDgzSlope = false
+          if (isShibuyaStage(huntMissionConfigRef.current.stage)) {
+            const slopeY = dogenzakaGroundY(
+              refs.focalPoint.x - HUNT_ARENA.x,
+              refs.focalPoint.z - HUNT_ARENA.z,
+            )
+            if (slopeY > 0) {
+              onDgzSlope = true
+              if (slopeY > groundY) groundY = slopeY
+            }
+          }
+
           // Is the player standing inside any climb zone right now? Powers
           // the bottom-of-screen "[E] 登る" prompt. We push to React state
           // only on boundary changes (entering / leaving the zone) so the
@@ -25326,6 +25520,23 @@ export default function ThreeWorld({
                 refs.focalPoint.z,
               )
             }
+          }
+          // 道玄坂: while WALKING the ramp — grounded last frame, not trying to
+          // jump, and within snap range of the surface — glue the player to it.
+          // This handles BOTH climbing and descending; a gentle downslope would
+          // otherwise read as "airborne" every frame and trip the gravity/fall
+          // path (spurious jitter + fall damage). Genuine jumps (space held) and
+          // real falls from a height (wasAirborne, or a big gap to the ramp) fail
+          // this test and run the normal jump / gravity branches below.
+          else if (
+            onDgzSlope &&
+            !wasAirborneRef.current &&
+            !(keysRef.current.has(" ") && !huntInputLockRef.current) &&
+            refs.focalPoint.y - groundY < DGZ_SNAP_MAX
+          ) {
+            refs.focalPoint.y = groundY
+            playerVelYRef.current = 0
+            wasAirborneRef.current = false
           }
           // Apply gravity / floor snap. Fall damage is computed from the drop
           // height (the Y the player became airborne at, minus the landing Y) —
