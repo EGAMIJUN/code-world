@@ -750,6 +750,34 @@ const dogenzakaGroundY = (lx: number, lz: number): number => {
 // 回廊ゾーン (汎用ファサードを坂道から排除する判定用、少し広めにとる)。
 const inDogenzakaZone = (lx: number, lz: number): boolean =>
   dogenzakaNearest(lx, lz).lat < DGZ_HW + 4
+// 弧長 s でのセンターライン上の点 + ランプ高さ h + 接線 (tx,tz) + 左直交 (px,pz)。
+// build が坂に沿って物を置く共通サンプラー (床/縁石/センターライン/横断歩道/街路樹/看板)。
+type DgzPoint = {
+  cx: number
+  cz: number
+  h: number
+  tx: number
+  tz: number
+  px: number
+  pz: number
+}
+const dogenzakaAt = (s: number): DgzPoint | null => {
+  let seg = DGZ_SEG[0]
+  for (const sg of DGZ_SEG) if (s >= sg.s0) seg = sg
+  if (!seg || seg.len <= 0) return null
+  const t = Math.max(0, Math.min(1, (s - seg.s0) / seg.len))
+  const tx = seg.dx / seg.len
+  const tz = seg.dz / seg.len
+  return {
+    cx: seg.ax + seg.dx * t,
+    cz: seg.az + seg.dz * t,
+    h: DGZ_GRADE * s,
+    tx,
+    tz,
+    px: -tz,
+    pz: tx,
+  }
+}
 // Per-theme minion spec — reuse an existing enemy model with a colour/scale
 // tweak. base = model, tint = body recolour, eyes = eye-glow colour.
 type HuntCreatureKind =
@@ -20837,16 +20865,6 @@ export default function ThreeWorld({
         // the SINGLE collision source (like センター街); the ramp floor carries NO hitbox.
         // Phase B dresses the road, C stacks the slope-side buildings, H caps the end.
         {
-          // Centre point + unit tangent + unit perpendicular (left of travel) at arc s.
-          const dgzAt = (s: number) => {
-            let seg = DGZ_SEG[0]
-            for (const sg of DGZ_SEG) if (s >= sg.s0) seg = sg
-            if (!seg || seg.len <= 0) return null
-            const t = Math.max(0, Math.min(1, (s - seg.s0) / seg.len))
-            const tx = seg.dx / seg.len
-            const tz = seg.dz / seg.len
-            return { cx: seg.ax + seg.dx * t, cz: seg.az + seg.dz * t, tx, tz, px: -tz, pz: tx }
-          }
           // ── (1) Climbing floor ribbon: ONE BufferGeometry, left/right edge verts at
           // each sample, heights from dogenzakaGroundY. Up-facing winding so the top is
           // lit. Its own wet-asphalt material → exactly one isolated draw call.
@@ -20856,7 +20874,7 @@ export default function ThreeWorld({
           const ribIdx: number[] = []
           for (let i = 0; i <= RIB_N; i++) {
             const s = (i / RIB_N) * DGZ_TOP_S
-            const p = dgzAt(s)
+            const p = dogenzakaAt(s)
             if (!p) continue
             const h = DGZ_GRADE * s
             ribPos.push(p.cx + p.px * DGZ_HW, h, p.cz + p.pz * DGZ_HW) // left edge
@@ -20888,9 +20906,9 @@ export default function ThreeWorld({
           const dgzSegN = Math.max(1, Math.round(DGZ_TOP_S / 5)) // ~5-unit boxes follow the curve
           for (let i = 0; i < dgzSegN; i++) {
             const sm = ((i + 0.5) / dgzSegN) * DGZ_TOP_S
-            const a0 = dgzAt((i / dgzSegN) * DGZ_TOP_S)
-            const a1 = dgzAt(((i + 1) / dgzSegN) * DGZ_TOP_S)
-            const am = dgzAt(sm)
+            const a0 = dogenzakaAt((i / dgzSegN) * DGZ_TOP_S)
+            const a1 = dogenzakaAt(((i + 1) / dgzSegN) * DGZ_TOP_S)
+            const am = dogenzakaAt(sm)
             if (!a0 || !a1 || !am) continue
             const segLen = Math.hypot(a1.cx - a0.cx, a1.cz - a0.cz) + 0.4 // overlap at joints
             const wallH = DGZ_GRADE * sm + DGZ_WALL_H // blocks at the raised feetY
@@ -20912,7 +20930,7 @@ export default function ThreeWorld({
           }
           // ── (3) Dead-end cap across the top (Phase H dresses it as a redevelopment
           // hoarding). Spans the full corridor width + both walls.
-          const cap = dgzAt(DGZ_TOP_S)
+          const cap = dogenzakaAt(DGZ_TOP_S)
           if (cap) {
             const capH = DGZ_GRADE * DGZ_TOP_S + DGZ_WALL_H
             const capW = DGZ_HW * 2 + DGZ_WALL_T * 2
@@ -20928,6 +20946,133 @@ export default function ThreeWorld({
             const capHalf = Math.abs(cap.tx) * (DGZ_WALL_T / 2) + Math.abs(cap.tz) * (capW / 2)
             const capDep = Math.abs(cap.tz) * (DGZ_WALL_T / 2) + Math.abs(cap.tx) * (capW / 2)
             addShibuyaAABB(capCx, capCz, capHalf, capDep, capH)
+          }
+        }
+
+        // ══ 道玄坂 (Dogenzaka) Phase B: road surface ════════════════════════════════
+        // Carriageway + sidewalks (wider than センター街), curbs, dashed centre line,
+        // a crosswalk at the base, and a wet 石畳 seam sheen — all following the SAME
+        // centreline/heights as the ramp (via dogenzakaAt), sitting just above the
+        // surface. NONE collide (curbs are below the step-up height → walkable).
+        {
+          const DGZ_CARRIAGE_HW = 5.2 // carriageway half-width (sidewalks fill 5.2→9)
+          // Append a lateral band [latC±latHW] over arc [s0,s1] at height + dy, up-facing.
+          const strip = (
+            pos: number[],
+            uv: number[],
+            idx: number[],
+            s0: number,
+            s1: number,
+            latC: number,
+            latHW: number,
+            dy: number,
+            steps: number,
+            uRepeat = 1,
+            vRepeat = 0.25,
+          ) => {
+            const base = pos.length / 3
+            let pushed = 0
+            for (let k = 0; k <= steps; k++) {
+              const s = s0 + (s1 - s0) * (k / steps)
+              const p = dogenzakaAt(s)
+              if (!p) continue
+              pos.push(p.cx + p.px * (latC + latHW), p.h + dy, p.cz + p.pz * (latC + latHW))
+              pos.push(p.cx + p.px * (latC - latHW), p.h + dy, p.cz + p.pz * (latC - latHW))
+              uv.push(0, s * vRepeat, uRepeat, s * vRepeat)
+              pushed++
+            }
+            for (let k = 0; k < pushed - 1; k++) {
+              const a = base + k * 2
+              idx.push(a, a + 2, a + 1, a + 1, a + 2, a + 3)
+            }
+          }
+          const buildGeo = (pos: number[], uv: number[], idx: number[]) => {
+            const g = new THREE.BufferGeometry()
+            g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3))
+            g.setAttribute("uv", new THREE.Float32BufferAttribute(uv, 2))
+            g.setIndex(idx)
+            g.computeVertexNormals()
+            return g
+          }
+          // (1) Curbs: raised light strips along both carriageway edges. Low (≤ step-up)
+          // → walkable, no AABB. One geometry → one draw call.
+          {
+            const pos: number[] = []
+            const uv: number[] = []
+            const idx: number[] = []
+            for (const side of [1, -1] as const) {
+              strip(pos, uv, idx, 0, DGZ_TOP_S, side * DGZ_CARRIAGE_HW, 0.34, 0.18, 48)
+            }
+            add(
+              new THREE.Mesh(
+                buildGeo(pos, uv, idx),
+                new THREE.MeshLambertMaterial({ color: 0x8a8d96 }),
+              ),
+            )
+          }
+          // (2) Centre line: dashed warm strip down the middle (starts past the
+          // crosswalk), glowing at night.
+          {
+            const pos: number[] = []
+            const uv: number[] = []
+            const idx: number[] = []
+            for (let s = 13; s < DGZ_TOP_S - 3; s += 4) {
+              strip(pos, uv, idx, s, Math.min(s + 2.2, DGZ_TOP_S), 0, 0.16, 0.06, 3)
+            }
+            add(
+              new THREE.Mesh(
+                buildGeo(pos, uv, idx),
+                new THREE.MeshBasicMaterial({ color: 0xd9c87a, toneMapped: false }),
+              ),
+            )
+          }
+          // (3) Crosswalk (横断歩道): white bars across the corridor near the base.
+          {
+            const pos: number[] = []
+            const uv: number[] = []
+            const idx: number[] = []
+            for (let s = 4; s < 11; s += 1.3) {
+              strip(pos, uv, idx, s, s + 0.7, 0, 7, 0.05, 2)
+            }
+            add(
+              new THREE.Mesh(
+                buildGeo(pos, uv, idx),
+                new THREE.MeshBasicMaterial({ color: 0xcdd2da, toneMapped: false }),
+              ),
+            )
+          }
+          // (4) Wet 石畳 seam sheen over the whole ramp — cool additive paving grid
+          // catching the neon (the センター街 wet-deck technique, mapped up the slope).
+          {
+            const seamCv = document.createElement("canvas")
+            seamCv.width = 64
+            seamCv.height = 64
+            const sctx = seamCv.getContext("2d")
+            if (sctx) {
+              sctx.clearRect(0, 0, 64, 64)
+              sctx.strokeStyle = "rgba(150,178,224,0.6)"
+              sctx.lineWidth = 2
+              sctx.strokeRect(1, 1, 62, 62)
+            }
+            const seamTex = new THREE.CanvasTexture(seamCv)
+            seamTex.wrapS = THREE.RepeatWrapping
+            seamTex.wrapT = THREE.RepeatWrapping
+            const pos: number[] = []
+            const uv: number[] = []
+            const idx: number[] = []
+            strip(pos, uv, idx, 0, DGZ_TOP_S, 0, DGZ_HW, 0.04, 60, 6, 1 / 3)
+            add(
+              new THREE.Mesh(
+                buildGeo(pos, uv, idx),
+                new THREE.MeshBasicMaterial({
+                  map: seamTex,
+                  transparent: true,
+                  opacity: 0.12,
+                  blending: THREE.AdditiveBlending,
+                  depthWrite: false,
+                }),
+              ),
+            )
           }
         }
 
