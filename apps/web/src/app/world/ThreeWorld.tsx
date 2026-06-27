@@ -23240,6 +23240,88 @@ export default function ThreeWorld({
           instAdd(ekiHedgeGeo, ekiHedgeMat, ekiHedgeXf)
         }
 
+        // ══ 駅東/ヒカリエ (Eki-higashi) Phase D: 動き・空気感 (人影 / タクシー / 冷色アクセント) ══
+        // The 駅東 plaza's cool, busy life: commuter figure silhouettes, a couple of parked
+        // taxis at the plaza edge (away from the entrance throat), and a few cool accent glow
+        // bars on the tower bases (animNeon flicker). The lit window grids on the towers
+        // already carry the night glow.
+        {
+          // ── (1) 人影 (静止、通勤者風シルエット): プラザに点在。AABB なし。──
+          const ekiFigMat = new THREE.MeshBasicMaterial({
+            color: 0x0b0d13,
+            transparent: true,
+            opacity: 0.85,
+            side: THREE.DoubleSide,
+          })
+          const ekiFigGeo = new THREE.PlaneGeometry(0.7, 1.8)
+          const ekiFigXf: Xf[] = []
+          for (const [fx, fz] of [
+            [105, 18],
+            [108, 6],
+            [112, -6],
+            [104, -18],
+            [116, 2],
+            [121, 8],
+            [126, 14],
+            [108, 26],
+            [103, 28],
+            [124, -2],
+          ] as const) {
+            ekiFigXf.push({ pos: [fx, 0.9, fz], rotY: (fx + fz) % Math.PI })
+          }
+          instAdd(ekiFigGeo, ekiFigMat, ekiFigXf)
+          // ── (2) 駐車タクシー (静止): プラザ縁に数台、入口スロート (x≤114,z[8,32]) は避ける。固い
+          // → AABB。──
+          const taxiBodyMat = new THREE.MeshStandardMaterial({
+            color: 0x1c2230,
+            roughness: 0.5,
+            metalness: 0.45,
+          })
+          const taxiCabMat = new THREE.MeshStandardMaterial({
+            color: 0x0b0e14,
+            emissive: 0x243246,
+            emissiveIntensity: 0.3,
+          })
+          const taxiBodyGeo = new THREE.BoxGeometry(2.0, 1.1, 4.4)
+          const taxiCabGeo = new THREE.BoxGeometry(1.8, 0.78, 2.2)
+          for (const [cx, cz, rot] of [
+            [103, -24, 0], // west strip (clear of buildings + entrance throat)
+            [110, -2, 0], // central plaza, south of ヒカリエ
+          ] as const) {
+            const body = new THREE.Mesh(taxiBodyGeo, taxiBodyMat)
+            body.position.set(cx, 0.7, cz)
+            body.rotation.y = rot
+            mAdd(body)
+            const cab = new THREE.Mesh(taxiCabGeo, taxiCabMat)
+            cab.position.set(cx, 1.55, cz)
+            cab.rotation.y = rot
+            mAdd(cab)
+            const along = Math.abs(Math.cos(rot)) // 1 if length along z, else along x
+            const hw = along * 1.0 + (1 - along) * 2.2
+            const hd = along * 2.2 + (1 - along) * 1.0
+            addShibuyaAABB(cx, cz, hw, hd, 1.4)
+          }
+          // ── (3) 冷色アクセント: 数本のビル基部の発光バー (animNeon フリッカー)。控えめ。──
+          const ekiAccentGeo = new THREE.BoxGeometry(0.26, 1, 0.14)
+          const ekiAccentCols = [0x7fb0ff, 0xbfe0ff]
+          const ekiAccentMats = ekiAccentCols.map(
+            (c) =>
+              new THREE.MeshStandardMaterial({ color: c, emissive: c, emissiveIntensity: 1.0 }),
+          )
+          const ekiAccentXf: Xf[][] = ekiAccentCols.map(() => [])
+          for (const [ax, az, arot, ci] of [
+            [113.6, 24, -Math.PI / 2, 0],
+            [120, -3.8, 0, 1],
+            [124.4, 5, Math.PI / 2, 0],
+            [106, -10, 0, 1],
+          ] as const) {
+            ekiAccentXf[ci]?.push({ pos: [ax, 6.5, az], rotY: arot, scl: [1, 3.2, 1] })
+          }
+          ekiAccentMats.forEach((mm, i) => {
+            if (instAdd(ekiAccentGeo, mm, ekiAccentXf[i] ?? [])) animNeon.push(mm)
+          })
+        }
+
         // ══ Phase C (scramble-detail): 大型ビジョン群 (駅前の顔) ════════════════════
         // The 駅前 video-wall look: several giant fictional-ad screens facing the
         // crossing + a round vision crowning the 渋谷MODE cylinder. Each screen is one
