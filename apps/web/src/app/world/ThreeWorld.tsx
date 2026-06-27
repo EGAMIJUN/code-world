@@ -778,6 +778,103 @@ const dogenzakaAt = (s: number): DgzPoint | null => {
     pz: tx,
   }
 }
+// ── 公園通り (Koen-dori): スクランブル北側から代々木公園方向へ緩やかに登る並木通り ──
+// 道玄坂 (南西・猥雑・濃いネオン) と対をなす「北の坂」。道幅は広め・勾配は緩やか・緑が多い。
+// 道玄坂とまったく同じ「回廊帯の内側だけ RISE、外では 0」方式 (koenDoriGroundY)。平坦な
+// 交差点/センター街/道玄坂、および渋谷以外の全ステージは一切影響を受けない。床メッシュ
+// (build) とプレイヤー Y (animate ループ) の両方を駆動する純データ + 純関数。道玄坂とは
+// 完全に独立した別の定数/関数 —— dogenzakaGroundY のロジックには一切触れない。
+const KDR_HW = 11 // 回廊半幅 (22 幅: 道玄坂 18 より広い「広めの車道 + 両側歩道」)
+const KDR_GRADE = 0.075 // 弧長あたりの上昇 (~4.3°、道玄坂 0.12 より明確に緩い登り)
+const KDR_PATH: readonly (readonly [number, number])[] = [
+  [0, -26], // 起点 — スクランブルプラザ北縁に開口 (h=0、北行きの既存 N-S 通りへ自然接続)
+  [-3, -45],
+  [-6, -62], // 中腹 — 宮下公園風ランドマーク (SHIBUYA PARK) を据える高さ (koendori 中心付近)
+  [-8, -78],
+  [-9, -90], // 上端の行き止まり (h≈4.9、r≈90 で北外周壁 z=-100 の内側に完全収容)
+]
+type KdrSeg = {
+  ax: number
+  az: number
+  dx: number
+  dz: number
+  len: number
+  len2: number
+  s0: number
+}
+// 道玄坂 DGZ_SEG と同じ前計算: セグメントごとに起点からの累積弧長 s0 を持たせる。
+const KDR_SEG: KdrSeg[] = (() => {
+  const segs: KdrSeg[] = []
+  let s0 = 0
+  for (let i = 0; i < KDR_PATH.length - 1; i++) {
+    const a = KDR_PATH[i]
+    const b = KDR_PATH[i + 1]
+    if (!a || !b) continue
+    const dx = b[0] - a[0]
+    const dz = b[1] - a[1]
+    const len = Math.hypot(dx, dz)
+    segs.push({ ax: a[0], az: a[1], dx, dz, len, len2: dx * dx + dz * dz, s0 })
+    s0 += len
+  }
+  return segs
+})()
+// 折れ線センターラインへの最近点投影 → { s: 起点からの弧長, lat: 直交距離 }。
+const koenDoriNearest = (lx: number, lz: number): { s: number; lat: number } => {
+  let bestD2 = Number.POSITIVE_INFINITY
+  let bestS = 0
+  for (const seg of KDR_SEG) {
+    let t = ((lx - seg.ax) * seg.dx + (lz - seg.az) * seg.dz) / seg.len2
+    if (t < 0) t = 0
+    else if (t > 1) t = 1
+    const cx = seg.ax + seg.dx * t
+    const cz = seg.az + seg.dz * t
+    const d2 = (lx - cx) * (lx - cx) + (lz - cz) * (lz - cz)
+    if (d2 < bestD2) {
+      bestD2 = d2
+      bestS = seg.s0 + seg.len * t
+    }
+  }
+  return { s: bestS, lat: Math.sqrt(bestD2) }
+}
+// 歩行可能ランプ高さ (arena-local)。回廊帯の内側は grade·弧長、外側は 0 (平坦)。起点で
+// s=0→h=0 なので平坦なスクランブルと段差なく繋がり、北へ歩くほど緩やかにせり上がる。
+const koenDoriGroundY = (lx: number, lz: number): number => {
+  const n = koenDoriNearest(lx, lz)
+  if (n.lat > KDR_HW) return 0
+  return KDR_GRADE * n.s
+}
+const KDR_TOP_S = KDR_SEG.reduce((acc, s) => acc + s.len, 0) // 総弧長 (上端の s)
+// 回廊ゾーン (汎用ファサード/プロップを坂道から排除する判定用、少し広めにとる)。
+const inKoenDoriZone = (lx: number, lz: number): boolean => koenDoriNearest(lx, lz).lat < KDR_HW + 4
+// 弧長 s でのセンターライン上の点 + ランプ高さ h + 接線 (tx,tz) + 左直交 (px,pz)。道玄坂
+// dogenzakaAt と同じ役割で、build が坂に沿って物 (床/側壁/縁石/街灯/街路樹/看板) を置く共通
+// サンプラー。完全に独立した別関数 —— dogenzakaAt には一切触れない。
+type KdrPoint = {
+  cx: number
+  cz: number
+  h: number
+  tx: number
+  tz: number
+  px: number
+  pz: number
+}
+const koenDoriAt = (s: number): KdrPoint | null => {
+  let seg = KDR_SEG[0]
+  for (const sg of KDR_SEG) if (s >= sg.s0) seg = sg
+  if (!seg || seg.len <= 0) return null
+  const t = Math.max(0, Math.min(1, (s - seg.s0) / seg.len))
+  const tx = seg.dx / seg.len
+  const tz = seg.dz / seg.len
+  return {
+    cx: seg.ax + seg.dx * t,
+    cz: seg.az + seg.dz * t,
+    h: KDR_GRADE * s,
+    tx,
+    tz,
+    px: -tz,
+    pz: tx,
+  }
+}
 // Per-theme minion spec — reuse an existing enemy model with a colour/scale
 // tweak. base = model, tint = body recolour, eyes = eye-glow colour.
 type HuntCreatureKind =
@@ -19298,9 +19395,14 @@ export default function ThreeWorld({
         for (let d = -90; d <= 90; d += 24) {
           if (Math.abs(d) < 16) continue // leave the intersection itself clear
           for (const side of [-12, 12]) {
-            lampPoleXf.push({ pos: [side, 3, d] }) // along the N-S road
-            lampHeadXf.push({ pos: [side, 6.1, d] })
-            lampPoleXf.push({ pos: [d, 3, side] }) // along the E-W road
+            // N-S road lamp: skip any that the 公園通り slope would bury (the avenue
+            // relights its own corridor in Phase B). koenDoriGroundY is 0 off the slope,
+            // so every flat-ground scramble lamp is kept untouched.
+            if (koenDoriGroundY(side, d) < 0.2) {
+              lampPoleXf.push({ pos: [side, 3, d] }) // along the N-S road
+              lampHeadXf.push({ pos: [side, 6.1, d] })
+            }
+            lampPoleXf.push({ pos: [d, 3, side] }) // along the E-W road (never on the slope)
             lampHeadXf.push({ pos: [d, 6.1, side] })
           }
         }
@@ -20779,7 +20881,8 @@ export default function ThreeWorld({
         const sbBlocked = (x: number, z: number) =>
           sbAvoid.some(([ax, az, ar]) => Math.hypot(x - ax, z - az) < ar) ||
           inCentergaiZone(x, z) ||
-          inDogenzakaZone(x, z)
+          inDogenzakaZone(x, z) ||
+          inKoenDoriZone(x, z)
         // (1) Four corner clusters in the diagonal sectors (the road arms stay open).
         for (let k = 0; k < 4; k++) {
           const baseA = Math.PI / 4 + k * (Math.PI / 2)
@@ -22105,6 +22208,829 @@ export default function ThreeWorld({
           // from here. NOTE: the top is at r≈99 — just inside the flat core (r≤144), so
           // the ground stays flat there; pushing the next area further SW past r≈144
           // would need its own local floor slab + height function (cf. dogenzakaGroundY).
+        }
+
+        // ══ 公園通り (Koen-dori) Phase B: 車道・歩道・路面 (sloped corridor + surface) ══
+        // 道玄坂と同じ「床リボン + 側壁 (唯一の当たり判定) + 路面デカール」方式を koenDoriAt で
+        // 公園通り用に組む。道幅は広め (HW 11)・勾配は緩やか・街灯は密で明るい (北の落ち着いた
+        // 並木通り)。床リボンは衝突なし、側壁だけが当たり判定 —— これが横方向の崖を塞ぎ、入口を
+        // 谷底 (スクランブル側) の口だけに限定する。道玄坂のコード/マテリアルには触れない。
+        {
+          // ── (1) 登り床リボン: ONE BufferGeometry, koenDoriAt sampling, wet asphalt ──
+          // 既存スクランブル N-S 路面 (y≈0.015) の上にわずかに乗せて z-fight を避ける。
+          const KRIB_N = 64
+          const kribPos: number[] = []
+          const kribUv: number[] = []
+          const kribIdx: number[] = []
+          for (let i = 0; i <= KRIB_N; i++) {
+            const s = (i / KRIB_N) * KDR_TOP_S
+            const p = koenDoriAt(s)
+            if (!p) continue
+            const h = p.h + 0.02
+            kribPos.push(p.cx + p.px * KDR_HW, h, p.cz + p.pz * KDR_HW) // left edge
+            kribPos.push(p.cx - p.px * KDR_HW, h, p.cz - p.pz * KDR_HW) // right edge
+            const v = s / 6
+            kribUv.push(0, v, 1, v)
+          }
+          for (let i = 0; i < KRIB_N; i++) {
+            const a = i * 2
+            kribIdx.push(a, a + 2, a + 1, a + 1, a + 2, a + 3) // normals up (+Y)
+          }
+          const kribGeo = new THREE.BufferGeometry()
+          kribGeo.setAttribute("position", new THREE.Float32BufferAttribute(kribPos, 3))
+          kribGeo.setAttribute("uv", new THREE.Float32BufferAttribute(kribUv, 2))
+          kribGeo.setIndex(kribIdx)
+          kribGeo.computeVertexNormals()
+          // 公園通りは「夜でも街灯が多くて明るい通り」→ 道玄坂 (0x7c7e88) よりやや明るいアスファルト。
+          const kdrRoadMat = new THREE.MeshLambertMaterial({
+            color: 0x84868f,
+            map: makeNoiseTexture(128, 0x303139, 0.12, 8),
+            emissive: 0x1a2236,
+            emissiveIntensity: 1,
+          })
+          add(new THREE.Mesh(kribGeo, kdrRoadMat))
+          // ── (2) 側壁: 回廊の唯一の当たり判定。ランプと共にせり上がる回転ボックス。各 AABB は
+          // 回転ボックスの厳密な軸並行境界 (#117 の過大化なし)。これが横の崖を塞ぐ要。 ──
+          const KDR_WALL_T = 1.5 // 壁厚
+          const KDR_WALL_H = 8 // 店舗ベース高 (Phase D が背後に中層ビルを積む)
+          const kdrSegN = Math.max(1, Math.round(KDR_TOP_S / 5)) // ~5-unit 箱でカーブを追う
+          for (let i = 0; i < kdrSegN; i++) {
+            const sm = ((i + 0.5) / kdrSegN) * KDR_TOP_S
+            const a0 = koenDoriAt((i / kdrSegN) * KDR_TOP_S)
+            const a1 = koenDoriAt(((i + 1) / kdrSegN) * KDR_TOP_S)
+            const am = koenDoriAt(sm)
+            if (!a0 || !a1 || !am) continue
+            const segLen = Math.hypot(a1.cx - a0.cx, a1.cz - a0.cz) + 0.4 // joint overlap
+            const wallH = am.h + KDR_WALL_H // raised feetY に乗せて塞ぐ
+            const halfAbs = Math.abs(am.tx) * (segLen / 2) + Math.abs(am.tz) * (KDR_WALL_T / 2)
+            const depAbs = Math.abs(am.tz) * (segLen / 2) + Math.abs(am.tx) * (KDR_WALL_T / 2)
+            const rotY = Math.atan2(-am.tz, am.tx) // local +X (length) along the tangent
+            for (const side of [1, -1] as const) {
+              const cx = am.cx + am.px * side * (KDR_HW + KDR_WALL_T / 2)
+              const cz = am.cz + am.pz * side * (KDR_HW + KDR_WALL_T / 2)
+              const box = new THREE.Mesh(
+                new THREE.BoxGeometry(segLen, wallH, KDR_WALL_T),
+                concreteMat,
+              )
+              box.position.set(cx, wallH / 2, cz)
+              box.rotation.y = rotY
+              mAdd(box)
+              addShibuyaAABB(cx, cz, halfAbs, depAbs, wallH)
+            }
+          }
+          // ── (3) 上端の行き止まりキャップ (Phase F がバリケード + 代々木公園方面サインで化粧
+          // する。当たり判定の実体はここ)。全幅 + 両側壁分。 ──
+          const kcap = koenDoriAt(KDR_TOP_S)
+          if (kcap) {
+            const capH = kcap.h + KDR_WALL_H
+            const capW = KDR_HW * 2 + KDR_WALL_T * 2
+            const capCx = kcap.cx + kcap.tx * (KDR_WALL_T / 2 + 0.5)
+            const capCz = kcap.cz + kcap.tz * (KDR_WALL_T / 2 + 0.5)
+            const capMesh = new THREE.Mesh(
+              new THREE.BoxGeometry(KDR_WALL_T, capH, capW),
+              concreteMat,
+            )
+            capMesh.position.set(capCx, capH / 2, capCz)
+            capMesh.rotation.y = Math.atan2(-kcap.tz, kcap.tx)
+            mAdd(capMesh)
+            const capHalf = Math.abs(kcap.tx) * (KDR_WALL_T / 2) + Math.abs(kcap.tz) * (capW / 2)
+            const capDep = Math.abs(kcap.tz) * (KDR_WALL_T / 2) + Math.abs(kcap.tx) * (capW / 2)
+            addShibuyaAABB(capCx, capCz, capHalf, capDep, capH)
+          }
+          // ── (4) 路面デカール: 広めの車道 + 両側歩道タイル + 縁石 + 破線センターライン +
+          // 谷底の横断歩道 + 濡れた石畳の艶。すべて koenDoriAt の同一センターライン/高さに乗せ、
+          // 衝突なし (縁石は step-up 以下なので歩ける)。 ──
+          const KDR_CARRIAGE_HW = 6.5 // 車道半幅 (道玄坂 5.2 より広い)。歩道は 6.5→11 を埋める。
+          const kstrip = (
+            pos: number[],
+            uv: number[],
+            idx: number[],
+            s0: number,
+            s1: number,
+            latC: number,
+            latHW: number,
+            dy: number,
+            steps: number,
+            uRepeat = 1,
+            vRepeat = 0.25,
+          ) => {
+            const base = pos.length / 3
+            let pushed = 0
+            for (let k = 0; k <= steps; k++) {
+              const s = s0 + (s1 - s0) * (k / steps)
+              const p = koenDoriAt(s)
+              if (!p) continue
+              pos.push(p.cx + p.px * (latC + latHW), p.h + dy, p.cz + p.pz * (latC + latHW))
+              pos.push(p.cx + p.px * (latC - latHW), p.h + dy, p.cz + p.pz * (latC - latHW))
+              uv.push(0, s * vRepeat, uRepeat, s * vRepeat)
+              pushed++
+            }
+            for (let k = 0; k < pushed - 1; k++) {
+              const a = base + k * 2
+              idx.push(a, a + 2, a + 1, a + 1, a + 2, a + 3)
+            }
+          }
+          const kbuildGeo = (pos: number[], uv: number[], idx: number[]) => {
+            const g = new THREE.BufferGeometry()
+            g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3))
+            g.setAttribute("uv", new THREE.Float32BufferAttribute(uv, 2))
+            g.setIndex(idx)
+            g.computeVertexNormals()
+            return g
+          }
+          // (4a) 両側歩道タイル: 車道の外 (6.5→11) を埋める明るめのコンクリート板。低い段差。
+          {
+            const pos: number[] = []
+            const uv: number[] = []
+            const idx: number[] = []
+            for (const side of [1, -1] as const) {
+              kstrip(
+                pos,
+                uv,
+                idx,
+                0,
+                KDR_TOP_S,
+                side * ((KDR_CARRIAGE_HW + KDR_HW) / 2),
+                (KDR_HW - KDR_CARRIAGE_HW) / 2,
+                0.1,
+                60,
+                1,
+                0.5,
+              )
+            }
+            add(
+              new THREE.Mesh(
+                kbuildGeo(pos, uv, idx),
+                new THREE.MeshLambertMaterial({
+                  color: 0x787b85, // 道玄坂の歩道より明るい (おしゃれ・落ち着いた北の通り)
+                  map: makeNoiseTexture(64, 0x4a4c54, 0.1, 6),
+                }),
+              ),
+            )
+          }
+          // (4b) 縁石: 車道両縁の隆起ライトストリップ。step-up 以下 → 歩ける、AABB なし。
+          {
+            const pos: number[] = []
+            const uv: number[] = []
+            const idx: number[] = []
+            for (const side of [1, -1] as const) {
+              kstrip(pos, uv, idx, 0, KDR_TOP_S, side * KDR_CARRIAGE_HW, 0.34, 0.18, 48)
+            }
+            add(
+              new THREE.Mesh(
+                kbuildGeo(pos, uv, idx),
+                new THREE.MeshLambertMaterial({ color: 0x9296a0 }),
+              ),
+            )
+          }
+          // (4c) センターライン: 中央の破線 (横断歩道の先から)。夜に映える白寄りの淡色。
+          {
+            const pos: number[] = []
+            const uv: number[] = []
+            const idx: number[] = []
+            for (let s = 12; s < KDR_TOP_S - 3; s += 4.2) {
+              kstrip(pos, uv, idx, s, Math.min(s + 2.4, KDR_TOP_S), 0, 0.16, 0.06, 3)
+            }
+            add(
+              new THREE.Mesh(
+                kbuildGeo(pos, uv, idx),
+                new THREE.MeshBasicMaterial({ color: 0xe6ead0, toneMapped: false }),
+              ),
+            )
+          }
+          // (4d) 横断歩道 (谷底): 回廊基部の白いゼブラ帯。
+          {
+            const pos: number[] = []
+            const uv: number[] = []
+            const idx: number[] = []
+            for (let s = 3.5; s < 11; s += 1.3) {
+              kstrip(pos, uv, idx, s, s + 0.72, 0, KDR_CARRIAGE_HW + 1.5, 0.05, 2)
+            }
+            add(
+              new THREE.Mesh(
+                kbuildGeo(pos, uv, idx),
+                new THREE.MeshBasicMaterial({ color: 0xd2d6de, toneMapped: false }),
+              ),
+            )
+          }
+          // (4e) 濡れた石畳の艶: 坂全体に乗せる加法パビンググリッド (#122 のウェット路面技法)。
+          {
+            const seamCv = document.createElement("canvas")
+            seamCv.width = 64
+            seamCv.height = 64
+            const sctx = seamCv.getContext("2d")
+            if (sctx) {
+              sctx.clearRect(0, 0, 64, 64)
+              sctx.strokeStyle = "rgba(150,178,224,0.6)"
+              sctx.lineWidth = 2
+              sctx.strokeRect(1, 1, 62, 62)
+            }
+            const seamTex = new THREE.CanvasTexture(seamCv)
+            seamTex.wrapS = THREE.RepeatWrapping
+            seamTex.wrapT = THREE.RepeatWrapping
+            const pos: number[] = []
+            const uv: number[] = []
+            const idx: number[] = []
+            kstrip(pos, uv, idx, 0, KDR_TOP_S, 0, KDR_HW, 0.04, 60, 6, 1 / 3)
+            add(
+              new THREE.Mesh(
+                kbuildGeo(pos, uv, idx),
+                new THREE.MeshBasicMaterial({
+                  map: seamTex,
+                  transparent: true,
+                  opacity: 0.12,
+                  blending: THREE.AdditiveBlending,
+                  depthWrite: false,
+                }),
+              ),
+            )
+          }
+          // ── (5) 街灯: 道玄坂より密 (s+=9) で明るい、北の並木通りの灯り。アーム付き電柱を
+          // koenDoriAt に沿って両側に。ヘッドは大きめ・暖白で強め。AABB は電柱基部のみ。 ──
+          const kPoleGeo = new THREE.CylinderGeometry(0.15, 0.21, 9.5, 6)
+          const kArmGeo = new THREE.BoxGeometry(2.4, 0.13, 0.13)
+          const kLampGeo = new THREE.BoxGeometry(0.7, 0.24, 0.4)
+          const kPoleMat = new THREE.MeshStandardMaterial({
+            color: 0x3a3d44,
+            roughness: 0.55,
+            metalness: 0.45,
+          })
+          const kLampMat = new THREE.MeshBasicMaterial({ color: 0xfff1cc, toneMapped: false }) // 暖白・明るい
+          const kPoleXf: Xf[] = []
+          const kArmXf: Xf[] = []
+          const kLampXf: Xf[] = []
+          for (const side of [1, -1] as const) {
+            for (let s = 8; s < KDR_TOP_S - 3; s += 9) {
+              const p = koenDoriAt(s + (side > 0 ? 0 : 4.5)) // 両側を互い違いに
+              if (!p) continue
+              const baseY = p.h
+              const tangentRotY = Math.atan2(-p.tz, p.tx)
+              const plat = side * 7.6 // 歩道側 (車道 6.5 の外)
+              const px = p.cx + p.px * plat
+              const pz = p.cz + p.pz * plat
+              kPoleXf.push({ pos: [px, baseY + 4.75, pz] })
+              kArmXf.push({
+                pos: [px - side * p.px * 1.0, baseY + 8.6, pz - side * p.pz * 1.0],
+                rotY: tangentRotY,
+              })
+              kLampXf.push({
+                pos: [px - side * p.px * 2.1, baseY + 8.4, pz - side * p.pz * 2.1],
+                rotY: tangentRotY,
+              })
+              addShibuyaAABB(px, pz, 0.3, 0.3, baseY + 5, baseY) // pole base only
+            }
+          }
+          instAdd(kPoleGeo, kPoleMat, kPoleXf)
+          instAdd(kArmGeo, kPoleMat, kArmXf)
+          instAdd(kLampGeo, kLampMat, kLampXf)
+        }
+
+        // ══ 公園通り (Koen-dori) Phase C: 宮下公園風ランドマーク「SHIBUYA PARK」 ══════════
+        // 坂の中腹 (koendori 中心付近) の横長・中層の商業施設。道玄坂の猥雑なビル群とは対照的
+        // に、外壁の緑化 + 屋上公園 + 控えめな1看板で「おしゃれ・落ち着いた北の通り」を象徴する。
+        // 西側 (谷の外=平地 y=0) に据えるので浮かない。下層は西壁の背後、上部マス + 緑化壁 + 屋上が
+        // 壁の上から見えるランドマークになる。到達可能な外面を持つので footprint AABB を登録。
+        {
+          const pMid = koenDoriAt(41) // 中腹 (z≈-67)
+          if (pMid) {
+            const PARK_L = 24 // 坂方向の長さ (横長)
+            const PARK_D = 14 // 奥行
+            const PARK_H = 20 // 中層
+            const parkLat = 20 // 西側中心 lat (footprint 13→27、壁 (lat≤12.5) の背後)
+            const bcx = pMid.cx + pMid.px * -1 * parkLat
+            const bcz = pMid.cz + pMid.pz * -1 * parkLat
+            const rotY = Math.atan2(-pMid.tz, pMid.tx)
+            // avenue 向き (+px 方向) の面: 緑化ルーバー・看板・店舗をここに付ける。
+            const ax = pMid.px
+            const az = pMid.pz
+            // ── (1) 本体マス: 既存の窓付き midMat を流用 (街と馴染ませ draw call も統合)。──
+            const mass = new THREE.Mesh(new THREE.BoxGeometry(PARK_L, PARK_H, PARK_D), midMat)
+            mass.position.set(bcx, PARK_H / 2, bcz)
+            mass.rotation.y = rotY
+            mAdd(mass)
+            const pHalf = Math.abs(pMid.tx) * (PARK_L / 2) + Math.abs(pMid.tz) * (PARK_D / 2)
+            const pDep = Math.abs(pMid.tz) * (PARK_L / 2) + Math.abs(pMid.tx) * (PARK_D / 2)
+            addShibuyaAABB(bcx, bcz, pHalf, pDep, PARK_H) // 到達可能な外面 → footprint 登録
+            // ── (2) 緑化壁: avenue 面に張り出す水平プランター帯 (宮下公園の植栽外壁)。──
+            const greenMat = new THREE.MeshLambertMaterial({ color: 0x3c6b2e })
+            const planterGeo = new THREE.BoxGeometry(PARK_L * 0.92, 0.7, 1.3)
+            for (const ly of [5.5, 9.5, 13.5, 17.5]) {
+              const pl = new THREE.Mesh(planterGeo, greenMat)
+              pl.position.set(bcx + ax * (PARK_D / 2 + 0.4), ly, bcz + az * (PARK_D / 2 + 0.4))
+              pl.rotation.y = rotY
+              mAdd(pl)
+            }
+            // ── (3) 屋上公園: 芝生デッキ + 周囲フェンス (屋上の緑面。植樹は Phase E が足す)。──
+            const grassMat = new THREE.MeshLambertMaterial({
+              color: 0x4d7a3c,
+              map: makeNoiseTexture(64, 0x3a5f2c, 0.16, 8),
+            })
+            const deck = new THREE.Mesh(
+              new THREE.BoxGeometry(PARK_L + 1, 0.5, PARK_D + 1),
+              grassMat,
+            )
+            deck.position.set(bcx, PARK_H + 0.25, bcz)
+            deck.rotation.y = rotY
+            mAdd(deck)
+            const fenceMat = new THREE.MeshStandardMaterial({
+              color: 0x6c7076,
+              roughness: 0.5,
+              metalness: 0.5,
+            })
+            const railLong = new THREE.BoxGeometry(PARK_L + 1, 1.0, 0.1)
+            const railShort = new THREE.BoxGeometry(0.1, 1.0, PARK_D + 1)
+            for (const sd of [1, -1] as const) {
+              const fl = new THREE.Mesh(railLong, fenceMat)
+              fl.position.set(
+                bcx + ax * sd * (PARK_D / 2 + 0.5),
+                PARK_H + 1.0,
+                bcz + az * sd * (PARK_D / 2 + 0.5),
+              )
+              fl.rotation.y = rotY
+              mAdd(fl)
+              const fs = new THREE.Mesh(railShort, fenceMat)
+              const sx = -az // 接線方向 (long 軸) の単位
+              const sz = ax
+              fs.position.set(
+                bcx + sx * sd * (PARK_L / 2 + 0.5),
+                PARK_H + 1.0,
+                bcz + sz * sd * (PARK_L / 2 + 0.5),
+              )
+              fs.rotation.y = rotY
+              mAdd(fs)
+            }
+            // ── (4) 店舗 (1〜2F): avenue 面の明るいガラス帯。控えめ・シック。──
+            const shopMat = new THREE.MeshStandardMaterial({
+              color: 0x2a2f38,
+              emissive: 0xffe9c0,
+              emissiveIntensity: 0.6,
+            })
+            const shop = new THREE.Mesh(new THREE.BoxGeometry(PARK_L * 0.9, 4.2, 0.4), shopMat)
+            shop.position.set(bcx + ax * (PARK_D / 2 + 0.2), 3.2, bcz + az * (PARK_D / 2 + 0.2))
+            shop.rotation.y = rotY
+            mAdd(shop)
+            // ── (5) 控えめな看板「SHIBUYA PARK」: 壁の上に出る高さに1枚だけ (道玄坂の看板洪水と差別化)。──
+            const sgCv = document.createElement("canvas")
+            sgCv.width = 256
+            sgCv.height = 48
+            const sgx = sgCv.getContext("2d")
+            if (sgx) {
+              sgx.fillStyle = "#0d1410"
+              sgx.fillRect(0, 0, 256, 48)
+              sgx.fillStyle = "#cfe6c2"
+              sgx.font = "bold 28px sans-serif"
+              sgx.textAlign = "center"
+              sgx.textBaseline = "middle"
+              sgx.fillText("SHIBUYA PARK", 128, 25)
+            }
+            const sgTex = new THREE.CanvasTexture(sgCv)
+            const sign = new THREE.Mesh(
+              new THREE.PlaneGeometry(10, 1.9),
+              new THREE.MeshBasicMaterial({
+                map: sgTex,
+                toneMapped: false,
+                side: THREE.DoubleSide,
+              }),
+            )
+            sign.position.set(bcx + ax * (PARK_D / 2 + 0.5), 16.5, bcz + az * (PARK_D / 2 + 0.5))
+            sign.rotation.y = rotY
+            add(sign)
+          }
+        }
+
+        // ══ 公園通り (Koen-dori) Phase D: 沿道の建物・店舗 (段々ビル + シックな店名看板) ══
+        // 道玄坂 Phase C の段々ビル手法を流用。ただし公園通りの両側外面はスクランブル側から
+        // 到達可能なので、道玄坂と違い各棟に footprint AABB を付けて貫通を防ぐ (lat≥12 で歩行
+        // 回廊 ±9.6 には掛からない)。足元は y=0 (浮かない)、高さに p.h を足してシルエットが坂と
+        // 共に段々とせり上がる。業態は全てオリジナルの「おしゃれ系」、看板は少なめ・シック。
+        {
+          const dBodyMats = [midMat, concreteMat, facGlassMat]
+          const shopNames = ["CAFÉ BEAM", "NORTE", "CLUB RISE", "GALLERY AOI", "SALON KÔ"]
+          const signTexCache = new Map<string, THREE.CanvasTexture>()
+          const shopSignTex = (name: string, accent: string) => {
+            const cached = signTexCache.get(name)
+            if (cached) return cached
+            const cv = document.createElement("canvas")
+            cv.width = 256
+            cv.height = 40
+            const c = cv.getContext("2d")
+            if (c) {
+              c.fillStyle = "#0b0d12" // 暗い下地 (シック)
+              c.fillRect(0, 0, 256, 40)
+              c.fillStyle = accent
+              c.fillRect(10, 30, 236, 2) // 細いアクセントライン1本だけ
+              c.fillStyle = "#e8ecf0"
+              c.font = "600 22px sans-serif"
+              c.textAlign = "center"
+              c.textBaseline = "middle"
+              c.fillText(name, 128, 16)
+            }
+            const tex = new THREE.CanvasTexture(cv)
+            signTexCache.set(name, tex)
+            return tex
+          }
+          const shopAccents = ["#e8a04a", "#dfe4ea", "#c85a9a", "#5aa0d8", "#9ad0a0"]
+          let signIdx = 0
+          for (const side of [1, -1] as const) {
+            let s = 5
+            let guard = 0
+            while (s < KDR_TOP_S - 3 && guard++ < 30) {
+              const sw = 7 + rnd() * 6 // 間口
+              const p = koenDoriAt(s + sw / 2)
+              if (!p) {
+                s += sw
+                continue
+              }
+              // SHIBUYA PARK (西側中腹) を避ける。
+              if (side === -1 && s > 26 && s < 56) {
+                s += sw
+                continue
+              }
+              const bd = 8 + rnd() * 5 // 奥行
+              const frontLat = KDR_HW + 1 // 壁 (lat≤12.5) のすぐ背後
+              const cx = p.cx + p.px * side * (frontLat + bd / 2)
+              const cz = p.cz + p.pz * side * (frontLat + bd / 2)
+              let bh = 15 + rnd() * 11 + p.h // 中層が中心、坂で段々とせり上がる
+              if (rnd() < 0.18) bh += 15 + rnd() * 13 // 一部高層
+              const mat = dBodyMats[Math.floor(rnd() * dBodyMats.length)] ?? midMat
+              const rotY = Math.atan2(-p.tz, p.tx)
+              const body = new THREE.Mesh(new THREE.BoxGeometry(sw - 0.4, bh, bd), mat)
+              body.position.set(cx, bh / 2, cz)
+              body.rotation.y = rotY
+              mAdd(body)
+              // footprint AABB (到達可能な外面 → 貫通防止)。lat≥12 なので回廊は素通り。
+              const hw = Math.abs(p.tx) * (sw / 2) + Math.abs(p.tz) * (bd / 2)
+              const hd = Math.abs(p.tz) * (sw / 2) + Math.abs(p.tx) * (bd / 2)
+              addShibuyaAABB(cx, cz, hw, hd, bh)
+              // 段々のセットバック屋上 (たまに)。
+              if (rnd() < 0.4) {
+                const th = 4 + rnd() * 6
+                const top = new THREE.Mesh(
+                  new THREE.BoxGeometry((sw - 0.4) * 0.6, th, bd * 0.6),
+                  mat,
+                )
+                top.position.set(cx, bh + th / 2, cz)
+                top.rotation.y = rotY
+                mAdd(top)
+              }
+              // シックな店名看板を 1/3 ほどの棟に1枚 (壁の上に出る高さ、両面)。看板洪水にしない。
+              if (rnd() < 0.42 && bh > 12) {
+                const name = shopNames[signIdx % shopNames.length] ?? "BEAM"
+                const accent = shopAccents[signIdx % shopAccents.length] ?? "#dfe4ea"
+                signIdx++
+                const sign = new THREE.Mesh(
+                  new THREE.PlaneGeometry(Math.min(sw * 0.8, 8), 1.5),
+                  new THREE.MeshBasicMaterial({
+                    map: shopSignTex(name, accent),
+                    toneMapped: false,
+                    side: THREE.DoubleSide,
+                    transparent: true,
+                  }),
+                )
+                sign.position.set(
+                  p.cx + p.px * side * frontLat,
+                  p.h + 9.4,
+                  p.cz + p.pz * side * frontLat,
+                )
+                sign.rotation.y = rotY
+                add(sign)
+              }
+              s += sw + 0.6
+            }
+          }
+        }
+
+        // ══ 公園通り (Koen-dori) Phase E: 街路樹・緑 (差別化の核 — 道玄坂より緑が多い) ══
+        // 公園通りを道玄坂と分ける核。両側に「大きめ・多め」の街路樹を並べ、上ほど密にして緑の
+        // トンネル感を出す。歩道沿いに花壇、SHIBUYA PARK 屋上に植樹。canopy は instAdd 後に
+        // registerSway で道玄坂と同じ揺れを登録 (Phase G が neon/霧/車などの残りの動きを足す)。
+        {
+          const kTrunkGeo = new THREE.CylinderGeometry(0.26, 0.4, 5.6, 6) // 道玄坂 (高4) より大
+          const kLeafGeo = new THREE.SphereGeometry(2.7, 8, 6) // 道玄坂 (2.0) より大きい樹冠
+          const kLeafMat = new THREE.MeshLambertMaterial({
+            color: 0x356b2e, // 道玄坂の暗い夜緑より瑞々しい緑 (公園通り=緑)
+            emissive: 0x0e1f0c,
+            emissiveIntensity: 0.5,
+          })
+          const kPlanterGeo = new THREE.CylinderGeometry(0.82, 0.95, 0.36, 8)
+          const kPlanterMat = new THREE.MeshLambertMaterial({ color: 0x34373d })
+          const trunkXf: Xf[] = []
+          const leafXf: Xf[] = []
+          const planterXf: Xf[] = []
+          const TREE_LAT = 8.6 // 歩道 (車道 ±6.5 の外、壁 11 の内)。中央車道は常に開けておく。
+          const addTree = (s: number, side: 1 | -1) => {
+            const p = koenDoriAt(s)
+            if (!p) return
+            const baseY = p.h
+            const tx = p.cx + p.px * side * TREE_LAT
+            const tz = p.cz + p.pz * side * TREE_LAT
+            const frac = s / KDR_TOP_S // 谷底0 → 上端1
+            const scl = (1.0 + 0.55 * frac) * (0.9 + rnd() * 0.3) // 上ほど大 → 緑のトンネル
+            trunkXf.push({ pos: [tx, baseY + 2.8, tz] })
+            leafXf.push({ pos: [tx, baseY + 5.7, tz], scl })
+            planterXf.push({ pos: [tx, baseY + 0.18, tz] })
+            addShibuyaAABB(tx, tz, 0.5, 0.5, baseY + 4, baseY) // tight trunk hitbox (floats w/ ramp)
+          }
+          for (const side of [1, -1] as const) {
+            // メイン列: 道玄坂 (s+=9.5) より密 (s+=7)、左右互い違い。
+            for (let s = 7; s < KDR_TOP_S - 3; s += 7) addTree(s + (side > 0 ? 0 : 3.5), side)
+            // 緑のトンネル: 上半分に infill して密度を上げる。
+            for (let s = KDR_TOP_S * 0.45; s < KDR_TOP_S - 3; s += 6) addTree(s + 3, side)
+          }
+          // 屋上の植樹: SHIBUYA PARK (Phase C と同じ pMid/parkLat) の芝生デッキに小ぶりの緑。
+          const pPark = koenDoriAt(41)
+          if (pPark) {
+            const bcx = pPark.cx + pPark.px * -1 * 20
+            const bcz = pPark.cz + pPark.pz * -1 * 20
+            const sxv = -pPark.pz // 接線 (long軸) 単位
+            const szv = pPark.px
+            const axv = pPark.px // 奥行 (perp) 単位
+            const azv = pPark.pz
+            for (let u = -1; u <= 1; u++) {
+              for (const v of [-3.5, 3.5]) {
+                const rx = bcx + sxv * (u * 7) + axv * v
+                const rz = bcz + szv * (u * 7) + azv * v
+                trunkXf.push({ pos: [rx, 21.5, rz] }) // 芝生デッキ (y≈20.5) の上
+                leafXf.push({ pos: [rx, 24.0, rz], scl: 0.8 })
+              }
+            }
+          }
+          instAdd(kTrunkGeo, woodMat, trunkXf)
+          const kLeafMesh = instAdd(kLeafGeo, kLeafMat, leafXf)
+          instAdd(kPlanterGeo, kPlanterMat, planterXf)
+          registerSway(kLeafMesh, leafXf, 0.05, 0.9, 0.6) // 道玄坂と同じ手法の風揺れ
+          // ── 花壇 (植え込み): 歩道の外寄りに低い土箱 + 色とりどりの花トップ。低い → 衝突なし。──
+          const bedGeo = new THREE.BoxGeometry(2.4, 0.42, 0.95)
+          const bedSoilMat = new THREE.MeshLambertMaterial({ color: 0x3a2c20 })
+          const flowerGeo = new THREE.BoxGeometry(2.2, 0.2, 0.78)
+          const flowerCols = [0xd8688c, 0xe6c84e, 0x9a7ed4, 0xeae4ea]
+          const bedXf: Xf[] = []
+          const flowerXf: Xf[][] = flowerCols.map(() => [])
+          for (const side of [1, -1] as const) {
+            for (let s = 11; s < KDR_TOP_S - 4; s += 11) {
+              const p = koenDoriAt(s + (side > 0 ? 5 : 0))
+              if (!p) continue
+              const baseY = p.h
+              const lat = side * 9.7
+              const bx = p.cx + p.px * lat
+              const bz = p.cz + p.pz * lat
+              const rotY = Math.atan2(-p.tz, p.tx)
+              bedXf.push({ pos: [bx, baseY + 0.21, bz], rotY })
+              const ci = Math.floor(rnd() * flowerCols.length)
+              flowerXf[ci]?.push({ pos: [bx, baseY + 0.44, bz], rotY })
+            }
+          }
+          instAdd(bedGeo, bedSoilMat, bedXf)
+          flowerCols.forEach((c, i) =>
+            instAdd(
+              flowerGeo,
+              new THREE.MeshLambertMaterial({ color: c, emissive: c, emissiveIntensity: 0.25 }),
+              flowerXf[i] ?? [],
+            ),
+          )
+        }
+
+        // ══ 公園通り (Koen-dori) Phase F: 突き当り (代々木公園方面) + 接続予約 ════════════
+        // 坂上の行き止まりを工事バリケード + 「代々木公園方面」サインで化粧 (当たり判定の実体は
+        // Phase B の cap)。cap の上に背の高い暗緑の樹冠シルエットを覗かせて「代々木公園の広さ /
+        // 開けた感じ」を暗示する。谷底の口には公園通りのゲートサイン。将来 宮下公園/代々木公園 へ
+        // 繋ぐための接続予約コメント付き。スクランブル北口の地続き接続は Phase A 独立sim で確認済み。
+        {
+          const kSignTex = (l1: string, l2: string, bg: string, fg: string) => {
+            const cv = document.createElement("canvas")
+            cv.width = 256
+            cv.height = 96
+            const c = cv.getContext("2d")
+            if (c) {
+              c.fillStyle = bg
+              c.fillRect(0, 0, 256, 96)
+              c.fillStyle = fg
+              c.textAlign = "center"
+              c.textBaseline = "middle"
+              c.font = "bold 30px sans-serif"
+              c.fillText(l1, 128, 36)
+              c.font = "20px sans-serif"
+              c.fillText(l2, 128, 70)
+            }
+            return new THREE.CanvasTexture(cv)
+          }
+          // ── (1) 行き止まりバリケード + 代々木公園方面サイン (上端) ──
+          const e = koenDoriAt(KDR_TOP_S - 0.5)
+          if (e) {
+            const barRotY = Math.atan2(e.tx, e.tz)
+            const fenceMat = new THREE.MeshStandardMaterial({
+              color: 0x6a6e75,
+              roughness: 0.5,
+              metalness: 0.5,
+            })
+            const fence = new THREE.Mesh(new THREE.BoxGeometry(KDR_HW * 2, 2.8, 0.2), fenceMat)
+            fence.position.set(e.cx - e.tx * 1.6, e.h + 1.4, e.cz - e.tz * 1.6)
+            fence.rotation.y = barRotY
+            mAdd(fence)
+            const barrierMat = new THREE.MeshStandardMaterial({
+              color: 0xe0a020,
+              emissive: 0x5a3c08,
+              emissiveIntensity: 0.8,
+            })
+            const lampMat = new THREE.MeshBasicMaterial({ color: 0xff8a30, toneMapped: false })
+            const barXf: Xf[] = []
+            const lampXf: Xf[] = []
+            for (const off of [-6, -2, 2, 6] as const) {
+              const bx = e.cx - e.tx * 2.7 + e.px * off
+              const bz = e.cz - e.tz * 2.7 + e.pz * off
+              barXf.push({ pos: [bx, e.h + 0.55, bz], rotY: barRotY })
+              lampXf.push({ pos: [bx, e.h + 1.25, bz] })
+            }
+            instAdd(new THREE.BoxGeometry(2.4, 1.1, 0.3), barrierMat, barXf)
+            instAdd(new THREE.SphereGeometry(0.17, 8, 6), lampMat, lampXf)
+            const dirSign = new THREE.Mesh(
+              new THREE.PlaneGeometry(KDR_HW * 1.4, 2.6),
+              new THREE.MeshBasicMaterial({
+                map: kSignTex("代々木公園 方面", "YOYOGI PARK →", "#0c2412", "#bfe8c0"),
+                toneMapped: false,
+                side: THREE.DoubleSide,
+              }),
+            )
+            dirSign.position.set(e.cx - e.tx * 1.5, e.h + 4.6, e.cz - e.tz * 1.5)
+            dirSign.rotation.y = barRotY
+            add(dirSign)
+            // ── (2) 開けた感じ: cap の先 (北、平地 y=0) に代々木公園を暗示する背の高い暗緑の
+            // 樹冠シルエット。cap (高≈12.8) の上から覗くので「壁の向こうに緑地が広がる」読み。──
+            const hintLeafMat = new THREE.MeshLambertMaterial({
+              color: 0x214d24,
+              emissive: 0x0a1a0c,
+              emissiveIntensity: 0.4,
+            })
+            const hintLeafGeo = new THREE.SphereGeometry(3.6, 7, 5)
+            const hintXf: Xf[] = []
+            for (let i = 0; i < 9; i++) {
+              const off = -13 + i * 3.2
+              const depth = 4 + (i % 3) * 2.2
+              hintXf.push({
+                pos: [
+                  e.cx + e.tx * depth + e.px * off,
+                  12.5 + (i % 3) * 2.4, // cap (≈12.8) の天端付近〜上に覗かせる
+                  e.cz + e.tz * depth + e.pz * off,
+                ],
+                scl: 1.6 + (i % 3) * 0.35,
+              })
+            }
+            instAdd(hintLeafGeo, hintLeafMat, hintXf)
+          }
+          // ── (3) 谷底の口: 公園通りのゲート横梁 + サイン (スクランブルへ向ける)。歩行は塞がない
+          // (横梁は頭上、柱は既存側壁の上)。 ──
+          const m = koenDoriAt(1.5)
+          if (m) {
+            const beamMat = new THREE.MeshStandardMaterial({
+              color: 0x3a3d44,
+              roughness: 0.6,
+              metalness: 0.4,
+            })
+            const beam = new THREE.Mesh(new THREE.BoxGeometry(KDR_HW * 2 + 3, 0.6, 0.6), beamMat)
+            beam.position.set(m.cx, m.h + 6.6, m.cz)
+            beam.rotation.y = Math.atan2(-m.tz, m.tx)
+            mAdd(beam)
+            const gateSign = new THREE.Mesh(
+              new THREE.PlaneGeometry(KDR_HW * 1.5, 2.0),
+              new THREE.MeshBasicMaterial({
+                map: kSignTex("公園通り", "KOEN-DORI", "#101826", "#e6ead0"),
+                toneMapped: false,
+                side: THREE.DoubleSide,
+              }),
+            )
+            gateSign.position.set(m.cx + m.tx * 0.4, m.h + 7.4, m.cz + m.tz * 0.4)
+            gateSign.rotation.y = Math.atan2(m.tx, m.tz)
+            add(gateSign)
+          }
+          // ── FUTURE / 接続予約 ──────────────────────────────────────────────────────
+          // 上端 cap (KDR_PATH 終点 ≈local(-9,-90)、r≈90、北外周壁 z=-100 の手前) は将来エリア
+          // への引き渡し点:
+          //   ・宮下公園  — 中腹 SHIBUYA PARK の屋上公園へ階段/デッキで接続
+          //   ・代々木公園 — この突き当りの先、北外周壁を開口して広い緑地ステージへ
+          // 実装時は cap + バリケードを開口に置換し、新しい歩行レーン (koenDoriGroundY と同型の
+          // 専用 floor + height 関数) を継ぐ。谷底の口 (s=0, h=0) は既に平坦なスクランブルと地続き
+          // で自然に入れることを Phase A 独立sim で確認済み (max per-step 0.0075 ≪ snap 1.5)。
+        }
+
+        // ══ 公園通り (Koen-dori) Phase G: 動き・空気感 (控えめネオン / 緑の霞 / 駐車車両 / 人影) ══
+        // 街路樹の揺れは Phase E で registerSway 済み。ここは公園通りらしい「おしゃれで控えめ」な
+        // 空気感を足す: シックな色のネオン (animNeon でフリッカー)、宮下公園へ上る緑の霞、静止の
+        // 駐車車両 (STEP2 で動かす placeholder)、遠景の人影シルエット。
+        {
+          // ── (1) 控えめネオン: 白・暖色・薄緑のみ (道玄坂の原色洪水と差別化)、壁面に疎らに。──
+          const kNeonGeo = new THREE.BoxGeometry(0.22, 1, 0.14)
+          const kNeonCols = [0xf0f2ff, 0xffd9a0, 0xbfe8c0] // 白 / 暖色 / 薄緑
+          const kNeonMats = kNeonCols.map(
+            (c) =>
+              new THREE.MeshStandardMaterial({ color: c, emissive: c, emissiveIntensity: 1.0 }),
+          )
+          const kNeonXf: Xf[][] = kNeonCols.map(() => [])
+          for (const side of [1, -1] as const) {
+            for (let s = 7; s < KDR_TOP_S - 4; s += 5) {
+              if (rnd() < 0.55) continue // 疎ら (看板洪水にしない)
+              const p = koenDoriAt(s)
+              if (!p) continue
+              const lat = side * (KDR_HW - 0.35)
+              const barH = 1.6 + rnd() * 2.0
+              const yC = p.h + 4.5 + rnd() * 3.5
+              const ci = Math.floor(rnd() * kNeonCols.length)
+              kNeonXf[ci]?.push({
+                pos: [p.cx + p.px * lat, yC, p.cz + p.pz * lat],
+                rotY: Math.atan2(-p.tz, p.tx),
+                scl: [1, barH, 1],
+              })
+            }
+          }
+          kNeonMats.forEach((mm, i) => {
+            if (instAdd(kNeonGeo, mm, kNeonXf[i] ?? [])) animNeon.push(mm) // updateShibuyaMap でフリッカー
+          })
+          // ── (2) 緑の霞: 宮下公園へ上る方向に柔らかい緑ヘイズ (加法スプライト数枚、両面)。──
+          const hazeCv = document.createElement("canvas")
+          hazeCv.width = 64
+          hazeCv.height = 64
+          const hz = hazeCv.getContext("2d")
+          if (hz) {
+            const g = hz.createRadialGradient(32, 32, 0, 32, 32, 32)
+            g.addColorStop(0, "rgba(180,230,190,0.5)")
+            g.addColorStop(1, "rgba(180,230,190,0)")
+            hz.fillStyle = g
+            hz.fillRect(0, 0, 64, 64)
+          }
+          const hazeTex = new THREE.CanvasTexture(hazeCv)
+          const hazeMat = new THREE.MeshBasicMaterial({
+            map: hazeTex,
+            transparent: true,
+            opacity: 0.1,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false,
+            side: THREE.DoubleSide,
+          })
+          const hazeGeo = new THREE.PlaneGeometry(22, 16)
+          const hazeXf: Xf[] = []
+          for (let i = 0; i < 5; i++) {
+            const p = koenDoriAt(KDR_TOP_S * (0.5 + i * 0.1))
+            if (!p) continue
+            hazeXf.push({ pos: [p.cx, p.h + 6 + i, p.cz], rotY: Math.atan2(p.tx, p.tz) })
+          }
+          instAdd(hazeGeo, hazeMat, hazeXf)
+          // ── (3) 駐車車両 (静止、STEP2 で動かす): 縁石脇に数台。固い → AABB。中央車道は空ける。──
+          const carBodyMat = new THREE.MeshStandardMaterial({
+            color: 0x2a2e36,
+            roughness: 0.5,
+            metalness: 0.4,
+          })
+          const carCabMat = new THREE.MeshStandardMaterial({
+            color: 0x0a0c10,
+            emissive: 0x223044,
+            emissiveIntensity: 0.3,
+          })
+          const carBodyGeo = new THREE.BoxGeometry(2.0, 1.1, 4.4)
+          const carCabGeo = new THREE.BoxGeometry(1.8, 0.8, 2.2)
+          for (const [s, side] of [
+            [16, 1],
+            [34, -1],
+            [52, 1],
+          ] as const) {
+            const p = koenDoriAt(s)
+            if (!p) continue
+            const lat = side * 6.3 // 縁石 (±6.5) ぎわの車道に縦列駐車 — 歩道の街路樹と被らず中央車道も開く
+            const cx = p.cx + p.px * lat
+            const cz = p.cz + p.pz * lat
+            const rotY = Math.atan2(p.tx, p.tz) // 車長 (z) を接線に沿わせ縦列駐車
+            const body = new THREE.Mesh(carBodyGeo, carBodyMat)
+            body.position.set(cx, p.h + 0.7, cz)
+            body.rotation.y = rotY
+            mAdd(body)
+            const cab = new THREE.Mesh(carCabGeo, carCabMat)
+            cab.position.set(cx, p.h + 1.55, cz)
+            cab.rotation.y = rotY
+            mAdd(cab)
+            const hw = Math.abs(p.tz) * 1.0 + Math.abs(p.tx) * 2.2
+            const hd = Math.abs(p.tx) * 1.0 + Math.abs(p.tz) * 2.2
+            addShibuyaAABB(cx, cz, hw, hd, p.h + 1.4, p.h)
+          }
+          // ── (4) 遠景の人影 (静止、STEP2 で動かす): 歩道に暗いシルエット。AABB なし。──
+          const figMat = new THREE.MeshBasicMaterial({
+            color: 0x0c0e14,
+            transparent: true,
+            opacity: 0.85,
+            side: THREE.DoubleSide,
+          })
+          const figGeo = new THREE.PlaneGeometry(0.7, 1.8)
+          const figXf: Xf[] = []
+          for (const side of [1, -1] as const) {
+            for (let s = 9; s < KDR_TOP_S - 5; s += 8.5) {
+              if (rnd() < 0.5) continue
+              const p = koenDoriAt(s + rnd() * 3)
+              if (!p) continue
+              const lat = side * (6.5 + rnd() * 2.5)
+              figXf.push({
+                pos: [p.cx + p.px * lat, p.h + 0.9, p.cz + p.pz * lat],
+                rotY: rnd() * Math.PI,
+              })
+            }
+          }
+          instAdd(figGeo, figMat, figXf)
         }
 
         // ══ Phase C (scramble-detail): 大型ビジョン群 (駅前の顔) ════════════════════
@@ -26552,10 +27478,12 @@ export default function ThreeWorld({
           // "glue to the ramp" branch below (keeps descending from going airborne).
           let onDgzSlope = false
           if (isShibuyaStage(huntMissionConfigRef.current.stage)) {
-            const slopeY = dogenzakaGroundY(
-              refs.focalPoint.x - HUNT_ARENA.x,
-              refs.focalPoint.z - HUNT_ARENA.z,
-            )
+            const lx = refs.focalPoint.x - HUNT_ARENA.x
+            const lz = refs.focalPoint.z - HUNT_ARENA.z
+            // 道玄坂 (南西) と 公園通り (北) は重ならない別回廊。各々が帯の外では 0 を返すので
+            // max を取れば「いま乗っている坂」の高さだけ拾える。両坂の平坦域も従来通り 0 で、
+            // onDgzSlope の吸着分岐 (DGZ_SNAP_MAX) は両方の下り坂で共通に効く。
+            const slopeY = Math.max(dogenzakaGroundY(lx, lz), koenDoriGroundY(lx, lz))
             if (slopeY > 0) {
               onDgzSlope = true
               if (slopeY > groundY) groundY = slopeY
