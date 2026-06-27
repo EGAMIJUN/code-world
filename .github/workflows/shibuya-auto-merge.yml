@@ -36,43 +36,65 @@ jobs:
               pull_number: prNumber
             });
 
-            // Check issue comments for CodeRabbit Major findings
+            // Collect all CodeRabbit comments up front
             const { data: issueComments } = await github.rest.issues.listComments({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: pr.number
             });
-            const hasMajorInIssue = issueComments.some(c =>
-              c.user?.login === 'coderabbitai[bot]' &&
-              c.body?.includes('Major') &&
-              !c.body?.includes('No actionable comments')
-            );
+            const crIssue = issueComments.filter(c => c.user?.login === 'coderabbitai[bot]');
 
-            // Also check inline review comments for CodeRabbit Major findings
             const { data: reviewComments } = await github.rest.pulls.listReviewComments({
               owner: context.repo.owner,
               repo: context.repo.repo,
               pull_number: pr.number
             });
-            const hasMajorInReview = reviewComments.some(c =>
-              c.user?.login === 'coderabbitai[bot]' &&
+            const crReview = reviewComments.filter(c => c.user?.login === 'coderabbitai[bot]');
+
+            // Gate 1: CodeRabbit rate-limited → review not complete, hold
+            const isRateLimited = crIssue.some(c =>
+              c.body?.toLowerCase().includes('review limit reached') ||
+              c.body?.toLowerCase().includes('rate limit')
+            );
+            if (isRateLimited) {
+              core.setFailed('CodeRabbit rate limited - review not complete, holding merge');
+              return;
+            }
+
+            // Gate 2: CodeRabbit review not complete → hold
+            // Completion is marked by "Actionable comments posted:" or
+            // "No actionable comments" appearing in a summary comment
+            const reviewCompleted = crIssue.some(c =>
+              c.body?.includes('Actionable comments posted:') ||
+              c.body?.includes('No actionable comments')
+            );
+            if (!reviewCompleted) {
+              core.setFailed('CodeRabbit review not complete - waiting');
+              return;
+            }
+
+            // Gate 3: CodeRabbit Major findings in issue or review comments
+            const hasMajorInIssue = crIssue.some(c =>
               c.body?.includes('Major') &&
               !c.body?.includes('No actionable comments')
             );
-
+            const hasMajorInReview = crReview.some(c =>
+              c.body?.includes('Major') &&
+              !c.body?.includes('No actionable comments')
+            );
             if (hasMajorInIssue || hasMajorInReview) {
               core.setFailed('CodeRabbit Major issues found - manual review required');
               return;
             }
 
-            // Check PR body for unresolved items
+            // Gate 4: PR body contains unresolved items marker
             if (pr.body?.includes('未解決')) {
               core.setFailed('PR has unresolved items');
               return;
             }
 
-            // Enable auto-merge via GraphQL so branch-protection required checks
-            // must complete before the actual merge happens
+            // All gates passed — enable auto-merge via GraphQL so branch-protection
+            // required checks must still complete before the actual merge happens
             await github.graphql(`
               mutation($pullRequestId: ID!, $mergeMethod: PullRequestMergeMethod!) {
                 enablePullRequestAutoMerge(input: {
