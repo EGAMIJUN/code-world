@@ -22912,6 +22912,127 @@ export default function ThreeWorld({
           // で自然に入れることを Phase A 独立sim で確認済み (max per-step 0.0075 ≪ snap 1.5)。
         }
 
+        // ══ 公園通り (Koen-dori) Phase G: 動き・空気感 (控えめネオン / 緑の霞 / 駐車車両 / 人影) ══
+        // 街路樹の揺れは Phase E で registerSway 済み。ここは公園通りらしい「おしゃれで控えめ」な
+        // 空気感を足す: シックな色のネオン (animNeon でフリッカー)、宮下公園へ上る緑の霞、静止の
+        // 駐車車両 (STEP2 で動かす placeholder)、遠景の人影シルエット。
+        {
+          // ── (1) 控えめネオン: 白・暖色・薄緑のみ (道玄坂の原色洪水と差別化)、壁面に疎らに。──
+          const kNeonGeo = new THREE.BoxGeometry(0.22, 1, 0.14)
+          const kNeonCols = [0xf0f2ff, 0xffd9a0, 0xbfe8c0] // 白 / 暖色 / 薄緑
+          const kNeonMats = kNeonCols.map(
+            (c) =>
+              new THREE.MeshStandardMaterial({ color: c, emissive: c, emissiveIntensity: 1.0 }),
+          )
+          const kNeonXf: Xf[][] = kNeonCols.map(() => [])
+          for (const side of [1, -1] as const) {
+            for (let s = 7; s < KDR_TOP_S - 4; s += 5) {
+              if (rnd() < 0.55) continue // 疎ら (看板洪水にしない)
+              const p = koenDoriAt(s)
+              if (!p) continue
+              const lat = side * (KDR_HW - 0.35)
+              const barH = 1.6 + rnd() * 2.0
+              const yC = p.h + 4.5 + rnd() * 3.5
+              const ci = Math.floor(rnd() * kNeonCols.length)
+              kNeonXf[ci]?.push({
+                pos: [p.cx + p.px * lat, yC, p.cz + p.pz * lat],
+                rotY: Math.atan2(-p.tz, p.tx),
+                scl: [1, barH, 1],
+              })
+            }
+          }
+          kNeonMats.forEach((mm, i) => {
+            if (instAdd(kNeonGeo, mm, kNeonXf[i] ?? [])) animNeon.push(mm) // updateShibuyaMap でフリッカー
+          })
+          // ── (2) 緑の霞: 宮下公園へ上る方向に柔らかい緑ヘイズ (加法スプライト数枚、両面)。──
+          const hazeCv = document.createElement("canvas")
+          hazeCv.width = 64
+          hazeCv.height = 64
+          const hz = hazeCv.getContext("2d")
+          if (hz) {
+            const g = hz.createRadialGradient(32, 32, 0, 32, 32, 32)
+            g.addColorStop(0, "rgba(180,230,190,0.5)")
+            g.addColorStop(1, "rgba(180,230,190,0)")
+            hz.fillStyle = g
+            hz.fillRect(0, 0, 64, 64)
+          }
+          const hazeTex = new THREE.CanvasTexture(hazeCv)
+          const hazeMat = new THREE.MeshBasicMaterial({
+            map: hazeTex,
+            transparent: true,
+            opacity: 0.1,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false,
+            side: THREE.DoubleSide,
+          })
+          const hazeGeo = new THREE.PlaneGeometry(22, 16)
+          const hazeXf: Xf[] = []
+          for (let i = 0; i < 5; i++) {
+            const p = koenDoriAt(KDR_TOP_S * (0.5 + i * 0.1))
+            if (!p) continue
+            hazeXf.push({ pos: [p.cx, p.h + 6 + i, p.cz], rotY: Math.atan2(p.tx, p.tz) })
+          }
+          instAdd(hazeGeo, hazeMat, hazeXf)
+          // ── (3) 駐車車両 (静止、STEP2 で動かす): 縁石脇に数台。固い → AABB。中央車道は空ける。──
+          const carBodyMat = new THREE.MeshStandardMaterial({
+            color: 0x2a2e36,
+            roughness: 0.5,
+            metalness: 0.4,
+          })
+          const carCabMat = new THREE.MeshStandardMaterial({
+            color: 0x0a0c10,
+            emissive: 0x223044,
+            emissiveIntensity: 0.3,
+          })
+          const carBodyGeo = new THREE.BoxGeometry(2.0, 1.1, 4.4)
+          const carCabGeo = new THREE.BoxGeometry(1.8, 0.8, 2.2)
+          for (const [s, side] of [
+            [16, 1],
+            [34, -1],
+            [52, 1],
+          ] as const) {
+            const p = koenDoriAt(s)
+            if (!p) continue
+            const lat = side * 8.0
+            const cx = p.cx + p.px * lat
+            const cz = p.cz + p.pz * lat
+            const rotY = Math.atan2(p.tx, p.tz) // 車長 (z) を接線に沿わせ縦列駐車
+            const body = new THREE.Mesh(carBodyGeo, carBodyMat)
+            body.position.set(cx, p.h + 0.7, cz)
+            body.rotation.y = rotY
+            mAdd(body)
+            const cab = new THREE.Mesh(carCabGeo, carCabMat)
+            cab.position.set(cx, p.h + 1.55, cz)
+            cab.rotation.y = rotY
+            mAdd(cab)
+            const hw = Math.abs(p.tz) * 1.0 + Math.abs(p.tx) * 2.2
+            const hd = Math.abs(p.tx) * 1.0 + Math.abs(p.tz) * 2.2
+            addShibuyaAABB(cx, cz, hw, hd, p.h + 1.4, p.h)
+          }
+          // ── (4) 遠景の人影 (静止、STEP2 で動かす): 歩道に暗いシルエット。AABB なし。──
+          const figMat = new THREE.MeshBasicMaterial({
+            color: 0x0c0e14,
+            transparent: true,
+            opacity: 0.85,
+            side: THREE.DoubleSide,
+          })
+          const figGeo = new THREE.PlaneGeometry(0.7, 1.8)
+          const figXf: Xf[] = []
+          for (const side of [1, -1] as const) {
+            for (let s = 9; s < KDR_TOP_S - 5; s += 8.5) {
+              if (rnd() < 0.5) continue
+              const p = koenDoriAt(s + rnd() * 3)
+              if (!p) continue
+              const lat = side * (6.5 + rnd() * 2.5)
+              figXf.push({
+                pos: [p.cx + p.px * lat, p.h + 0.9, p.cz + p.pz * lat],
+                rotY: rnd() * Math.PI,
+              })
+            }
+          }
+          instAdd(figGeo, figMat, figXf)
+        }
+
         // ══ Phase C (scramble-detail): 大型ビジョン群 (駅前の顔) ════════════════════
         // The 駅前 video-wall look: several giant fictional-ad screens facing the
         // crossing + a round vision crowning the 渋谷MODE cylinder. Each screen is one
