@@ -23098,6 +23098,148 @@ export default function ThreeWorld({
         makeFacade(120, 32, 12, 8, 56, Math.PI / 2, "stepped") // 南壁ぎわ中央
         makeFacade(133, -28, 7, 12, 60, 0, "glass") // 北東の壁際 (ヒカリエ東脇)
 
+        // ══ 駅東/ヒカリエ (Eki-higashi) Phase C: 広場ディテール (地下入口 + 大型ビジョン + 照明) ══
+        // 駅東広場を「らしく」する: 地下広場への装飾入口 (グレーチング、歩いて越せる) + ビル面の
+        // 大型ビジョン + 背の高いモダンな広場灯 + ベンチ/プランター。中央プラザは塞がない。
+        {
+          // ── (1) 地下広場への入口 (装飾、グレーチングで封鎖 — 地下は未実装): 中央プラザに据える。──
+          const subX = 109
+          const subZ = 4
+          for (let s = 0; s < 4; s++) {
+            const st = new THREE.Mesh(new THREE.BoxGeometry(3.4, 0.4, 1.1), wallMat)
+            st.position.set(subX, -0.2 - s * 0.34, subZ - 1.5 + s * 1.0)
+            mAdd(st)
+          }
+          const grate = new THREE.Mesh(
+            new THREE.BoxGeometry(3.4, 0.08, 4.6),
+            new THREE.MeshStandardMaterial({ color: 0x2a2c32, roughness: 0.45, metalness: 0.75 }),
+          )
+          grate.position.set(subX, 0.04, subZ)
+          mAdd(grate)
+          const subPostGeo = new THREE.CylinderGeometry(0.07, 0.07, 1.0, 6)
+          const subPostXf: Xf[] = []
+          for (let i = 0; i <= 5; i++) {
+            subPostXf.push({ pos: [subX - 1.95, 0.5, subZ - 2.5 + i] })
+            subPostXf.push({ pos: [subX + 1.95, 0.5, subZ - 2.5 + i] })
+          }
+          instAdd(subPostGeo, railMat, subPostXf)
+          for (const rxp of [-1.95, 1.95]) {
+            const rail = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.08, 5.2), railMat)
+            rail.position.set(subX + rxp, 1.0, subZ)
+            mAdd(rail)
+            addShibuyaAABB(subX + rxp, subZ, 0.2, 2.6, 1.0) // low railing — guides around the pit
+          }
+          const subSign = new THREE.Mesh(
+            new THREE.PlaneGeometry(4.2, 1.3),
+            new THREE.MeshBasicMaterial({
+              map: makeSignTex({
+                kind: "board",
+                w: 5,
+                h: 1.4,
+                bg: "#0a1426",
+                t1: "駅東 地下広場",
+                c1: "#9fd0ff",
+                t2: "▼ B1 PLAZA",
+                c2: "#ffffff",
+                bar: "#1c3a6a",
+              }),
+              toneMapped: false,
+              side: THREE.DoubleSide,
+            }),
+          )
+          subSign.position.set(subX, 3.0, subZ + 2.8)
+          add(subSign)
+          // ── (2) 大型ビジョン: SHIBUYA RISE と ヒカリエ のプラザ向き面に明るい広告スクリーン。──
+          const visAd = (label: string, accent: string) => {
+            const cv = document.createElement("canvas")
+            cv.width = 256
+            cv.height = 144
+            const c = cv.getContext("2d")
+            if (c) {
+              c.fillStyle = "#050810" // dark screen base
+              c.fillRect(0, 0, 256, 144)
+              c.fillStyle = accent
+              for (let i = 0; i < 5; i++) c.fillRect(18 + i * 46, 20 + (i % 2) * 60, 34, 44)
+              c.fillStyle = "#eef4ff"
+              c.font = "bold 30px sans-serif"
+              c.textAlign = "center"
+              c.fillText(label, 128, 130)
+            }
+            const t = new THREE.CanvasTexture(cv)
+            t.colorSpace = THREE.SRGBColorSpace
+            return new THREE.MeshBasicMaterial({ map: t, toneMapped: false })
+          }
+          // SHIBUYA RISE west face (faces the plaza, x≈113.8, z=24).
+          const vis1 = new THREE.Mesh(new THREE.PlaneGeometry(12, 8), visAd("RISE", "#3aa0ff"))
+          vis1.position.set(113.7, 16, 24)
+          vis1.rotation.y = -Math.PI / 2
+          add(vis1)
+          // ヒカリエ south face (faces the plaza, z≈-3.8, x=120).
+          const vis2 = new THREE.Mesh(new THREE.PlaneGeometry(16, 9), visAd("HIKARIE", "#7a5cff"))
+          vis2.position.set(120, 20, -3.7)
+          add(vis2)
+          // ── (3) 広場灯: 背の高いモダンな2灯式ポール。プラザに点在。AABB は基部のみ。──
+          const plazaPoleGeo = new THREE.CylinderGeometry(0.16, 0.22, 11, 8)
+          const plazaPoleMat = new THREE.MeshStandardMaterial({
+            color: 0x40434b,
+            roughness: 0.5,
+            metalness: 0.5,
+          })
+          const plazaLampGeo = new THREE.SphereGeometry(0.42, 8, 6)
+          const plazaLampMat = new THREE.MeshBasicMaterial({ color: 0xeaf2ff, toneMapped: false })
+          const plazaPoleXf: Xf[] = []
+          const plazaLampXf: Xf[] = []
+          for (const [lx, lz] of [
+            [104, 14],
+            [104, -14],
+            [114, 0],
+            [110, 30],
+            [128, 18],
+            [128, -8],
+          ] as const) {
+            plazaPoleXf.push({ pos: [lx, 5.5, lz] })
+            plazaLampXf.push({ pos: [lx - 0.9, 10.6, lz] })
+            plazaLampXf.push({ pos: [lx + 0.9, 10.6, lz] })
+            addShibuyaAABB(lx, lz, 0.3, 0.3, 5)
+          }
+          instAdd(plazaPoleGeo, plazaPoleMat, plazaPoleXf)
+          instAdd(plazaLampGeo, plazaLampMat, plazaLampXf)
+          // ── (4) ベンチ + プランター (入口まわり、低い → 衝突なし)。──
+          const ekiBenchGeo = new THREE.BoxGeometry(2.2, 0.45, 0.6)
+          const ekiBenchMat = new THREE.MeshStandardMaterial({ color: 0x55585f, roughness: 0.7 })
+          const ekiPlanterGeo = new THREE.BoxGeometry(1.6, 0.5, 1.6)
+          const ekiPlanterMat = new THREE.MeshLambertMaterial({ color: 0x3a3d44 })
+          const ekiHedgeGeo = new THREE.BoxGeometry(1.5, 0.5, 1.5)
+          const ekiHedgeMat = new THREE.MeshLambertMaterial({
+            color: 0x355f33,
+            emissive: 0x0c1a0c,
+            emissiveIntensity: 0.4,
+          })
+          const ekiBenchXf: Xf[] = []
+          const ekiPlanterXf: Xf[] = []
+          const ekiHedgeXf: Xf[] = []
+          for (const [bx, bz, rot] of [
+            [106, 10, 0],
+            [106, -2, 0],
+            [116, -12, Math.PI / 2],
+            [120, 12, 0],
+          ] as const) {
+            ekiBenchXf.push({ pos: [bx, 0.22, bz], rotY: rot })
+          }
+          for (const [px, pz] of [
+            [112, 16],
+            [112, -10],
+            [124, 8],
+            [108, 28],
+          ] as const) {
+            ekiPlanterXf.push({ pos: [px, 0.25, pz] })
+            ekiHedgeXf.push({ pos: [px, 0.62, pz] })
+          }
+          instAdd(ekiBenchGeo, ekiBenchMat, ekiBenchXf)
+          instAdd(ekiPlanterGeo, ekiPlanterMat, ekiPlanterXf)
+          instAdd(ekiHedgeGeo, ekiHedgeMat, ekiHedgeXf)
+        }
+
         // ══ Phase C (scramble-detail): 大型ビジョン群 (駅前の顔) ════════════════════
         // The 駅前 video-wall look: several giant fictional-ad screens facing the
         // crossing + a round vision crowning the 渋谷MODE cylinder. Each screen is one
