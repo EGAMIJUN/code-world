@@ -18884,6 +18884,33 @@ export default function ThreeWorld({
         // when shibuyaAnim is assigned at the very end (off-centre detail is culled).
         const animNeon: THREE.MeshStandardMaterial[] = []
         const animCull: { obj: THREE.Object3D; cx: number; cz: number; r: number }[] = []
+        // Pendulum-sway registry (declared here, beside the other anim collectors, so
+        // BOTH the センター街 real-street section AND the 道玄坂 phases can register sway).
+        const animSway: {
+          mesh: THREE.InstancedMesh
+          base: { x: number; y: number; z: number; s: number; ph: number; ry: number }[]
+          amp: number
+          freq: number
+          pv: number
+        }[] = []
+        const registerSway = (
+          mesh: THREE.InstancedMesh | null,
+          xfs: Xf[],
+          amp: number,
+          freq: number,
+          pv: number,
+        ) => {
+          if (!mesh || xfs.length === 0) return
+          const base = xfs.map((xf) => ({
+            x: xf.pos[0],
+            y: xf.pos[1],
+            z: xf.pos[2],
+            s: typeof xf.scl === "number" ? xf.scl : 1,
+            ph: rnd() * Math.PI * 2,
+            ry: xf.rotY ?? 0,
+          }))
+          animSway.push({ mesh, base, amp, freq, pv })
+        }
         // ── SHIBUYA collision registry ─────────────────────────────────────────
         // Mirrors addOsakaAABB: only MAJOR structures (perimeter walls + later the
         // landmark footprints) get a hitbox so the scramble stays freely walkable.
@@ -21272,7 +21299,8 @@ export default function ThreeWorld({
             }
           }
           instAdd(treeTrunkGeo, woodMat, trunkXf)
-          instAdd(treeLeafGeo, treeLeafMat, leafXf)
+          // Phase G: the foliage sways gently in the wind (registered into animSway).
+          registerSway(instAdd(treeLeafGeo, treeLeafMat, leafXf), leafXf, 0.05, 1.0, 0.6)
           instAdd(planterGeo, planterMat, planterXf)
         }
 
@@ -21515,6 +21543,104 @@ export default function ThreeWorld({
             bi++
           }
           bannerMats.forEach((m, i) => instAdd(bannerGeo, m, bannerXf[i] ?? []))
+        }
+
+        // ══ 道玄坂 (Dogenzaka) Phase G: motion + atmosphere ════════════════════════
+        // Lightweight life: neon BLOOM halos behind the signs, a STATIC crowd of figure
+        // silhouettes, and STATIC parked cars (kept still — moving traffic/crowd is
+        // STEP2). The street-tree sway is wired in Phase D (registerSway), and the neon
+        // flicker in Phase F (animNeon). Depth haze up the slope is the existing global
+        // Shibuya fog. Bloom/crowd/cars are overhead or off the carriageway → no collide.
+        {
+          // (1) Neon bloom — soft additive halos behind the brightest signs.
+          const glowCv = document.createElement("canvas")
+          glowCv.width = 64
+          glowCv.height = 64
+          const ggx = glowCv.getContext("2d")
+          if (ggx) {
+            const grad = ggx.createRadialGradient(32, 32, 0, 32, 32, 32)
+            grad.addColorStop(0, "rgba(255,255,255,0.9)")
+            grad.addColorStop(1, "rgba(255,255,255,0)")
+            ggx.fillStyle = grad
+            ggx.fillRect(0, 0, 64, 64)
+          }
+          const glowTex = new THREE.CanvasTexture(glowCv)
+          const glowGeo = new THREE.PlaneGeometry(1, 1)
+          const glowCols = [0xff5a9a, 0x46d4ff, 0xffd24a]
+          const glowMats = glowCols.map(
+            (hex) =>
+              new THREE.MeshBasicMaterial({
+                map: glowTex,
+                color: hex,
+                transparent: true,
+                opacity: 0.5,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false,
+              }),
+          )
+          const glowXf: Xf[][] = glowCols.map(() => [])
+          for (const side of [1, -1] as const) {
+            for (let s = 8; s < DGZ_TOP_S - 4; s += 6) {
+              if (rnd() < 0.3) continue
+              const p = dogenzakaAt(s)
+              if (!p) continue
+              const lat = side * (DGZ_HW - 0.5)
+              const gi = Math.floor(rnd() * glowCols.length)
+              glowXf[gi]?.push({
+                pos: [p.cx + p.px * lat, p.h + 5 + rnd() * 4, p.cz + p.pz * lat],
+                scl: 3 + rnd() * 2.5,
+              })
+            }
+          }
+          glowMats.forEach((m, i) => instAdd(glowGeo, m, glowXf[i] ?? []))
+          // (2) Static crowd silhouettes — dark figure boards on the sidewalks (no anim).
+          const personGeo = new THREE.PlaneGeometry(0.7, 1.7)
+          const personMat = new THREE.MeshBasicMaterial({
+            color: 0x0a0c12,
+            transparent: true,
+            opacity: 0.85,
+            side: THREE.DoubleSide,
+          })
+          const personXf: Xf[] = []
+          for (const side of [1, -1] as const) {
+            for (let s = 6; s < DGZ_TOP_S - 4; s += 4.5) {
+              if (rnd() < 0.5) continue
+              const p = dogenzakaAt(s)
+              if (!p) continue
+              const lat = side * (6 + rnd() * 2)
+              personXf.push({
+                pos: [p.cx + p.px * lat, p.h + 0.85, p.cz + p.pz * lat],
+                rotY: rnd() * Math.PI,
+              })
+            }
+          }
+          instAdd(personGeo, personMat, personXf)
+          // (3) Static parked cars — decorative (no collision), parallel at the lower curb.
+          const carBodyGeo = new THREE.BoxGeometry(1.8, 1.0, 4.0)
+          const carCabinGeo = new THREE.BoxGeometry(1.6, 0.7, 2.0)
+          const carCols = [0x884048, 0x2a3a55, 0x3a3a40]
+          const carMats = carCols.map(
+            (c) => new THREE.MeshStandardMaterial({ color: c, roughness: 0.4, metalness: 0.5 }),
+          )
+          const carBodyXf: Xf[][] = carCols.map(() => [])
+          const carCabinXf: Xf[][] = carCols.map(() => [])
+          for (const [s, side] of [
+            [16, 1],
+            [30, -1],
+            [46, 1],
+          ] as const) {
+            const p = dogenzakaAt(s)
+            if (!p) continue
+            const lat = side * 6.6
+            const ci = Math.floor(rnd() * carCols.length)
+            const rotY = Math.atan2(p.tx, p.tz) // length along the tangent (parallel parking)
+            carBodyXf[ci]?.push({ pos: [p.cx + p.px * lat, p.h + 0.5, p.cz + p.pz * lat], rotY })
+            carCabinXf[ci]?.push({ pos: [p.cx + p.px * lat, p.h + 1.15, p.cz + p.pz * lat], rotY })
+          }
+          carMats.forEach((m, i) => {
+            instAdd(carBodyGeo, m, carBodyXf[i] ?? [])
+            instAdd(carCabinGeo, m, carCabinXf[i] ?? [])
+          })
         }
 
         // ══ Phase C (scramble-detail): 大型ビジョン群 (駅前の顔) ════════════════════
@@ -22201,31 +22327,8 @@ export default function ThreeWorld({
         arcLightRunner.position.set(arcX0, arcRidgeY - 0.25, CG_Z)
         add(arcLightRunner)
         // Register the pendulum sway of the hanging noren + arcade lanterns (Phase F meshes).
-        const animSway: {
-          mesh: THREE.InstancedMesh
-          base: { x: number; y: number; z: number; s: number; ph: number; ry: number }[]
-          amp: number
-          freq: number
-          pv: number
-        }[] = []
-        const registerSway = (
-          mesh: THREE.InstancedMesh | null,
-          xfs: Xf[],
-          amp: number,
-          freq: number,
-          pv: number,
-        ) => {
-          if (!mesh || xfs.length === 0) return
-          const base = xfs.map((xf) => ({
-            x: xf.pos[0],
-            y: xf.pos[1],
-            z: xf.pos[2],
-            s: typeof xf.scl === "number" ? xf.scl : 1,
-            ph: rnd() * Math.PI * 2,
-            ry: xf.rotY ?? 0,
-          }))
-          animSway.push({ mesh, base, amp, freq, pv })
-        }
+        // (animSway + registerSway are declared earlier — beside animNeon — so the 道玄坂
+        // phases can register sway too.)
         registerSway(arcLanternMesh, arcLanternXf, 0.08, 1.4, 0.55)
         norenMeshes.forEach((m, i) => registerSway(m, norenXf2[i] ?? [], 0.13, 1.1, 0.42))
 
