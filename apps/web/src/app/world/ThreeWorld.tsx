@@ -875,6 +875,84 @@ const koenDoriAt = (s: number): KdrPoint | null => {
     pz: tx,
   }
 }
+// ── 文化村通り (Bunkamura-dori): スクランブル西へ抜ける平坦な文化施設の通り ──────────
+// 道玄坂(南西・猥雑)/公園通り(北・おしゃれ)/宮益坂(東・ビジネス) と異なり、これは坂ではなく
+// **平坦**な西の通り。劇場・ホール・落ち着いた古い商店の文化街。床は谷底のまま (y=0) なので
+// groundY も animate override も不要 —— センター街と同じ「平坦な壁付き回廊」方式。西外周壁の
+// 南セグメントに開けたギャップ (z∈[-12,+12]) から西へ抜け、x≈-132 で行き止まる。センター街
+// (z≈-22) の南、渋谷MODE シリンダー (-42,30,z≥18.5) の手前を縫う。回廊判定 inBunkamuraZone は
+// scramble の汎用ファサードを締め出すのに使う (他坂と同じ #126 ガード)。
+const BKM_HW = 10 // 回廊半幅 (20 幅: 落ち着いた文化通り)
+const BKM_PATH: readonly (readonly [number, number])[] = [
+  [-100, 0], // 東の口 — 西外周壁ギャップ (E-W メインストリート西端の延長、h=0 平坦)
+  [-112, 1],
+  [-124, 3], // 渋谷MODE (z≥18.5) の手前・センター街 (z≈-22) の南を縫う
+  [-132, 4], // 西の行き止まり (文化村プラザ、r≈132 で平坦コア内)
+]
+type BkmSeg = {
+  ax: number
+  az: number
+  dx: number
+  dz: number
+  len: number
+  len2: number
+  s0: number
+}
+const BKM_SEG: BkmSeg[] = (() => {
+  const segs: BkmSeg[] = []
+  let s0 = 0
+  for (let i = 0; i < BKM_PATH.length - 1; i++) {
+    const a = BKM_PATH[i]
+    const b = BKM_PATH[i + 1]
+    if (!a || !b) continue
+    const dx = b[0] - a[0]
+    const dz = b[1] - a[1]
+    const len = Math.hypot(dx, dz)
+    segs.push({ ax: a[0], az: a[1], dx, dz, len, len2: dx * dx + dz * dz, s0 })
+    s0 += len
+  }
+  return segs
+})()
+const BKM_TOP_S = BKM_SEG.reduce((acc, s) => acc + s.len, 0)
+const bunkamuraNearest = (lx: number, lz: number): { s: number; lat: number } => {
+  let bestD2 = Number.POSITIVE_INFINITY
+  let bestS = 0
+  for (const seg of BKM_SEG) {
+    let t = ((lx - seg.ax) * seg.dx + (lz - seg.az) * seg.dz) / seg.len2
+    if (t < 0) t = 0
+    else if (t > 1) t = 1
+    const cx = seg.ax + seg.dx * t
+    const cz = seg.az + seg.dz * t
+    const d2 = (lx - cx) * (lx - cx) + (lz - cz) * (lz - cz)
+    if (d2 < bestD2) {
+      bestD2 = d2
+      bestS = seg.s0 + seg.len * t
+    }
+  }
+  return { s: bestS, lat: Math.sqrt(bestD2) }
+}
+// 回廊ゾーン (汎用ファサードを通りから締め出す判定用、少し広めにとる)。平坦なので高さ判定なし。
+const inBunkamuraZone = (lx: number, lz: number): boolean =>
+  bunkamuraNearest(lx, lz).lat < BKM_HW + 4
+// 弧長 s でのセンターライン上の点 + 接線 (tx,tz) + 左直交 (px,pz)。平坦なので h は常に 0。
+type BkmPoint = {
+  cx: number
+  cz: number
+  h: number
+  tx: number
+  tz: number
+  px: number
+  pz: number
+}
+const bunkamuraAt = (s: number): BkmPoint | null => {
+  let seg = BKM_SEG[0]
+  for (const sg of BKM_SEG) if (s >= sg.s0) seg = sg
+  if (!seg || seg.len <= 0) return null
+  const t = Math.max(0, Math.min(1, (s - seg.s0) / seg.len))
+  const tx = seg.dx / seg.len
+  const tz = seg.dz / seg.len
+  return { cx: seg.ax + seg.dx * t, cz: seg.az + seg.dz * t, h: 0, tx, tz, px: -tz, pz: tx }
+}
 // ── 宮益坂 (Miyamasuzaka): スクランブル東から東へ登るビジネス街の坂 ───────────────
 // 道玄坂 (南西・猥雑・濃いネオン) / 公園通り (北・おしゃれ・緑) と対をなす「東の坂・
 // オフィス街」。E-W メインストリートの東延長として平坦なプラザ東縁から登り始め、東外周壁
@@ -19272,7 +19350,13 @@ export default function ThreeWorld({
           [H, 5.5, 2, 5], // MIDDLE sliver — z[+3,+8] (between the 宮益坂 and 駅東 gaps)
           [H, 66, 2, 68], // SOUTH segment — z[+32,+100] (south of the 駅東 gap)
           [-H, -63.5, 2, 73], // west wall — segment NORTH of the centre-gai mouth
-          [-H, 41.5, 2, 117], // west wall — segment SOUTH of the centre-gai mouth
+          [-H, -14.5, 2, 5], // west wall — sliver between センター街 mouth (z=-17) and 文化村通り gap
+          [-H, 56, 2, 88], // west wall — segment SOUTH of the 文化村通り mouth (z>+12)
+          // ↑ the old single south segment [-H,41.5,2,117] (z[-17,+100]) is split to open a
+          //   24-wide gap at z∈[-12,+12] — the 文化村通り (Bunkamura-dori) mouth. The flat
+          //   cultural street punches west through here onto the still-flat core (r≤144 holds
+          //   to x≈-138). Its own side walls seal the sides. Threads south of センター街
+          //   (z≈-22) and east of 渋谷MODE (z≥18.5).
         ] as const) {
           const wall = new THREE.Mesh(new THREE.BoxGeometry(w, 10, d), wallMat)
           wall.position.set(x, 5, z)
@@ -19892,6 +19976,7 @@ export default function ThreeWorld({
           const bz = Math.sin(ang) * rr
           if (Math.max(Math.abs(bx), Math.abs(bz)) < 104) continue // inside walls → skip
           if (bx < -104 && Math.abs(bz + 22) < 14) continue // centre-gai west dead-end
+          if (bx < -96 && bz > -14 && bz < 18) continue // 文化村通り (Bunkamura) west corridor
           if (bx > 96 && bx < 140 && Math.abs(bz) < 40) continue // 駅東 (eki-higashi) district
           const bw = 11 + rnd() * 14
           const bh = 36 + rnd() * 56 // 36..92
@@ -20997,6 +21082,8 @@ export default function ThreeWorld({
           [40, -28, 20],
         ]
         // inCentergaiZone keeps generic facades out of the walkable センター街 lane.
+        // inBunkamuraZone added so the west-axis facade row never drops a building into the
+        // 文化村通り corridor (centreline z≈0) — the #126-class trap (cf. 宮益坂/eki-higashi).
         // inMiyamasuzakaZone added so the axis-facing facade rows (loop (2), the +x/EAST
         // axis at z=±16) never drop a building into the 宮益坂 corridor (centreline z≈-8) —
         // the #126-class trap that would block the new climbing street with a phantom wall.
@@ -21005,6 +21092,7 @@ export default function ThreeWorld({
           inCentergaiZone(x, z) ||
           inDogenzakaZone(x, z) ||
           inKoenDoriZone(x, z) ||
+          inBunkamuraZone(x, z) ||
           inMiyamasuzakaZone(x, z)
         // (1) Four corner clusters in the diagonal sectors (the road arms stay open).
         for (let k = 0; k < 4; k++) {
@@ -23157,6 +23245,415 @@ export default function ThreeWorld({
             }
           }
           instAdd(figGeo, figMat, figXf)
+        }
+
+        // ══ 文化村通り (Bunkamura-dori) Phase A: 平坦な壁付き回廊 (西へ) ════════════════
+        // A FLAT cultural street west of the scramble — no ramp (groundY/animate untouched).
+        // The bowl floor is already flat (y=0) out to r≤144 (dead-end r≈132), so it's just a
+        // paving ribbon following bunkamuraAt + two side walls (the SINGLE collision, like
+        // センター街) that seal the corridor and tuck into the west-wall gap. Warmer, older
+        // palette than the cool 駅東/宮益坂 — a calm theatre street.
+        {
+          // ── (1) Flat paving ribbon (h=0) along bunkamuraAt. Own warm-grey material → 1 draw. ──
+          const BRIB_N = 40
+          const bribPos: number[] = []
+          const bribUv: number[] = []
+          const bribIdx: number[] = []
+          for (let i = 0; i <= BRIB_N; i++) {
+            const s = (i / BRIB_N) * BKM_TOP_S
+            const p = bunkamuraAt(s)
+            if (!p) continue
+            bribPos.push(p.cx + p.px * BKM_HW, 0.02, p.cz + p.pz * BKM_HW)
+            bribPos.push(p.cx - p.px * BKM_HW, 0.02, p.cz - p.pz * BKM_HW)
+            bribUv.push(0, s / 6, 1, s / 6)
+          }
+          for (let i = 0; i < BRIB_N; i++) {
+            const a = i * 2
+            bribIdx.push(a, a + 2, a + 1, a + 1, a + 2, a + 3)
+          }
+          const bribGeo = new THREE.BufferGeometry()
+          bribGeo.setAttribute("position", new THREE.Float32BufferAttribute(bribPos, 3))
+          bribGeo.setAttribute("uv", new THREE.Float32BufferAttribute(bribUv, 2))
+          bribGeo.setIndex(bribIdx)
+          bribGeo.computeVertexNormals()
+          const bkmRoadMat = new THREE.MeshLambertMaterial({
+            color: 0x7b7670, // warm older-street grey (vs the cool business streets)
+            map: makeNoiseTexture(128, 0x34302c, 0.12, 10),
+            emissive: 0x201a14, // faint warm sheen
+            emissiveIntensity: 1,
+          })
+          add(new THREE.Mesh(bribGeo, bkmRoadMat))
+          // ── (2) Side walls: the corridor's ONLY collision. Flat (h=0), exact AABBs. They
+          // tuck into the west-wall gap (z∈[-12,+12]) and seal the sides. ──
+          const BKM_WALL_T = 1.5
+          const BKM_WALL_H = 8
+          const bkmSegN = Math.max(1, Math.round(BKM_TOP_S / 5))
+          for (let i = 0; i < bkmSegN; i++) {
+            const sm = ((i + 0.5) / bkmSegN) * BKM_TOP_S
+            const a0 = bunkamuraAt((i / bkmSegN) * BKM_TOP_S)
+            const a1 = bunkamuraAt(((i + 1) / bkmSegN) * BKM_TOP_S)
+            const am = bunkamuraAt(sm)
+            if (!a0 || !a1 || !am) continue
+            const segLen = Math.hypot(a1.cx - a0.cx, a1.cz - a0.cz) + 1.2 // joint overlap
+            const halfAbs = Math.abs(am.tx) * (segLen / 2) + Math.abs(am.tz) * (BKM_WALL_T / 2)
+            const depAbs = Math.abs(am.tz) * (segLen / 2) + Math.abs(am.tx) * (BKM_WALL_T / 2)
+            const rotY = Math.atan2(-am.tz, am.tx)
+            for (const side of [1, -1] as const) {
+              const cx = am.cx + am.px * side * (BKM_HW + BKM_WALL_T / 2)
+              const cz = am.cz + am.pz * side * (BKM_HW + BKM_WALL_T / 2)
+              const box = new THREE.Mesh(
+                new THREE.BoxGeometry(segLen, BKM_WALL_H, BKM_WALL_T),
+                concreteMat,
+              )
+              box.position.set(cx, BKM_WALL_H / 2, cz)
+              box.rotation.y = rotY
+              mAdd(box)
+              addShibuyaAABB(cx, cz, halfAbs, depAbs, BKM_WALL_H)
+            }
+          }
+          // ── (3) Dead-end cap at the west end (Phase D dresses it as the 文化村 frontage). ──
+          const bcap = bunkamuraAt(BKM_TOP_S)
+          if (bcap) {
+            const bcapW = BKM_HW * 2 + BKM_WALL_T * 2
+            const bcapCx = bcap.cx + bcap.tx * (BKM_WALL_T / 2 + 0.5)
+            const bcapCz = bcap.cz + bcap.tz * (BKM_WALL_T / 2 + 0.5)
+            const bcapMesh = new THREE.Mesh(
+              new THREE.BoxGeometry(BKM_WALL_T, BKM_WALL_H, bcapW),
+              concreteMat,
+            )
+            bcapMesh.position.set(bcapCx, BKM_WALL_H / 2, bcapCz)
+            bcapMesh.rotation.y = Math.atan2(-bcap.tz, bcap.tx)
+            mAdd(bcapMesh)
+            const bcapHalf = Math.abs(bcap.tx) * (BKM_WALL_T / 2) + Math.abs(bcap.tz) * (bcapW / 2)
+            const bcapDep = Math.abs(bcap.tz) * (BKM_WALL_T / 2) + Math.abs(bcap.tx) * (bcapW / 2)
+            addShibuyaAABB(bcapCx, bcapCz, bcapHalf, bcapDep, BKM_WALL_H)
+          }
+        }
+
+        // ══ 文化村通り (Bunkamura-dori) Phase B: 文化施設・劇場・古い商店 ════════════════
+        // The calm cultural frontages behind the side walls (lat≥11.5 → corridor ±9.6 clear),
+        // each with a footprint AABB. Warmer/older palette than the cool 駅東/宮益坂 glass.
+        // Original names: 文化村ホール (a wide low hall at the dead-end) / シアター渋谷 / シネマ
+        // ルミエ / 古書 西村 / ギャラリー文谷 / 喫茶 文. Restrained warm signage.
+        {
+          const bkmWarmMat = new THREE.MeshStandardMaterial({
+            color: 0x6a5f52, // warm older stone/brick
+            roughness: 0.85,
+            metalness: 0.05,
+          })
+          const bBodyMats = [bkmWarmMat, midMat, concreteMat]
+          const cultNames = [
+            "シアター渋谷",
+            "シネマ ルミエ",
+            "古書 西村",
+            "ギャラリー文谷",
+            "喫茶 文",
+          ]
+          const bSignCache = new Map<string, THREE.CanvasTexture>()
+          const cultSignTex = (name: string, accent: string) => {
+            const cached = bSignCache.get(name)
+            if (cached) return cached
+            const cv = document.createElement("canvas")
+            cv.width = 256
+            cv.height = 44
+            const c = cv.getContext("2d")
+            if (c) {
+              c.fillStyle = "#1a140e" // warm dark ground (older signage)
+              c.fillRect(0, 0, 256, 44)
+              c.fillStyle = accent
+              c.fillRect(10, 34, 236, 2)
+              c.fillStyle = "#efe6d8"
+              c.font = "600 22px serif" // serif → older / cultural
+              c.textAlign = "center"
+              c.textBaseline = "middle"
+              c.fillText(name, 128, 18)
+            }
+            const tex = new THREE.CanvasTexture(cv)
+            bSignCache.set(name, tex)
+            return tex
+          }
+          const cultAccents = ["#caa45a", "#b8704a", "#a8895a", "#9a6a48", "#c4b48a"] // warm
+          let bSignIdx = 0
+          for (const side of [1, -1] as const) {
+            let s = 3
+            let guard = 0
+            while (s < BKM_TOP_S - 3 && guard++ < 20) {
+              const sw = 6 + rnd() * 5 // narrower, older frontages
+              const p = bunkamuraAt(s + sw / 2)
+              if (!p) {
+                s += sw
+                continue
+              }
+              const bd = 7 + rnd() * 5
+              const frontLat = BKM_HW + 1.5
+              const cx = p.cx + p.px * side * (frontLat + bd / 2)
+              const cz = p.cz + p.pz * side * (frontLat + bd / 2)
+              const bh = 9 + rnd() * 8 // low-to-mid (calm, older — not high-rise)
+              const mat = bBodyMats[Math.floor(rnd() * bBodyMats.length)] ?? midMat
+              const rotY = Math.atan2(-p.tz, p.tx)
+              const body = new THREE.Mesh(new THREE.BoxGeometry(sw - 0.4, bh, bd), mat)
+              body.position.set(cx, bh / 2, cz)
+              body.rotation.y = rotY
+              mAdd(body)
+              const hw = Math.abs(p.tx) * (sw / 2) + Math.abs(p.tz) * (bd / 2)
+              const hd = Math.abs(p.tz) * (sw / 2) + Math.abs(p.tx) * (bd / 2)
+              addShibuyaAABB(cx, cz, hw, hd, bh)
+              // A warm cultural sign on ~half the frontages (two-sided, above the wall).
+              if (rnd() < 0.5 && bh > 8) {
+                const name = cultNames[bSignIdx % cultNames.length] ?? "シアター渋谷"
+                const accent = cultAccents[bSignIdx % cultAccents.length] ?? "#caa45a"
+                bSignIdx++
+                const sign = new THREE.Mesh(
+                  new THREE.PlaneGeometry(Math.min(sw * 0.8, 7), 1.5),
+                  new THREE.MeshBasicMaterial({
+                    map: cultSignTex(name, accent),
+                    toneMapped: false,
+                    side: THREE.DoubleSide,
+                    transparent: true,
+                  }),
+                )
+                sign.position.set(p.cx + p.px * side * frontLat, 8.4, p.cz + p.pz * side * frontLat)
+                // Same proven facing rule as 公園通り/宮益坂: side==1 → flip π toward the road.
+                sign.rotation.y = side === 1 ? rotY + Math.PI : rotY
+                add(sign)
+              }
+              s += sw + 0.6
+            }
+          }
+          // ── 文化村ホール: a wide low grand hall spanning the dead-end frontage, facing the
+          // approaching player. Behind the cap (lat 0 at the west end). Columned base. ──
+          const hallP = bunkamuraAt(BKM_TOP_S)
+          if (hallP) {
+            const hx = hallP.cx + hallP.tx * 6 // 6u behind the cap (keeps the hall within r≤144)
+            const hz = hallP.cz + hallP.tz * 6
+            const hRotY = Math.atan2(-hallP.tz, hallP.tx)
+            const hall = new THREE.Mesh(new THREE.BoxGeometry(BKM_HW * 2 + 6, 16, 10), bkmWarmMat)
+            hall.position.set(hx, 8, hz)
+            hall.rotation.y = hRotY
+            mAdd(hall)
+            const hallHw = Math.abs(hallP.tx) * 5 + Math.abs(hallP.tz) * (BKM_HW + 3)
+            const hallHd = Math.abs(hallP.tz) * 5 + Math.abs(hallP.tx) * (BKM_HW + 3)
+            addShibuyaAABB(hx, hz, hallHw, hallHd, 16)
+            // A row of columns across the east face (facing the player).
+            const colGeo = new THREE.CylinderGeometry(0.5, 0.5, 9, 8)
+            const colXf: Xf[] = []
+            for (let cI = -4; cI <= 4; cI++) {
+              colXf.push({
+                pos: [
+                  hallP.cx + hallP.tx * 2.5 + hallP.px * (cI * 2.4),
+                  4.5,
+                  hallP.cz + hallP.tz * 2.5 + hallP.pz * (cI * 2.4),
+                ],
+              })
+            }
+            instAdd(colGeo, concreteMat, colXf)
+            // The hall sign 文化村ホール, facing east toward the player.
+            const hallSign = new THREE.Mesh(
+              new THREE.PlaneGeometry(14, 2.2),
+              new THREE.MeshBasicMaterial({
+                map: cultSignTex("文化村ホール", "#caa45a"),
+                toneMapped: false,
+                side: THREE.DoubleSide,
+              }),
+            )
+            hallSign.position.set(hallP.cx + hallP.tx * 1.5, 11, hallP.cz + hallP.tz * 1.5)
+            hallSign.rotation.y = Math.atan2(-hallP.tx, -hallP.tz) // face back down the street
+            add(hallSign)
+          }
+        }
+
+        // ══ 文化村通り (Bunkamura-dori) Phase C: 街路樹・什器・看板 + 動き (落ち着いた西の通り) ══
+        // Calm dressing for the cultural street: a few street trees, vintage warm lamps,
+        // benches/planters, a 文化村通り gate at the mouth, plus quiet life (art-goer figures,
+        // a couple of parked cars, warm restrained sign glow). Central lane stays open.
+        {
+          // ── (1) 街路樹 (落ち着いた並木、歩道側 lat 8.4)。trunk のみ AABB、canopy は風揺れ。──
+          const bTrunkGeo = new THREE.CylinderGeometry(0.24, 0.36, 5.0, 6)
+          const bLeafGeo = new THREE.SphereGeometry(2.3, 8, 6)
+          const bLeafMat = new THREE.MeshLambertMaterial({
+            color: 0x3f5a36, // calm muted green
+            emissive: 0x0e180c,
+            emissiveIntensity: 0.45,
+          })
+          const bTrunkXf: Xf[] = []
+          const bLeafXf: Xf[] = []
+          for (const side of [1, -1] as const) {
+            for (let s = 6; s < BKM_TOP_S - 3; s += 8) {
+              const p = bunkamuraAt(s + (side > 0 ? 0 : 4))
+              if (!p) continue
+              const tx = p.cx + p.px * side * 8.4
+              const tz = p.cz + p.pz * side * 8.4
+              bTrunkXf.push({ pos: [tx, 2.5, tz] })
+              bLeafXf.push({ pos: [tx, 5.1, tz], scl: 0.9 + rnd() * 0.2 })
+              addShibuyaAABB(tx, tz, 0.45, 0.45, 4)
+            }
+          }
+          instAdd(bTrunkGeo, woodMat, bTrunkXf)
+          registerSway(instAdd(bLeafGeo, bLeafMat, bLeafXf), bLeafXf, 0.04, 0.8, 0.6)
+          // ── (2) ヴィンテージ街灯 (暖色、歩道 lat 7.4)。AABB は基部のみ。──
+          const bPoleGeo = new THREE.CylinderGeometry(0.13, 0.2, 5.2, 6)
+          const bPoleMat = new THREE.MeshStandardMaterial({
+            color: 0x2e2a26,
+            roughness: 0.6,
+            metalness: 0.4,
+          })
+          const bGlobeGeo = new THREE.SphereGeometry(0.34, 8, 6)
+          const bGlobeMat = new THREE.MeshBasicMaterial({ color: 0xffe6b0, toneMapped: false }) // 暖色
+          const bPoleXf: Xf[] = []
+          const bGlobeXf: Xf[] = []
+          for (const side of [1, -1] as const) {
+            for (let s = 9; s < BKM_TOP_S - 2; s += 9) {
+              const p = bunkamuraAt(s + (side > 0 ? 4.5 : 0))
+              if (!p) continue
+              const lx = p.cx + p.px * side * 7.4
+              const lz = p.cz + p.pz * side * 7.4
+              bPoleXf.push({ pos: [lx, 2.6, lz] })
+              bGlobeXf.push({ pos: [lx, 5.5, lz] })
+              addShibuyaAABB(lx, lz, 0.3, 0.3, 3)
+            }
+          }
+          instAdd(bPoleGeo, bPoleMat, bPoleXf)
+          instAdd(bGlobeGeo, bGlobeMat, bGlobeXf)
+          // ── (3) ベンチ + プランター (低い → 衝突なし)。──
+          const bBenchGeo = new THREE.BoxGeometry(1.9, 0.45, 0.55)
+          const bBenchMat = new THREE.MeshStandardMaterial({ color: 0x4a4038, roughness: 0.8 })
+          const bPlanterGeo = new THREE.BoxGeometry(1.3, 0.45, 1.3)
+          const bPlanterMat = new THREE.MeshLambertMaterial({ color: 0x4a3d30 })
+          const bBenchXf: Xf[] = []
+          const bPlanterXf: Xf[] = []
+          for (const side of [1, -1] as const) {
+            for (let s = 11; s < BKM_TOP_S - 4; s += 13) {
+              const p = bunkamuraAt(s + (side > 0 ? 6 : 0))
+              if (!p) continue
+              const rotY = Math.atan2(-p.tz, p.tx)
+              bBenchXf.push({
+                pos: [p.cx + p.px * side * 7.0, 0.22, p.cz + p.pz * side * 7.0],
+                rotY,
+              })
+              bPlanterXf.push({ pos: [p.cx + p.px * side * 9.2, 0.22, p.cz + p.pz * side * 9.2] })
+            }
+          }
+          instAdd(bBenchGeo, bBenchMat, bBenchXf)
+          instAdd(bPlanterGeo, bPlanterMat, bPlanterXf)
+          // ── (4) 谷底の口: 文化村通りゲート横梁 + サイン (スクランブルへ向ける)。歩行は塞がない。──
+          const m = bunkamuraAt(1.5)
+          if (m) {
+            const beamMat = new THREE.MeshStandardMaterial({
+              color: 0x3a322a,
+              roughness: 0.6,
+              metalness: 0.35,
+            })
+            const beam = new THREE.Mesh(new THREE.BoxGeometry(BKM_HW * 2 + 3, 0.6, 0.6), beamMat)
+            beam.position.set(m.cx, 6.4, m.cz)
+            beam.rotation.y = Math.atan2(-m.tz, m.tx)
+            mAdd(beam)
+            const gateCv = document.createElement("canvas")
+            gateCv.width = 256
+            gateCv.height = 64
+            const gc = gateCv.getContext("2d")
+            if (gc) {
+              gc.fillStyle = "#1a140e"
+              gc.fillRect(0, 0, 256, 64)
+              gc.fillStyle = "#caa45a"
+              gc.font = "bold 30px serif"
+              gc.textAlign = "center"
+              gc.textBaseline = "middle"
+              gc.fillText("文化村通り", 128, 24)
+              gc.font = "16px serif"
+              gc.fillText("BUNKAMURA-DORI", 128, 48)
+            }
+            const gateSign = new THREE.Mesh(
+              new THREE.PlaneGeometry(BKM_HW * 1.5, 2.0),
+              new THREE.MeshBasicMaterial({
+                map: new THREE.CanvasTexture(gateCv),
+                toneMapped: false,
+                side: THREE.DoubleSide,
+              }),
+            )
+            gateSign.position.set(m.cx + m.tx * 0.4, 7.2, m.cz + m.tz * 0.4)
+            gateSign.rotation.y = Math.atan2(-m.tx, -m.tz) // face approaching scramble players
+            add(gateSign)
+          }
+          // ── (5) 動き: 人影 (アート客風)、駐車車両、暖色のサイン光 (animNeon)。──
+          const bFigMat = new THREE.MeshBasicMaterial({
+            color: 0x0d0b08,
+            transparent: true,
+            opacity: 0.85,
+            side: THREE.DoubleSide,
+          })
+          const bFigGeo = new THREE.PlaneGeometry(0.7, 1.8)
+          const bFigXf: Xf[] = []
+          for (const side of [1, -1] as const) {
+            for (let s = 8; s < BKM_TOP_S - 4; s += 7) {
+              if (rnd() < 0.5) continue
+              const p = bunkamuraAt(s + rnd() * 2)
+              if (!p) continue
+              const lat = side * (6.6 + rnd() * 1.6)
+              bFigXf.push({
+                pos: [p.cx + p.px * lat, 0.9, p.cz + p.pz * lat],
+                rotY: rnd() * Math.PI,
+              })
+            }
+          }
+          instAdd(bFigGeo, bFigMat, bFigXf)
+          // 駐車車両 2台 (縁石際 lat 6.2、中央レーンは空ける)。
+          const bCarBodyMat = new THREE.MeshStandardMaterial({
+            color: 0x2a2622,
+            roughness: 0.55,
+            metalness: 0.4,
+          })
+          const bCarCabMat = new THREE.MeshStandardMaterial({
+            color: 0x0c0a08,
+            emissive: 0x2a1e12,
+            emissiveIntensity: 0.3,
+          })
+          for (const [s, side] of [
+            [12, 1],
+            [24, -1],
+          ] as const) {
+            const p = bunkamuraAt(s)
+            if (!p) continue
+            const lat = side * 6.2
+            const cx = p.cx + p.px * lat
+            const cz = p.cz + p.pz * lat
+            const rotY = Math.atan2(p.tx, p.tz)
+            const body = new THREE.Mesh(new THREE.BoxGeometry(2.0, 1.1, 4.4), bCarBodyMat)
+            body.position.set(cx, 0.7, cz)
+            body.rotation.y = rotY
+            mAdd(body)
+            const cab = new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.78, 2.2), bCarCabMat)
+            cab.position.set(cx, 1.55, cz)
+            cab.rotation.y = rotY
+            mAdd(cab)
+            const hw = Math.abs(p.tz) * 1.0 + Math.abs(p.tx) * 2.2
+            const hd = Math.abs(p.tx) * 1.0 + Math.abs(p.tz) * 2.2
+            addShibuyaAABB(cx, cz, hw, hd, 1.4, 0)
+          }
+          // 暖色のサイン光バー (animNeon フリッカー、控えめ)。
+          const bNeonGeo = new THREE.BoxGeometry(0.22, 1, 0.12)
+          const bNeonCols = [0xffcf8a, 0xe8a85a]
+          const bNeonMats = bNeonCols.map(
+            (c) =>
+              new THREE.MeshStandardMaterial({ color: c, emissive: c, emissiveIntensity: 1.0 }),
+          )
+          const bNeonXf: Xf[][] = bNeonCols.map(() => [])
+          for (const side of [1, -1] as const) {
+            for (let s = 8; s < BKM_TOP_S - 3; s += 7) {
+              if (rnd() < 0.6) continue
+              const p = bunkamuraAt(s)
+              if (!p) continue
+              const lat = side * (BKM_HW - 0.4)
+              const ci = Math.floor(rnd() * bNeonCols.length)
+              bNeonXf[ci]?.push({
+                pos: [p.cx + p.px * lat, 5.0 + rnd() * 2, p.cz + p.pz * lat],
+                rotY: Math.atan2(-p.tz, p.tx),
+                scl: [1, 1.4 + rnd() * 1.6, 1],
+              })
+            }
+          }
+          bNeonMats.forEach((mm, i) => {
+            if (instAdd(bNeonGeo, mm, bNeonXf[i] ?? [])) animNeon.push(mm)
+          })
         }
 
         // ══ 宮益坂 (Miyamasuzaka) Phase A: sloped walkable corridor ═══════════════════
