@@ -20010,8 +20010,16 @@ export default function ThreeWorld({
           tw.position.set(bx, shibuyaGroundY(bx, bz) + bh / 2, bz)
           mAdd(tw)
         }
-        // — Big-vision building (N / 駅前 — the giant screen faces the crossing). ──
-        const bvX = 4
+        // — Big-vision building (NE of the crossing — QFRONT-style, the giant screen faces
+        // the crossing). Was centred at x=4, but the N-S main road (x∈[-10,10]) and the
+        // 公園通り corridor (added later, running north up x≈-3) both pass through that
+        // spot, so its 26-wide mesh sat ON the road/lane with the collision sliced away to
+        // x[12,17] to keep 公園通り walkable — i.e. you walked through its west 2/3
+        // (see-through on the road). Moved EAST to x=25 so the whole mesh (x[12,38]) clears
+        // the road (x>10) and the 公園通り east edge (~x10 at z=-32), and given a FULL
+        // footprint hitbox. Authentic — Shibuya's big screens (QFRONT/Tsutaya) sit NE of
+        // the crossing, not in the road. ──
+        const bvX = 25
         const bvZ = -42
         const bvW = 26
         const bvD = 20
@@ -20028,10 +20036,9 @@ export default function ThreeWorld({
         const bvBody = new THREE.Mesh(new THREE.BoxGeometry(bvW, bvH, bvD), bvMat)
         bvBody.position.set(bvX, bvH / 2, bvZ)
         mAdd(bvBody)
-        // East face only (local x[12,17]). The KDR corridor east edge reaches x≈+10 at the
-        // BV south wall (z=-32), so the AABB west edge must be ≥x=12 (2u clearance) to avoid
-        // an invisible wall inside the corridor. x=12→17 still blocks the eastern approach.
-        addShibuyaAABB(bvX + 10.5, bvZ, bvW / 2 - 10.5, bvD / 2, bvH)
+        // Full footprint hitbox (x[12,38]×z[-52,-32]) now that the building clears the road
+        // + 公園通り — no more sliced AABB / see-through west face.
+        addShibuyaAABB(bvX, bvZ, bvW / 2, bvD / 2, bvH)
         // The giant screen: a bright fake-ad CanvasTexture (fictional brands). Scroll
         // animation arrives in Phase F; for now it's a static lit billboard. Its own
         // material → kept as its own draw call (emissive, frustum-culled off).
@@ -20437,7 +20444,7 @@ export default function ThreeWorld({
           if (
             Math.hypot(bx - 46, bz - 30) < 22 ||
             Math.hypot(bx + 42, bz - 30) < 22 ||
-            Math.hypot(bx - 4, bz + 42) < 24 ||
+            Math.hypot(bx - 25, bz + 42) < 22 || // big-vision (moved NE to x=25)
             Math.hypot(bx - 58, bz + 54) < 26 || // leave the Phase E shrine grove clear
             inCentergaiZone(bx, bz) // keep the walkable lane clear
           )
@@ -21102,7 +21109,7 @@ export default function ThreeWorld({
         const sbAvoid: [number, number, number][] = [
           [46, 30, 20],
           [-42, 30, 22],
-          [4, -42, 24],
+          [25, -42, 20], // big-vision (moved NE from x=4 → x=25, off the road/corridor)
           [58, -54, 26],
           [-20, 22, 9],
           [40, -28, 20],
@@ -21256,16 +21263,23 @@ export default function ThreeWorld({
             const bh = 14 + rnd() * 26 // 14..40 → taller センター街 walls close the sky
             const bd = 6 + rnd() * 6
             const mat = cgBodyMats[Math.floor(rnd() * cgBodyMats.length)] ?? midMat
+            const bz = outerZ - nz * (bd / 2)
             const body = new THREE.Mesh(new THREE.BoxGeometry(sw - 0.4, bh, bd), mat)
-            body.position.set(cx, bh / 2, outerZ - nz * (bd / 2))
-            mAdd(body) // no AABB — the Phase A wall already blocks the lane here
+            body.position.set(cx, bh / 2, bz)
+            mAdd(body)
+            // Footprint AABB. The Phase A wall blocks the LANE side, but the open bowl wraps
+            // around the OUTER face (north of z≈-29 / south of z≈-15), so inside the
+            // perimeter the player walked through these shops from the bowl (see-through).
+            // The shop sits at |z−CG_Z| ≥ CG_HW+2, well outside the lane, so a footprint
+            // hitbox seals the bowl approach without touching the walkable lane.
+            addShibuyaAABB(cx, bz, (sw - 0.4) / 2, bd / 2, bh)
             if (rnd() < 0.42) {
               const th = bh * (0.2 + rnd() * 0.22) // stepped setback for silhouette variety
               const top = new THREE.Mesh(
                 new THREE.BoxGeometry((sw - 0.4) * 0.62, th, bd * 0.62),
                 mat,
               )
-              top.position.set(cx, bh + th / 2, outerZ - nz * (bd / 2))
+              top.position.set(cx, bh + th / 2, bz)
               mAdd(top)
             }
             // Flood the lane-facing wall with shop signs; project blades over the lane.
@@ -21928,25 +21942,32 @@ export default function ThreeWorld({
               const bd = 7 + rnd() * 5
               const mat = dgzBodyMats[Math.floor(rnd() * dgzBodyMats.length)] ?? midMat
               const rotY = Math.atan2(-p.tz, p.tx)
+              const bcx = p.cx + p.px * side * (buildFrontLat + bd / 2)
+              const bcz = p.cz + p.pz * side * (buildFrontLat + bd / 2)
               const body = new THREE.Mesh(new THREE.BoxGeometry(sw - 0.5, bh, bd), mat)
-              body.position.set(
-                p.cx + p.px * side * (buildFrontLat + bd / 2),
-                baseY + bh / 2,
-                p.cz + p.pz * side * (buildFrontLat + bd / 2),
-              )
+              body.position.set(bcx, baseY + bh / 2, bcz)
               body.rotation.y = rotY
-              mAdd(body) // behind the wall → NO AABB
+              mAdd(body)
+              // Footprint AABB. The "behind the wall → unreachable → no hitbox" assumption
+              // held only from the LANE side; the open bowl wraps around the OUTER face, so
+              // the player walked straight through these from outside (see-through). Give
+              // each a footprint hitbox (exact axis-aligned bound of the rotated box, like
+              // 公園通り/宮益坂). lat ≥ buildFrontLat (10.8) > DGZ_HW (9), so the lane stays
+              // clear — this only seals the bowl-side approach.
+              addShibuyaAABB(
+                bcx,
+                bcz,
+                Math.abs(p.tx) * ((sw - 0.5) / 2) + Math.abs(p.tz) * (bd / 2),
+                Math.abs(p.tz) * ((sw - 0.5) / 2) + Math.abs(p.tx) * (bd / 2),
+                baseY + bh,
+              )
               if (rnd() < 0.42) {
                 const th = bh * (0.2 + rnd() * 0.2) // stepped setback for silhouette variety
                 const top = new THREE.Mesh(
                   new THREE.BoxGeometry((sw - 0.5) * 0.6, th, bd * 0.6),
                   mat,
                 )
-                top.position.set(
-                  p.cx + p.px * side * (buildFrontLat + bd / 2),
-                  baseY + bh + th / 2,
-                  p.cz + p.pz * side * (buildFrontLat + bd / 2),
-                )
+                top.position.set(bcx, baseY + bh + th / 2, bcz)
                 top.rotation.y = rotY
                 mAdd(top)
               }
@@ -21973,17 +21994,11 @@ export default function ThreeWorld({
           const topP = dogenzakaAt(DGZ_TOP_S - 6)
           if (topP) {
             for (const side of [1, -1] as const) {
-              makeTower(
-                topP.cx + topP.px * side * 17,
-                topP.cz + topP.pz * side * 17,
-                11,
-                11,
-                32 + rnd() * 12,
-                topP.h,
-                side > 0 ? 0xbfe0ff : 0xffe0b0,
-                0.5,
-                4,
-              )
+              const tx = topP.cx + topP.px * side * 17
+              const tz = topP.cz + topP.pz * side * 17
+              const th = 32 + rnd() * 12
+              makeTower(tx, tz, 11, 11, th, topP.h, side > 0 ? 0xbfe0ff : 0xffe0b0, 0.5, 4)
+              addShibuyaAABB(tx, tz, 5.5, 5.5, topP.h + th) // footprint hitbox (was see-through)
             }
           }
           // Flush the local sign buckets (the scramble's already flushed above).
@@ -24869,8 +24884,12 @@ export default function ThreeWorld({
         // asphalt + a little more street furniture, so the crossing reads as enclosed
         // top-to-bottom. Bodies ride the existing merge buckets; pools/bollards are
         // instanced. (makeSignTex / SignSpec from Phase B are reused for the signage.)
-        // ── 駅 (station) silhouette: a long low 横長 backdrop on the far 駅前 side. ──
-        const staZ = -90
+        // ── 駅 (station) silhouette: a long low 横長 backdrop on the far 駅前 side. Pulled
+        // to z=-97 (was -90) so its SOUTH face (staZ + depth/2 = -90) sits at the 公園通り
+        // dead-end (-9,-90) instead of protruding ~7u INTO the lane — before, the corridor's
+        // last stretch ran inside the station mesh (the middle gap has no hitbox), so you
+        // walked through the station facade at the dead-end (see-through). ──
+        const staZ = -97
         const staBody = new THREE.Mesh(new THREE.BoxGeometry(70, 22, 14), midMat)
         staBody.position.set(0, 11, staZ)
         mAdd(staBody)
