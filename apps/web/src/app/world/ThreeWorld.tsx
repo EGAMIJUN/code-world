@@ -1627,6 +1627,46 @@ const OSAKA_AABBS: WallAABB[] = []
 // tests OSAKA_AABBS *and* SHIBUYA_AABBS; the inactive stage's array is empty.
 const SHIBUYA_AABBS: WallAABB[] = []
 
+// ── SHIBUYA STEP2: 歪 (distortion) combat ──────────────────────────────────────────────
+// The 封絶 (sealing barrier) falls on Shibuya, the underground seal cracks, and humans'
+// negative emotions manifest as 歪 — the creature the player exorcises. This is a FULLY
+// SEPARATE, lean enemy system from the CombatEnemy humanoid pool (OSAKA/HUNT/PvP use that;
+// 歪 never enter the `enemies` array). Everything is gated by isShibuyaStage, so OSAKA's
+// combat is never touched. A 歪 is an original silhouette: a translucent black-mist
+// humanoid trailing into smoke, lit from within by glowing red fracture veins + red eyes.
+// STEP2-A is the foundation (spawn/seek/hit/death/contact); 擬態 (mimicry) / 楔 (wedge) /
+// area-personality / the sealed boss land in STEP2-B+.
+const SHIBUYA_HIZUMI_HP = 60 // ~ a few pistol shots / one shotgun burst
+const SHIBUYA_HIZUMI_SPEED = 2.3 // m/s — a slow, creeping approach the player can kite
+const SHIBUYA_HIZUMI_TOUCH_RANGE = 1.7 // it stops seeking once this close to the player
+const SHIBUYA_HIZUMI_RADIUS = 0.5 // body radius for wall collision (vs SHIBUYA_AABBS)
+const SHIBUYA_HIZUMI_DEATH_SEC = 0.9 // dissipation duration (fade + sink + spin)
+// Fixed spawn ring around the scramble (LOCAL coords; +HUNT_ARENA → world). STEP2-A keeps
+// this a small fixed set — escalating waves arrive with the 楔 (wedge) in STEP2-B.
+const SHIBUYA_WAVE_LOCAL: readonly (readonly [number, number])[] = [
+  [0, -22],
+  [16, -12],
+  [-16, -12],
+  [22, 8],
+  [-22, 8],
+  [8, -30],
+  [-8, 18],
+]
+// A 歪 instance. Lean on purpose — no humanoid rig (no arms/legs/pose state machine); the
+// whole lifecycle lives in the shibuya* functions, never in the generic enemy update.
+interface ShibuyaEnemy {
+  id: number
+  group: THREE.Group // root — positioned/rotated each frame
+  hp: number
+  maxHp: number
+  alive: boolean
+  dying: number // seconds of dissipation remaining once killed (>0 → fading out)
+  driftPhase: number // per-instance phase so a crowd bobs / pulses out of sync
+  bodyMat: THREE.MeshStandardMaterial // dark mist body (red crack emissiveMap); fades on death
+  eyeMat: THREE.MeshBasicMaterial // glowing red eyes; fade on death
+  lastTouch: number // ms — throttles this 歪's contact damage
+}
+
 // Shared per-AABB tests (so the OSAKA path and the base-map path stay identical).
 function aabbBlocksMover(
   w: WallAABB,
@@ -3035,6 +3075,12 @@ export default function ThreeWorld({
   // SHIBUYA stage map (scramble core + landmarks). Top-level objects built by
   // buildShibuyaMap, disposed by clearShibuyaMap on mission return.
   const shibuyaMapMeshesRef = useRef<THREE.Object3D[]>([])
+  // SHIBUYA STEP2-A: 歪 combat — a fully separate enemy pool (never the `enemies` array, so
+  // OSAKA/HUNT stay untouched). Live 歪 + a per-deploy wave-active flag + an id counter.
+  // Cleared on (re)build / mission return in clearShibuyaMap.
+  const shibuyaEnemiesRef = useRef<ShibuyaEnemy[]>([])
+  const shibuyaWaveActiveRef = useRef(false)
+  const shibuyaNextEnemyIdRef = useRef(0)
   // OSAKA area-progression state + the active mid-boss (Tengu / Yamaya).
   const osakaProgressRef = useRef<OsakaProgressState>({
     area: "dotonbori",
@@ -17406,6 +17452,9 @@ export default function ThreeWorld({
         dummy: THREE.Object3D
       }
       let shibuyaAnim: ShibuyaAnim | null = null
+      // SHIBUYA STEP2: the 歪 red-crack emissive texture is the same for every instance, so
+      // it's built once on first spawn and shared (cached here for the run).
+      let hizumiCrackTex: THREE.CanvasTexture | null = null
       // SHIBUYA night sky saved on build so it restores on teardown (fog reuses the
       // shared huntStageFogSaved; base-light dimming reuses huntStageLightSaved).
       let shibuyaBgSaved: THREE.Color | THREE.Texture | null = null
@@ -25625,6 +25674,7 @@ export default function ThreeWorld({
           })
         }
         shibuyaMapMeshesRef.current = []
+        clearShibuyaEnemies() // STEP2-A: dispose any live 歪 with the map
         SHIBUYA_AABBS.length = 0 // drop the SHIBUYA collision boxes on teardown
         shibuyaAnim = null // animated handles die with the disposed meshes (Phase F)
         // Restore the night sky (fog + base-light dimming restore via clearOsakaMap /
@@ -25708,6 +25758,196 @@ export default function ThreeWorld({
           for (const c of a.cull) c.obj.visible = Math.hypot(lx - c.cx, lz - c.cz) < c.r
         }
       }
+      // ══ SHIBUYA STEP2-A: 歪 (distortion) combat — spawn / seek / render ══════════════
+      // A fully separate enemy pool from the CombatEnemy humanoids (OSAKA/HUNT use those).
+      // Every function below only runs for SHIBUYA (the pool is empty otherwise), so OSAKA's
+      // combat is never touched. STEP2-A = the foundation; STEP2-B adds 楔 / mimicry / boss.
+
+      // Shared red-crack emissive texture — jagged glowing veins on black (black = no glow).
+      // Built once and cached for the run (every 歪 reuses it as an emissiveMap).
+      function getHizumiCrackTex(): THREE.CanvasTexture {
+        if (hizumiCrackTex) return hizumiCrackTex
+        const cv = document.createElement("canvas")
+        cv.width = 64
+        cv.height = 128
+        const c = cv.getContext("2d")
+        if (c) {
+          c.fillStyle = "#000000"
+          c.fillRect(0, 0, 64, 128)
+          c.lineCap = "round"
+          for (let i = 0; i < 6; i++) {
+            let x = 6 + Math.random() * 52
+            let y = 2
+            c.strokeStyle = i % 2 ? "#ff2740" : "#ff5a2a"
+            c.lineWidth = 1 + Math.random() * 1.6
+            c.beginPath()
+            c.moveTo(x, y)
+            while (y < 126) {
+              x += (Math.random() - 0.5) * 16
+              y += 7 + Math.random() * 11
+              c.lineTo(x, y)
+              if (Math.random() < 0.25) {
+                c.lineTo(x + (Math.random() - 0.5) * 18, y + Math.random() * 8) // a short branch
+                c.moveTo(x, y)
+              }
+            }
+            c.stroke()
+          }
+        }
+        const tex = new THREE.CanvasTexture(cv)
+        hizumiCrackTex = tex
+        return tex
+      }
+
+      // Build one 歪: a translucent black-mist humanoid trailing into smoke, veined with
+      // glowing red cracks + two red eyes. Original silhouette (no humanoid rig). The body
+      // meshes are tagged userData.hizumi so the fire() centre-ray can hit them (Phase B).
+      function makeHizumi(): ShibuyaEnemy {
+        const group = new THREE.Group()
+        const bodyMat = new THREE.MeshStandardMaterial({
+          color: 0x05050c, // near-black smoke
+          transparent: true,
+          opacity: 0.7,
+          roughness: 1,
+          metalness: 0,
+          emissive: 0xff2030, // the cracks glow red from within
+          emissiveMap: getHizumiCrackTex(),
+          emissiveIntensity: 0.9,
+          depthWrite: false,
+        })
+        const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.24, 0.46, 1.5, 10), bodyMat)
+        torso.position.y = 1.2
+        group.add(torso)
+        const tail = new THREE.Mesh(new THREE.ConeGeometry(0.46, 1.0, 10), bodyMat)
+        tail.position.y = 0.5
+        tail.rotation.x = Math.PI // wide at the body → narrows to a wisp at the ground
+        group.add(tail)
+        const head = new THREE.Mesh(new THREE.IcosahedronGeometry(0.33, 0), bodyMat)
+        head.position.y = 2.12
+        group.add(head)
+        for (const sx of [-1, 1] as const) {
+          const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.12, 1.15, 6), bodyMat)
+          arm.position.set(sx * 0.3, 1.45, 0.04)
+          arm.rotation.z = sx * 0.45 // drooping tendrils
+          group.add(arm)
+        }
+        const eyeMat = new THREE.MeshBasicMaterial({
+          color: 0xff2a3a,
+          transparent: true,
+          opacity: 1,
+        })
+        const eyeGeo = new THREE.SphereGeometry(0.05, 6, 5)
+        for (const sx of [-1, 1] as const) {
+          const eye = new THREE.Mesh(eyeGeo, eyeMat)
+          eye.position.set(sx * 0.11, 2.16, 0.27)
+          group.add(eye)
+        }
+        group.traverse((o) => {
+          if (o instanceof THREE.Mesh) {
+            o.castShadow = false
+            o.userData.hizumi = true
+          }
+        })
+        return {
+          id: shibuyaNextEnemyIdRef.current++,
+          group,
+          hp: SHIBUYA_HIZUMI_HP,
+          maxHp: SHIBUYA_HIZUMI_HP,
+          alive: true,
+          dying: 0,
+          driftPhase: Math.random() * Math.PI * 2,
+          bodyMat,
+          eyeMat,
+          lastTouch: 0,
+        }
+      }
+
+      // Free a 歪's GPU resources (geometry + per-instance materials; the crack texture is
+      // shared and kept for the run).
+      function disposeHizumi(h: ShibuyaEnemy) {
+        scene.remove(h.group)
+        h.group.traverse((o) => {
+          if (o instanceof THREE.Mesh) o.geometry.dispose()
+        })
+        h.bodyMat.dispose()
+        h.eyeMat.dispose()
+      }
+
+      // Tear down the whole 歪 pool (mission return / re-deploy). Never touches `enemies`.
+      function clearShibuyaEnemies() {
+        for (const h of shibuyaEnemiesRef.current) disposeHizumi(h)
+        shibuyaEnemiesRef.current = []
+        shibuyaWaveActiveRef.current = false
+      }
+
+      // True if a 歪-sized body at (wx,wz) would overlap a SHIBUYA wall/landmark AABB.
+      function hizumiBlocked(wx: number, wz: number): boolean {
+        for (const w of SHIBUYA_AABBS) {
+          if (aabbBlocksMover(w, wx, wz, SHIBUYA_HIZUMI_RADIUS, 0)) return true
+        }
+        return false
+      }
+
+      // Spawn one 歪 near (wx,wz) world, nudged to a wall-free spot.
+      function spawnShibuyaEnemy(wx: number, wz: number) {
+        const h = makeHizumi()
+        const safe = findSafeSpawnNear(wx, wz, SHIBUYA_HIZUMI_RADIUS)
+        h.group.position.set(safe.x, 0, safe.z)
+        scene.add(h.group)
+        shibuyaEnemiesRef.current.push(h)
+      }
+
+      // Spawn the fixed STEP2-A wave around the scramble (escalation arrives in STEP2-B).
+      function spawnShibuyaWave() {
+        clearShibuyaEnemies()
+        for (const [lx, lz] of SHIBUYA_WAVE_LOCAL) {
+          spawnShibuyaEnemy(HUNT_ARENA.x + lx, HUNT_ARENA.z + lz)
+        }
+        shibuyaWaveActiveRef.current = true
+      }
+
+      // Per-frame 歪 update: dissipate the dying, seek the player (simple, wall-stopped),
+      // and the eerie idle (bob + crack-glow pulse). Self-gates on an empty pool (so it is a
+      // no-op outside SHIBUYA). Contact damage + the clear check are wired in Phase B / C.
+      function updateShibuyaEnemies(dt: number) {
+        const list = shibuyaEnemiesRef.current
+        if (list.length === 0) return
+        for (let i = list.length - 1; i >= 0; i--) {
+          const h = list[i]
+          if (!h) continue
+          if (h.dying > 0) {
+            h.dying -= dt
+            const k = Math.max(0, h.dying / SHIBUYA_HIZUMI_DEATH_SEC)
+            h.bodyMat.opacity = 0.7 * k
+            h.eyeMat.opacity = k
+            h.group.position.y -= dt * 1.2 // sink into the ground
+            h.group.rotation.y += dt * 6 // spin apart
+            h.group.scale.setScalar(0.4 + 0.6 * k)
+            if (h.dying <= 0) {
+              disposeHizumi(h)
+              list.splice(i, 1)
+            }
+            continue
+          }
+          // Seek the player on the ground plane; stop short at touch range.
+          const dx = focalPoint.x - h.group.position.x
+          const dz = focalPoint.z - h.group.position.z
+          const dist = Math.hypot(dx, dz) || 1
+          if (dist > SHIBUYA_HIZUMI_TOUCH_RANGE) {
+            const step = SHIBUYA_HIZUMI_SPEED * dt
+            const nx = h.group.position.x + (dx / dist) * step
+            const nz = h.group.position.z + (dz / dist) * step
+            // Per-axis wall stop → slides along walls instead of sticking.
+            if (!hizumiBlocked(nx, h.group.position.z)) h.group.position.x = nx
+            if (!hizumiBlocked(h.group.position.x, nz)) h.group.position.z = nz
+          }
+          h.group.rotation.y = Math.atan2(dx, dz) // face the player (model faces +z)
+          h.driftPhase += dt
+          h.group.position.y = Math.sin(h.driftPhase * 2) * 0.12 // eerie hover/bob
+          h.bodyMat.emissiveIntensity = 0.7 + 0.45 * (0.5 + 0.5 * Math.sin(h.driftPhase * 3))
+        }
+      }
+
       // Per-frame OSAKA scenery animation: neon flicker/pulse, lantern sway,
       // rooftop blinkers, water shimmer, tower beacon hue, scrolling marquee.
       function updateOsakaMap(dt: number) {
@@ -26178,9 +26418,10 @@ export default function ThreeWorld({
           const hamaSpawn = osakaAreaCenter("dotonbori")
           makeRPGPickup(hamaSpawn.x + 6, hamaSpawn.z + 4, 0, "hamaho")
         } else if (isShibuya) {
-          // SHIBUYA core PR: no minions/boss yet — just place the player at the
-          // scramble. Outer-ring areas + enemies + the sealed boss land in later PRs.
+          // SHIBUYA STEP2-A: place the player at the scramble, then 封絶 falls and the first
+          // 歪 wave manifests. Outer-ring areas + 楔 / mimicry / the sealed boss land later.
           shibuyaInitProgression()
+          spawnShibuyaWave()
           // Show "SHIBUYA" banner on stage entry (world-zone banner suppressed in HUNT).
           areaRef.current = "SHIBUYA"
           areaKeyRef.current += 1
@@ -29049,6 +29290,7 @@ export default function ThreeWorld({
           updateOsakaBikes(dt) // 鉄輪部隊 (Block B): track riders + squad-clear bonus
           updateOsakaMap(dt) // OSAKA scenery animation (neon, lanterns, marquee…)
           updateShibuyaMap(dt) // SHIBUYA scenery (screen scroll, seal pulse, neon)
+          updateShibuyaEnemies(dt) // SHIBUYA STEP2-A 歪 (no-op when the pool is empty)
           updateOsakaFx(dt) // OSAKA boss hazards (telegraphs, pools, splitters…)
           updateOsakaRain(dt) // OSAKA rain streaks + ground ripples
           updateOsakaEnv(dt) // OSAKA collapsing bridges
