@@ -1644,17 +1644,6 @@ const SHIBUYA_HIZUMI_TOUCH_RANGE = 2.4 // it stops seeking / claws within this (
 const SHIBUYA_HIZUMI_TOUCH_CD = 700 // ms between contact ticks from one 歪
 const SHIBUYA_HIZUMI_RADIUS = 0.7 // body radius for wall collision (vs SHIBUYA_AABBS; bigger body)
 const SHIBUYA_HIZUMI_DEATH_SEC = 0.9 // dissipation duration (fade + sink + spin)
-// Fixed spawn ring around the scramble (LOCAL coords; +HUNT_ARENA → world). STEP2-A keeps
-// this a small fixed set — escalating waves arrive with the 楔 (wedge) in STEP2-B.
-const SHIBUYA_WAVE_LOCAL: readonly (readonly [number, number])[] = [
-  [0, -22],
-  [16, -12],
-  [-16, -12],
-  [22, 8],
-  [-22, 8],
-  [8, -30],
-  [-8, 18],
-]
 // A 歪 instance. Lean on purpose — no humanoid rig (no arms/legs/pose state machine); the
 // whole lifecycle lives in the shibuya* functions, never in the generic enemy update.
 interface ShibuyaEnemy {
@@ -1686,6 +1675,14 @@ interface ShibuyaEnemy {
 const SHIBUYA_WEDGE_HP = 100
 const SHIBUYA_WEDGE_RANGE = 3 // player must be within this (XZ) of a 楔 to damage it
 const SHIBUYA_WEDGE_FLINCH = 0.5 // s — a destroyed 楔's area 歪 stagger this long
+const SHIBUYA_ENEMY_CAP = 28 // hard ceiling on simultaneous live 歪 across all areas
+const SHIBUYA_ACTIVE_RADIUS = 100 // 歪 / 一般人 beyond this from the player sleep (skip AI)
+const SHIBUYA_SPAWN_INTERVAL = 5200 // ms between a living 楔's area top-up spawns
+const SHIBUYA_AMBUSH_TRIGGER = 18 // ambush 歪 lurk until the player closes within this
+const SHIBUYA_RANGED_STANDOFF = 13 // ranged 歪 hold roughly this distance
+const SHIBUYA_RANGED_RANGE = 32 // ranged 歪 scream when the player is within this
+const SHIBUYA_SCREAM_CD = 4200 // ms between a ranged 歪's disorient screams
+const SHIBUYA_DISORIENT_SEC = 1.2 // s the aim-drift (方向転換) debuff lingers
 type ShibuyaPersona = "rush" | "ambush" | "slope" | "creep" | "flank" | "tank" | "ranged"
 // A combat area: its 楔 position + the 歪 spawn ring + the area's 歪 "personality" + the
 // 擬態 civilian counts (Phase D). All coords are arena-LOCAL (world = + HUNT_ARENA). The 楔
@@ -26186,19 +26183,57 @@ export default function ThreeWorld({
       }
 
       // Spawn one 歪 near (wx,wz) world, nudged to a wall-free spot.
-      function spawnShibuyaEnemy(wx: number, wz: number) {
+      // Spawn one 歪 for a combat area at world (wx,wz), tuned to the area's persona (speed,
+      // size, HP) and tagged with its areaId for flinch + spawn accounting. Rides the slope
+      // ground at spawn so 坂 (道玄坂/公園通り/宮益坂) 歪 never start sunk into the ramp.
+      function spawnShibuyaEnemyInArea(area: ShibuyaCombatArea, wx: number, wz: number) {
         const h = makeHizumi()
-        const safe = findSafeSpawnNear(wx, wz, SHIBUYA_HIZUMI_RADIUS)
-        h.group.position.set(safe.x, 0, safe.z)
+        h.areaId = area.id
+        h.persona = area.persona
+        switch (area.persona) {
+          case "rush":
+            h.speed = SHIBUYA_HIZUMI_SPEED * 1.35 // 高速・直進・集団
+            break
+          case "ambush":
+            h.speed = SHIBUYA_HIZUMI_SPEED * 1.75 // 待ち伏せ → 急加速 (trips near the player)
+            h.aggro = false
+            break
+          case "slope":
+            h.speed = SHIBUYA_HIZUMI_SPEED * 1.45 // 坂の上から突進
+            break
+          case "creep":
+            h.speed = SHIBUYA_HIZUMI_SPEED * 0.55 // じわじわ
+            break
+          case "flank":
+            h.speed = SHIBUYA_HIZUMI_SPEED * 1.05 // ペアで挟む
+            break
+          case "tank":
+            h.speed = SHIBUYA_HIZUMI_SPEED * 0.5 // 大きく遅く硬い
+            h.baseScale = 1.7
+            h.hp = SHIBUYA_HIZUMI_HP * 3
+            h.maxHp = h.hp
+            h.group.scale.setScalar(1.7)
+            break
+          case "ranged":
+            h.speed = SHIBUYA_HIZUMI_SPEED * 0.9 // 遠距離から叫ぶ
+            break
+        }
+        const safe = findSafeSpawnNear(wx, wz, SHIBUYA_HIZUMI_RADIUS * h.baseScale)
+        h.group.position.set(safe.x, shibuyaGroundAt(safe.x, safe.z), safe.z)
         scene.add(h.group)
         shibuyaEnemiesRef.current.push(h)
       }
 
-      // Spawn the fixed STEP2-A wave around the scramble (escalation arrives in STEP2-B).
-      function spawnShibuyaWave() {
+      // STEP2-B: populate every area to its target 歪 count on deploy. Living 楔 then top each
+      // area back up over time (updateShibuyaWedges). Replaces the STEP2-A scramble-only wave.
+      function spawnShibuyaAreas() {
         clearShibuyaEnemies()
-        for (const [lx, lz] of SHIBUYA_WAVE_LOCAL) {
-          spawnShibuyaEnemy(HUNT_ARENA.x + lx, HUNT_ARENA.z + lz)
+        for (const area of SHIBUYA_COMBAT_AREAS) {
+          for (let i = 0; i < area.count; i++) {
+            const sp = area.spawns[i % area.spawns.length]
+            if (!sp) continue
+            spawnShibuyaEnemyInArea(area, HUNT_ARENA.x + sp[0], HUNT_ARENA.z + sp[1])
+          }
         }
         shibuyaWaveActiveRef.current = true
         setShibuyaEradicated(false)
@@ -26297,9 +26332,23 @@ export default function ThreeWorld({
         }
       }
 
-      // Per-frame 歪 update: dissipate the dying, seek the player (simple, wall-stopped),
-      // and the eerie idle (bob + crack-glow pulse). Self-gates on an empty pool (so it is a
-      // no-op outside SHIBUYA). Contact damage + the clear check are wired in Phase B / C.
+      // A 歪's area flinch window (set when its 楔 is destroyed). 0 = not flinching.
+      function shibuyaAreaFlinchUntil(areaId: string): number {
+        for (const w of shibuyaWedgesRef.current) if (w.areaId === areaId) return w.flinchUntil
+        return 0
+      }
+      // 文化村通り (ranged) 歪 の咆哮 → プレイヤーに方向転換デバフ: 照準が一定時間ふらつく +
+      // カメラシェイク + 既存 SFX (新規 audio なし)。タイマーは animate のプレイヤー更新が読む。
+      let shibuyaDisorientT = 0
+      function shibuyaScream() {
+        shibuyaDisorientT = SHIBUYA_DISORIENT_SEC
+        cameraShakeRef.current.intensity = Math.max(cameraShakeRef.current.intensity, 3)
+        SOUNDS.huntWarn()
+      }
+      // Per-frame 歪 update: dissipate the dying, then per-persona seek (rush/ambush/slope/
+      // creep/flank/tank/ranged) with an active-radius sleep + a destroyed-楔 flinch, contact
+      // claw, the ranged scream, slope-ride and crack-glow pulse. Self-gates on an empty pool
+      // (no-op outside SHIBUYA). Never touches the `enemies` pool → OSAKA/HUNT/PvP unaffected.
       function updateShibuyaEnemies(dt: number) {
         const list = shibuyaEnemiesRef.current
         if (list.length === 0) return
@@ -26314,29 +26363,74 @@ export default function ThreeWorld({
             h.eyeMat.opacity = k
             h.group.position.y -= dt * 1.2 // sink into the ground
             h.group.rotation.y += dt * 6 // spin apart
-            h.group.scale.setScalar(0.4 + 0.6 * k)
+            h.group.scale.setScalar(h.baseScale * (0.4 + 0.6 * k)) // shrink from its resting size
             if (h.dying <= 0) {
               disposeHizumi(h)
               list.splice(i, 1)
             }
             continue
           }
-          // Seek the player on the ground plane; stop short at touch range.
+          // Distance to the player on the ground plane.
           const dx = focalPoint.x - h.group.position.x
           const dz = focalPoint.z - h.group.position.z
           const dist = Math.hypot(dx, dz) || 1
-          if (dist > SHIBUYA_HIZUMI_TOUCH_RANGE) {
-            const step = SHIBUYA_HIZUMI_SPEED * dt
-            const nx = h.group.position.x + (dx / dist) * step
-            const nz = h.group.position.z + (dz / dist) * step
+          // Active limit: 歪 far from the player sleep — skip ALL AI (seek/contact/scream) and
+          // just hold position. Keeps FPS up with ~26 歪 over 7 areas. (Dying 歪 above always
+          // finish dissipating regardless of distance.)
+          if (dist > SHIBUYA_ACTIVE_RADIUS) continue
+          // Flinch: this area's 楔 was just destroyed → the 歪 stagger (no advance / no claw).
+          const flinching = now < shibuyaAreaFlinchUntil(h.areaId)
+          // Per-persona movement. Base = straight homing at the 歪's own speed.
+          let dirx = dx / dist
+          let dirz = dz / dist
+          let advance = !flinching && dist > SHIBUYA_HIZUMI_TOUCH_RANGE
+          if (h.persona === "ambush" && !h.aggro) {
+            if (dist < SHIBUYA_AMBUSH_TRIGGER)
+              h.aggro = true // tripped → it bursts forward from now on
+            else advance = false // lurk in place until the player is close
+          } else if (h.persona === "flank" && advance && dist > 6) {
+            // veer to one side to pincer (paired 歪 carry opposite flankSigns).
+            const ox = dx / dist
+            dirx += -dirz * h.flankSign * 0.6
+            dirz += ox * h.flankSign * 0.6
+            const dl = Math.hypot(dirx, dirz) || 1
+            dirx /= dl
+            dirz /= dl
+          } else if (h.persona === "ranged") {
+            // hold a standoff: back away if too close, stop drifting once at range.
+            if (dist < SHIBUYA_RANGED_STANDOFF) {
+              dirx = -dirx
+              dirz = -dirz
+            } else if (dist < SHIBUYA_RANGED_STANDOFF + 4) {
+              advance = false
+            }
+          }
+          if (advance) {
+            const step = h.speed * dt
+            const nx = h.group.position.x + dirx * step
+            const nz = h.group.position.z + dirz * step
             // Per-axis wall stop → slides along walls instead of sticking.
             if (!hizumiBlocked(nx, h.group.position.z)) h.group.position.x = nx
             if (!hizumiBlocked(h.group.position.x, nz)) h.group.position.z = nz
-          } else if (now - h.lastTouch >= SHIBUYA_HIZUMI_TOUCH_CD) {
-            // Reached the player → it claws (throttled per 歪). applyPlayerDamage handles
-            // spawn-invuln + game-over (its osakaRunHurt tally is a no-op outside OSAKA).
+          }
+          // Contact claw when it reaches the player (throttled per 歪; never while flinching).
+          if (
+            !flinching &&
+            dist <= SHIBUYA_HIZUMI_TOUCH_RANGE &&
+            now - h.lastTouch >= SHIBUYA_HIZUMI_TOUCH_CD
+          ) {
             h.lastTouch = now
             applyPlayerDamage(SHIBUYA_HIZUMI_TOUCH_DMG, 3)
+          }
+          // Ranged 歪 scream → a brief aim-drift (方向転換) debuff on the player.
+          if (
+            h.persona === "ranged" &&
+            !flinching &&
+            dist < SHIBUYA_RANGED_RANGE &&
+            now - h.lastScream >= SHIBUYA_SCREAM_CD
+          ) {
+            h.lastScream = now
+            shibuyaScream()
           }
           h.group.rotation.y = Math.atan2(dx, dz) // face the player (model faces +z)
           h.driftPhase += dt
@@ -26501,7 +26595,10 @@ export default function ThreeWorld({
       function updateShibuyaWedges(dt: number) {
         const list = shibuyaWedgesRef.current
         if (list.length === 0) return
-        const t = Date.now() * 0.001
+        const now = Date.now()
+        const t = now * 0.001
+        let totalAlive = 0
+        for (const e of shibuyaEnemiesRef.current) if (e.alive) totalAlive++
         for (const w of list) {
           if (w.destroyed) continue
           w.spin += dt * 1.1 // always rotating
@@ -26510,6 +26607,21 @@ export default function ThreeWorld({
           const pulse = 0.5 + 0.5 * Math.sin(t * 3 + w.x * 0.2)
           w.pillarMat.emissiveIntensity = w.hitFlash > 0 ? 2.6 : 0.5 + 0.85 * pulse
           w.beamMat.opacity = 0.3 + 0.22 * pulse
+          // Area top-up: a living 楔 keeps its area at its target 歪 count (escalating pressure
+          // until the player breaks it), throttled per area + bounded by the global cap.
+          if (now < w.nextSpawnAt || totalAlive >= SHIBUYA_ENEMY_CAP) continue
+          const area = SHIBUYA_COMBAT_AREAS.find((a) => a.id === w.areaId)
+          if (!area) continue
+          let areaAlive = 0
+          for (const e of shibuyaEnemiesRef.current)
+            if (e.alive && e.areaId === w.areaId) areaAlive++
+          if (areaAlive >= area.count) continue
+          const sp = area.spawns[Math.floor(Math.random() * area.spawns.length)]
+          if (!sp) continue
+          spawnShibuyaEnemyInArea(area, HUNT_ARENA.x + sp[0], HUNT_ARENA.z + sp[1])
+          totalAlive++
+          w.nextSpawnAt = now + SHIBUYA_SPAWN_INTERVAL
+          refreshShibuyaRemaining()
         }
       }
 
@@ -26993,7 +27105,7 @@ export default function ThreeWorld({
           SOUNDS.collapse()
           window.setTimeout(() => SOUNDS.huntWarn(), 340)
           spawnShibuyaWedges() // 各エリアに 楔 を1基ずつ (歪 を生み続ける核)
-          spawnShibuyaWave()
+          spawnShibuyaAreas() // 全7エリアに persona 別 歪 を配置 (楔 が時間で補充)
           // Show "SHIBUYA" banner on stage entry (world-zone banner suppressed in HUNT).
           areaRef.current = "SHIBUYA"
           areaKeyRef.current += 1
@@ -30122,6 +30234,11 @@ export default function ThreeWorld({
             if (slopeY > 0) {
               onDgzSlope = true
               if (slopeY > groundY) groundY = slopeY
+            }
+            // 文化村通り (ranged) 歪 の咆哮デバフ: 照準を緩く揺さぶる (方向転換)。Shibuya 限定。
+            if (shibuyaDisorientT > 0) {
+              shibuyaDisorientT -= dt
+              camState.yaw += Math.sin(Date.now() * 0.02) * 0.008
             }
           }
 
