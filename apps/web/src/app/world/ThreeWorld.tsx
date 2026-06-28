@@ -3531,6 +3531,14 @@ export default function ThreeWorld({
   // ERADICATED flash. Separate from aliveEnemyCount (which counts the `enemies` pool).
   const [shibuyaRemaining, setShibuyaRemaining] = useState(0)
   const [shibuyaEradicated, setShibuyaEradicated] = useState(false)
+  // SHIBUYA STEP2-B: the 封絶 (sealing) dramatic banner — opening "封絶が渋谷を覆った" and the
+  // 封絶崩壊 finale. A dedicated Shibuya overlay kept apart from the OSAKA cutin so the two
+  // stages never share UI state. `ms` drives the CSS fade so callers pick the dwell. null=hidden.
+  const [shibuyaCutin, setShibuyaCutin] = useState<{
+    title: string
+    sub: string | null
+    ms: number
+  } | null>(null)
 
   useEffect(() => {
     setIsMobile(navigator.maxTouchPoints > 0)
@@ -25623,6 +25631,31 @@ export default function ThreeWorld({
         shibuyaBgWasSaved = true
         scene.background = new THREE.Color(0x1b2540) // lifted neon night (was 0x10172a navy void)
 
+        // ── 封絶 (Fūzetsu / sealing dome) — STEP2-B world-framing ──────────────────
+        // A black mist dome seals Shibuya in. ONE BackSide sphere, radius past the
+        // farthest corridor mouth (駅東→x≈140 / 文化村→x≈-138) so every walkable
+        // extension stays enclosed, faintly self-lit from within (MeshBasicMaterial in a
+        // near-black violet — no light needed) so it reads as a glowing membrane at the
+        // horizon and a sealed sky overhead. depthWrite off + fog off + renderOrder −1 so
+        // it neither z-fights the skyline nor gets eaten by the haze, and draws as a
+        // backdrop behind everything. Single draw call; added to the tracked arena group
+        // so clearShibuyaMap disposes it with the rest of the map (no extra teardown).
+        const fuzetsuDome = new THREE.Mesh(
+          new THREE.SphereGeometry(155, 36, 18, 0, Math.PI * 2, 0, Math.PI * 0.62),
+          new THREE.MeshBasicMaterial({
+            color: 0x140a22,
+            transparent: true,
+            opacity: 0.5,
+            side: THREE.BackSide,
+            depthWrite: false,
+            fog: false,
+          }),
+        )
+        fuzetsuDome.position.y = -4 // dip the rim below the deck so it meets the ground
+        fuzetsuDome.renderOrder = -1
+        fuzetsuDome.frustumCulled = false
+        add(fuzetsuDome)
+
         flushMerges() // collapse all static buckets → one mesh per material
         scene.add(group)
         shibuyaMapMeshesRef.current.push(group)
@@ -25677,6 +25710,17 @@ export default function ThreeWorld({
           shibuyaBgSaved = null
           shibuyaBgWasSaved = false
         }
+      }
+      // 封絶 dramatic banner: show a centred title/sub for `ms`, auto-hiding unless a newer
+      // call supersedes it (gen guard, mirrors osakaShowCutin). Shibuya-only UI — never the
+      // OSAKA cutin. Used for the opening 「封絶が渋谷を覆った」 and the 封絶崩壊 finale.
+      let shibuyaCutinGen = 0
+      function shibuyaShowCutin(title: string, sub: string | null, ms: number) {
+        const gen = ++shibuyaCutinGen
+        setShibuyaCutin({ title, sub, ms })
+        window.setTimeout(() => {
+          if (shibuyaCutinGen === gen) setShibuyaCutin(null)
+        }, ms)
       }
       // 渋谷ミッション開始時のプレイヤー配置。今回 (核 PR) は敵/ボス無し — 谷底の
       // スクランブル中央 (y=0) に置き、北 (公園通り/駅前方向) を向かせるだけ。外周
@@ -26613,6 +26657,12 @@ export default function ThreeWorld({
           // SHIBUYA STEP2-A: place the player at the scramble, then 封絶 falls and the first
           // 歪 wave manifests. Outer-ring areas + 楔 / mimicry / the sealed boss land later.
           shibuyaInitProgression()
+          // 封絶 falls: dramatic centred banner for 3s + a low collapse knell and a warning
+          // sting (reusing existing WebAudio SFX — no new audio). The dome mesh itself is
+          // built in buildShibuyaMap (huntApplyStage above) — this is just the announcement.
+          shibuyaShowCutin("封 絶", "封絶が渋谷を覆った", 3000)
+          SOUNDS.collapse()
+          window.setTimeout(() => SOUNDS.huntWarn(), 340)
           spawnShibuyaWave()
           // Show "SHIBUYA" banner on stage entry (world-zone banner suppressed in HUNT).
           areaRef.current = "SHIBUYA"
@@ -33432,6 +33482,54 @@ export default function ThreeWorld({
                 <style>
                   {
                     "@keyframes osakaCutinSlide { 0% { transform: translateX(55vw); opacity: 0; } 13% { transform: translateX(0); opacity: 1; } 80% { transform: translateX(0); opacity: 1; } 100% { transform: translateX(-55vw); opacity: 0; } } @keyframes osakaCutinFade { 0% { opacity: 0; } 15% { opacity: 1; } 80% { opacity: 1; } 100% { opacity: 0; } } @keyframes daimaCutin { 0% { transform: scale(1.35); opacity: 0; } 12% { transform: scale(1); opacity: 1; } 85% { transform: scale(1); opacity: 1; } 100% { transform: scale(1.06); opacity: 0; } }"
+                  }
+                </style>
+              </div>
+            )}
+
+            {/* ── 封絶カットイン (STEP2-B): 黒紫の霧幕タイトルが中央にせり上がる ── */}
+            {shibuyaCutin && gamePhase === "playing" && (
+              <div
+                style={{
+                  position: "absolute",
+                  top: "18%",
+                  left: 0,
+                  right: 0,
+                  zIndex: 76,
+                  pointerEvents: "none",
+                  textAlign: "center",
+                  animation: `shibuyaCutin ${shibuyaCutin.ms}ms ease-in-out forwards`,
+                }}
+              >
+                <div
+                  style={{
+                    fontFamily: "'Hiragino Mincho ProN','Yu Mincho',serif",
+                    fontSize: isMobile ? "2.1rem" : "3.2rem",
+                    color: "#c9a8ff",
+                    letterSpacing: "0.5em",
+                    fontWeight: "bold",
+                    textShadow: "0 0 34px rgba(150,80,255,0.9), 0 0 12px rgba(0,0,0,0.9)",
+                  }}
+                >
+                  {shibuyaCutin.title}
+                </div>
+                {shibuyaCutin.sub && (
+                  <div
+                    style={{
+                      marginTop: "0.5rem",
+                      color: "#b9a0d8",
+                      fontSize: isMobile ? "0.85rem" : "1.05rem",
+                      letterSpacing: "0.32em",
+                      fontFamily: "'Hiragino Mincho ProN','Yu Mincho',serif",
+                      textShadow: "0 0 16px rgba(120,60,220,0.7)",
+                    }}
+                  >
+                    {shibuyaCutin.sub}
+                  </div>
+                )}
+                <style>
+                  {
+                    "@keyframes shibuyaCutin { 0% { opacity: 0; transform: translateY(18px) scale(1.08); } 14% { opacity: 1; transform: translateY(0) scale(1); } 82% { opacity: 1; transform: translateY(0) scale(1); } 100% { opacity: 0; transform: translateY(-10px) scale(1.02); } }"
                   }
                 </style>
               </div>
