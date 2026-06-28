@@ -13886,6 +13886,9 @@ export default function ThreeWorld({
           const cx = focalPoint.x
           const cz = focalPoint.z
           const m = osakaRainDummy.matrix
+          // GPU upload (setMatrixAt × count) is the bottleneck — run every other frame.
+          // Positions still advance every frame so rain speed is unchanged.
+          const doGpu = osakaMapFrame % 2 === 0
           for (let i = 0; i < count; i++) {
             const b = i * 3
             let x = pos[b] ?? 0
@@ -13901,12 +13904,14 @@ export default function ThreeWorld({
             pos[b] = x
             pos[b + 1] = y
             pos[b + 2] = z
-            // Drops are pure translations (no rotation/scale), so build the matrix
-            // directly — no getMatrixAt / decompose / recompose round-trip.
-            m.makeTranslation(x, y, z)
-            mesh.setMatrixAt(i, m)
+            if (doGpu) {
+              // Drops are pure translations (no rotation/scale), so build the matrix
+              // directly — no getMatrixAt / decompose / recompose round-trip.
+              m.makeTranslation(x, y, z)
+              mesh.setMatrixAt(i, m)
+            }
           }
-          mesh.instanceMatrix.needsUpdate = true
+          if (doGpu) mesh.instanceMatrix.needsUpdate = true
         }
         for (let i = osakaRipples.length - 1; i >= 0; i--) {
           const r = osakaRipples[i]
@@ -25781,7 +25786,7 @@ export default function ThreeWorld({
         if (a.marquee) {
           a.marquee.offset = (a.marquee.offset + dt * 60) % 1000
         }
-        if (a.marquee && osakaMapFrame % 3 === 0) {
+        if (a.marquee && osakaMapFrame % 6 === 0) {
           const { ctx, canvas, tex } = a.marquee
           ctx.fillStyle = "#001033"
           ctx.fillRect(0, 0, canvas.width, canvas.height)
