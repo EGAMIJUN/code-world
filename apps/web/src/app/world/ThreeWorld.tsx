@@ -18990,8 +18990,10 @@ export default function ThreeWorld({
         if (osakaCataclysm()) {
           scene.fog = new THREE.Fog(0x1a0305, 70, 220) // Phase E: 赤黒い終末の靄を狭め「何かいる」恐怖 (旧 90/340)
           osakaAmbient.color.setHex(0x3a1414)
+          osakaAmbient.intensity = 9.0 // compensate removed PointLights (#135 perf cut): 6→9
           osakaHemi.color.setHex(0x4a1a1a)
           osakaHemi.groundColor.setHex(0x180808)
+          osakaHemi.intensity = 5.0 // compensate removed PointLights (#135 perf cut): 3→5
           moonlight.color.setHex(0xff5a44)
           osakaFill.color.setHex(0xff7766)
           // 地割れ (Block C): a single painted CanvasTexture plane over the field —
