@@ -25825,33 +25825,42 @@ export default function ThreeWorld({
           emissiveIntensity: 0.9,
           depthWrite: false,
         })
-        const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.24, 0.46, 1.5, 10), bodyMat)
-        torso.position.y = 1.2
-        group.add(torso)
-        const tail = new THREE.Mesh(new THREE.ConeGeometry(0.46, 1.0, 10), bodyMat)
-        tail.position.y = 0.5
-        tail.rotation.x = Math.PI // wide at the body → narrows to a wisp at the ground
-        group.add(tail)
-        const head = new THREE.Mesh(new THREE.IcosahedronGeometry(0.33, 0), bodyMat)
-        head.position.y = 2.12
-        group.add(head)
-        for (const sx of [-1, 1] as const) {
-          const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.12, 1.15, 6), bodyMat)
-          arm.position.set(sx * 0.3, 1.45, 0.04)
-          arm.rotation.z = sx * 0.45 // drooping tendrils
-          group.add(arm)
-        }
+        // Merge the whole silhouette (cloak torso + smoke-tail cone + head + two drooping
+        // arm-tendrils) into ONE geometry → one draw call for the body. Each part is baked
+        // into place via geometry transforms before the merge.
+        const bodyGeo =
+          mergeGeometries(
+            [
+              new THREE.CylinderGeometry(0.24, 0.46, 1.5, 10).translate(0, 1.2, 0), // torso
+              new THREE.ConeGeometry(0.46, 1.0, 10)
+                .rotateX(Math.PI)
+                .translate(0, 0.5, 0), // tail
+              new THREE.IcosahedronGeometry(0.33, 0).translate(0, 2.12, 0), // head
+              new THREE.CylinderGeometry(0.06, 0.12, 1.15, 6)
+                .rotateZ(0.45)
+                .translate(0.3, 1.45, 0.04),
+              new THREE.CylinderGeometry(0.06, 0.12, 1.15, 6)
+                .rotateZ(-0.45)
+                .translate(-0.3, 1.45, 0.04),
+            ],
+            false,
+          ) ?? new THREE.CylinderGeometry(0.24, 0.46, 1.5, 10)
+        group.add(new THREE.Mesh(bodyGeo, bodyMat))
+        // Eyes: two red points merged into one mesh (one more draw call).
         const eyeMat = new THREE.MeshBasicMaterial({
           color: 0xff2a3a,
           transparent: true,
           opacity: 1,
         })
-        const eyeGeo = new THREE.SphereGeometry(0.05, 6, 5)
-        for (const sx of [-1, 1] as const) {
-          const eye = new THREE.Mesh(eyeGeo, eyeMat)
-          eye.position.set(sx * 0.11, 2.16, 0.27)
-          group.add(eye)
-        }
+        const eyeGeo =
+          mergeGeometries(
+            [
+              new THREE.SphereGeometry(0.05, 6, 5).translate(0.11, 2.16, 0.27),
+              new THREE.SphereGeometry(0.05, 6, 5).translate(-0.11, 2.16, 0.27),
+            ],
+            false,
+          ) ?? new THREE.SphereGeometry(0.05, 6, 5)
+        group.add(new THREE.Mesh(eyeGeo, eyeMat))
         group.traverse((o) => {
           if (o instanceof THREE.Mesh) {
             o.castShadow = false
