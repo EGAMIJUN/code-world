@@ -14182,6 +14182,7 @@ export default function ThreeWorld({
             applyEnemyKill(e, tag)
           }
         }
+        meleeShibuyaEnemies(nfx, nfz, cosHalf, range, dmg) // SHIBUYA 歪 (no-op off-stage)
         // 五変化: 体への直接斬撃は減衰なし、正面レイにコアが居れば ×3 (露出依存は
         // コアの visible/手前判定そのもの)。
         const ob = osakaBossRef.current
@@ -25954,6 +25955,79 @@ export default function ThreeWorld({
         }
       }
 
+      // ── Unified 歪 damage entry points so EVERY weapon path can hit 歪 (CodeRabbit #132):
+      // hitscan / cone-melee / radius. Each SELF-GATES on an empty pool — the 歪 pool is only
+      // populated on the SHIBUYA stage (spawnShibuyaWave), so calling these from the shared
+      // OSAKA/HUNT damage helpers is a guaranteed no-op off-stage and never touches OSAKA. ──
+
+      // Centre-/aim-ray hitscan: damage the nearest 歪 body the ray hits, unless a wall (at
+      // wallDist) is nearer. Returns true if a 歪 was hit. Used by fire() + the HUNT guns +
+      // the 破魔砲 beam — every aimed weapon reaches 歪 through this one path.
+      function hitscanShibuyaEnemy(
+        rc: THREE.Raycaster,
+        dmg: number,
+        wallDist: number | null,
+      ): boolean {
+        if (shibuyaEnemiesRef.current.length === 0) return false
+        const parts: THREE.Object3D[] = []
+        for (const h of shibuyaEnemiesRef.current) {
+          if (!h.alive) continue
+          h.group.traverse((o) => {
+            if (o instanceof THREE.Mesh && o.userData.hizumi) parts.push(o)
+          })
+        }
+        const hit = rc.intersectObjects(parts, false)[0]
+        if (!hit) return false
+        if (wallDist != null && wallDist < hit.distance) return false // occluded by cover
+        const owner = shibuyaEnemiesRef.current.find((e) => e.id === hit.object.userData.hizumiId)
+        if (!owner) return false
+        damageShibuyaEnemy(owner, dmg, hit.point)
+        return true
+      }
+
+      // Forward fan-shaped melee against 歪 (knife / HUNT blade / 鬼刀 / 大槍). The caller
+      // passes its own normalised forward (nfx,nfz), cone half-angle cos, range and damage.
+      function meleeShibuyaEnemies(
+        nfx: number,
+        nfz: number,
+        cosHalf: number,
+        range: number,
+        dmg: number,
+      ) {
+        if (shibuyaEnemiesRef.current.length === 0) return
+        for (const h of shibuyaEnemiesRef.current) {
+          if (!h.alive) continue
+          const dx = h.group.position.x - focalPoint.x
+          const dz = h.group.position.z - focalPoint.z
+          const d = Math.hypot(dx, dz)
+          if (d > range || d < 1e-3) continue
+          if ((dx / d) * nfx + (dz / d) * nfz < cosHalf) continue
+          damageShibuyaEnemy(h, dmg, new THREE.Vector3(h.group.position.x, 1.2, h.group.position.z))
+        }
+      }
+
+      // AOE against 歪 (grenade / rocket / tank shell / gravity cannon). dmgAt(d) is the
+      // caller's falloff. Called from damageAllInRadius / huntGravityBlast.
+      function damageShibuyaInRadius(
+        cx: number,
+        cy: number,
+        cz: number,
+        radius: number,
+        dmgAt: (d: number) => number,
+      ) {
+        if (shibuyaEnemiesRef.current.length === 0) return
+        for (const h of shibuyaEnemiesRef.current) {
+          if (!h.alive) continue
+          const d = Math.hypot(h.group.position.x - cx, 1.1 - cy, h.group.position.z - cz)
+          if (d >= radius) continue
+          damageShibuyaEnemy(
+            h,
+            dmgAt(d),
+            new THREE.Vector3(h.group.position.x, 1.2, h.group.position.z),
+          )
+        }
+      }
+
       // Per-frame 歪 update: dissipate the dying, seek the player (simple, wall-stopped),
       // and the eerie idle (bob + crack-glow pulse). Self-gates on an empty pool (so it is a
       // no-op outside SHIBUYA). Contact damage + the clear check are wired in Phase B / C.
@@ -26780,6 +26854,7 @@ export default function ThreeWorld({
           spawnBlood(new THREE.Vector3(e.mesh.position.x, EYE_HEIGHT * 0.8, e.mesh.position.z))
           if (e.hp <= 0) applyEnemyKill(e, tag)
         }
+        meleeShibuyaEnemies(nfx, nfz, cosHalf, range, dmg) // SHIBUYA 歪 (no-op off-stage)
         if (struck) SOUNDS.hit()
         recoilRef.current = 0.05
         knifeSwingRef.current = KNIFE_SWING_TIME
@@ -26832,6 +26907,7 @@ export default function ThreeWorld({
             applyEnemyKill(e, "gravity")
           }
         }
+        damageShibuyaInRadius(center.x, center.y, center.z, 15, () => 9999) // SHIBUYA 歪 (no-op off-stage)
         cameraShakeRef.current.intensity = 5
         SOUNDS.rpg()
       }
@@ -26844,6 +26920,25 @@ export default function ThreeWorld({
         raycaster.setFromCamera(pointer, camera)
         tryHitBarrel(100)
         const now = Date.now()
+        // SHIBUYA: the lock-on / burst / capture HUNT guns are bound to the (empty here)
+        // CombatEnemy pool, so on this stage they fire a direct hitscan at the aimed 歪
+        // instead — the player is never stuck with a HUNT weapon. The gravity cannon keeps
+        // its AOE (it catches 歪 via huntGravityBlast). Self-gates on the empty 歪 pool, so
+        // OSAKA / creature stages are unchanged.
+        if (shibuyaEnemiesRef.current.length > 0 && id !== "gravitycannon") {
+          const cd = id === "pulsegun" ? 250 : id === "pulseshotgun" ? 600 : 400
+          if (now - lastFireTimeRef.current < cd) return
+          lastFireTimeRef.current = now
+          if (!huntConsumeAmmo(id)) return
+          hitscanShibuyaEnemy(
+            raycaster,
+            id === "capturegun" ? 9999 : id === "pulsegun" ? 120 : 200,
+            null,
+          )
+          SOUNDS[id === "pulseshotgun" ? "shotgun" : "sniper"]()
+          recoilRef.current = 0.14
+          return
+        }
         if (id === "pulsegun") {
           if (now - lastFireTimeRef.current < 250) return
           lastFireTimeRef.current = now
@@ -27987,6 +28082,8 @@ export default function ThreeWorld({
           const near = bigBossNearestDist(center.x, center.z)
           if (near !== null && near < radius) bossTakeDamage(falloff(Math.max(0, near)))
         }
+        // SHIBUYA 歪: grenades / rockets / tank shells catch the 歪 too (no-op off-stage).
+        damageShibuyaInRadius(center.x, center.y, center.z, radius, falloff)
       }
 
       // Shared hitscan — push damage candidates for the "hard" (non-humanoid)
@@ -28357,6 +28454,26 @@ export default function ThreeWorld({
           if (e.hp <= 0) applyEnemyKill(e, "hamaho")
         }
         setScore(scoreRef.current)
+        // SHIBUYA 歪: the piercing beam burns through every 歪 along its length (a thick-line
+        // test like the zako pass above; no-op off-stage as the pool is empty).
+        for (const h of shibuyaEnemiesRef.current) {
+          if (!h.alive) continue
+          const hy = 1.2
+          const t =
+            (h.group.position.x - origin.x) * dir.x +
+            (hy - origin.y) * dir.y +
+            (h.group.position.z - origin.z) * dir.z
+          if (t <= 0 || t > reach) continue
+          const cx = origin.x + dir.x * t
+          const cy = origin.y + dir.y * t
+          const cz = origin.z + dir.z * t
+          if (
+            Math.hypot(h.group.position.x - cx, hy - cy, h.group.position.z - cz) >
+            HAMAHO_THICK + 1
+          )
+            continue
+          damageShibuyaEnemy(h, dmg, new THREE.Vector3(cx, cy, cz))
+        }
         // 2) 五変化 boss (core wins over body) along the beam
         const ob = osakaBossRef.current
         if (ob && !ob.transitioning) {
@@ -28582,6 +28699,14 @@ export default function ThreeWorld({
             })),
           )
         }
+        // SHIBUYA 歪: the knife cleaves the 歪 in the same forward fan (no-op off-stage).
+        meleeShibuyaEnemies(
+          nfx,
+          nfz,
+          cosHalf,
+          KNIFE_RANGE,
+          headHeightAim ? 9999 : Math.round(KNIFE_DAMAGE * meleeSuitMult()),
+        )
 
         // PvP melee: stab nearby remote players (same gating as gun PvP).
         const sceneRefsLocal = sceneRef.current
@@ -28900,32 +29025,15 @@ export default function ThreeWorld({
           }
         }
 
-        // SHIBUYA 歪 (STEP2-A): the centre ray hits the nearest 歪 body not occluded by a
-        // wall. A fully separate pool from the CombatEnemy array (so enemyHits is always
-        // empty on this stage); its own raycast + damage, gated to the Shibuya stage so
-        // OSAKA/HUNT/PvP never run it. Mirrors the OSAKA mid-boss hitscan pattern above.
-        if (!shotConsumed && isShibuyaStage(huntMissionConfigRef.current.stage)) {
-          const hizParts: THREE.Object3D[] = []
-          for (const h of shibuyaEnemiesRef.current) {
-            if (!h.alive) continue
-            h.group.traverse((o) => {
-              if (o instanceof THREE.Mesh && o.userData.hizumi) hizParts.push(o)
-            })
-          }
-          const hizHit = raycaster.intersectObjects(hizParts, false)[0]
-          if (hizHit) {
-            const blockedByWall = !!(nearestWall && nearestWall.distance < hizHit.distance)
-            if (!blockedByWall) {
-              const owner = shibuyaEnemiesRef.current.find(
-                (e) => e.id === hizHit.object.userData.hizumiId,
-              )
-              if (owner) {
-                SOUNDS.hit()
-                damageShibuyaEnemy(owner, weapon.hitDamage, hizHit.point)
-                shotConsumed = true
-              }
-            }
-          }
+        // SHIBUYA 歪 (STEP2-A): the standard guns hit the aimed 歪 through the shared
+        // hitscanShibuyaEnemy (the same path the HUNT guns + 破魔砲 beam use). The 歪 pool is
+        // empty off-stage so this is a no-op everywhere but Shibuya — OSAKA/HUNT/PvP unaffected.
+        if (
+          !shotConsumed &&
+          hitscanShibuyaEnemy(raycaster, weapon.hitDamage, nearestWall?.distance ?? null)
+        ) {
+          SOUNDS.hit()
+          shotConsumed = true
         }
 
         // PvP hit: check remote players
