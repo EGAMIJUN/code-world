@@ -1668,6 +1668,161 @@ interface ShibuyaEnemy {
   bodyMat: THREE.MeshStandardMaterial // dark mist body (red crack emissiveMap); fades on death
   eyeMat: THREE.MeshBasicMaterial // glowing red eyes; fade on death
   lastTouch: number // ms — throttles this 歪's contact damage
+  // ── STEP2-B fields (defaulted by makeHizumi so STEP2-A callers are unaffected) ──
+  areaId: string // which combat area / 楔 this 歪 belongs to (flinch + spawn accounting)
+  persona: ShibuyaPersona // movement behaviour for its area
+  speed: number // per-instance move speed (persona-derived)
+  baseScale: number // resting scale (tank 歪 are larger; death-shrink rides this)
+  aggro: boolean // ambush: false until the player trips it, then it bursts
+  flankSign: number // flank: which side this 歪 circles to (±1)
+  lastScream: number // ranged: ms throttle on the disorient scream
+}
+
+// ── SHIBUYA STEP2-B: 封絶 / 楔 (wedge) / per-area combat ────────────────────────────
+// Each of the 7 渋谷 areas holds a 楔 (wedge): a black hex pillar driving a red beam
+// skyward, slowly rotating, that spawns 歪 into its area until the player walks up and
+// destroys it (melee-range, within 3u — "近づいて抜く"). Destroy all 7 → 封絶崩壊 (the
+// STEP2-B clear). Every datum/function here is isShibuyaStage-scoped — OSAKA is untouched.
+const SHIBUYA_WEDGE_HP = 100
+const SHIBUYA_WEDGE_RANGE = 3 // player must be within this (XZ) of a 楔 to damage it
+const SHIBUYA_WEDGE_FLINCH = 0.5 // s — a destroyed 楔's area 歪 stagger this long
+type ShibuyaPersona = "rush" | "ambush" | "slope" | "creep" | "flank" | "tank" | "ranged"
+// A combat area: its 楔 position + the 歪 spawn ring + the area's 歪 "personality" + the
+// 擬態 civilian counts (Phase D). All coords are arena-LOCAL (world = + HUNT_ARENA). The 楔
+// positions are validated reachable against the perimeter gaps — notably 駅東 lives inside
+// its real z∈[8,32] mouth (the prompt's (118,0) is sealed behind the 宮益坂 dead-end at x≈101).
+type ShibuyaCombatArea = {
+  id: string
+  label: string
+  persona: ShibuyaPersona
+  wedge: readonly [number, number]
+  spawns: readonly (readonly [number, number])[]
+  count: number // target simultaneous 歪 for this area (sum = 26, under the 28 cap)
+  civilians: number // 一般人 to scatter here (Phase D)
+  disguised: number // how many of `civilians` are 擬態 歪 (Phase D)
+}
+const SHIBUYA_COMBAT_AREAS: readonly ShibuyaCombatArea[] = [
+  {
+    id: "scramble",
+    label: "スクランブル",
+    persona: "rush",
+    wedge: [0, 0],
+    spawns: [
+      [18, -10],
+      [-18, -10],
+      [12, 16],
+      [-12, 16],
+      [22, 4],
+      [-22, 4],
+      [0, -22],
+    ],
+    count: 7,
+    civilians: 3,
+    disguised: 1,
+  },
+  {
+    id: "centergai",
+    label: "センター街",
+    persona: "ambush",
+    wedge: [-96, -22],
+    spawns: [
+      [-48, -22],
+      [-66, -22],
+      [-82, -22],
+      [-92, -22],
+    ],
+    count: 4,
+    civilians: 3,
+    disguised: 1,
+  },
+  {
+    id: "dogenzaka",
+    label: "道玄坂",
+    persona: "slope",
+    wedge: [-70, 70],
+    spawns: [
+      [-22, 51],
+      [-42, 61],
+      [-58, 67],
+    ],
+    count: 3,
+    civilians: 3,
+    disguised: 1,
+  },
+  {
+    id: "koendori",
+    label: "公園通り",
+    persona: "creep",
+    wedge: [-4, -50],
+    spawns: [
+      [-3, -45],
+      [-7, -58],
+      [-9, -72],
+    ],
+    count: 3,
+    civilians: 3,
+    disguised: 1,
+  },
+  {
+    id: "miyamasuzaka",
+    label: "宮益坂",
+    persona: "flank",
+    wedge: [88, -9],
+    spawns: [
+      [48, -6],
+      [52, -4],
+      [78, -8],
+      [82, -9],
+    ],
+    count: 4,
+    civilians: 3,
+    disguised: 1,
+  },
+  {
+    id: "ekihigashi",
+    label: "駅東プラザ",
+    persona: "tank",
+    wedge: [112, 20],
+    spawns: [
+      [106, 16],
+      [116, 24],
+    ],
+    count: 2,
+    civilians: 2,
+    disguised: 1,
+  },
+  {
+    id: "bunkamura",
+    label: "文化村通り",
+    persona: "ranged",
+    wedge: [-118, 0],
+    spawns: [
+      [-108, -1],
+      [-118, 1],
+      [-126, 3],
+    ],
+    count: 3,
+    civilians: 3,
+    disguised: 1,
+  },
+]
+// A 楔 instance (runtime). Carries its area's runtime combat state too (flinch window +
+// respawn scheduling) so the 歪 update can read flinch by areaId without a side table.
+interface ShibuyaWedge {
+  areaId: string
+  label: string
+  x: number // world
+  z: number // world
+  hp: number
+  maxHp: number
+  destroyed: boolean
+  group: THREE.Group
+  pillarMat: THREE.MeshStandardMaterial
+  beamMat: THREE.MeshBasicMaterial
+  spin: number
+  hitFlash: number // s — brief emissive kick after a hit
+  flinchUntil: number // ms — this area's 歪 flinch until (set on destroy)
+  nextSpawnAt: number // ms — next area top-up spawn time (Phase C)
 }
 
 // Shared per-AABB tests (so the OSAKA path and the base-map path stay identical).
@@ -3086,6 +3241,15 @@ export default function ThreeWorld({
   const shibuyaNextEnemyIdRef = useRef(0)
   // ms timestamp at which the ERADICATED flash hands back to the hub (0 = inactive).
   const shibuyaClearAtRef = useRef(0)
+  // SHIBUYA STEP2-B: the 7 楔 (wedges) + run-wide 封絶 progress. Fully separate from any
+  // OSAKA progression — the Shibuya objective is "destroy all 7 楔" (not the OSAKA clear path).
+  const shibuyaWedgesRef = useRef<ShibuyaWedge[]>([])
+  const shibuyaProgressRef = useRef({
+    active: false,
+    wedgesDestroyed: 0,
+    collapse: false, // true once all 7 楔 are down (封絶崩壊 → STEP3 hook)
+    collapseAt: 0, // ms — when the finale hands back to the hub (0 = inactive)
+  })
   // OSAKA area-progression state + the active mid-boss (Tengu / Yamaya).
   const osakaProgressRef = useRef<OsakaProgressState>({
     area: "dotonbori",
@@ -3539,6 +3703,8 @@ export default function ThreeWorld({
     sub: string | null
     ms: number
   } | null>(null)
+  // SHIBUYA STEP2-B: 楔 (wedge) objective counter for the HUD — destroyed / total.
+  const [shibuyaWedgeStat, setShibuyaWedgeStat] = useState({ destroyed: 0, total: 0 })
 
   useEffect(() => {
     setIsMobile(navigator.maxTouchPoints > 0)
@@ -25701,6 +25867,7 @@ export default function ThreeWorld({
         }
         shibuyaMapMeshesRef.current = []
         clearShibuyaEnemies() // STEP2-A: dispose any live 歪 with the map
+        clearShibuyaWedges() // STEP2-B: dispose the 7 楔 with the map
         SHIBUYA_AABBS.length = 0 // drop the SHIBUYA collision boxes on teardown
         shibuyaAnim = null // animated handles die with the disposed meshes (Phase F)
         // Restore the night sky (fog + base-light dimming restore via clearOsakaMap /
@@ -25974,6 +26141,14 @@ export default function ThreeWorld({
           bodyMat,
           eyeMat,
           lastTouch: 0,
+          // STEP2-B defaults — spawnShibuyaEnemyInArea (Phase C) overrides per area/persona.
+          areaId: "scramble",
+          persona: "rush",
+          speed: SHIBUYA_HIZUMI_SPEED,
+          baseScale: 1,
+          aggro: false,
+          flankSign: Math.random() < 0.5 ? -1 : 1,
+          lastScream: 0,
         }
       }
 
@@ -26181,6 +26356,160 @@ export default function ThreeWorld({
           h.group.position.y = groundY + Math.sin(h.driftPhase * 2) * 0.12 // ride ground + bob
           // throb the orange crack-veins (stronger range than STEP2-A → reads in the dark)
           h.bodyMat.emissiveIntensity = 0.95 + 0.5 * (0.5 + 0.5 * Math.sin(h.driftPhase * 3))
+        }
+      }
+
+      // ══ SHIBUYA STEP2-B: 楔 (wedge) — the per-area 歪 spawner the player destroys ════════
+      // Black hex pillar + a red beam to the sky, slowly spinning. Attack within 3u to drop its
+      // HP; at 0 it explodes, its area's 歪 flinch, and that area stops spawning. All 7 down →
+      // 封絶崩壊 (Phase E). Lives in shibuyaWedgesRef — never the `enemies` pool; OSAKA untouched.
+      const shibuyaGroundAt = (wx: number, wz: number): number => {
+        const lx = wx - HUNT_ARENA.x
+        const lz = wz - HUNT_ARENA.z
+        return Math.max(
+          dogenzakaGroundY(lx, lz),
+          koenDoriGroundY(lx, lz),
+          miyamasuzakaGroundY(lx, lz),
+        )
+      }
+      function makeShibuyaWedge(area: ShibuyaCombatArea): ShibuyaWedge {
+        const group = new THREE.Group()
+        // Black hex pillar (h=4) — one mesh. A faint red emissive that the update pulses.
+        const pillarMat = new THREE.MeshStandardMaterial({
+          color: 0x070608,
+          roughness: 0.55,
+          metalness: 0.35,
+          emissive: 0xcc1024,
+          emissiveIntensity: 0.5,
+        })
+        const pillar = new THREE.Mesh(new THREE.CylinderGeometry(0.62, 0.95, 4, 6), pillarMat)
+        pillar.position.y = 2
+        pillar.castShadow = false
+        pillar.userData.shibuyaWedge = true // ray spark target (damage is proximity-gated)
+        group.add(pillar)
+        // Red light beam spearing the sky — open-ended additive cylinder, one mesh.
+        const beamMat = new THREE.MeshBasicMaterial({
+          color: 0xff2233,
+          transparent: true,
+          opacity: 0.5,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+          toneMapped: false,
+          side: THREE.DoubleSide,
+          fog: false,
+        })
+        const beam = new THREE.Mesh(new THREE.CylinderGeometry(0.36, 0.1, 64, 8, 1, true), beamMat)
+        beam.position.y = 32
+        beam.castShadow = false
+        group.add(beam)
+        // Place it on a wall-free spot, riding the slope ground if it sits on a 坂.
+        const safe = findSafeSpawnNear(
+          HUNT_ARENA.x + area.wedge[0],
+          HUNT_ARENA.z + area.wedge[1],
+          1.2,
+        )
+        group.position.set(safe.x, shibuyaGroundAt(safe.x, safe.z), safe.z)
+        return {
+          areaId: area.id,
+          label: area.label,
+          x: safe.x,
+          z: safe.z,
+          hp: SHIBUYA_WEDGE_HP,
+          maxHp: SHIBUYA_WEDGE_HP,
+          destroyed: false,
+          group,
+          pillarMat,
+          beamMat,
+          spin: Math.random() * Math.PI * 2,
+          hitFlash: 0,
+          flinchUntil: 0,
+          nextSpawnAt: 0,
+        }
+      }
+      function disposeShibuyaWedge(w: ShibuyaWedge) {
+        scene.remove(w.group)
+        w.group.traverse((o) => {
+          if (o instanceof THREE.Mesh) o.geometry.dispose()
+        })
+        w.pillarMat.dispose()
+        w.beamMat.dispose()
+      }
+      // Spawn all 7 楔, one per area, and arm the 封絶 progress. Called on Shibuya deploy.
+      function spawnShibuyaWedges() {
+        clearShibuyaWedges()
+        for (const area of SHIBUYA_COMBAT_AREAS) {
+          const w = makeShibuyaWedge(area)
+          scene.add(w.group)
+          shibuyaWedgesRef.current.push(w)
+        }
+        shibuyaProgressRef.current = {
+          active: true,
+          wedgesDestroyed: 0,
+          collapse: false,
+          collapseAt: 0,
+        }
+        setShibuyaWedgeStat({ destroyed: 0, total: SHIBUYA_COMBAT_AREAS.length })
+      }
+      function clearShibuyaWedges() {
+        for (const w of shibuyaWedgesRef.current) disposeShibuyaWedge(w)
+        shibuyaWedgesRef.current = []
+        shibuyaProgressRef.current = {
+          active: false,
+          wedgesDestroyed: 0,
+          collapse: false,
+          collapseAt: 0,
+        }
+        setShibuyaWedgeStat({ destroyed: 0, total: 0 })
+      }
+      // The player attacked near a 楔 → drop its HP. Proximity-gated to 3u so it's a "walk up
+      // and break it" objective rather than a snipe. Returns true if a 楔 was in range. Called
+      // from fire() + meleeAttack with the weapon's damage; no-op off-stage (empty pool).
+      function damageShibuyaWedgeNear(dmg: number): boolean {
+        const list = shibuyaWedgesRef.current
+        if (list.length === 0) return false
+        let hitAny = false
+        for (const w of list) {
+          if (w.destroyed) continue
+          if (Math.hypot(w.x - focalPoint.x, w.z - focalPoint.z) > SHIBUYA_WEDGE_RANGE) continue
+          hitAny = true
+          w.hp -= dmg
+          w.hitFlash = 0.12
+          SOUNDS.hit()
+          if (w.hp <= 0) destroyShibuyaWedge(w)
+        }
+        return hitAny
+      }
+      function destroyShibuyaWedge(w: ShibuyaWedge) {
+        if (w.destroyed) return
+        w.destroyed = true
+        w.flinchUntil = Date.now() + SHIBUYA_WEDGE_FLINCH * 1000 // its area's 歪 stagger 0.5s
+        const c = w.group.position
+        spawnExplosion(new THREE.Vector3(c.x, c.y + 2, c.z), false, true) // red gore burst
+        spawnBlood(new THREE.Vector3(c.x, c.y + 2.6, c.z))
+        SOUNDS.bossStomp()
+        w.group.visible = false // hide immediately; struct stays for flinch lookup (disposed on teardown)
+        const prog = shibuyaProgressRef.current
+        prog.wedgesDestroyed++
+        setShibuyaWedgeStat({ destroyed: prog.wedgesDestroyed, total: SHIBUYA_COMBAT_AREAS.length })
+        showNotification(
+          `楔 破壊 — ${w.label} (${prog.wedgesDestroyed}/${SHIBUYA_COMBAT_AREAS.length})`,
+        )
+        // All 7 down → 封絶崩壊 is detected + dramatized in updateHunt (Phase E).
+      }
+      // Per-frame 楔 animation: spin + red pulse + hit-flash decay. Phase C adds the area
+      // top-up spawning here. Self-gates on an empty pool → no-op outside SHIBUYA.
+      function updateShibuyaWedges(dt: number) {
+        const list = shibuyaWedgesRef.current
+        if (list.length === 0) return
+        const t = Date.now() * 0.001
+        for (const w of list) {
+          if (w.destroyed) continue
+          w.spin += dt * 1.1 // always rotating
+          w.group.rotation.y = w.spin
+          if (w.hitFlash > 0) w.hitFlash -= dt
+          const pulse = 0.5 + 0.5 * Math.sin(t * 3 + w.x * 0.2)
+          w.pillarMat.emissiveIntensity = w.hitFlash > 0 ? 2.6 : 0.5 + 0.85 * pulse
+          w.beamMat.opacity = 0.3 + 0.22 * pulse
         }
       }
 
@@ -26663,6 +26992,7 @@ export default function ThreeWorld({
           shibuyaShowCutin("封 絶", "封絶が渋谷を覆った", 3000)
           SOUNDS.collapse()
           window.setTimeout(() => SOUNDS.huntWarn(), 340)
+          spawnShibuyaWedges() // 各エリアに 楔 を1基ずつ (歪 を生み続ける核)
           spawnShibuyaWave()
           // Show "SHIBUYA" banner on stage entry (world-zone banner suppressed in HUNT).
           areaRef.current = "SHIBUYA"
@@ -28821,6 +29151,8 @@ export default function ThreeWorld({
           KNIFE_RANGE,
           headHeightAim ? 9999 : Math.round(KNIFE_DAMAGE * meleeSuitMult()),
         )
+        // SHIBUYA 楔: a melee swing within 3u chips the wedge too (no head bonus — it's a pillar).
+        damageShibuyaWedgeNear(Math.round(KNIFE_DAMAGE * meleeSuitMult()))
 
         // PvP melee: stab nearby remote players (same gating as gun PvP).
         const sceneRefsLocal = sceneRef.current
@@ -29149,6 +29481,10 @@ export default function ThreeWorld({
           SOUNDS.hit()
           shotConsumed = true
         }
+
+        // SHIBUYA 楔 (STEP2-B): firing within 3u of a wedge chips it down (proximity-gated, not
+        // ray-gated — you must walk up and break it). No-op when no 楔 is near / off-stage.
+        if (damageShibuyaWedgeNear(weapon.hitDamage)) shotConsumed = true
 
         // PvP hit: check remote players
         const sceneRefsLocal = sceneRef.current
@@ -29615,6 +29951,7 @@ export default function ThreeWorld({
           updateOsakaBikes(dt) // 鉄輪部隊 (Block B): track riders + squad-clear bonus
           updateOsakaMap(dt) // OSAKA scenery animation (neon, lanterns, marquee…)
           updateShibuyaMap(dt) // SHIBUYA scenery (screen scroll, seal pulse, neon)
+          updateShibuyaWedges(dt) // SHIBUYA STEP2-B 楔 spin/pulse (no-op when the pool is empty)
           updateShibuyaEnemies(dt) // SHIBUYA STEP2-A 歪 (no-op when the pool is empty)
           updateOsakaFx(dt) // OSAKA boss hazards (telegraphs, pools, splitters…)
           updateOsakaRain(dt) // OSAKA rain streaks + ground ripples
@@ -33274,47 +33611,63 @@ export default function ThreeWorld({
               </div>
             )}
 
-            {/* SHIBUYA STEP2-A: 歪 remaining / provisional ERADICATED flash (Shibuya-only). */}
-            {(shibuyaRemaining > 0 || shibuyaEradicated) && gamePhase === "playing" && (
-              <div
-                style={{
-                  position: "absolute",
-                  top: "3.2rem",
-                  left: "50%",
-                  transform: "translateX(-50%)",
-                  zIndex: 28,
-                  pointerEvents: "none",
-                  fontFamily: "monospace",
-                  textAlign: "center",
-                }}
-              >
-                {shibuyaEradicated ? (
-                  <span
-                    style={{
-                      color: "#ff3a4a",
-                      fontSize: "1.5rem",
-                      fontWeight: "bold",
-                      letterSpacing: "0.32em",
-                      textShadow: "0 0 16px rgba(255,40,60,0.9)",
-                    }}
-                  >
-                    ERADICATED
-                  </span>
-                ) : (
-                  <span
-                    style={{
-                      color: "#ff5566",
-                      fontSize: "0.95rem",
-                      fontWeight: "bold",
-                      letterSpacing: "0.18em",
-                      textShadow: "0 0 10px rgba(255,40,60,0.8)",
-                    }}
-                  >
-                    歪 残り {shibuyaRemaining}
-                  </span>
-                )}
-              </div>
-            )}
+            {/* SHIBUYA STEP2-B: 封絶 objective HUD — 楔 progress + 歪 remaining (Shibuya-only). */}
+            {(shibuyaWedgeStat.total > 0 || shibuyaRemaining > 0 || shibuyaEradicated) &&
+              gamePhase === "playing" && (
+                <div
+                  style={{
+                    position: "absolute",
+                    top: "3.2rem",
+                    left: "50%",
+                    transform: "translateX(-50%)",
+                    zIndex: 28,
+                    pointerEvents: "none",
+                    fontFamily: "monospace",
+                    textAlign: "center",
+                  }}
+                >
+                  {shibuyaEradicated ? (
+                    <span
+                      style={{
+                        color: "#ff3a4a",
+                        fontSize: "1.5rem",
+                        fontWeight: "bold",
+                        letterSpacing: "0.32em",
+                        textShadow: "0 0 16px rgba(255,40,60,0.9)",
+                      }}
+                    >
+                      ERADICATED
+                    </span>
+                  ) : (
+                    <>
+                      {shibuyaWedgeStat.total > 0 && (
+                        <div
+                          style={{
+                            color: "#c9a8ff",
+                            fontSize: "1.05rem",
+                            fontWeight: "bold",
+                            letterSpacing: "0.22em",
+                            textShadow: "0 0 12px rgba(150,80,255,0.85)",
+                          }}
+                        >
+                          封絶 ▸ 楔 {shibuyaWedgeStat.destroyed}/{shibuyaWedgeStat.total}
+                        </div>
+                      )}
+                      <span
+                        style={{
+                          color: "#ff5566",
+                          fontSize: "0.9rem",
+                          fontWeight: "bold",
+                          letterSpacing: "0.18em",
+                          textShadow: "0 0 10px rgba(255,40,60,0.8)",
+                        }}
+                      >
+                        歪 残り {shibuyaRemaining} 体
+                      </span>
+                    </>
+                  )}
+                </div>
+              )}
 
             {osakaBossHud && gamePhase === "playing" && (
               <div
