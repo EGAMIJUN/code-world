@@ -3725,6 +3725,8 @@ export default function ThreeWorld({
   } | null>(null)
   // SHIBUYA STEP2-B: 楔 (wedge) objective counter for the HUD — destroyed / total.
   const [shibuyaWedgeStat, setShibuyaWedgeStat] = useState({ destroyed: 0, total: 0 })
+  // SHIBUYA STEP2-B: key of the last CIVILIAN HIT (0 = hidden) → drives the penalty overlay.
+  const [shibuyaCivHit, setShibuyaCivHit] = useState(0)
 
   useEffect(() => {
     setIsMobile(navigator.maxTouchPoints > 0)
@@ -26277,6 +26279,7 @@ export default function ThreeWorld({
           SOUNDS.zombieGroan()
           const c = h.group.position
           spawnBlood(new THREE.Vector3(c.x, 1.8, c.z)) // a final burst at the (taller) body
+          shibuyaDeathFog(c.x, c.z) // 黒い霧が散る (#132 霧散) on top of the body's dissipation
           refreshShibuyaRemaining()
         }
       }
@@ -26602,6 +26605,7 @@ export default function ThreeWorld({
         const c = w.group.position
         spawnExplosion(new THREE.Vector3(c.x, c.y + 2, c.z), false, true) // red gore burst
         spawnBlood(new THREE.Vector3(c.x, c.y + 2.6, c.z))
+        shibuyaPuff(c.x, c.y + 2, c.z, 0xcc1024, true, 0.9, 0.5, 8, 0) // red shockwave ring
         SOUNDS.bossStomp()
         w.group.visible = false // hide immediately; struct stays for flinch lookup (disposed on teardown)
         const prog = shibuyaProgressRef.current
@@ -26650,31 +26654,74 @@ export default function ThreeWorld({
       // ══ SHIBUYA STEP2-B: 擬態 (civilians + disguised 歪) ════════════════════════════════
       // Transient white "tear" flashes (擬態解除 / 一般人 poof). Outlive the civilian pool, so
       // updateShibuyaCivilians always pumps them before its empty-pool early-return.
-      const shibuyaFlashes: { mesh: THREE.Mesh; mat: THREE.MeshBasicMaterial; t: number }[] = []
-      function shibuyaRevealFlash(x: number, z: number) {
+      const shibuyaFlashes: {
+        mesh: THREE.Mesh
+        mat: THREE.MeshBasicMaterial
+        t: number
+        dur: number
+        grow: number
+        rise: number
+        op: number
+      }[] = []
+      // One expanding+fading billboard puff. additive white = a bright tear-flash; normal-blended
+      // dark = drifting 霧散 smoke. Shared expand/rise/fade in updateShibuyaFlashes.
+      function shibuyaPuff(
+        x: number,
+        y: number,
+        z: number,
+        color: number,
+        additive: boolean,
+        op: number,
+        dur: number,
+        grow: number,
+        rise: number,
+      ) {
         const mat = new THREE.MeshBasicMaterial({
-          color: 0xffffff,
+          color,
           transparent: true,
-          opacity: 0.95,
-          blending: THREE.AdditiveBlending,
+          opacity: op,
+          blending: additive ? THREE.AdditiveBlending : THREE.NormalBlending,
           depthWrite: false,
           toneMapped: false,
           fog: false,
         })
         const mesh = new THREE.Mesh(new THREE.SphereGeometry(0.6, 10, 8), mat)
-        mesh.position.set(x, shibuyaGroundAt(x, z) + 1.4, z)
+        mesh.position.set(x, y, z)
         mesh.renderOrder = 5
         scene.add(mesh)
-        shibuyaFlashes.push({ mesh, mat, t: 0 })
+        shibuyaFlashes.push({ mesh, mat, t: 0, dur, grow, rise, op })
+      }
+      // 擬態解除 / 一般人 poof: a bright white tear-flash.
+      function shibuyaRevealFlash(x: number, z: number) {
+        shibuyaPuff(x, shibuyaGroundAt(x, z) + 1.4, z, 0xffffff, true, 0.95, 0.35, 5, 0)
+      }
+      // 歪 撃破: dark mist that swells, rises and fades — the #132 霧散 made explicit (the body's
+      // own fade+sink+spin still plays underneath). A few offset puffs read as scattering smoke.
+      function shibuyaDeathFog(x: number, z: number) {
+        const gy = shibuyaGroundAt(x, z)
+        for (let n = 0; n < 3; n++) {
+          shibuyaPuff(
+            x + (Math.random() - 0.5) * 0.9,
+            gy + 1.2 + n * 0.5,
+            z + (Math.random() - 0.5) * 0.9,
+            0x0a0710,
+            false,
+            0.7,
+            0.6,
+            3.2,
+            1.0,
+          )
+        }
       }
       function updateShibuyaFlashes(dt: number) {
         for (let i = shibuyaFlashes.length - 1; i >= 0; i--) {
           const f = shibuyaFlashes[i]
           if (!f) continue
           f.t += dt
-          const k = f.t / 0.35
-          f.mesh.scale.setScalar(0.5 + k * 5)
-          f.mat.opacity = Math.max(0, 0.95 * (1 - k))
+          const k = f.t / f.dur
+          f.mesh.scale.setScalar(0.4 + k * f.grow)
+          f.mesh.position.y += f.rise * dt
+          f.mat.opacity = Math.max(0, f.op * (1 - k))
           if (k >= 1) {
             scene.remove(f.mesh)
             f.mesh.geometry.dispose()
@@ -26811,7 +26858,9 @@ export default function ThreeWorld({
         setDamageFlash(true) // the red screen-edge frame (reused damage overlay)
         window.setTimeout(() => setDamageFlash(false), 300)
         SOUNDS.huntWarn()
-        showNotification(`CIVILIAN HIT  −${SHIBUYA_CIVILIAN_PENALTY}`)
+        const hk = Date.now() // prominent centre "CIVILIAN HIT −200" overlay (auto-hides)
+        setShibuyaCivHit(hk)
+        window.setTimeout(() => setShibuyaCivHit((v) => (v === hk ? 0 : v)), 950)
         shibuyaRevealFlash(c.group.position.x, c.group.position.z) // it poofs away in white
         const idx = shibuyaCiviliansRef.current.indexOf(c)
         if (idx >= 0) shibuyaCiviliansRef.current.splice(idx, 1)
@@ -34255,6 +34304,54 @@ export default function ThreeWorld({
                 <style>
                   {
                     "@keyframes shibuyaCutin { 0% { opacity: 0; transform: translateY(18px) scale(1.08); } 14% { opacity: 1; transform: translateY(0) scale(1); } 82% { opacity: 1; transform: translateY(0) scale(1); } 100% { opacity: 0; transform: translateY(-10px) scale(1.02); } }"
+                  }
+                </style>
+              </div>
+            )}
+
+            {/* ── CIVILIAN HIT ペナルティ (STEP2-B): 一般人 誤射時に中央へ赤字で一瞬 ── */}
+            {shibuyaCivHit > 0 && gamePhase === "playing" && (
+              <div
+                key={shibuyaCivHit}
+                style={{
+                  position: "absolute",
+                  top: "40%",
+                  left: 0,
+                  right: 0,
+                  zIndex: 77,
+                  pointerEvents: "none",
+                  textAlign: "center",
+                  animation: "shibuyaCivHit 0.95s ease-out forwards",
+                }}
+              >
+                <div
+                  style={{
+                    color: "#ff3344",
+                    fontSize: isMobile ? "1.8rem" : "2.6rem",
+                    fontWeight: "bold",
+                    letterSpacing: "0.3em",
+                    fontFamily: "monospace",
+                    textShadow: "0 0 22px rgba(255,30,40,0.95)",
+                  }}
+                >
+                  CIVILIAN HIT
+                </div>
+                <div
+                  style={{
+                    marginTop: "0.3rem",
+                    color: "#ff8088",
+                    fontSize: isMobile ? "1.1rem" : "1.5rem",
+                    fontWeight: "bold",
+                    letterSpacing: "0.2em",
+                    fontFamily: "monospace",
+                    textShadow: "0 0 14px rgba(255,30,40,0.85)",
+                  }}
+                >
+                  −{SHIBUYA_CIVILIAN_PENALTY}
+                </div>
+                <style>
+                  {
+                    "@keyframes shibuyaCivHit { 0% { opacity: 0; transform: scale(1.4); } 15% { opacity: 1; transform: scale(1); } 70% { opacity: 1; transform: scale(1); } 100% { opacity: 0; transform: scale(1.05); } }"
                   }
                 </style>
               </div>
