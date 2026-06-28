@@ -1638,7 +1638,10 @@ const SHIBUYA_AABBS: WallAABB[] = []
 // area-personality / the sealed boss land in STEP2-B+.
 const SHIBUYA_HIZUMI_HP = 60 // ~ a few pistol shots / one shotgun burst
 const SHIBUYA_HIZUMI_SPEED = 2.3 // m/s — a slow, creeping approach the player can kite
-const SHIBUYA_HIZUMI_TOUCH_RANGE = 1.7 // it stops seeking once this close to the player
+const SHIBUYA_HIZUMI_SCORE = 120 // score per 歪 purified
+const SHIBUYA_HIZUMI_TOUCH_DMG = 9 // contact damage per tick when it reaches the player
+const SHIBUYA_HIZUMI_TOUCH_RANGE = 1.7 // it stops seeking / touches the player within this
+const SHIBUYA_HIZUMI_TOUCH_CD = 700 // ms between contact ticks from one 歪
 const SHIBUYA_HIZUMI_RADIUS = 0.5 // body radius for wall collision (vs SHIBUYA_AABBS)
 const SHIBUYA_HIZUMI_DEATH_SEC = 0.9 // dissipation duration (fade + sink + spin)
 // Fixed spawn ring around the scramble (LOCAL coords; +HUNT_ARENA → world). STEP2-A keeps
@@ -25803,6 +25806,7 @@ export default function ThreeWorld({
       // glowing red cracks + two red eyes. Original silhouette (no humanoid rig). The body
       // meshes are tagged userData.hizumi so the fire() centre-ray can hit them (Phase B).
       function makeHizumi(): ShibuyaEnemy {
+        const id = shibuyaNextEnemyIdRef.current++
         const group = new THREE.Group()
         const bodyMat = new THREE.MeshStandardMaterial({
           color: 0x05050c, // near-black smoke
@@ -25846,10 +25850,11 @@ export default function ThreeWorld({
           if (o instanceof THREE.Mesh) {
             o.castShadow = false
             o.userData.hizumi = true
+            o.userData.hizumiId = id // so the fire() hitscan can map a body mesh → its 歪
           }
         })
         return {
-          id: shibuyaNextEnemyIdRef.current++,
+          id,
           group,
           hp: SHIBUYA_HIZUMI_HP,
           maxHp: SHIBUYA_HIZUMI_HP,
@@ -25906,12 +25911,31 @@ export default function ThreeWorld({
         shibuyaWaveActiveRef.current = true
       }
 
+      // A shot landed on a 歪: splash a red impact, drop HP, and on 0 start the dissipation
+      // (fade+sink+spin runs in updateShibuyaEnemies), bank the score, and groan. Score reuses
+      // the shared scoreRef/setScore — the only global combat state 歪 touch.
+      function damageShibuyaEnemy(h: ShibuyaEnemy, dmg: number, hitPoint: THREE.Vector3) {
+        if (!h.alive) return
+        spawnBlood(hitPoint)
+        h.hp -= dmg
+        if (h.hp <= 0) {
+          h.alive = false
+          h.dying = SHIBUYA_HIZUMI_DEATH_SEC
+          scoreRef.current += SHIBUYA_HIZUMI_SCORE
+          setScore(scoreRef.current)
+          SOUNDS.zombieGroan()
+          const c = h.group.position
+          spawnBlood(new THREE.Vector3(c.x, 1.3, c.z)) // a final burst at the body
+        }
+      }
+
       // Per-frame 歪 update: dissipate the dying, seek the player (simple, wall-stopped),
       // and the eerie idle (bob + crack-glow pulse). Self-gates on an empty pool (so it is a
       // no-op outside SHIBUYA). Contact damage + the clear check are wired in Phase B / C.
       function updateShibuyaEnemies(dt: number) {
         const list = shibuyaEnemiesRef.current
         if (list.length === 0) return
+        const now = Date.now()
         for (let i = list.length - 1; i >= 0; i--) {
           const h = list[i]
           if (!h) continue
@@ -25940,6 +25964,11 @@ export default function ThreeWorld({
             // Per-axis wall stop → slides along walls instead of sticking.
             if (!hizumiBlocked(nx, h.group.position.z)) h.group.position.x = nx
             if (!hizumiBlocked(h.group.position.x, nz)) h.group.position.z = nz
+          } else if (now - h.lastTouch >= SHIBUYA_HIZUMI_TOUCH_CD) {
+            // Reached the player → it claws (throttled per 歪). applyPlayerDamage handles
+            // spawn-invuln + game-over (its osakaRunHurt tally is a no-op outside OSAKA).
+            h.lastTouch = now
+            applyPlayerDamage(SHIBUYA_HIZUMI_TOUCH_DMG, 3)
           }
           h.group.rotation.y = Math.atan2(dx, dz) // face the player (model faces +z)
           h.driftPhase += dt
@@ -28821,6 +28850,34 @@ export default function ThreeWorld({
               osakaMB.hp -= weapon.hitDamage
               enemyHits = []
               shotConsumed = true
+            }
+          }
+        }
+
+        // SHIBUYA 歪 (STEP2-A): the centre ray hits the nearest 歪 body not occluded by a
+        // wall. A fully separate pool from the CombatEnemy array (so enemyHits is always
+        // empty on this stage); its own raycast + damage, gated to the Shibuya stage so
+        // OSAKA/HUNT/PvP never run it. Mirrors the OSAKA mid-boss hitscan pattern above.
+        if (!shotConsumed && isShibuyaStage(huntMissionConfigRef.current.stage)) {
+          const hizParts: THREE.Object3D[] = []
+          for (const h of shibuyaEnemiesRef.current) {
+            if (!h.alive) continue
+            h.group.traverse((o) => {
+              if (o instanceof THREE.Mesh && o.userData.hizumi) hizParts.push(o)
+            })
+          }
+          const hizHit = raycaster.intersectObjects(hizParts, false)[0]
+          if (hizHit) {
+            const blockedByWall = !!(nearestWall && nearestWall.distance < hizHit.distance)
+            if (!blockedByWall) {
+              const owner = shibuyaEnemiesRef.current.find(
+                (e) => e.id === hizHit.object.userData.hizumiId,
+              )
+              if (owner) {
+                SOUNDS.hit()
+                damageShibuyaEnemy(owner, weapon.hitDamage, hizHit.point)
+                shotConsumed = true
+              }
             }
           }
         }
