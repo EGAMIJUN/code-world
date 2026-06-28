@@ -19952,34 +19952,60 @@ export default function ThreeWorld({
           emissiveMap: rimWinTex,
           emissiveIntensity: 0.54,
         })
+        // Footprint-aware backdrop placement. A near-black silhouette box carries NO
+        // collision, but it must still never VISUALLY stand inside the playable world, or
+        // it reads as a black building dropped in the road. The old skip tested only the
+        // box CENTRE against the ±104 square, so a box up to 25 wide poked its footprint up
+        // to ~8.5u inside the ±100 perimeter (and the centre-only carves missed wide boxes
+        // straddling a corridor edge). Instead, push each box radially OUTWARD until its
+        // whole footprint clears (a) the ±100 square (+1u) and (b) the gap-corridor
+        // extensions that punch past the walls along the E/W axes (宮益坂→x101 / 駅東→x140,
+        // z∈[-42,42]; 文化村→x-132 / センター街→x-138, z∈[-32,20]). Keeps every box (the
+        // skyline stays full) — intruders are just shoved out. Seed-independent (cf. #126).
+        const rimClearRadius = (ang: number, rr: number, hw: number): number => {
+          const ca = Math.cos(ang)
+          const sa = Math.sin(ang)
+          let r = Math.max(rr, (101 + hw) / Math.max(Math.abs(ca), Math.abs(sa))) // ±100 square
+          const z = sa * r
+          if (ca > 0 && z + hw > -42 && z - hw < 42) r = Math.max(r, (142 + hw) / ca) // E gaps
+          if (ca < 0 && z + hw > -32 && z - hw < 20) r = Math.max(r, (142 + hw) / -ca) // W gaps
+          return r
+        }
         for (let i = 0; i < dn(26); i++) {
           const ang = (i / 26) * Math.PI * 2 + rnd() * 0.26
-          const rr = 150 + rnd() * 56 // r150..206 — deeper skyline band
-          const bx = Math.cos(ang) * rr
-          const bz = Math.sin(ang) * rr
+          const rrRaw = 150 + rnd() * 56 // r150..206 — deeper skyline band
           const bw = 13 + rnd() * 16
           const bh = 48 + rnd() * 64 // 48..112 — real high-rises fill the sky
+          const rr = rimClearRadius(ang, rrRaw, bw / 2) // push clear of the playable world
+          const bx = Math.cos(ang) * rr
+          const bz = Math.sin(ang) * rr
           const tw = new THREE.Mesh(new THREE.BoxGeometry(bw, bh, bw), rimMat)
           tw.position.set(bx, shibuyaGroundY(bx, bz) + bh / 2, bz)
           mAdd(tw)
         }
         // — Mid-distance silhouette ring filling the empty annulus between the ±100
         // perimeter walls and the far rim, so looking down the open radiating roads no
-        // longer shows bare sky. Shares rimMat → still ONE draw call. Placed ONLY where
-        // max(|x|,|z|) > 104 (strictly OUTSIDE the square walls) so it can never become
-        // a phantom obstacle in the playable box; the centre-gai corridor pokes west to
-        // x≈-138, so that lane is carved out.
+        // longer shows bare sky. Shares rimMat → still ONE draw call. The original
+        // centre-only skip is KEPT verbatim (so the rnd() stream — and therefore every
+        // downstream area's layout — stays byte-identical: skipped boxes consume only the 2
+        // rnd() above, placed boxes the 4 below, exactly as before). The boxes that DO get
+        // placed are the near-cardinal / near-wall ones — precisely the ones that used to
+        // poke their wide footprint up to ~8.5u inside the playable box — so rimClearRadius
+        // now pushes each one strictly clear of the ±100 square + the gap corridors.
         for (let i = 0; i < dn(30); i++) {
           const ang = (i / 30) * Math.PI * 2 + rnd() * 0.18
-          const rr = 108 + rnd() * 40 // r108..148
-          const bx = Math.cos(ang) * rr
-          const bz = Math.sin(ang) * rr
-          if (Math.max(Math.abs(bx), Math.abs(bz)) < 104) continue // inside walls → skip
-          if (bx < -104 && Math.abs(bz + 22) < 14) continue // centre-gai west dead-end
-          if (bx < -96 && bz > -14 && bz < 18) continue // 文化村通り (Bunkamura) west corridor
-          if (bx > 96 && bx < 140 && Math.abs(bz) < 40) continue // 駅東 (eki-higashi) district
+          const rrRaw = 108 + rnd() * 40 // r108..148
+          const bx0 = Math.cos(ang) * rrRaw
+          const bz0 = Math.sin(ang) * rrRaw
+          if (Math.max(Math.abs(bx0), Math.abs(bz0)) < 104) continue // diagonal boxes (skyline fills)
+          if (bx0 < -104 && Math.abs(bz0 + 22) < 14) continue // centre-gai west dead-end
+          if (bx0 < -96 && bz0 > -14 && bz0 < 18) continue // 文化村通り (Bunkamura) west corridor
+          if (bx0 > 96 && bx0 < 140 && Math.abs(bz0) < 40) continue // 駅東 (eki-higashi) district
           const bw = 11 + rnd() * 14
           const bh = 36 + rnd() * 56 // 36..92
+          const rr = rimClearRadius(ang, rrRaw, bw / 2) // push the placed box's footprint clear
+          const bx = Math.cos(ang) * rr
+          const bz = Math.sin(ang) * rr
           const tw = new THREE.Mesh(new THREE.BoxGeometry(bw, bh, bw), rimMat)
           tw.position.set(bx, shibuyaGroundY(bx, bz) + bh / 2, bz)
           mAdd(tw)
@@ -21081,19 +21107,59 @@ export default function ThreeWorld({
           [-20, 22, 9],
           [40, -28, 20],
         ]
-        // inCentergaiZone keeps generic facades out of the walkable センター街 lane.
-        // inBunkamuraZone added so the west-axis facade row never drops a building into the
-        // 文化村通り corridor (centreline z≈0) — the #126-class trap (cf. 宮益坂/eki-higashi).
-        // inMiyamasuzakaZone added so the axis-facing facade rows (loop (2), the +x/EAST
-        // axis at z=±16) never drop a building into the 宮益坂 corridor (centreline z≈-8) —
-        // the #126-class trap that would block the new climbing street with a phantom wall.
-        const sbBlocked = (x: number, z: number) =>
-          sbAvoid.some(([ax, az, ar]) => Math.hypot(x - ax, z - az) < ar) ||
-          inCentergaiZone(x, z) ||
-          inDogenzakaZone(x, z) ||
-          inKoenDoriZone(x, z) ||
-          inBunkamuraZone(x, z) ||
-          inMiyamasuzakaZone(x, z)
+        // Footprint-aware keep-out for the generic facade scatter. The OLD guard tested only
+        // the building CENTRE against the corridor zones (inXxxZone = lat<HW+4), so a facade
+        // centred just outside a zone still poked its body (footprint half up to ~11u) into
+        // the road/corridor — the bug that dropped near-black-reading high-rises INTO the
+        // streets (loop(1) corner clusters into the cardinal road arms, loop(2) frontages
+        // into the 宮益坂 lane near its mouth). sbBlockedR samples the building footprint (a
+        // fixed worst-case-reach square around the centre — loop(1) faces any way → 11,
+        // loop(2) axis-aligned frontages → 9) against the TIGHT walkable surface: every
+        // corridor LANE (lat<HW), the センター街 lane, and — newly — the cardinal ±10 main
+        // streets the old guard never covered. It reads only (cx,cz)+a constant, so it sits
+        // at the SAME point in the rnd() stream as the old centre check (blocked candidates
+        // still `continue` before the dims rnd()), leaving every other area byte-identical.
+        // The sbAvoid circles + the inXxxZone centre guards stay as an additive fast-path
+        // (they bake in the #126 intent); the footprint sample only ever ADDS blocks.
+        const sbLaneCorr = (x: number, z: number): boolean =>
+          (x > CG_X1 && x < CG_X0 && Math.abs(z - CG_Z) < CG_HW) || // センター街 lane (tight)
+          dogenzakaNearest(x, z).lat < DGZ_HW ||
+          koenDoriNearest(x, z).lat < KDR_HW ||
+          miyamasuzakaNearest(x, z).lat < MMZ_HW ||
+          bunkamuraNearest(x, z).lat < BKM_HW
+        const sbBlockedR = (
+          cx: number,
+          cz: number,
+          reach: number,
+          testStreet: boolean,
+        ): boolean => {
+          if (sbAvoid.some(([ax, az, ar]) => Math.hypot(cx - ax, cz - az) < ar)) return true
+          if (
+            inCentergaiZone(cx, cz) ||
+            inDogenzakaZone(cx, cz) ||
+            inKoenDoriZone(cx, cz) ||
+            inBunkamuraZone(cx, cz) ||
+            inMiyamasuzakaZone(cx, cz)
+          )
+            return true
+          // Footprint sweep: any body point reaching a tight lane / main street → blocked.
+          for (let dx = -reach; dx <= reach + 1e-9; dx += reach / 4) {
+            for (let dz = -reach; dz <= reach + 1e-9; dz += reach / 4) {
+              const x = cx + dx
+              const z = cz + dz
+              if (sbLaneCorr(x, z)) return true
+              // Cardinal ±10 main streets (the radiating road arms). loop(2) frontages line
+              // the ±16 kerb and clear ±10 even worst-case, so they pass testStreet=false.
+              if (
+                testStreet &&
+                ((Math.abs(x) <= 10 && Math.abs(z) <= 96) ||
+                  (Math.abs(z) <= 10 && Math.abs(x) <= 96))
+              )
+                return true
+            }
+          }
+          return false
+        }
         // (1) Four corner clusters in the diagonal sectors (the road arms stay open).
         for (let k = 0; k < 4; k++) {
           const baseA = Math.PI / 4 + k * (Math.PI / 2)
@@ -21102,7 +21168,9 @@ export default function ThreeWorld({
             const r = 30 + rnd() * 20
             const cx = Math.cos(a) * r
             const cz = Math.sin(a) * r
-            if (sbBlocked(cx, cz)) continue
+            // reach 11 (corner clusters face any direction) + main-street keep-out (these
+            // diagonal-sector high-rises must leave the cardinal road arms clear).
+            if (sbBlockedR(cx, cz, 11, true)) continue
             const shape = facadeShapes[Math.floor(rnd() * facadeShapes.length)] ?? "box"
             makeFacade(
               cx,
@@ -21130,7 +21198,9 @@ export default function ThreeWorld({
             for (const side of [-1, 1] as const) {
               const cx = ax * d + px * 16 * side
               const cz = az * d + pz * 16 * side
-              if (sbBlocked(cx, cz)) continue
+              // reach 9 (axis-aligned frontages); NO main-street test — these line the ±16
+              // kerb and their depth clears the ±10 carriageway even worst-case.
+              if (sbBlockedR(cx, cz, 9, false)) continue
               const shape = facadeShapes[Math.floor(rnd() * facadeShapes.length)] ?? "box"
               makeFacade(
                 cx,
@@ -24351,29 +24421,12 @@ export default function ThreeWorld({
             dirSign.position.set(e.cx - e.tx * 1.5, e.h + 4.6, e.cz - e.tz * 1.5)
             dirSign.rotation.y = barRotY
             add(dirSign)
-            // HIKARIE-direction glass high-rise silhouettes peeking over the cap (east, flat
-            // y=0). Cool emissive glass slabs → suggests the 駅東 high-rise district beyond.
-            const hintMat = new THREE.MeshStandardMaterial({
-              color: 0x0c1420,
-              emissive: 0x3a5578,
-              emissiveIntensity: 0.5,
-              roughness: 0.5,
-            })
-            const hintGeo = new THREE.BoxGeometry(4.5, 26, 4.5)
-            const hintXf: Xf[] = []
-            for (let i = 0; i < 6; i++) {
-              const off = -11 + i * 4.4
-              const depth = 8 + (i % 3) * 4
-              hintXf.push({
-                pos: [
-                  e.cx + e.tx * depth + e.px * off,
-                  10 + (i % 3) * 6, // tall slabs poking above the cap (≈16) toward the sky
-                  e.cz + e.tz * depth + e.pz * off,
-                ],
-                scl: [1, 1 + (i % 3) * 0.5, 1],
-              })
-            }
-            instAdd(hintGeo, hintMat, hintXf)
+            // (The old "HIKARIE-direction" glass-slab silhouettes that peeked east over the
+            // cap were removed: 宮益坂 (#127) placed them as a backdrop HINT of a district
+            // "beyond", but 駅東 (#128) then built the REAL walkable high-rise district right
+            // there (x≈100..140, |z|<37). The hint slabs (x≈109..117, z≈-20..2, no collision)
+            // ended up standing INSIDE the 駅東 plaza as dark ghost boxes you walk through —
+            // a #127+#128 stacking regression. The real 駅東 towers are the silhouette now.)
           }
           // ── (5) 谷底の口: 宮益坂ゲート横梁 + サイン (スクランブルへ向ける)。歩行は塞がない。──
           const m = miyamasuzakaAt(1.5)
