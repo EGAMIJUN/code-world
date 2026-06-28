@@ -3252,10 +3252,9 @@ export default function ThreeWorld({
   // buildShibuyaMap, disposed by clearShibuyaMap on mission return.
   const shibuyaMapMeshesRef = useRef<THREE.Object3D[]>([])
   // SHIBUYA STEP2-A: 歪 combat — a fully separate enemy pool (never the `enemies` array, so
-  // OSAKA/HUNT stay untouched). Live 歪 + a per-deploy wave-active flag + an id counter.
-  // Cleared on (re)build / mission return in clearShibuyaMap.
+  // OSAKA/HUNT stay untouched). Live 歪 + an id counter. The STEP2-B clear is 楔-driven
+  // (shibuyaProgressRef), not all-歪-dead. Cleared on (re)build / mission return.
   const shibuyaEnemiesRef = useRef<ShibuyaEnemy[]>([])
-  const shibuyaWaveActiveRef = useRef(false)
   const shibuyaNextEnemyIdRef = useRef(0)
   // ms timestamp at which the ERADICATED flash hands back to the hub (0 = inactive).
   const shibuyaClearAtRef = useRef(0)
@@ -26189,7 +26188,6 @@ export default function ThreeWorld({
       function clearShibuyaEnemies() {
         for (const h of shibuyaEnemiesRef.current) disposeHizumi(h)
         shibuyaEnemiesRef.current = []
-        shibuyaWaveActiveRef.current = false
         shibuyaClearAtRef.current = 0
         setShibuyaRemaining(0)
         setShibuyaEradicated(false)
@@ -26260,7 +26258,6 @@ export default function ThreeWorld({
             spawnShibuyaEnemyInArea(area, HUNT_ARENA.x + sp[0], HUNT_ARENA.z + sp[1])
           }
         }
-        shibuyaWaveActiveRef.current = true
         setShibuyaEradicated(false)
         refreshShibuyaRemaining()
       }
@@ -28178,21 +28175,29 @@ export default function ThreeWorld({
           ) {
             huntReturnToRoom("clear")
           }
-          // SHIBUYA STEP2-A provisional clear. The generic check above is skipped for Shibuya
-          // (no CombatEnemy pool); instead, once the 歪 wave is active and every 歪 is
-          // purified, flash ERADICATED, then — after a beat so the last finishes dissipating —
-          // hand back to the hub. STEP2-B replaces this with the 楔 / sealed-boss objective.
-          // Entirely separate from the OSAKA path; touches no OSAKA state.
+          // SHIBUYA STEP2-B clear: destroy ALL 7 楔 → 封絶崩壊. The generic check above is skipped
+          // for Shibuya; instead, once every 楔 is down, dramatize the collapse (封絶崩壊 カットイン
+          // + full white flash + collapse roar), bank the 封絶 clear flag, then — after the beat —
+          // hand back to the hub (the STEP3 中ボス hook). Entirely separate from the OSAKA path.
           if (
             isShibuyaStage(huntMissionConfigRef.current.stage) &&
-            shibuyaWaveActiveRef.current &&
-            shibuyaEnemiesRef.current.every((e) => !e.alive)
+            shibuyaProgressRef.current.active &&
+            !shibuyaProgressRef.current.collapse &&
+            shibuyaProgressRef.current.wedgesDestroyed >= SHIBUYA_COMBAT_AREAS.length
           ) {
-            shibuyaWaveActiveRef.current = false
-            setShibuyaEradicated(true)
-            SOUNDS.clear()
-            showNotification("歪 ERADICATED — スクランブル鎮圧")
-            shibuyaClearAtRef.current = Date.now() + 2600
+            shibuyaProgressRef.current.collapse = true
+            setShibuyaEradicated(true) // HUD switches to the 封絶崩壊 banner
+            shibuyaShowCutin("封絶崩壊", "地下から何かが来る…", 4500)
+            setHuntWhiteFlash(true) // full-screen white flash → next phase
+            window.setTimeout(() => setHuntWhiteFlash(false), 460)
+            SOUNDS.collapse()
+            window.setTimeout(() => SOUNDS.bossRoar(), 700)
+            try {
+              localStorage.setItem("shibuya_fuzetsu_clear", "1")
+            } catch {
+              /* ignore */
+            }
+            shibuyaClearAtRef.current = Date.now() + 4500
           }
           if (shibuyaClearAtRef.current > 0 && Date.now() >= shibuyaClearAtRef.current) {
             shibuyaClearAtRef.current = 0
@@ -33996,14 +34001,14 @@ export default function ThreeWorld({
                   {shibuyaEradicated ? (
                     <span
                       style={{
-                        color: "#ff3a4a",
+                        color: "#c9a8ff",
                         fontSize: "1.5rem",
                         fontWeight: "bold",
                         letterSpacing: "0.32em",
-                        textShadow: "0 0 16px rgba(255,40,60,0.9)",
+                        textShadow: "0 0 18px rgba(150,80,255,0.95)",
                       }}
                     >
-                      ERADICATED
+                      封絶 崩壊
                     </span>
                   ) : (
                     <>
