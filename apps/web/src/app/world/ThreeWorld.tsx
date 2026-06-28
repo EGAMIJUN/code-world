@@ -1822,6 +1822,27 @@ interface ShibuyaWedge {
   nextSpawnAt: number // ms — next area top-up spawn time (Phase C)
 }
 
+// 一般人 (civilian): a ghostly translucent humanoid fleeing the 封絶. Some are 擬態 (disguised
+// 歪) — identical in look + movement until the player closes within 5u, when they tear open
+// into a real 歪. Shooting ANY civilian-form (you can't tell which) = CIVILIAN HIT: −200 + the
+// red damage frame. A separate pool from 歪 + the `enemies` humanoids → OSAKA untouched.
+const SHIBUYA_CIVILIAN_SPEED = 3.2 // m/s — they scurry faster than the 歪 creep toward you
+const SHIBUYA_CIVILIAN_REVEAL = 5 // a disguised 歪 tears open within this distance of the player
+const SHIBUYA_CIVILIAN_PENALTY = 200 // score lost for shooting a civilian-form
+interface ShibuyaCivilian {
+  id: number
+  group: THREE.Group
+  areaId: string
+  disguised: boolean
+  alive: boolean
+  bodyMat: THREE.MeshStandardMaterial
+  wanderX: number // current wander target (world)
+  wanderZ: number
+  wanderUntil: number // ms — pick a new wander target after this
+  homeX: number // world — roams around its area, not across the whole map
+  homeZ: number
+}
+
 // Shared per-AABB tests (so the OSAKA path and the base-map path stay identical).
 function aabbBlocksMover(
   w: WallAABB,
@@ -3247,6 +3268,9 @@ export default function ThreeWorld({
     collapse: false, // true once all 7 楔 are down (封絶崩壊 → STEP3 hook)
     collapseAt: 0, // ms — when the finale hands back to the hub (0 = inactive)
   })
+  // SHIBUYA STEP2-B: 一般人 (civilians, some 擬態 歪). Separate pool — never `enemies` / 歪.
+  const shibuyaCiviliansRef = useRef<ShibuyaCivilian[]>([])
+  const shibuyaNextCivIdRef = useRef(0)
   // OSAKA area-progression state + the active mid-boss (Tengu / Yamaya).
   const osakaProgressRef = useRef<OsakaProgressState>({
     area: "dotonbori",
@@ -25865,6 +25889,7 @@ export default function ThreeWorld({
         shibuyaMapMeshesRef.current = []
         clearShibuyaEnemies() // STEP2-A: dispose any live 歪 with the map
         clearShibuyaWedges() // STEP2-B: dispose the 7 楔 with the map
+        clearShibuyaCivilians() // STEP2-B: dispose 一般人 + reveal flashes with the map
         SHIBUYA_AABBS.length = 0 // drop the SHIBUYA collision boxes on teardown
         shibuyaAnim = null // animated handles die with the disposed meshes (Phase F)
         // Restore the night sky (fog + base-light dimming restore via clearOsakaMap /
@@ -26625,6 +26650,223 @@ export default function ThreeWorld({
         }
       }
 
+      // ══ SHIBUYA STEP2-B: 擬態 (civilians + disguised 歪) ════════════════════════════════
+      // Transient white "tear" flashes (擬態解除 / 一般人 poof). Outlive the civilian pool, so
+      // updateShibuyaCivilians always pumps them before its empty-pool early-return.
+      const shibuyaFlashes: { mesh: THREE.Mesh; mat: THREE.MeshBasicMaterial; t: number }[] = []
+      function shibuyaRevealFlash(x: number, z: number) {
+        const mat = new THREE.MeshBasicMaterial({
+          color: 0xffffff,
+          transparent: true,
+          opacity: 0.95,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+          toneMapped: false,
+          fog: false,
+        })
+        const mesh = new THREE.Mesh(new THREE.SphereGeometry(0.6, 10, 8), mat)
+        mesh.position.set(x, shibuyaGroundAt(x, z) + 1.4, z)
+        mesh.renderOrder = 5
+        scene.add(mesh)
+        shibuyaFlashes.push({ mesh, mat, t: 0 })
+      }
+      function updateShibuyaFlashes(dt: number) {
+        for (let i = shibuyaFlashes.length - 1; i >= 0; i--) {
+          const f = shibuyaFlashes[i]
+          if (!f) continue
+          f.t += dt
+          const k = f.t / 0.35
+          f.mesh.scale.setScalar(0.5 + k * 5)
+          f.mat.opacity = Math.max(0, 0.95 * (1 - k))
+          if (k >= 1) {
+            scene.remove(f.mesh)
+            f.mesh.geometry.dispose()
+            f.mat.dispose()
+            shibuyaFlashes.splice(i, 1)
+          }
+        }
+      }
+      // Build one 一般人: a translucent, faintly-glowing white humanoid (+ a trailing skirt) —
+      // ONE merged mesh = one draw call. Tagged for the fire() civilian hitscan.
+      function makeShibuyaCivilian(
+        area: ShibuyaCombatArea,
+        disguised: boolean,
+        wx: number,
+        wz: number,
+      ): ShibuyaCivilian {
+        const id = shibuyaNextCivIdRef.current++
+        const group = new THREE.Group()
+        const bodyMat = new THREE.MeshStandardMaterial({
+          color: 0xdfe6ff,
+          transparent: true,
+          opacity: 0.46,
+          roughness: 1,
+          metalness: 0,
+          emissive: 0x6678aa,
+          emissiveIntensity: 0.35,
+          depthWrite: false,
+        })
+        const geo =
+          mergeGeometries(
+            [
+              new THREE.SphereGeometry(0.22, 8, 6).translate(0, 1.62, 0), // head
+              new THREE.CylinderGeometry(0.2, 0.26, 0.9, 8).translate(0, 1.05, 0), // torso
+              new THREE.CylinderGeometry(0.09, 0.07, 0.7, 6).translate(0.13, 0.35, 0), // legs
+              new THREE.CylinderGeometry(0.09, 0.07, 0.7, 6).translate(-0.13, 0.35, 0),
+              new THREE.CylinderGeometry(0.07, 0.06, 0.6, 6)
+                .rotateZ(0.3)
+                .translate(0.28, 1.1, 0), // arms
+              new THREE.CylinderGeometry(0.07, 0.06, 0.6, 6).rotateZ(-0.3).translate(-0.28, 1.1, 0),
+              new THREE.ConeGeometry(0.26, 0.55, 8).translate(0, 0.66, 0), // ghostly trailing skirt
+            ],
+            false,
+          ) ?? new THREE.SphereGeometry(0.3, 8, 6)
+        const mesh = new THREE.Mesh(geo, bodyMat)
+        mesh.castShadow = false
+        mesh.userData.shibuyaCivilian = true
+        mesh.userData.civilianId = id
+        group.add(mesh)
+        const safe = findSafeSpawnNear(wx, wz, 0.5)
+        group.position.set(safe.x, shibuyaGroundAt(safe.x, safe.z), safe.z)
+        return {
+          id,
+          group,
+          areaId: area.id,
+          disguised,
+          alive: true,
+          bodyMat,
+          wanderX: safe.x,
+          wanderZ: safe.z,
+          wanderUntil: 0,
+          homeX: safe.x,
+          homeZ: safe.z,
+        }
+      }
+      function disposeShibuyaCivilian(c: ShibuyaCivilian) {
+        scene.remove(c.group)
+        c.group.traverse((o) => {
+          if (o instanceof THREE.Mesh) o.geometry.dispose()
+        })
+        c.bodyMat.dispose()
+      }
+      function clearShibuyaCivilians() {
+        for (const c of shibuyaCiviliansRef.current) disposeShibuyaCivilian(c)
+        shibuyaCiviliansRef.current = []
+        for (const f of shibuyaFlashes) {
+          scene.remove(f.mesh)
+          f.mesh.geometry.dispose()
+          f.mat.dispose()
+        }
+        shibuyaFlashes.length = 0
+      }
+      // Scatter 一般人 around every area; the first `disguised` of each area's batch are 擬態 歪.
+      function spawnShibuyaCivilians() {
+        clearShibuyaCivilians()
+        for (const area of SHIBUYA_COMBAT_AREAS) {
+          for (let i = 0; i < area.civilians; i++) {
+            const disguised = i < area.disguised
+            const sp = area.spawns[i % area.spawns.length] ?? area.wedge
+            const jx = (Math.random() - 0.5) * 12
+            const jz = (Math.random() - 0.5) * 12
+            const c = makeShibuyaCivilian(
+              area,
+              disguised,
+              HUNT_ARENA.x + sp[0] + jx,
+              HUNT_ARENA.z + sp[1] + jz,
+            )
+            scene.add(c.group)
+            shibuyaCiviliansRef.current.push(c)
+          }
+        }
+      }
+      // 擬態解除: a disguised 一般人 tears open into a real 歪 (white flash + a real 歪 spawn at
+      // its spot, inheriting its area's persona). Player-triggered, so it ignores the spawn cap.
+      function revealDisguisedCivilian(c: ShibuyaCivilian) {
+        const area = SHIBUYA_COMBAT_AREAS.find((a) => a.id === c.areaId)
+        const p = c.group.position
+        shibuyaRevealFlash(p.x, p.z)
+        SOUNDS.zombieGroan()
+        if (area) spawnShibuyaEnemyInArea(area, p.x, p.z)
+      }
+      // fire() centre-/aim-ray vs civilians. A hit (disguised or not — indistinguishable) is a
+      // CIVILIAN HIT. Returns true if one was hit. No-op off-stage (empty pool).
+      function hitscanShibuyaCivilian(rc: THREE.Raycaster, wallDist: number | null): boolean {
+        const list = shibuyaCiviliansRef.current
+        if (list.length === 0) return false
+        const parts: THREE.Object3D[] = []
+        for (const c of list) {
+          if (!c.alive) continue
+          c.group.traverse((o) => {
+            if (o instanceof THREE.Mesh && o.userData.shibuyaCivilian) parts.push(o)
+          })
+        }
+        const hit = rc.intersectObjects(parts, false)[0]
+        if (!hit) return false
+        if (wallDist != null && wallDist < hit.distance) return false // occluded by cover
+        const owner = list.find((c) => c.id === hit.object.userData.civilianId)
+        if (!owner) return false
+        shibuyaCivilianHit(owner)
+        return true
+      }
+      function shibuyaCivilianHit(c: ShibuyaCivilian) {
+        scoreRef.current = Math.max(0, scoreRef.current - SHIBUYA_CIVILIAN_PENALTY)
+        setScore(scoreRef.current)
+        setDamageFlash(true) // the red screen-edge frame (reused damage overlay)
+        window.setTimeout(() => setDamageFlash(false), 300)
+        SOUNDS.huntWarn()
+        showNotification(`CIVILIAN HIT  −${SHIBUYA_CIVILIAN_PENALTY}`)
+        shibuyaRevealFlash(c.group.position.x, c.group.position.z) // it poofs away in white
+        const idx = shibuyaCiviliansRef.current.indexOf(c)
+        if (idx >= 0) shibuyaCiviliansRef.current.splice(idx, 1)
+        disposeShibuyaCivilian(c)
+      }
+      // Per-frame 一般人 update: animate the white flashes, then wander / flee / 擬態解除.
+      function updateShibuyaCivilians(dt: number) {
+        updateShibuyaFlashes(dt) // flashes outlive the pool → pump them first
+        const list = shibuyaCiviliansRef.current
+        if (list.length === 0) return
+        const now = Date.now()
+        for (let i = list.length - 1; i >= 0; i--) {
+          const c = list[i]
+          if (!c) continue
+          const dx = focalPoint.x - c.group.position.x
+          const dz = focalPoint.z - c.group.position.z
+          const dist = Math.hypot(dx, dz) || 1
+          // 擬態解除: a disguised one tears open when the player gets close.
+          if (c.disguised && dist < SHIBUYA_CIVILIAN_REVEAL) {
+            revealDisguisedCivilian(c)
+            disposeShibuyaCivilian(c)
+            list.splice(i, 1)
+            continue
+          }
+          if (dist > SHIBUYA_ACTIVE_RADIUS) continue // active limit: distant civilians freeze
+          // Wander around home; flee a little when the player is near (but not yet revealing).
+          if (now >= c.wanderUntil) {
+            const ang = Math.random() * Math.PI * 2
+            const r = 4 + Math.random() * 8
+            c.wanderX = c.homeX + Math.cos(ang) * r
+            c.wanderZ = c.homeZ + Math.sin(ang) * r
+            c.wanderUntil = now + 1200 + Math.random() * 1800
+          }
+          let tx = c.wanderX - c.group.position.x
+          let tz = c.wanderZ - c.group.position.z
+          if (dist < 14) {
+            tx = -dx
+            tz = -dz
+          }
+          const tl = Math.hypot(tx, tz) || 1
+          const step = SHIBUYA_CIVILIAN_SPEED * dt
+          const nx = c.group.position.x + (tx / tl) * step
+          const nz = c.group.position.z + (tz / tl) * step
+          if (!hizumiBlocked(nx, c.group.position.z)) c.group.position.x = nx
+          if (!hizumiBlocked(c.group.position.x, nz)) c.group.position.z = nz
+          c.group.rotation.y = Math.atan2(tx, tz)
+          c.group.position.y =
+            shibuyaGroundAt(c.group.position.x, c.group.position.z) +
+            Math.sin(now * 0.004 + c.id) * 0.06
+        }
+      }
+
       // Per-frame OSAKA scenery animation: neon flicker/pulse, lantern sway,
       // rooftop blinkers, water shimmer, tower beacon hue, scrolling marquee.
       function updateOsakaMap(dt: number) {
@@ -27106,6 +27348,7 @@ export default function ThreeWorld({
           window.setTimeout(() => SOUNDS.huntWarn(), 340)
           spawnShibuyaWedges() // 各エリアに 楔 を1基ずつ (歪 を生み続ける核)
           spawnShibuyaAreas() // 全7エリアに persona 別 歪 を配置 (楔 が時間で補充)
+          spawnShibuyaCivilians() // 逃げ惑う一般人 (一部は擬態 歪)
           // Show "SHIBUYA" banner on stage entry (world-zone banner suppressed in HUNT).
           areaRef.current = "SHIBUYA"
           areaKeyRef.current += 1
@@ -29598,6 +29841,12 @@ export default function ThreeWorld({
         // ray-gated — you must walk up and break it). No-op when no 楔 is near / off-stage.
         if (damageShibuyaWedgeNear(weapon.hitDamage)) shotConsumed = true
 
+        // SHIBUYA 一般人 (STEP2-B): a direct shot on a civilian-form (disguised or not — you
+        // can't tell) is a CIVILIAN HIT: −200 + the red damage frame. No-op off-stage.
+        if (!shotConsumed && hitscanShibuyaCivilian(raycaster, nearestWall?.distance ?? null)) {
+          shotConsumed = true
+        }
+
         // PvP hit: check remote players
         const sceneRefsLocal = sceneRef.current
         if (
@@ -30063,8 +30312,9 @@ export default function ThreeWorld({
           updateOsakaBikes(dt) // 鉄輪部隊 (Block B): track riders + squad-clear bonus
           updateOsakaMap(dt) // OSAKA scenery animation (neon, lanterns, marquee…)
           updateShibuyaMap(dt) // SHIBUYA scenery (screen scroll, seal pulse, neon)
-          updateShibuyaWedges(dt) // SHIBUYA STEP2-B 楔 spin/pulse (no-op when the pool is empty)
+          updateShibuyaWedges(dt) // SHIBUYA STEP2-B 楔 spin/pulse/top-up (no-op when empty)
           updateShibuyaEnemies(dt) // SHIBUYA STEP2-A 歪 (no-op when the pool is empty)
+          updateShibuyaCivilians(dt) // SHIBUYA STEP2-B 一般人 + 擬態 (no-op when empty)
           updateOsakaFx(dt) // OSAKA boss hazards (telegraphs, pools, splitters…)
           updateOsakaRain(dt) // OSAKA rain streaks + ground ripples
           updateOsakaEnv(dt) // OSAKA collapsing bridges
