@@ -19339,13 +19339,16 @@ export default function ThreeWorld({
         for (const [x, z, w, d] of [
           [0, H, 2 * H, 2],
           [0, -H, 2 * H, 2],
-          [H, -60.5, 2, 79], // east wall — segment NORTH of the 宮益坂 mouth (z<-21)
-          [H, 51.5, 2, 97], // east wall — segment SOUTH of the 宮益坂 mouth (z>+3)
-          // ↑ east wall split: 24-wide gap at z∈[-21,+3] is the 宮益坂 (Miyamasuzaka)
-          //   corridor mouth — the ramp punches out through here toward 駅東/HIKARIE on the
-          //   still-flat core (r≤FLAT_R holds past x=100). Its own side walls seal the sides
-          //   (built in the 宮益坂 Phase A section), so the gap never leaks — same recipe as
-          //   the west-wall split for センター街.
+          // East wall split into THREE segments to open BOTH the 宮益坂 and 駅東 mouths
+          // (merge of #127 宮益坂 + #128 駅東). Two gaps, three solid runs:
+          //   ・gap z∈[-21,+3]  = 宮益坂 (Miyamasuzaka) sloped-corridor mouth
+          //   ・gap z∈[+8,+32]  = 駅東/ヒカリエ (Eki-higashi) flat high-rise district mouth
+          // The far-north segment runs to z=-100 (NE corner sealed, the #128 fix — no backdrop-
+          // void hole), and a 5-wide sliver bridges z∈[+3,+8] BETWEEN the two gaps. Each area's
+          // own side walls seal its gap's sides, so neither leaks.
+          [H, -60.5, 2, 79], // NORTH segment — z[-100,-21] (north of the 宮益坂 gap)
+          [H, 5.5, 2, 5], // MIDDLE sliver — z[+3,+8] (between the 宮益坂 and 駅東 gaps)
+          [H, 66, 2, 68], // SOUTH segment — z[+32,+100] (south of the 駅東 gap)
           [-H, -63.5, 2, 73], // west wall — segment NORTH of the centre-gai mouth
           [-H, -14.5, 2, 5], // west wall — sliver between センター街 mouth (z=-17) and 文化村通り gap
           [-H, 56, 2, 88], // west wall — segment SOUTH of the 文化村通り mouth (z>+12)
@@ -19974,6 +19977,7 @@ export default function ThreeWorld({
           if (Math.max(Math.abs(bx), Math.abs(bz)) < 104) continue // inside walls → skip
           if (bx < -104 && Math.abs(bz + 22) < 14) continue // centre-gai west dead-end
           if (bx < -96 && bz > -14 && bz < 18) continue // 文化村通り (Bunkamura) west corridor
+          if (bx > 96 && bx < 140 && Math.abs(bz) < 40) continue // 駅東 (eki-higashi) district
           const bw = 11 + rnd() * 14
           const bh = 36 + rnd() * 56 // 36..92
           const tw = new THREE.Mesh(new THREE.BoxGeometry(bw, bh, bw), rimMat)
@@ -24401,6 +24405,282 @@ export default function ThreeWorld({
           // は エリア2「駅東/ヒカリエ」への引き渡し点。実装時は cap + バリケードを開口に置換し、駅東
           // 広場 + SHIBUYA RISE 高層街へ歩行レーンを継ぐ。谷底の口 (s=0, h=0) は平坦なプラザ/E-W
           // メインストリートと地続きで自然に入れることを Phase A 独立sim で確認済み。
+        }
+
+        // ══ 駅東/ヒカリエ (Eki-higashi) Phase A: 区画シェル (接続 + 確定壁 + 広場路面) ══════
+        // A FLAT high-rise district reached through the east-wall gap (z∈[+8,+32], cut above)
+        // and confined by its own walls into a box x∈[100,136] × z∈[-36,+36]. The スリバチ bowl
+        // floor is already flat (y=0) out to r≤144 (district corner r≈141), so no new floor
+        // mesh — just a 駅東広場 paving deck on top + the perimeter walls that contain the
+        // player. The wall stays SOLID at z∈[-21,+3] (handled by the east-wall split) so a
+        // future 宮益坂 area can open its own gap there; x∈[100,106]×z∈[-21,+3] is left as open
+        // plaza so that hand-off connects cleanly.
+        {
+          // ── (1) District confining walls (east / north / south). Reuse wallMat → merge
+          // into the perimeter-wall bucket (no new draw call). Each gets an exact AABB. ──
+          for (const [wx, wz, ww, wd] of [
+            [136, 0, 2, 74], // far-east wall (z spans the box + corner overlap)
+            [118, -36, 38, 2], // north wall (x[100,136])
+            [118, 36, 38, 2], // south wall (x[100,136])
+          ] as const) {
+            const wall = new THREE.Mesh(new THREE.BoxGeometry(ww, 11, wd), wallMat)
+            wall.position.set(wx, 5.5, wz)
+            mAdd(wall)
+            addShibuyaAABB(wx, wz, ww / 2, wd / 2, 11)
+          }
+          // ── (2) 駅東広場 paving deck: a clean lighter slab over the dark bowl floor, so the
+          // district reads as a plaza, not bare asphalt. Reuse roadMat (merges). ──
+          const ekiPlaza = new THREE.Mesh(new THREE.PlaneGeometry(36, 72), roadMat)
+          ekiPlaza.rotation.x = -Math.PI / 2
+          ekiPlaza.position.set(118, 0.02, 0)
+          mAdd(ekiPlaza)
+          // A brighter granite apron right at the entrance throat (z∈[+8,+32]) so the mouth
+          // from the scramble reads as a welcoming plaza floor.
+          const ekiApronMat = new THREE.MeshLambertMaterial({
+            color: 0x9498a2,
+            map: makeNoiseTexture(64, 0x55585f, 0.08, 6),
+          })
+          const ekiApron = new THREE.Mesh(new THREE.PlaneGeometry(20, 24), ekiApronMat)
+          ekiApron.rotation.x = -Math.PI / 2
+          ekiApron.position.set(110, 0.03, 20)
+          mAdd(ekiApron)
+        }
+        // ── ヒカリエ昇格: 既存背景塔 (120,-20,82) に footprint AABB を与えて街区の主役に。──
+        addShibuyaAABB(120, -20, 14, 16, 82) // x[106,134] × z[-36,-4] (NE block)
+        // ── SHIBUYA RISE: 区画最高層 (h98) の段々ガラス塔。南東に据える hero。──
+        makeTower(124, 24, 20, 20, 98, 0, 0xcfe8ff, 0.55, 18)
+        addShibuyaAABB(124, 24, 10, 10, 98) // x[114,134] × z[14,34] (SE block)
+        // ── 東中央のスクランブルスクエア風ステップ塔 (pocket between ヒカリエ & RISE)。──
+        makeTower(130, 5, 11, 13, 70, 0, 0x9fd0ff, 0.5, 12)
+        addShibuyaAABB(130, 5, 5.5, 6.5, 70) // x[124.5,135.5] × z[-1.5,11.5]
+        // ── 多様なガラス高層フィラー (makeFacade → 既存 facGlassMat/midMat バケットに統合、
+        // 各棟が自前の AABB を持つ)。壁際・南西に置き、中央プラザは塞がない。 ──
+        makeFacade(106, 31, 11, 9, 44, Math.PI / 2, "glass") // 南西の壁際
+        makeFacade(120, 32, 12, 8, 56, Math.PI / 2, "stepped") // 南壁ぎわ中央
+        makeFacade(133, -28, 7, 12, 60, 0, "glass") // 北東の壁際 (ヒカリエ東脇)
+
+        // ══ 駅東/ヒカリエ (Eki-higashi) Phase C: 広場ディテール (地下入口 + 大型ビジョン + 照明) ══
+        // 駅東広場を「らしく」する: 地下広場への装飾入口 (グレーチング、歩いて越せる) + ビル面の
+        // 大型ビジョン + 背の高いモダンな広場灯 + ベンチ/プランター。中央プラザは塞がない。
+        {
+          // ── (1) 地下広場への入口 (装飾、グレーチングで封鎖 — 地下は未実装): 中央プラザに据える。──
+          const subX = 109
+          const subZ = 4
+          for (let s = 0; s < 4; s++) {
+            const st = new THREE.Mesh(new THREE.BoxGeometry(3.4, 0.4, 1.1), wallMat)
+            st.position.set(subX, -0.2 - s * 0.34, subZ - 1.5 + s * 1.0)
+            mAdd(st)
+          }
+          const grate = new THREE.Mesh(
+            new THREE.BoxGeometry(3.4, 0.08, 4.6),
+            new THREE.MeshStandardMaterial({ color: 0x2a2c32, roughness: 0.45, metalness: 0.75 }),
+          )
+          grate.position.set(subX, 0.04, subZ)
+          mAdd(grate)
+          const subPostGeo = new THREE.CylinderGeometry(0.07, 0.07, 1.0, 6)
+          const subPostXf: Xf[] = []
+          for (let i = 0; i <= 5; i++) {
+            subPostXf.push({ pos: [subX - 1.95, 0.5, subZ - 2.5 + i] })
+            subPostXf.push({ pos: [subX + 1.95, 0.5, subZ - 2.5 + i] })
+          }
+          instAdd(subPostGeo, railMat, subPostXf)
+          for (const rxp of [-1.95, 1.95]) {
+            const rail = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.08, 5.2), railMat)
+            rail.position.set(subX + rxp, 1.0, subZ)
+            mAdd(rail)
+            addShibuyaAABB(subX + rxp, subZ, 0.2, 2.6, 1.0) // low railing — guides around the pit
+          }
+          const subSign = new THREE.Mesh(
+            new THREE.PlaneGeometry(4.2, 1.3),
+            new THREE.MeshBasicMaterial({
+              map: makeSignTex({
+                kind: "board",
+                w: 5,
+                h: 1.4,
+                bg: "#0a1426",
+                t1: "駅東 地下広場",
+                c1: "#9fd0ff",
+                t2: "▼ B1 PLAZA",
+                c2: "#ffffff",
+                bar: "#1c3a6a",
+              }),
+              toneMapped: false,
+              side: THREE.DoubleSide,
+            }),
+          )
+          subSign.position.set(subX, 3.0, subZ + 2.8)
+          add(subSign)
+          // ── (2) 大型ビジョン: SHIBUYA RISE と ヒカリエ のプラザ向き面に明るい広告スクリーン。──
+          const visAd = (label: string, accent: string) => {
+            const cv = document.createElement("canvas")
+            cv.width = 256
+            cv.height = 144
+            const c = cv.getContext("2d")
+            if (c) {
+              c.fillStyle = "#050810" // dark screen base
+              c.fillRect(0, 0, 256, 144)
+              c.fillStyle = accent
+              for (let i = 0; i < 5; i++) c.fillRect(18 + i * 46, 20 + (i % 2) * 60, 34, 44)
+              c.fillStyle = "#eef4ff"
+              c.font = "bold 30px sans-serif"
+              c.textAlign = "center"
+              c.fillText(label, 128, 130)
+            }
+            const t = new THREE.CanvasTexture(cv)
+            t.colorSpace = THREE.SRGBColorSpace
+            return new THREE.MeshBasicMaterial({ map: t, toneMapped: false })
+          }
+          // SHIBUYA RISE west face (faces the plaza, x≈113.8, z=24).
+          const vis1 = new THREE.Mesh(new THREE.PlaneGeometry(12, 8), visAd("RISE", "#3aa0ff"))
+          vis1.position.set(113.7, 16, 24)
+          vis1.rotation.y = -Math.PI / 2
+          add(vis1)
+          // ヒカリエ south face (faces the plaza, z≈-3.8, x=120).
+          const vis2 = new THREE.Mesh(new THREE.PlaneGeometry(16, 9), visAd("HIKARIE", "#7a5cff"))
+          vis2.position.set(120, 20, -3.7)
+          add(vis2)
+          // ── (3) 広場灯: 背の高いモダンな2灯式ポール。プラザに点在。AABB は基部のみ。──
+          const plazaPoleGeo = new THREE.CylinderGeometry(0.16, 0.22, 11, 8)
+          const plazaPoleMat = new THREE.MeshStandardMaterial({
+            color: 0x40434b,
+            roughness: 0.5,
+            metalness: 0.5,
+          })
+          const plazaLampGeo = new THREE.SphereGeometry(0.42, 8, 6)
+          const plazaLampMat = new THREE.MeshBasicMaterial({ color: 0xeaf2ff, toneMapped: false })
+          const plazaPoleXf: Xf[] = []
+          const plazaLampXf: Xf[] = []
+          for (const [lx, lz] of [
+            [104, 14],
+            [104, -14],
+            [114, 0],
+            [110, 30],
+            [128, 18],
+            [128, -8],
+          ] as const) {
+            plazaPoleXf.push({ pos: [lx, 5.5, lz] })
+            plazaLampXf.push({ pos: [lx - 0.9, 10.6, lz] })
+            plazaLampXf.push({ pos: [lx + 0.9, 10.6, lz] })
+            addShibuyaAABB(lx, lz, 0.3, 0.3, 5)
+          }
+          instAdd(plazaPoleGeo, plazaPoleMat, plazaPoleXf)
+          instAdd(plazaLampGeo, plazaLampMat, plazaLampXf)
+          // ── (4) ベンチ + プランター (入口まわり、低い → 衝突なし)。──
+          const ekiBenchGeo = new THREE.BoxGeometry(2.2, 0.45, 0.6)
+          const ekiBenchMat = new THREE.MeshStandardMaterial({ color: 0x55585f, roughness: 0.7 })
+          const ekiPlanterGeo = new THREE.BoxGeometry(1.6, 0.5, 1.6)
+          const ekiPlanterMat = new THREE.MeshLambertMaterial({ color: 0x3a3d44 })
+          const ekiHedgeGeo = new THREE.BoxGeometry(1.5, 0.5, 1.5)
+          const ekiHedgeMat = new THREE.MeshLambertMaterial({
+            color: 0x355f33,
+            emissive: 0x0c1a0c,
+            emissiveIntensity: 0.4,
+          })
+          const ekiBenchXf: Xf[] = []
+          const ekiPlanterXf: Xf[] = []
+          const ekiHedgeXf: Xf[] = []
+          for (const [bx, bz, rot] of [
+            [106, 10, 0],
+            [106, -2, 0],
+            [116, -12, Math.PI / 2],
+            [120, 12, 0],
+          ] as const) {
+            ekiBenchXf.push({ pos: [bx, 0.22, bz], rotY: rot })
+          }
+          for (const [px, pz] of [
+            [112, 16],
+            [112, -10],
+            [124, 8],
+            [108, 28],
+          ] as const) {
+            ekiPlanterXf.push({ pos: [px, 0.25, pz] })
+            ekiHedgeXf.push({ pos: [px, 0.62, pz] })
+          }
+          instAdd(ekiBenchGeo, ekiBenchMat, ekiBenchXf)
+          instAdd(ekiPlanterGeo, ekiPlanterMat, ekiPlanterXf)
+          instAdd(ekiHedgeGeo, ekiHedgeMat, ekiHedgeXf)
+        }
+
+        // ══ 駅東/ヒカリエ (Eki-higashi) Phase D: 動き・空気感 (人影 / タクシー / 冷色アクセント) ══
+        // The 駅東 plaza's cool, busy life: commuter figure silhouettes, a couple of parked
+        // taxis at the plaza edge (away from the entrance throat), and a few cool accent glow
+        // bars on the tower bases (animNeon flicker). The lit window grids on the towers
+        // already carry the night glow.
+        {
+          // ── (1) 人影 (静止、通勤者風シルエット): プラザに点在。AABB なし。──
+          const ekiFigMat = new THREE.MeshBasicMaterial({
+            color: 0x0b0d13,
+            transparent: true,
+            opacity: 0.85,
+            side: THREE.DoubleSide,
+          })
+          const ekiFigGeo = new THREE.PlaneGeometry(0.7, 1.8)
+          const ekiFigXf: Xf[] = []
+          for (const [fx, fz] of [
+            [105, 18],
+            [108, 6],
+            [112, -6],
+            [104, -18],
+            [116, 2],
+            [121, 8],
+            [126, 14],
+            [108, 26],
+            [103, 28],
+            [124, -2],
+          ] as const) {
+            ekiFigXf.push({ pos: [fx, 0.9, fz], rotY: (fx + fz) % Math.PI })
+          }
+          instAdd(ekiFigGeo, ekiFigMat, ekiFigXf)
+          // ── (2) 駐車タクシー (静止): プラザ縁に数台、入口スロート (x≤114,z[8,32]) は避ける。固い
+          // → AABB。──
+          const taxiBodyMat = new THREE.MeshStandardMaterial({
+            color: 0x1c2230,
+            roughness: 0.5,
+            metalness: 0.45,
+          })
+          const taxiCabMat = new THREE.MeshStandardMaterial({
+            color: 0x0b0e14,
+            emissive: 0x243246,
+            emissiveIntensity: 0.3,
+          })
+          const taxiBodyGeo = new THREE.BoxGeometry(2.0, 1.1, 4.4)
+          const taxiCabGeo = new THREE.BoxGeometry(1.8, 0.78, 2.2)
+          for (const [cx, cz, rot] of [
+            [103, -24, 0], // west strip (clear of buildings + entrance throat)
+            [110, -2, 0], // central plaza, south of ヒカリエ
+          ] as const) {
+            const body = new THREE.Mesh(taxiBodyGeo, taxiBodyMat)
+            body.position.set(cx, 0.7, cz)
+            body.rotation.y = rot
+            mAdd(body)
+            const cab = new THREE.Mesh(taxiCabGeo, taxiCabMat)
+            cab.position.set(cx, 1.55, cz)
+            cab.rotation.y = rot
+            mAdd(cab)
+            const along = Math.abs(Math.cos(rot)) // 1 if length along z, else along x
+            const hw = along * 1.0 + (1 - along) * 2.2
+            const hd = along * 2.2 + (1 - along) * 1.0
+            addShibuyaAABB(cx, cz, hw, hd, 1.4)
+          }
+          // ── (3) 冷色アクセント: 数本のビル基部の発光バー (animNeon フリッカー)。控えめ。──
+          const ekiAccentGeo = new THREE.BoxGeometry(0.26, 1, 0.14)
+          const ekiAccentCols = [0x7fb0ff, 0xbfe0ff]
+          const ekiAccentMats = ekiAccentCols.map(
+            (c) =>
+              new THREE.MeshStandardMaterial({ color: c, emissive: c, emissiveIntensity: 1.0 }),
+          )
+          const ekiAccentXf: Xf[][] = ekiAccentCols.map(() => [])
+          for (const [ax, az, arot, ci] of [
+            [113.6, 24, -Math.PI / 2, 0],
+            [120, -3.8, 0, 1],
+            [124.4, 5, Math.PI / 2, 0],
+            [106, -10, 0, 1],
+          ] as const) {
+            ekiAccentXf[ci]?.push({ pos: [ax, 6.5, az], rotY: arot, scl: [1, 3.2, 1] })
+          }
+          ekiAccentMats.forEach((mm, i) => {
+            if (instAdd(ekiAccentGeo, mm, ekiAccentXf[i] ?? [])) animNeon.push(mm)
+          })
         }
 
         // ══ Phase C (scramble-detail): 大型ビジョン群 (駅前の顔) ════════════════════
