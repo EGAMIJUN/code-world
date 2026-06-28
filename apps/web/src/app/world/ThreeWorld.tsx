@@ -19160,13 +19160,16 @@ export default function ThreeWorld({
         for (const [x, z, w, d] of [
           [0, H, 2 * H, 2],
           [0, -H, 2 * H, 2],
-          [H, -46, 2, 92], // east wall — segment NORTH of the 駅東 (eki-higashi) mouth (z<+8)
-          [H, 66, 2, 68], // east wall — segment SOUTH of the 駅東 mouth (z>+32)
+          [H, -46, 2, 108], // east wall — segment NORTH of the 駅東 (eki-higashi) mouth (z[-100,+8])
+          [H, 66, 2, 68], // east wall — segment SOUTH of the 駅東 mouth (z[+32,+100])
           // ↑ east wall split: 24-wide gap at z∈[+8,+32] is the 駅東/ヒカリエ district mouth —
           //   the player passes through onto the flat core (r≤FLAT_R holds past x=100) into a
           //   walled high-rise plaza beyond. Same recipe as the センター街 / 宮益坂 splits. The
-          //   wall stays SOLID at z∈[-21,+3] so a future 宮益坂 area can open its own gap there
-          //   without colliding with this one.
+          //   north segment runs the FULL z[-100,+8] (depth 108) — it must reach the NE corner
+          //   (z=-100), or the ~8-wide gap at z∈[-100,-92] would be a hole the player walks out
+          //   of into the backdrop void (SHIBUYA has no world-bounds clamp; r≈138 there < FLAT_R
+          //   144, so the ground is still walkable). The wall stays SOLID across z∈[-21,+3] so a
+          //   future 宮益坂 area can open its own gap there without colliding with this one.
           [-H, -63.5, 2, 73], // west wall — segment NORTH of the centre-gai mouth
           [-H, 41.5, 2, 117], // west wall — segment SOUTH of the centre-gai mouth
         ] as const) {
