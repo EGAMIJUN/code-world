@@ -953,6 +953,107 @@ const bunkamuraAt = (s: number): BkmPoint | null => {
   const tz = seg.dz / seg.len
   return { cx: seg.ax + seg.dx * t, cz: seg.az + seg.dz * t, h: 0, tx, tz, px: -tz, pz: tx }
 }
+// ── 宮益坂 (Miyamasuzaka): スクランブル東から東へ登るビジネス街の坂 ───────────────
+// 道玄坂 (南西・猥雑・濃いネオン) / 公園通り (北・おしゃれ・緑) と対をなす「東の坂・
+// オフィス街」。E-W メインストリートの東延長として平坦なプラザ東縁から登り始め、東外周壁
+// (x=+100) に開けた 20 幅ギャップを抜けて駅東/ヒカリエ方向の手前 (x≈101) で行き止まる。
+// 道玄坂/公園通りとまったく同じ「回廊帯の内側だけ RISE、外では 0」方式だが、定数・関数は
+// すべて別系統 (MMZ_* / miyamasuzakaGroundY / miyamasuzakaAt) で dogenzakaGroundY /
+// koenDoriGroundY のロジックには一切触れない。床メッシュ (build) とプレイヤー Y (animate
+// ループ) の両方を駆動する純データ + 純関数。SE ガラスタワー (46,30,±12→z≤42) からは
+// 北へ十分クリア、HIKARIE 背景塔 (120,-20,西面 x=106) の手前で停止する。
+const MMZ_HW = 10 // 回廊半幅 (20 幅: 公園通り 22 よりやや狭い「広い片側2車線のオフィス街路」)
+const MMZ_GRADE = 0.1 // 弧長あたりの上昇 (~5.7°、道玄坂 0.12 と公園通り 0.075 の中間)
+const MMZ_PATH: readonly (readonly [number, number])[] = [
+  [30, -2], // 起点 — プラザ東縁/E-W メインストリート東端に開口 (h=0、平坦コアと段差なく接続)
+  [50, -5],
+  [68, -8], // 中腹 — miyamasuzaka 中心 (62,-8) 付近 (SE タワー z≤42 から北へ ~13u クリア)
+  [86, -8],
+  [101, -9], // 上端の行き止まり (h≈7.1、x=+100 ギャップを 1u 抜けた直後、HIKARIE 手前)
+]
+type MmzSeg = {
+  ax: number
+  az: number
+  dx: number
+  dz: number
+  len: number
+  len2: number
+  s0: number
+}
+// 道玄坂 DGZ_SEG / 公園通り KDR_SEG と同じ前計算: セグメントごとに起点からの累積弧長 s0。
+const MMZ_SEG: MmzSeg[] = (() => {
+  const segs: MmzSeg[] = []
+  let s0 = 0
+  for (let i = 0; i < MMZ_PATH.length - 1; i++) {
+    const a = MMZ_PATH[i]
+    const b = MMZ_PATH[i + 1]
+    if (!a || !b) continue
+    const dx = b[0] - a[0]
+    const dz = b[1] - a[1]
+    const len = Math.hypot(dx, dz)
+    segs.push({ ax: a[0], az: a[1], dx, dz, len, len2: dx * dx + dz * dz, s0 })
+    s0 += len
+  }
+  return segs
+})()
+// 折れ線センターラインへの最近点投影 → { s: 起点からの弧長, lat: 直交距離 }。
+const miyamasuzakaNearest = (lx: number, lz: number): { s: number; lat: number } => {
+  let bestD2 = Number.POSITIVE_INFINITY
+  let bestS = 0
+  for (const seg of MMZ_SEG) {
+    let t = ((lx - seg.ax) * seg.dx + (lz - seg.az) * seg.dz) / seg.len2
+    if (t < 0) t = 0
+    else if (t > 1) t = 1
+    const cx = seg.ax + seg.dx * t
+    const cz = seg.az + seg.dz * t
+    const d2 = (lx - cx) * (lx - cx) + (lz - cz) * (lz - cz)
+    if (d2 < bestD2) {
+      bestD2 = d2
+      bestS = seg.s0 + seg.len * t
+    }
+  }
+  return { s: bestS, lat: Math.sqrt(bestD2) }
+}
+// 歩行可能ランプ高さ (arena-local)。回廊帯の内側は grade·弧長、外側は 0 (平坦)。起点で
+// s=0→h=0 なので平坦なプラザ/E-W 通りと段差なく繋がり、東へ歩くほど緩やかにせり上がる。
+const miyamasuzakaGroundY = (lx: number, lz: number): number => {
+  const n = miyamasuzakaNearest(lx, lz)
+  if (n.lat > MMZ_HW) return 0
+  return MMZ_GRADE * n.s
+}
+const MMZ_TOP_S = MMZ_SEG.reduce((acc, s) => acc + s.len, 0) // 総弧長 (上端の s)
+// 回廊ゾーン (汎用ファサード/プロップを坂道から排除する判定用、少し広めにとる)。
+const inMiyamasuzakaZone = (lx: number, lz: number): boolean =>
+  miyamasuzakaNearest(lx, lz).lat < MMZ_HW + 4
+// 弧長 s でのセンターライン上の点 + ランプ高さ h + 接線 (tx,tz) + 左直交 (px,pz)。道玄坂
+// dogenzakaAt / 公園通り koenDoriAt と同じ役割で、build が坂に沿って物 (床/側壁/縁石/街灯/
+// 街路樹/看板) を置く共通サンプラー。完全に独立した別関数 —— 他坂の At には一切触れない。
+type MmzPoint = {
+  cx: number
+  cz: number
+  h: number
+  tx: number
+  tz: number
+  px: number
+  pz: number
+}
+const miyamasuzakaAt = (s: number): MmzPoint | null => {
+  let seg = MMZ_SEG[0]
+  for (const sg of MMZ_SEG) if (s >= sg.s0) seg = sg
+  if (!seg || seg.len <= 0) return null
+  const t = Math.max(0, Math.min(1, (s - seg.s0) / seg.len))
+  const tx = seg.dx / seg.len
+  const tz = seg.dz / seg.len
+  return {
+    cx: seg.ax + seg.dx * t,
+    cz: seg.az + seg.dz * t,
+    h: MMZ_GRADE * s,
+    tx,
+    tz,
+    px: -tz,
+    pz: tx,
+  }
+}
 // Per-theme minion spec — reuse an existing enemy model with a colour/scale
 // tweak. base = model, tint = body recolour, eyes = eye-glow colour.
 type HuntCreatureKind =
@@ -19238,7 +19339,13 @@ export default function ThreeWorld({
         for (const [x, z, w, d] of [
           [0, H, 2 * H, 2],
           [0, -H, 2 * H, 2],
-          [H, 0, 2, 2 * H],
+          [H, -60.5, 2, 79], // east wall — segment NORTH of the 宮益坂 mouth (z<-21)
+          [H, 51.5, 2, 97], // east wall — segment SOUTH of the 宮益坂 mouth (z>+3)
+          // ↑ east wall split: 24-wide gap at z∈[-21,+3] is the 宮益坂 (Miyamasuzaka)
+          //   corridor mouth — the ramp punches out through here toward 駅東/HIKARIE on the
+          //   still-flat core (r≤FLAT_R holds past x=100). Its own side walls seal the sides
+          //   (built in the 宮益坂 Phase A section), so the gap never leaks — same recipe as
+          //   the west-wall split for センター街.
           [-H, -63.5, 2, 73], // west wall — segment NORTH of the centre-gai mouth
           [-H, -14.5, 2, 5], // west wall — sliver between センター街 mouth (z=-17) and 文化村通り gap
           [-H, 56, 2, 88], // west wall — segment SOUTH of the 文化村通り mouth (z>+12)
@@ -19486,8 +19593,13 @@ export default function ThreeWorld({
               lampPoleXf.push({ pos: [side, 3, d] }) // along the N-S road
               lampHeadXf.push({ pos: [side, 6.1, d] })
             }
-            lampPoleXf.push({ pos: [d, 3, side] }) // along the E-W road (never on the slope)
-            lampHeadXf.push({ pos: [d, 6.1, side] })
+            // E-W road lamp: skip any the 宮益坂 slope would bury (the avenue relights its
+            // own corridor in its Phase B). miyamasuzakaGroundY is 0 off the slope, so every
+            // flat-ground scramble lamp on the E-W road is kept untouched.
+            if (miyamasuzakaGroundY(d, side) < 0.2) {
+              lampPoleXf.push({ pos: [d, 3, side] }) // along the E-W road
+              lampHeadXf.push({ pos: [d, 6.1, side] })
+            }
           }
         }
         instAdd(lampPoleGeo, sigPoleMat, lampPoleXf)
@@ -20968,12 +21080,16 @@ export default function ThreeWorld({
         // inCentergaiZone keeps generic facades out of the walkable センター街 lane.
         // inBunkamuraZone added so the west-axis facade row never drops a building into the
         // 文化村通り corridor (centreline z≈0) — the #126-class trap (cf. 宮益坂/eki-higashi).
+        // inMiyamasuzakaZone added so the axis-facing facade rows (loop (2), the +x/EAST
+        // axis at z=±16) never drop a building into the 宮益坂 corridor (centreline z≈-8) —
+        // the #126-class trap that would block the new climbing street with a phantom wall.
         const sbBlocked = (x: number, z: number) =>
           sbAvoid.some(([ax, az, ar]) => Math.hypot(x - ax, z - az) < ar) ||
           inCentergaiZone(x, z) ||
           inDogenzakaZone(x, z) ||
           inKoenDoriZone(x, z) ||
-          inBunkamuraZone(x, z)
+          inBunkamuraZone(x, z) ||
+          inMiyamasuzakaZone(x, z)
         // (1) Four corner clusters in the diagonal sectors (the road arms stay open).
         for (let k = 0; k < 4; k++) {
           const baseA = Math.PI / 4 + k * (Math.PI / 2)
@@ -23534,6 +23650,757 @@ export default function ThreeWorld({
           bNeonMats.forEach((mm, i) => {
             if (instAdd(bNeonGeo, mm, bNeonXf[i] ?? [])) animNeon.push(mm)
           })
+        }
+
+        // ══ 宮益坂 (Miyamasuzaka) Phase A: sloped walkable corridor ═══════════════════
+        // The EAST climbing street: extends the E-W main road past the scramble plaza,
+        // rises with arc-length via the module-level miyamasuzakaGroundY (the SAME function
+        // the player's Y follows in animate, so floor and footing always agree), punches
+        // through a 20-wide gap cut in the east perimeter wall (split below), and dead-ends
+        // at x≈101 just short of the HIKARIE backdrop. The two side walls are the SINGLE
+        // collision source (like 道玄坂/公園通り); the ramp floor carries NO hitbox.
+        {
+          // ── (1) Climbing floor ribbon: ONE BufferGeometry, left/right edge verts at
+          // each sample, heights from MMZ_GRADE·s. Up-facing winding. Own asphalt material
+          // (a touch cooler/cleaner than 道玄坂 — business street) → one isolated draw call.
+          const MRIB_N = 56
+          const mribPos: number[] = []
+          const mribUv: number[] = []
+          const mribIdx: number[] = []
+          for (let i = 0; i <= MRIB_N; i++) {
+            const s = (i / MRIB_N) * MMZ_TOP_S
+            const p = miyamasuzakaAt(s)
+            if (!p) continue
+            const h = MMZ_GRADE * s
+            mribPos.push(p.cx + p.px * MMZ_HW, h, p.cz + p.pz * MMZ_HW) // left edge
+            mribPos.push(p.cx - p.px * MMZ_HW, h, p.cz - p.pz * MMZ_HW) // right edge
+            const v = s / 6
+            mribUv.push(0, v, 1, v)
+          }
+          for (let i = 0; i < MRIB_N; i++) {
+            const a = i * 2
+            mribIdx.push(a, a + 2, a + 1, a + 1, a + 2, a + 3)
+          }
+          const mribGeo = new THREE.BufferGeometry()
+          mribGeo.setAttribute("position", new THREE.Float32BufferAttribute(mribPos, 3))
+          mribGeo.setAttribute("uv", new THREE.Float32BufferAttribute(mribUv, 2))
+          mribGeo.setIndex(mribIdx)
+          mribGeo.computeVertexNormals()
+          const mmzRoadMat = new THREE.MeshLambertMaterial({
+            color: 0x82858f, // cool clean asphalt — corporate street vs 道玄坂's warmer grime
+            map: makeNoiseTexture(128, 0x303139, 0.1, 9),
+            emissive: 0x182032, // faint cool sheen
+            emissiveIntensity: 1,
+          })
+          add(new THREE.Mesh(mribGeo, mmzRoadMat))
+          // ── (2) Side walls: short rotated boxes hugging both band edges, rising with the
+          // ramp. The corridor's ONLY collision; each AABB is the EXACT axis-aligned bound of
+          // its rotated box (≥2u corridor clearance built into MMZ_HW + wall offset).
+          const MMZ_WALL_T = 1.5
+          const MMZ_WALL_H = 9 // office-base height (Phase C stacks towers behind)
+          const mmzSegN = Math.max(1, Math.round(MMZ_TOP_S / 5))
+          for (let i = 0; i < mmzSegN; i++) {
+            const sm = ((i + 0.5) / mmzSegN) * MMZ_TOP_S
+            const a0 = miyamasuzakaAt((i / mmzSegN) * MMZ_TOP_S)
+            const a1 = miyamasuzakaAt(((i + 1) / mmzSegN) * MMZ_TOP_S)
+            const am = miyamasuzakaAt(sm)
+            if (!a0 || !a1 || !am) continue
+            const segLen = Math.hypot(a1.cx - a0.cx, a1.cz - a0.cz) + 1.5 // joint overlap
+            // (1.5, wider than 道玄坂's 0.4: closes the small outer-edge notch at the
+            // (68,-8) path bend so the side wall AABBs seal with no ghost gap — the lane
+            // stays clear because the extra length runs ALONG the tangent, not laterally.)
+            const wallH = MMZ_GRADE * sm + MMZ_WALL_H
+            const halfAbs = Math.abs(am.tx) * (segLen / 2) + Math.abs(am.tz) * (MMZ_WALL_T / 2)
+            const depAbs = Math.abs(am.tz) * (segLen / 2) + Math.abs(am.tx) * (MMZ_WALL_T / 2)
+            const rotY = Math.atan2(-am.tz, am.tx)
+            for (const side of [1, -1] as const) {
+              const cx = am.cx + am.px * side * (MMZ_HW + MMZ_WALL_T / 2)
+              const cz = am.cz + am.pz * side * (MMZ_HW + MMZ_WALL_T / 2)
+              const box = new THREE.Mesh(
+                new THREE.BoxGeometry(segLen, wallH, MMZ_WALL_T),
+                concreteMat,
+              )
+              box.position.set(cx, wallH / 2, cz)
+              box.rotation.y = rotY
+              mAdd(box)
+              addShibuyaAABB(cx, cz, halfAbs, depAbs, wallH)
+            }
+          }
+          // ── (3) Dead-end cap across the top (Phase G dresses it as a 駅東再開発 hoarding).
+          // Spans the full corridor width + both walls.
+          const mcap = miyamasuzakaAt(MMZ_TOP_S)
+          if (mcap) {
+            const mcapH = MMZ_GRADE * MMZ_TOP_S + MMZ_WALL_H
+            const mcapW = MMZ_HW * 2 + MMZ_WALL_T * 2
+            const mcapCx = mcap.cx + mcap.tx * (MMZ_WALL_T / 2 + 0.5)
+            const mcapCz = mcap.cz + mcap.tz * (MMZ_WALL_T / 2 + 0.5)
+            const mcapMesh = new THREE.Mesh(
+              new THREE.BoxGeometry(MMZ_WALL_T, mcapH, mcapW),
+              concreteMat,
+            )
+            mcapMesh.position.set(mcapCx, mcapH / 2, mcapCz)
+            mcapMesh.rotation.y = Math.atan2(-mcap.tz, mcap.tx)
+            mAdd(mcapMesh)
+            const mcapHalf = Math.abs(mcap.tx) * (MMZ_WALL_T / 2) + Math.abs(mcap.tz) * (mcapW / 2)
+            const mcapDep = Math.abs(mcap.tz) * (MMZ_WALL_T / 2) + Math.abs(mcap.tx) * (mcapW / 2)
+            addShibuyaAABB(mcapCx, mcapCz, mcapHalf, mcapDep, mcapH)
+          }
+        }
+
+        // ══ 宮益坂 (Miyamasuzaka) Phase B: 車道・歩道・路面 + 街灯 ════════════════════
+        // Road decals layered on the Phase A ramp via miyamasuzakaAt: carriageway +
+        // sidewalk tiles + curbs + dashed centre line + a crosswalk at the base + a faint
+        // cool sheen, then clean modern cool-white lamps (business street, not 道玄坂's
+        // grime). NONE collide except the lamp pole bases. The existing E-W road lamps the
+        // ramp would bury are culled at the scramble lamp pass (miyamasuzakaGroundY gate).
+        {
+          const MMZ_CARRIAGE_HW = 6.0 // carriageway half-width (sidewalks fill 6.0→10)
+          const mstrip = (
+            pos: number[],
+            uv: number[],
+            idx: number[],
+            s0: number,
+            s1: number,
+            latC: number,
+            latHW: number,
+            dy: number,
+            steps: number,
+            uRepeat = 1,
+            vRepeat = 0.25,
+          ) => {
+            const base = pos.length / 3
+            let pushed = 0
+            for (let k = 0; k <= steps; k++) {
+              const s = s0 + (s1 - s0) * (k / steps)
+              const p = miyamasuzakaAt(s)
+              if (!p) continue
+              pos.push(p.cx + p.px * (latC + latHW), p.h + dy, p.cz + p.pz * (latC + latHW))
+              pos.push(p.cx + p.px * (latC - latHW), p.h + dy, p.cz + p.pz * (latC - latHW))
+              uv.push(0, s * vRepeat, uRepeat, s * vRepeat)
+              pushed++
+            }
+            for (let k = 0; k < pushed - 1; k++) {
+              const a = base + k * 2
+              idx.push(a, a + 2, a + 1, a + 1, a + 2, a + 3)
+            }
+          }
+          const mbuildGeo = (pos: number[], uv: number[], idx: number[]) => {
+            const gg = new THREE.BufferGeometry()
+            gg.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3))
+            gg.setAttribute("uv", new THREE.Float32BufferAttribute(uv, 2))
+            gg.setIndex(idx)
+            gg.computeVertexNormals()
+            return gg
+          }
+          // (4a) Sidewalk tiles: fill the carriage→HW band with clean pale concrete.
+          {
+            const pos: number[] = []
+            const uv: number[] = []
+            const idx: number[] = []
+            for (const side of [1, -1] as const) {
+              mstrip(
+                pos,
+                uv,
+                idx,
+                0,
+                MMZ_TOP_S,
+                side * ((MMZ_CARRIAGE_HW + MMZ_HW) / 2),
+                (MMZ_HW - MMZ_CARRIAGE_HW) / 2,
+                0.1,
+                56,
+                1,
+                0.5,
+              )
+            }
+            add(
+              new THREE.Mesh(
+                mbuildGeo(pos, uv, idx),
+                new THREE.MeshLambertMaterial({
+                  color: 0x7e818b, // clean pale concrete (corporate pavement)
+                  map: makeNoiseTexture(64, 0x4a4c54, 0.08, 6),
+                }),
+              ),
+            )
+          }
+          // (4b) Curbs: raised light strips at both carriage edges. Below step-up → walkable.
+          {
+            const pos: number[] = []
+            const uv: number[] = []
+            const idx: number[] = []
+            for (const side of [1, -1] as const) {
+              mstrip(pos, uv, idx, 0, MMZ_TOP_S, side * MMZ_CARRIAGE_HW, 0.32, 0.18, 44)
+            }
+            add(
+              new THREE.Mesh(
+                mbuildGeo(pos, uv, idx),
+                new THREE.MeshLambertMaterial({ color: 0x969aa4 }),
+              ),
+            )
+          }
+          // (4c) Centre line: cool-white dashes from past the crosswalk to the top.
+          {
+            const pos: number[] = []
+            const uv: number[] = []
+            const idx: number[] = []
+            for (let s = 12; s < MMZ_TOP_S - 3; s += 4.2) {
+              mstrip(pos, uv, idx, s, Math.min(s + 2.4, MMZ_TOP_S), 0, 0.16, 0.06, 3)
+            }
+            add(
+              new THREE.Mesh(
+                mbuildGeo(pos, uv, idx),
+                new THREE.MeshBasicMaterial({ color: 0xdfe6f0, toneMapped: false }),
+              ),
+            )
+          }
+          // (4d) Crosswalk at the base: white zebra band where the ramp meets the plaza.
+          {
+            const pos: number[] = []
+            const uv: number[] = []
+            const idx: number[] = []
+            for (let s = 3.5; s < 11; s += 1.3) {
+              mstrip(pos, uv, idx, s, s + 0.72, 0, MMZ_CARRIAGE_HW + 1.4, 0.05, 2)
+            }
+            add(
+              new THREE.Mesh(
+                mbuildGeo(pos, uv, idx),
+                new THREE.MeshBasicMaterial({ color: 0xd6dae2, toneMapped: false }),
+              ),
+            )
+          }
+          // (4e) Faint cool sheen over the whole ramp (subtle — business street reads clean,
+          // not rain-grimy like 道玄坂). One additive paving grid.
+          {
+            const seamCv = document.createElement("canvas")
+            seamCv.width = 64
+            seamCv.height = 64
+            const sctx = seamCv.getContext("2d")
+            if (sctx) {
+              sctx.clearRect(0, 0, 64, 64)
+              sctx.strokeStyle = "rgba(150,170,210,0.5)"
+              sctx.lineWidth = 2
+              sctx.strokeRect(1, 1, 62, 62)
+            }
+            const seamTex = new THREE.CanvasTexture(seamCv)
+            seamTex.wrapS = THREE.RepeatWrapping
+            seamTex.wrapT = THREE.RepeatWrapping
+            const pos: number[] = []
+            const uv: number[] = []
+            const idx: number[] = []
+            mstrip(pos, uv, idx, 0, MMZ_TOP_S, 0, MMZ_HW, 0.04, 56, 6, 1 / 3)
+            add(
+              new THREE.Mesh(
+                mbuildGeo(pos, uv, idx),
+                new THREE.MeshBasicMaterial({
+                  map: seamTex,
+                  transparent: true,
+                  opacity: 0.09,
+                  blending: THREE.AdditiveBlending,
+                  depthWrite: false,
+                }),
+              ),
+            )
+          }
+          // ── (5) 街灯: clean modern arm-poles along miyamasuzakaAt, both sides, cool-white
+          // heads (corporate street lighting). AABB on the pole base only.
+          const mPoleGeo = new THREE.CylinderGeometry(0.14, 0.2, 9.8, 6)
+          const mArmGeo = new THREE.BoxGeometry(2.3, 0.13, 0.13)
+          const mLampGeo = new THREE.BoxGeometry(0.66, 0.22, 0.4)
+          const mPoleMat = new THREE.MeshStandardMaterial({
+            color: 0x40434b,
+            roughness: 0.5,
+            metalness: 0.5,
+          })
+          const mLampMat = new THREE.MeshBasicMaterial({ color: 0xf0f4ff, toneMapped: false }) // 冷白
+          const mPoleXf: Xf[] = []
+          const mArmXf: Xf[] = []
+          const mLampXf: Xf[] = []
+          for (const side of [1, -1] as const) {
+            for (let s = 8; s < MMZ_TOP_S - 3; s += 10) {
+              const p = miyamasuzakaAt(s + (side > 0 ? 0 : 5))
+              if (!p) continue
+              const baseY = p.h
+              const tangentRotY = Math.atan2(-p.tz, p.tx)
+              const plat = side * 7.2 // sidewalk side (outside the 6.0 carriageway)
+              const px = p.cx + p.px * plat
+              const pz = p.cz + p.pz * plat
+              mPoleXf.push({ pos: [px, baseY + 4.9, pz] })
+              mArmXf.push({
+                pos: [px - side * p.px * 1.0, baseY + 8.8, pz - side * p.pz * 1.0],
+                rotY: tangentRotY,
+              })
+              mLampXf.push({
+                pos: [px - side * p.px * 2.05, baseY + 8.6, pz - side * p.pz * 2.05],
+                rotY: tangentRotY,
+              })
+              addShibuyaAABB(px, pz, 0.3, 0.3, baseY + 5, baseY) // pole base only
+            }
+          }
+          instAdd(mPoleGeo, mPoleMat, mPoleXf)
+          instAdd(mArmGeo, mPoleMat, mArmXf)
+          instAdd(mLampGeo, mLampMat, mLampXf)
+        }
+
+        // ══ 宮益坂 (Miyamasuzaka) Phase C: オフィスビル群 (段々ビル + 控えめな企業サイン) ══
+        // 道玄坂 Phase C / 公園通り Phase D の段々ビル手法を流用。宮益坂は東のビジネス街なので、
+        // 道玄坂の猥雑な雑居ビルでも公園通りのおしゃれ店でもなく、ガラス主体の高めのオフィス
+        // タワー + 銀行 + カフェ + 書店。サインは青白グレーの企業系で控えめ (看板洪水にしない)。
+        // 各棟は側壁 (lat≤11.5) の背後に置き、到達可能な外面なので footprint AABB を付ける
+        // (lat≥11.5 → 歩行回廊 ±9.6 には掛からない)。足元 y=0、高さに p.h を足して坂と共に
+        // 段々とせり上がる。SE ガラスタワー (46,30) と センター街路地 (40,-28) を回避する。
+        {
+          const mBodyMats = [facGlassMat, midMat, facGlassMat, concreteMat] // glass-weighted (corporate)
+          const officeNames = [
+            "MIYAMASU TOWER",
+            "TOA SHINKIN",
+            "DOOR COFFEE",
+            "青林堂",
+            "MEISEI OFFICE",
+            "ARC SYSTEMS",
+            "渋谷東口ビル",
+          ]
+          const mSignCache = new Map<string, THREE.CanvasTexture>()
+          const officeSignTex = (name: string, accent: string) => {
+            const cached = mSignCache.get(name)
+            if (cached) return cached
+            const cv = document.createElement("canvas")
+            cv.width = 256
+            cv.height = 40
+            const c = cv.getContext("2d")
+            if (c) {
+              c.fillStyle = "#0c1018" // dark cool ground (corporate, sober)
+              c.fillRect(0, 0, 256, 40)
+              c.fillStyle = accent
+              c.fillRect(10, 7, 3, 26) // a single thin accent bar at the left
+              c.fillStyle = "#dfe7f2"
+              c.font = "600 21px sans-serif"
+              c.textAlign = "left"
+              c.textBaseline = "middle"
+              c.fillText(name, 24, 21)
+            }
+            const tex = new THREE.CanvasTexture(cv)
+            mSignCache.set(name, tex)
+            return tex
+          }
+          // Blue-white-grey corporate accents only (restrained vs 道玄坂's primary flood).
+          const mAccents = ["#9fc0e8", "#cfe0ff", "#b8c0cc", "#dfe4ea", "#7fa8d8"]
+          // Skip zones (local): SE glass tower, センター街 alley. North-side bodies only past
+          // the alley's east end (cx≥70) so they never sit on the nomiya lane.
+          const mmzAvoid: [number, number, number][] = [
+            [46, 30, 21],
+            [40, -28, 24],
+          ]
+          let mSignIdx = 0
+          for (const side of [1, -1] as const) {
+            let s = 5
+            let guard = 0
+            while (s < MMZ_TOP_S - 3 && guard++ < 30) {
+              const sw = 8 + rnd() * 7 // frontage
+              const p = miyamasuzakaAt(s + sw / 2)
+              if (!p) {
+                s += sw
+                continue
+              }
+              const bd = 9 + rnd() * 6 // depth
+              const frontLat = MMZ_HW + 1.5 // just behind the side wall (lat≤11.5)
+              const cx = p.cx + p.px * side * (frontLat + bd / 2)
+              const cz = p.cz + p.pz * side * (frontLat + bd / 2)
+              // North side (side=-1 → −z): keep clear of the centre-gai alley (x≤64) until
+              // the body's west edge is past it (cx≥74 with the ≤15 frontage). South side
+              // (side=+1 → +z): keep clear of the SE glass tower (handled by mmzAvoid).
+              if (side === -1 && p.cx < 74) {
+                s += sw
+                continue
+              }
+              if (mmzAvoid.some(([ax, az, ar]) => Math.hypot(cx - ax, cz - az) < ar)) {
+                s += sw
+                continue
+              }
+              let bh = 20 + rnd() * 16 + p.h // taller office towers, stepping up the slope
+              if (rnd() < 0.3) bh += 14 + rnd() * 16 // some genuine high-rises
+              const mat = mBodyMats[Math.floor(rnd() * mBodyMats.length)] ?? midMat
+              const rotY = Math.atan2(-p.tz, p.tx)
+              const body = new THREE.Mesh(new THREE.BoxGeometry(sw - 0.4, bh, bd), mat)
+              body.position.set(cx, bh / 2, cz)
+              body.rotation.y = rotY
+              mAdd(body)
+              const hw = Math.abs(p.tx) * (sw / 2) + Math.abs(p.tz) * (bd / 2)
+              const hd = Math.abs(p.tz) * (sw / 2) + Math.abs(p.tx) * (bd / 2)
+              addShibuyaAABB(cx, cz, hw, hd, bh)
+              // Occasional stepped-back crown (corporate tower silhouette).
+              if (rnd() < 0.45) {
+                const th = 5 + rnd() * 7
+                const top = new THREE.Mesh(
+                  new THREE.BoxGeometry((sw - 0.4) * 0.62, th, bd * 0.62),
+                  mat,
+                )
+                top.position.set(cx, bh + th / 2, cz)
+                top.rotation.y = rotY
+                mAdd(top)
+              }
+              // A restrained corporate sign on ~1/3 of the towers (above the wall, two-sided).
+              if (rnd() < 0.36 && bh > 16) {
+                const name = officeNames[mSignIdx % officeNames.length] ?? "MIYAMASU TOWER"
+                const accent = mAccents[mSignIdx % mAccents.length] ?? "#cfe0ff"
+                mSignIdx++
+                const sign = new THREE.Mesh(
+                  new THREE.PlaneGeometry(Math.min(sw * 0.78, 8), 1.4),
+                  new THREE.MeshBasicMaterial({
+                    map: officeSignTex(name, accent),
+                    toneMapped: false,
+                    side: THREE.DoubleSide,
+                    transparent: true,
+                  }),
+                )
+                sign.position.set(
+                  p.cx + p.px * side * frontLat,
+                  p.h + 9.6,
+                  p.cz + p.pz * side * frontLat,
+                )
+                // Sign normal must face the road (toward the centreline). The plane's default
+                // +z normal rotates to +(px,pz) = the +side direction; a body on side=+1 needs
+                // it flipped π to face back toward the centre, side=-1 already faces inward.
+                // (Same proven facing rule as 公園通り Phase D.)
+                sign.rotation.y = side === 1 ? rotY + Math.PI : rotY
+                add(sign)
+              }
+              s += sw + 0.6
+            }
+          }
+        }
+
+        // ══ 宮益坂 (Miyamasuzaka) Phase D: 街路樹・什器 (整然としたオフィス街路) ══════════
+        // 公園通りの「緑のトンネル」とは対照的に、宮益坂は整然と等間隔の街路樹 + ビジネス街の
+        // 什器 (プランター・ベンチ・バス停シェルター・駐輪ラック・ボラード)。すべて歩道 (車道 ±6
+        // の外、壁 10 の内) に置き、中央車道は常に開ける。街路樹は trunk のみ細い AABB、低い什器は
+        // 衝突なし。canopy は registerSway で他坂と同じ風揺れ。
+        {
+          const mTrunkGeo = new THREE.CylinderGeometry(0.22, 0.34, 5.2, 6)
+          const mLeafGeo = new THREE.SphereGeometry(2.2, 8, 6) // neat, uniform (not 公園通り's big tunnel)
+          const mLeafMat = new THREE.MeshLambertMaterial({
+            color: 0x3a5f3a, // slightly cooler, tidier green than 公園通り
+            emissive: 0x0e1a0e,
+            emissiveIntensity: 0.45,
+          })
+          const mTreePlanterGeo = new THREE.BoxGeometry(1.5, 0.34, 1.5)
+          const mTreePlanterMat = new THREE.MeshLambertMaterial({ color: 0x3a3d44 })
+          const mTrunkXf: Xf[] = []
+          const mLeafXf: Xf[] = []
+          const mTreePlanterXf: Xf[] = []
+          const M_TREE_LAT = 8.4 // sidewalk (outside the ±6 carriageway, inside the 10 wall)
+          for (const side of [1, -1] as const) {
+            for (let s = 8; s < MMZ_TOP_S - 3; s += 8.5) {
+              const p = miyamasuzakaAt(s + (side > 0 ? 0 : 4.25)) // stagger the two rows
+              if (!p) continue
+              const baseY = p.h
+              const tx = p.cx + p.px * side * M_TREE_LAT
+              const tz = p.cz + p.pz * side * M_TREE_LAT
+              const scl = 0.92 + rnd() * 0.22 // uniform (corporate tidiness, no tunnel ramp-up)
+              mTrunkXf.push({ pos: [tx, baseY + 2.6, tz] })
+              mLeafXf.push({ pos: [tx, baseY + 5.2, tz], scl })
+              mTreePlanterXf.push({ pos: [tx, baseY + 0.17, tz] })
+              addShibuyaAABB(tx, tz, 0.45, 0.45, baseY + 4, baseY) // tight trunk hitbox
+            }
+          }
+          instAdd(mTrunkGeo, woodMat, mTrunkXf)
+          const mLeafMesh = instAdd(mLeafGeo, mLeafMat, mLeafXf)
+          instAdd(mTreePlanterGeo, mTreePlanterMat, mTreePlanterXf)
+          registerSway(mLeafMesh, mLeafXf, 0.04, 0.85, 0.6) // same wind sway as the other slopes
+          // ── Furniture: benches + bollards + bike racks + a couple of bus shelters. All on
+          // the sidewalk, all low (no collision) except the shelter posts (tiny AABBs). ──
+          const benchGeo = new THREE.BoxGeometry(2.0, 0.45, 0.6)
+          const benchMat = new THREE.MeshStandardMaterial({ color: 0x55585f, roughness: 0.7 })
+          const bollardGeo = new THREE.CylinderGeometry(0.12, 0.14, 0.7, 6)
+          const bollardMat = new THREE.MeshStandardMaterial({
+            color: 0x9aa0aa,
+            roughness: 0.5,
+            metalness: 0.5,
+          })
+          const rackGeo = new THREE.BoxGeometry(0.06, 0.7, 1.8) // bike-rack hoop bar (low)
+          const rackMat = bollardMat
+          const benchXf: Xf[] = []
+          const bollardXf: Xf[] = []
+          const rackXf: Xf[] = []
+          for (const side of [1, -1] as const) {
+            for (let s = 12; s < MMZ_TOP_S - 5; s += 12) {
+              const p = miyamasuzakaAt(s + (side > 0 ? 6 : 0))
+              if (!p) continue
+              const baseY = p.h
+              const rotY = Math.atan2(-p.tz, p.tx)
+              const benchLat = side * 7.4
+              benchXf.push({
+                pos: [p.cx + p.px * benchLat, baseY + 0.22, p.cz + p.pz * benchLat],
+                rotY,
+              })
+              // a small cluster of bollards at the carriage edge
+              for (const bo of [-1.4, 0, 1.4]) {
+                const bl = side * 6.4
+                bollardXf.push({
+                  pos: [p.cx + p.px * bl + p.tx * bo, baseY + 0.35, p.cz + p.pz * bl + p.tz * bo],
+                })
+              }
+            }
+            // bike racks halfway up, on the wide sidewalk
+            for (let s = 18; s < MMZ_TOP_S - 6; s += 22) {
+              const p = miyamasuzakaAt(s + (side > 0 ? 0 : 11))
+              if (!p) continue
+              const rl = side * 8.6
+              rackXf.push({
+                pos: [p.cx + p.px * rl, p.h + 0.35, p.cz + p.pz * rl],
+                rotY: Math.atan2(-p.tz, p.tx),
+              })
+            }
+          }
+          instAdd(benchGeo, benchMat, benchXf)
+          instAdd(bollardGeo, bollardMat, bollardXf)
+          instAdd(rackGeo, rackMat, rackXf)
+          // Two bus-stop shelters near the base (a flat roof on two posts + a back panel).
+          const shelterRoofMat = new THREE.MeshStandardMaterial({
+            color: 0x2a2d34,
+            roughness: 0.5,
+            metalness: 0.4,
+          })
+          const shelterGlassMat = new THREE.MeshStandardMaterial({
+            color: 0x1a2230,
+            transparent: true,
+            opacity: 0.4,
+            emissive: 0x2a3a52,
+            emissiveIntensity: 0.3,
+          })
+          for (const [s, side] of [
+            [16, 1],
+            [30, -1],
+          ] as const) {
+            const p = miyamasuzakaAt(s)
+            if (!p) continue
+            const baseY = p.h
+            const rotY = Math.atan2(-p.tz, p.tx)
+            const lat = side * 8.2
+            const bx = p.cx + p.px * lat
+            const bz = p.cz + p.pz * lat
+            const roof = new THREE.Mesh(new THREE.BoxGeometry(4.2, 0.16, 1.6), shelterRoofMat)
+            roof.position.set(bx, baseY + 2.5, bz)
+            roof.rotation.y = rotY
+            mAdd(roof)
+            const back = new THREE.Mesh(new THREE.BoxGeometry(4.2, 2.0, 0.08), shelterGlassMat)
+            back.position.set(bx + p.px * side * 0.7, baseY + 1.25, bz + p.pz * side * 0.7)
+            back.rotation.y = rotY
+            mAdd(back)
+            for (const po of [-1.9, 1.9]) {
+              const post = new THREE.Mesh(
+                new THREE.CylinderGeometry(0.08, 0.08, 2.5, 6),
+                shelterRoofMat,
+              )
+              post.position.set(bx + p.tx * po, baseY + 1.25, bz + p.tz * po)
+              mAdd(post)
+            }
+          }
+        }
+
+        // ══ 宮益坂 (Miyamasuzaka) Phase E: 動き・空気感 + 突き当り (駅東/HIKARIE 方面) ══════
+        // 道玄坂のネオン洪水とは対照的に「整然・控えめ・冷たい」ビジネス街の動き: 冷白/青の
+        // 控えめなサイン光 (animNeon フリッカー)、縁石脇の駐車車両、歩道のビジネスマン風人影。
+        // 上端は工事 (駅東再開発) バリケード + 「駅東/HIKARIE 方面」サイン + 壁の先に HIKARIE 風
+        // ガラス高層のシルエットを覗かせて エリア2 (駅東) への接続を予約。谷底の口に宮益坂ゲート。
+        {
+          // ── (1) 控えめな冷色サイン光: ビル前面に縦の細い発光バーを疎らに。animNeon でゆらぎ。──
+          const mNeonGeo = new THREE.BoxGeometry(0.22, 1, 0.12)
+          const mNeonCols = [0x9fc8ff, 0xdfe8f4, 0x7fb0e0] // cool blue / white / steel-blue
+          const mNeonMats = mNeonCols.map(
+            (c) =>
+              new THREE.MeshStandardMaterial({ color: c, emissive: c, emissiveIntensity: 1.0 }),
+          )
+          const mNeonXf: Xf[][] = mNeonCols.map(() => [])
+          for (const side of [1, -1] as const) {
+            for (let s = 9; s < MMZ_TOP_S - 4; s += 7) {
+              if (rnd() < 0.62) continue // sparse (corporate restraint, no flood)
+              const p = miyamasuzakaAt(s)
+              if (!p) continue
+              const lat = side * (MMZ_HW - 0.4)
+              const barH = 1.4 + rnd() * 2.2
+              const yC = p.h + 5.0 + rnd() * 3.5
+              const ci = Math.floor(rnd() * mNeonCols.length)
+              mNeonXf[ci]?.push({
+                pos: [p.cx + p.px * lat, yC, p.cz + p.pz * lat],
+                rotY: Math.atan2(-p.tz, p.tx),
+                scl: [1, barH, 1],
+              })
+            }
+          }
+          mNeonMats.forEach((mm, i) => {
+            if (instAdd(mNeonGeo, mm, mNeonXf[i] ?? [])) animNeon.push(mm) // updateShibuyaMap flicker
+          })
+          // ── (2) 駐車車両 (静止): 縁石脇に数台。固い → AABB。lat 6.4 で中央車道 ±5 は開ける。──
+          const mCarBodyMat = new THREE.MeshStandardMaterial({
+            color: 0x2c303a,
+            roughness: 0.5,
+            metalness: 0.45,
+          })
+          const mCarCabMat = new THREE.MeshStandardMaterial({
+            color: 0x0b0e14,
+            emissive: 0x1e2a3e,
+            emissiveIntensity: 0.3,
+          })
+          const mCarBodyGeo = new THREE.BoxGeometry(2.0, 1.1, 4.4)
+          const mCarCabGeo = new THREE.BoxGeometry(1.8, 0.78, 2.2)
+          for (const [s, side] of [
+            [20, 1],
+            [40, -1],
+            [58, 1],
+          ] as const) {
+            const p = miyamasuzakaAt(s)
+            if (!p) continue
+            const lat = side * 6.2 // at the kerb (inside the bollards); central lane stays open
+            const cx = p.cx + p.px * lat
+            const cz = p.cz + p.pz * lat
+            const rotY = Math.atan2(p.tx, p.tz) // park lengthwise along the tangent
+            const body = new THREE.Mesh(mCarBodyGeo, mCarBodyMat)
+            body.position.set(cx, p.h + 0.7, cz)
+            body.rotation.y = rotY
+            mAdd(body)
+            const cab = new THREE.Mesh(mCarCabGeo, mCarCabMat)
+            cab.position.set(cx, p.h + 1.55, cz)
+            cab.rotation.y = rotY
+            mAdd(cab)
+            const hw = Math.abs(p.tz) * 1.0 + Math.abs(p.tx) * 2.2
+            const hd = Math.abs(p.tx) * 1.0 + Math.abs(p.tz) * 2.2
+            addShibuyaAABB(cx, cz, hw, hd, p.h + 1.4, p.h)
+          }
+          // ── (3) 人影 (静止): 歩道にビジネスマン風の暗いシルエット。AABB なし。──
+          const mFigMat = new THREE.MeshBasicMaterial({
+            color: 0x0b0d13,
+            transparent: true,
+            opacity: 0.85,
+            side: THREE.DoubleSide,
+          })
+          const mFigGeo = new THREE.PlaneGeometry(0.7, 1.8)
+          const mFigXf: Xf[] = []
+          for (const side of [1, -1] as const) {
+            for (let s = 10; s < MMZ_TOP_S - 5; s += 9) {
+              if (rnd() < 0.55) continue
+              const p = miyamasuzakaAt(s + rnd() * 3)
+              if (!p) continue
+              const lat = side * (7.0 + rnd() * 1.8)
+              mFigXf.push({
+                pos: [p.cx + p.px * lat, p.h + 0.9, p.cz + p.pz * lat],
+                rotY: rnd() * Math.PI,
+              })
+            }
+          }
+          instAdd(mFigGeo, mFigMat, mFigXf)
+          // ── (4) 突き当り (上端): 駅東再開発バリケード + 「駅東/HIKARIE 方面」サイン。当たり判定の
+          // 実体は Phase A の cap。壁の先 (東、平地 y=0) に HIKARIE 風ガラス高層のシルエットを覗かせ
+          // 「この先に駅東の高層街が広がる」読みにして エリア2 への接続を予約。 ──
+          const mSignTex2 = (l1: string, l2: string, bg: string, fg: string) => {
+            const cv = document.createElement("canvas")
+            cv.width = 256
+            cv.height = 96
+            const c = cv.getContext("2d")
+            if (c) {
+              c.fillStyle = bg
+              c.fillRect(0, 0, 256, 96)
+              c.fillStyle = fg
+              c.textAlign = "center"
+              c.textBaseline = "middle"
+              c.font = "bold 28px sans-serif"
+              c.fillText(l1, 128, 36)
+              c.font = "19px sans-serif"
+              c.fillText(l2, 128, 70)
+            }
+            return new THREE.CanvasTexture(cv)
+          }
+          const e = miyamasuzakaAt(MMZ_TOP_S - 0.5)
+          if (e) {
+            const barRotY = Math.atan2(e.tx, e.tz)
+            const fenceMat = new THREE.MeshStandardMaterial({
+              color: 0x6a6e75,
+              roughness: 0.5,
+              metalness: 0.5,
+            })
+            const fence = new THREE.Mesh(new THREE.BoxGeometry(MMZ_HW * 2, 2.8, 0.2), fenceMat)
+            fence.position.set(e.cx - e.tx * 1.6, e.h + 1.4, e.cz - e.tz * 1.6)
+            fence.rotation.y = barRotY
+            mAdd(fence)
+            const barrierMat = new THREE.MeshStandardMaterial({
+              color: 0xe0a020,
+              emissive: 0x5a3c08,
+              emissiveIntensity: 0.8,
+            })
+            const warnLampMat = new THREE.MeshBasicMaterial({ color: 0xff8a30, toneMapped: false })
+            const barXf: Xf[] = []
+            const warnXf: Xf[] = []
+            for (const off of [-6, -2, 2, 6] as const) {
+              const bx = e.cx - e.tx * 2.7 + e.px * off
+              const bz = e.cz - e.tz * 2.7 + e.pz * off
+              barXf.push({ pos: [bx, e.h + 0.55, bz], rotY: barRotY })
+              warnXf.push({ pos: [bx, e.h + 1.25, bz] })
+            }
+            instAdd(new THREE.BoxGeometry(2.4, 1.1, 0.3), barrierMat, barXf)
+            instAdd(new THREE.SphereGeometry(0.17, 8, 6), warnLampMat, warnXf)
+            const dirSign = new THREE.Mesh(
+              new THREE.PlaneGeometry(MMZ_HW * 1.4, 2.6),
+              new THREE.MeshBasicMaterial({
+                map: mSignTex2("駅東 / HIKARIE 方面", "EKI-HIGASHI →", "#0a1426", "#bcd6f4"),
+                toneMapped: false,
+                side: THREE.DoubleSide,
+              }),
+            )
+            dirSign.position.set(e.cx - e.tx * 1.5, e.h + 4.6, e.cz - e.tz * 1.5)
+            dirSign.rotation.y = barRotY
+            add(dirSign)
+            // HIKARIE-direction glass high-rise silhouettes peeking over the cap (east, flat
+            // y=0). Cool emissive glass slabs → suggests the 駅東 high-rise district beyond.
+            const hintMat = new THREE.MeshStandardMaterial({
+              color: 0x0c1420,
+              emissive: 0x3a5578,
+              emissiveIntensity: 0.5,
+              roughness: 0.5,
+            })
+            const hintGeo = new THREE.BoxGeometry(4.5, 26, 4.5)
+            const hintXf: Xf[] = []
+            for (let i = 0; i < 6; i++) {
+              const off = -11 + i * 4.4
+              const depth = 8 + (i % 3) * 4
+              hintXf.push({
+                pos: [
+                  e.cx + e.tx * depth + e.px * off,
+                  10 + (i % 3) * 6, // tall slabs poking above the cap (≈16) toward the sky
+                  e.cz + e.tz * depth + e.pz * off,
+                ],
+                scl: [1, 1 + (i % 3) * 0.5, 1],
+              })
+            }
+            instAdd(hintGeo, hintMat, hintXf)
+          }
+          // ── (5) 谷底の口: 宮益坂ゲート横梁 + サイン (スクランブルへ向ける)。歩行は塞がない。──
+          const m = miyamasuzakaAt(1.5)
+          if (m) {
+            const beamMat = new THREE.MeshStandardMaterial({
+              color: 0x3a3d44,
+              roughness: 0.6,
+              metalness: 0.4,
+            })
+            const beam = new THREE.Mesh(new THREE.BoxGeometry(MMZ_HW * 2 + 3, 0.6, 0.6), beamMat)
+            beam.position.set(m.cx, m.h + 6.6, m.cz)
+            beam.rotation.y = Math.atan2(-m.tz, m.tx)
+            mAdd(beam)
+            const gateSign = new THREE.Mesh(
+              new THREE.PlaneGeometry(MMZ_HW * 1.5, 2.0),
+              new THREE.MeshBasicMaterial({
+                map: mSignTex2("宮益坂", "MIYAMASUZAKA", "#101a2a", "#dfe7f2"),
+                toneMapped: false,
+                side: THREE.DoubleSide,
+              }),
+            )
+            gateSign.position.set(m.cx + m.tx * 0.4, m.h + 7.4, m.cz + m.tz * 0.4)
+            // atan2(-tx,-tz) faces the sign back down-slope (west, toward approaching players).
+            gateSign.rotation.y = Math.atan2(-m.tx, -m.tz)
+            add(gateSign)
+          }
+          // ── FUTURE / 接続予約 ──────────────────────────────────────────────────────
+          // 上端 cap (MMZ_PATH 終点 ≈local(101,-9)、東外周壁の 1u 外、HIKARIE 背景塔 x=106 の手前)
+          // は エリア2「駅東/ヒカリエ」への引き渡し点。実装時は cap + バリケードを開口に置換し、駅東
+          // 広場 + SHIBUYA RISE 高層街へ歩行レーンを継ぐ。谷底の口 (s=0, h=0) は平坦なプラザ/E-W
+          // メインストリートと地続きで自然に入れることを Phase A 独立sim で確認済み。
         }
 
         // ══ Phase C (scramble-detail): 大型ビジョン群 (駅前の顔) ════════════════════
@@ -27988,10 +28855,14 @@ export default function ThreeWorld({
           if (isShibuyaStage(huntMissionConfigRef.current.stage)) {
             const lx = refs.focalPoint.x - HUNT_ARENA.x
             const lz = refs.focalPoint.z - HUNT_ARENA.z
-            // 道玄坂 (南西) と 公園通り (北) は重ならない別回廊。各々が帯の外では 0 を返すので
-            // max を取れば「いま乗っている坂」の高さだけ拾える。両坂の平坦域も従来通り 0 で、
-            // onDgzSlope の吸着分岐 (DGZ_SNAP_MAX) は両方の下り坂で共通に効く。
-            const slopeY = Math.max(dogenzakaGroundY(lx, lz), koenDoriGroundY(lx, lz))
+            // 道玄坂 (南西) / 公園通り (北) / 宮益坂 (東) は重ならない別回廊。各々が帯の外では
+            // 0 を返すので max を取れば「いま乗っている坂」の高さだけ拾える。各坂の平坦域も従来
+            // 通り 0 で、onDgzSlope の吸着分岐 (DGZ_SNAP_MAX) は全ての下り坂で共通に効く。
+            const slopeY = Math.max(
+              dogenzakaGroundY(lx, lz),
+              koenDoriGroundY(lx, lz),
+              miyamasuzakaGroundY(lx, lz),
+            )
             if (slopeY > 0) {
               onDgzSlope = true
               if (slopeY > groundY) groundY = slopeY
