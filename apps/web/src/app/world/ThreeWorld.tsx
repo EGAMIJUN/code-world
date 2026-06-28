@@ -25820,52 +25820,90 @@ export default function ThreeWorld({
       function makeHizumi(): ShibuyaEnemy {
         const id = shibuyaNextEnemyIdRef.current++
         const group = new THREE.Group()
+        // ── A grotesque, fully ORIGINAL 歪: a hunched, emaciated humanoid warped out of
+        // true — over-long crawler arms hanging past the knees, a deformed twin-lobed head
+        // jutting forward, a spiked hunched spine and spindly legs. Dark sickly flesh veined
+        // with throbbing orange-red cracks (so it never melts into the night), plus a set of
+        // FULL-BRIGHT glowing organs (exposed chest core, asymmetric eyes, a maw slit, claw
+        // tips) that read clearly across the dark crossing. Still just TWO merged meshes
+        // (body + glow) → unchanged draw-call cost. ──
         const bodyMat = new THREE.MeshStandardMaterial({
-          color: 0x05050c, // near-black smoke
+          color: 0x442a26, // dark sickly flesh
           transparent: true,
-          opacity: 0.7,
-          roughness: 1,
+          opacity: 0.96, // near-solid now (was a translucent smoke that vanished at night)
+          roughness: 0.9,
           metalness: 0,
-          emissive: 0xff2030, // the cracks glow red from within
+          emissive: 0xff3a14, // orange-red veins glow through the crack map
           emissiveMap: getHizumiCrackTex(),
           emissiveIntensity: 0.9,
-          depthWrite: false,
         })
-        // Merge the whole silhouette (cloak torso + smoke-tail cone + head + two drooping
-        // arm-tendrils) into ONE geometry → one draw call for the body. Each part is baked
-        // into place via geometry transforms before the merge.
         const bodyGeo =
           mergeGeometries(
             [
-              new THREE.CylinderGeometry(0.24, 0.46, 1.5, 10).translate(0, 1.2, 0), // torso
-              new THREE.ConeGeometry(0.46, 1.0, 10)
-                .rotateX(Math.PI)
-                .translate(0, 0.5, 0), // tail
-              new THREE.IcosahedronGeometry(0.33, 0).translate(0, 2.12, 0), // head
-              new THREE.CylinderGeometry(0.06, 0.12, 1.15, 6)
-                .rotateZ(0.45)
-                .translate(0.3, 1.45, 0.04),
-              new THREE.CylinderGeometry(0.06, 0.12, 1.15, 6)
-                .rotateZ(-0.45)
-                .translate(-0.3, 1.45, 0.04),
+              // hunched emaciated torso (lumpy ovoid leaning forward)
+              new THREE.IcosahedronGeometry(0.46, 1)
+                .scale(0.82, 1.34, 0.72)
+                .translate(0, 1.3, 0.06),
+              // deformed oversized head, tilted + jutting forward, with a fused second lobe
+              new THREE.IcosahedronGeometry(0.4, 0)
+                .scale(1.16, 0.82, 1)
+                .rotateZ(0.34)
+                .translate(0.07, 2.12, 0.2),
+              new THREE.IcosahedronGeometry(0.2, 0).translate(-0.17, 2.3, 0.12),
+              // two TOO-LONG arms reaching past the knees (thin, angled forward)
+              new THREE.CylinderGeometry(0.05, 0.09, 2.0, 6)
+                .rotateZ(0.34)
+                .rotateX(-0.2)
+                .translate(0.45, 0.96, 0.18),
+              new THREE.CylinderGeometry(0.05, 0.09, 1.95, 6)
+                .rotateZ(-0.28)
+                .rotateX(-0.15)
+                .translate(-0.42, 1.0, 0.12),
+              // hooked claw-spikes at the arm ends
+              new THREE.ConeGeometry(0.07, 0.34, 5)
+                .rotateX(1.5)
+                .translate(0.64, 0.1, 0.4),
+              new THREE.ConeGeometry(0.07, 0.32, 5).rotateX(1.5).translate(-0.58, 0.12, 0.32),
+              // spindly bent legs
+              new THREE.CylinderGeometry(0.085, 0.05, 1.18, 6)
+                .rotateZ(0.06)
+                .translate(0.16, 0.56, -0.02),
+              new THREE.CylinderGeometry(0.085, 0.05, 1.18, 6)
+                .rotateZ(-0.06)
+                .translate(-0.16, 0.56, -0.02),
+              // jagged spine spikes down the hunched back
+              new THREE.ConeGeometry(0.1, 0.4, 5).translate(0, 1.72, -0.28),
+              new THREE.ConeGeometry(0.085, 0.32, 5).translate(0, 1.44, -0.32),
+              new THREE.ConeGeometry(0.07, 0.26, 5).translate(0, 1.16, -0.32),
             ],
             false,
-          ) ?? new THREE.CylinderGeometry(0.24, 0.46, 1.5, 10)
+          ) ?? new THREE.IcosahedronGeometry(0.46, 1)
         group.add(new THREE.Mesh(bodyGeo, bodyMat))
-        // Eyes: two red points merged into one mesh (one more draw call).
+        // Full-bright glowing organs (visible even in pitch dark) — one merged mesh.
         const eyeMat = new THREE.MeshBasicMaterial({
-          color: 0xff2a3a,
+          color: 0xff6a24, // hot orange
           transparent: true,
           opacity: 1,
+          toneMapped: false, // hold full brightness under the night tone-mapping
         })
         const eyeGeo =
           mergeGeometries(
             [
-              new THREE.SphereGeometry(0.05, 6, 5).translate(0.11, 2.16, 0.27),
-              new THREE.SphereGeometry(0.05, 6, 5).translate(-0.11, 2.16, 0.27),
+              // exposed chest core — the brightest mass, reads from any angle / distance
+              new THREE.IcosahedronGeometry(0.2, 0).translate(0, 1.32, 0.3),
+              // asymmetric glowing eyes set in the deformed head
+              new THREE.SphereGeometry(0.08, 7, 6).translate(0.15, 2.16, 0.44),
+              new THREE.SphereGeometry(0.062, 7, 6).translate(-0.17, 2.22, 0.35),
+              // a glowing maw slit below the eyes
+              new THREE.BoxGeometry(0.28, 0.05, 0.04)
+                .rotateZ(0.12)
+                .translate(0.01, 1.92, 0.44),
+              // glowing claw-tips
+              new THREE.SphereGeometry(0.05, 5, 4).translate(0.64, -0.04, 0.42),
+              new THREE.SphereGeometry(0.05, 5, 4).translate(-0.58, -0.02, 0.34),
             ],
             false,
-          ) ?? new THREE.SphereGeometry(0.05, 6, 5)
+          ) ?? new THREE.IcosahedronGeometry(0.2, 0)
         group.add(new THREE.Mesh(eyeGeo, eyeMat))
         group.traverse((o) => {
           if (o instanceof THREE.Mesh) {
@@ -26046,7 +26084,7 @@ export default function ThreeWorld({
           if (h.dying > 0) {
             h.dying -= dt
             const k = Math.max(0, h.dying / SHIBUYA_HIZUMI_DEATH_SEC)
-            h.bodyMat.opacity = 0.7 * k
+            h.bodyMat.opacity = 0.96 * k
             h.eyeMat.opacity = k
             h.group.position.y -= dt * 1.2 // sink into the ground
             h.group.rotation.y += dt * 6 // spin apart
@@ -26076,8 +26114,22 @@ export default function ThreeWorld({
           }
           h.group.rotation.y = Math.atan2(dx, dz) // face the player (model faces +z)
           h.driftPhase += dt
-          h.group.position.y = Math.sin(h.driftPhase * 2) * 0.12 // eerie hover/bob
-          h.bodyMat.emissiveIntensity = 0.7 + 0.45 * (0.5 + 0.5 * Math.sin(h.driftPhase * 3))
+          // Follow the sloped ground (道玄坂 / 公園通り / 宮益坂) the SAME way the player's
+          // animate loop does — max of the three corridor groundY fns (each returns 0 outside
+          // its band, and they don't overlap), evaluated at the 歪's ARENA-LOCAL position
+          // (the group sits in world space, so subtract HUNT_ARENA). 0 on the flat core, so
+          // the scramble behaves exactly as before; on a ramp the 歪 rides the surface
+          // instead of sinking into it.
+          const lx = h.group.position.x - HUNT_ARENA.x
+          const lz = h.group.position.z - HUNT_ARENA.z
+          const groundY = Math.max(
+            dogenzakaGroundY(lx, lz),
+            koenDoriGroundY(lx, lz),
+            miyamasuzakaGroundY(lx, lz),
+          )
+          h.group.position.y = groundY + Math.sin(h.driftPhase * 2) * 0.12 // ride ground + bob
+          // throb the orange crack-veins (stronger range than STEP2-A → reads in the dark)
+          h.bodyMat.emissiveIntensity = 0.95 + 0.5 * (0.5 + 0.5 * Math.sin(h.driftPhase * 3))
         }
       }
 
