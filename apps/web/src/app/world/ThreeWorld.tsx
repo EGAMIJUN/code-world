@@ -3084,6 +3084,8 @@ export default function ThreeWorld({
   const shibuyaEnemiesRef = useRef<ShibuyaEnemy[]>([])
   const shibuyaWaveActiveRef = useRef(false)
   const shibuyaNextEnemyIdRef = useRef(0)
+  // ms timestamp at which the ERADICATED flash hands back to the hub (0 = inactive).
+  const shibuyaClearAtRef = useRef(0)
   // OSAKA area-progression state + the active mid-boss (Tengu / Yamaya).
   const osakaProgressRef = useRef<OsakaProgressState>({
     area: "dotonbori",
@@ -3525,6 +3527,10 @@ export default function ThreeWorld({
   const [defenseTimer, setDefenseTimer] = useState(60)
   const [killFeed, setKillFeed] = useState<{ id: number; text: string; color: string }[]>([])
   const [aliveEnemyCount, setAliveEnemyCount] = useState(0)
+  // SHIBUYA STEP2-A: the Shibuya-only combat HUD — remaining (alive) 歪 + the provisional
+  // ERADICATED flash. Separate from aliveEnemyCount (which counts the `enemies` pool).
+  const [shibuyaRemaining, setShibuyaRemaining] = useState(0)
+  const [shibuyaEradicated, setShibuyaEradicated] = useState(false)
 
   useEffect(() => {
     setIsMobile(navigator.maxTouchPoints > 0)
@@ -25883,6 +25889,13 @@ export default function ThreeWorld({
         for (const h of shibuyaEnemiesRef.current) disposeHizumi(h)
         shibuyaEnemiesRef.current = []
         shibuyaWaveActiveRef.current = false
+        shibuyaClearAtRef.current = 0
+        setShibuyaRemaining(0)
+        setShibuyaEradicated(false)
+      }
+      // Push the live alive-歪 count to the HUD (called on spawn + on each kill).
+      function refreshShibuyaRemaining() {
+        setShibuyaRemaining(shibuyaEnemiesRef.current.filter((e) => e.alive).length)
       }
 
       // True if a 歪-sized body at (wx,wz) would overlap a SHIBUYA wall/landmark AABB.
@@ -25909,6 +25922,8 @@ export default function ThreeWorld({
           spawnShibuyaEnemy(HUNT_ARENA.x + lx, HUNT_ARENA.z + lz)
         }
         shibuyaWaveActiveRef.current = true
+        setShibuyaEradicated(false)
+        refreshShibuyaRemaining()
       }
 
       // A shot landed on a 歪: splash a red impact, drop HP, and on 0 start the dissipation
@@ -25926,6 +25941,7 @@ export default function ThreeWorld({
           SOUNDS.zombieGroan()
           const c = h.group.position
           spawnBlood(new THREE.Vector3(c.x, 1.3, c.z)) // a final burst at the body
+          refreshShibuyaRemaining()
         }
       }
 
@@ -27258,6 +27274,27 @@ export default function ThreeWorld({
             enemies.filter((e) => e.hp > 0).length === 0
           ) {
             huntReturnToRoom("clear")
+          }
+          // SHIBUYA STEP2-A provisional clear. The generic check above is skipped for Shibuya
+          // (no CombatEnemy pool); instead, once the 歪 wave is active and every 歪 is
+          // purified, flash ERADICATED, then — after a beat so the last finishes dissipating —
+          // hand back to the hub. STEP2-B replaces this with the 楔 / sealed-boss objective.
+          // Entirely separate from the OSAKA path; touches no OSAKA state.
+          if (
+            isShibuyaStage(huntMissionConfigRef.current.stage) &&
+            shibuyaWaveActiveRef.current &&
+            shibuyaEnemiesRef.current.every((e) => !e.alive)
+          ) {
+            shibuyaWaveActiveRef.current = false
+            setShibuyaEradicated(true)
+            SOUNDS.clear()
+            showNotification("歪 ERADICATED — スクランブル鎮圧")
+            shibuyaClearAtRef.current = Date.now() + 2600
+          }
+          if (shibuyaClearAtRef.current > 0 && Date.now() >= shibuyaClearAtRef.current) {
+            shibuyaClearAtRef.current = 0
+            huntReturnToRoom("clear")
+            return
           }
         }
       }
@@ -33003,6 +33040,48 @@ export default function ThreeWorld({
                     }}
                   />
                 </div>
+              </div>
+            )}
+
+            {/* SHIBUYA STEP2-A: 歪 remaining / provisional ERADICATED flash (Shibuya-only). */}
+            {(shibuyaRemaining > 0 || shibuyaEradicated) && gamePhase === "playing" && (
+              <div
+                style={{
+                  position: "absolute",
+                  top: "3.2rem",
+                  left: "50%",
+                  transform: "translateX(-50%)",
+                  zIndex: 28,
+                  pointerEvents: "none",
+                  fontFamily: "monospace",
+                  textAlign: "center",
+                }}
+              >
+                {shibuyaEradicated ? (
+                  <span
+                    style={{
+                      color: "#ff3a4a",
+                      fontSize: "1.5rem",
+                      fontWeight: "bold",
+                      letterSpacing: "0.32em",
+                      textShadow: "0 0 16px rgba(255,40,60,0.9)",
+                    }}
+                  >
+                    ERADICATED
+                  </span>
+                ) : (
+                  <span
+                    style={{
+                      color: "#ff5566",
+                      fontSize: "0.95rem",
+                      fontWeight: "bold",
+                      letterSpacing: "0.18em",
+                      textShadow: "0 0 10px rgba(255,40,60,0.8)",
+                    }}
+                  >
+                    歪 残り {shibuyaRemaining}
+                  </span>
+                )}
               </div>
             )}
 
