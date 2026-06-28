@@ -3264,8 +3264,7 @@ export default function ThreeWorld({
   const shibuyaProgressRef = useRef({
     active: false,
     wedgesDestroyed: 0,
-    collapse: false, // true once all 7 楔 are down (封絶崩壊 → STEP3 hook)
-    collapseAt: 0, // ms — when the finale hands back to the hub (0 = inactive)
+    collapse: false, // true once all 7 楔 are down (封絶崩壊 → STEP3 hook); handoff via shibuyaClearAtRef
   })
   // SHIBUYA STEP2-B: 一般人 (civilians, some 擬態 歪). Separate pool — never `enemies` / 歪.
   const shibuyaCiviliansRef = useRef<ShibuyaCivilian[]>([])
@@ -26191,6 +26190,7 @@ export default function ThreeWorld({
         for (const h of shibuyaEnemiesRef.current) disposeHizumi(h)
         shibuyaEnemiesRef.current = []
         shibuyaClearAtRef.current = 0
+        shibuyaDisorientT = 0 // clear any lingering ranged-scream aim-drift on teardown / re-deploy
         setShibuyaRemaining(0)
         setShibuyaEradicated(false)
       }
@@ -26286,7 +26286,7 @@ export default function ThreeWorld({
 
       // ── Unified 歪 damage entry points so EVERY weapon path can hit 歪 (CodeRabbit #132):
       // hitscan / cone-melee / radius. Each SELF-GATES on an empty pool — the 歪 pool is only
-      // populated on the SHIBUYA stage (spawnShibuyaWave), so calling these from the shared
+      // populated on the SHIBUYA stage (spawnShibuyaAreas), so calling these from the shared
       // OSAKA/HUNT damage helpers is a guaranteed no-op off-stage and never touches OSAKA. ──
 
       // Centre-/aim-ray hitscan: damage the nearest 歪 body the ray hits, unless a wall (at
@@ -26565,7 +26565,6 @@ export default function ThreeWorld({
           active: true,
           wedgesDestroyed: 0,
           collapse: false,
-          collapseAt: 0,
         }
         setShibuyaWedgeStat({ destroyed: 0, total: SHIBUYA_COMBAT_AREAS.length })
       }
@@ -26576,7 +26575,6 @@ export default function ThreeWorld({
           active: false,
           wedgesDestroyed: 0,
           collapse: false,
-          collapseAt: 0,
         }
         setShibuyaWedgeStat({ destroyed: 0, total: 0 })
       }
