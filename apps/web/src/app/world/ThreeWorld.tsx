@@ -16751,7 +16751,7 @@ export default function ThreeWorld({
           const sp2 = e.velocity.x * e.velocity.x + e.velocity.z * e.velocity.z
           if (sp2 > 0.04) b.group.rotation.y = Math.atan2(-e.velocity.x, -e.velocity.z)
           e.mesh.position.y = 1.4 // seat the rider on the machine
-          b.wheel.rotation.x -= Math.sqrt(sp2) * dt * 2 * TETSURIN_WHEEL_SPIN
+          b.wheel.rotation.x -= Math.sqrt(sp2) * dt * 4 * TETSURIN_WHEEL_SPIN // ×4: compensate half-rate update
         }
       }
       // Dispose any live enemy bikes + reset the squad flags (clearOsakaMap).
