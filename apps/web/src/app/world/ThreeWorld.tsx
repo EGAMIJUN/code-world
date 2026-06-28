@@ -13396,7 +13396,7 @@ export default function ThreeWorld({
       // the CPU (draw calls stay fine — the cost is JS-side). Hard-cap the number
       // of SIMULTANEOUS live enemies so the field is a "replenish on kill" trickle
       // (dead enemies free up slots as the player clears them).
-      const OSAKA_ENEMY_CAP = isMobileDevice ? 15 : 20 // Phase B: trimmed (was 20/28) — lighter central spine
+      const OSAKA_ENEMY_CAP = isMobileDevice ? 6 : 8 // perf: cut active AI from 20/15 → 8/6 (draw call + CPU)
       function osakaLiveEnemyCount(): number {
         let c = 0
         for (const e of enemies) if (e.hp > 0) c++
@@ -16723,7 +16723,7 @@ export default function ThreeWorld({
           return
         }
         osakaBikeFrame++
-        const half = osakaBikeFrame % 2 === 0
+        if (osakaBikeFrame % 2 !== 0) return // half-rate: visual sync every other frame
         for (let i = osakaEnemyBikes.length - 1; i >= 0; i--) {
           const b = osakaEnemyBikes[i]
           if (!b) continue
@@ -16751,7 +16751,7 @@ export default function ThreeWorld({
           const sp2 = e.velocity.x * e.velocity.x + e.velocity.z * e.velocity.z
           if (sp2 > 0.04) b.group.rotation.y = Math.atan2(-e.velocity.x, -e.velocity.z)
           e.mesh.position.y = 1.4 // seat the rider on the machine
-          if (half) b.wheel.rotation.x -= Math.sqrt(sp2) * dt * 2 * TETSURIN_WHEEL_SPIN
+          b.wheel.rotation.x -= Math.sqrt(sp2) * dt * 4 * TETSURIN_WHEEL_SPIN // ×4: compensate half-rate update
         }
       }
       // Dispose any live enemy bikes + reset the squad flags (clearOsakaMap).
@@ -17953,9 +17953,8 @@ export default function ThreeWorld({
           A.blink.push({ mesh: blink, spd: 2 + rnd() * 2, phase: rnd() * 6.28 })
         }
         instAdd(bldgGeoCache, bldgMat, bldgXf)
-        // Neon point lights along the canal — the single biggest light sink, so
-        // capped hard: PC 3, mobile 1. The neon sign emissive carries the rest.
-        const neonCount = fullLights ? 3 : 1
+        // Neon point lights along the canal — emissive carries the rest; 1 light is enough.
+        const neonCount = 1
         for (let i = 0; i < neonCount; i++) {
           // Fewer lights (perf) but main's brighter intensity/range + wide spread.
           const pl = new THREE.PointLight(i % 2 === 0 ? 0xff3366 : 0x33ddff, 5.0, 38)
@@ -18135,7 +18134,7 @@ export default function ThreeWorld({
         orbTop.position.set(0, 47, 0)
         orbTop.name = "osakaTowerOrb" // 通天閣クリア演出 (FINAL-I) が爆破で消す
         add(orbTop)
-        const towerLight = new THREE.PointLight(0xffcc00, 8, 60)
+        const towerLight = new THREE.PointLight(0xffcc00, 6, 30) // perf: range 60→30
         towerLight.castShadow = false
         towerLight.position.set(0, 47, 0)
         add(towerLight)
@@ -18486,14 +18485,8 @@ export default function ThreeWorld({
           mAdd(headF)
         }
         // Front-facing floodlights washing the keep (the back pair are dropped —
-        // unseen on approach): PC keeps the front pair, mobile a single centre wash.
-        // Fewer lights (perf), but main's brighter intensity 5.
-        const castleLights: [number, number][] = fullLights
-          ? [
-              [12, cz + 12],
-              [-12, cz + 12],
-            ]
-          : [[0, cz + 12]]
+        // Single centre wash (was PC 2 / mobile 1) — perf: halve castle PBR cost.
+        const castleLights: [number, number][] = [[0, cz + 12]]
         for (const [lx, lz] of castleLights) {
           const cl = new THREE.PointLight(0xffeedd, 8, 50)
           cl.castShadow = false
@@ -18622,8 +18615,8 @@ export default function ThreeWorld({
             const lampBox = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.18, 0.14), undLightMat)
             lampBox.position.set(ux - uw / 2 + 0.35, uh - 0.4, lz)
             mAdd(lampBox)
-            // 灯体4つは見た目通り、PointLight はモバイル2灯に間引く (FINAL-G)。
-            if (!isMobileDevice || i % 2 === 0) {
+            // 灯体4つは見た目通り、PointLight は2灯に間引く (perf: was PC 4 / mobile 2, now 2 for all)。
+            if (i % 2 === 0) {
               const pl = new THREE.PointLight(0xff3322, 1.6, 9)
               pl.position.set(ux - uw / 2 + 0.6, uh - 0.5, lz)
               add(pl)
@@ -18662,10 +18655,7 @@ export default function ThreeWorld({
           blade.position.set(ux, 1.45, bladeZ)
           blade.rotation.z = 0.5
           add(blade)
-          // 暗い通路の奥でも遠くから見える強い赤光 + 立ち上る光柱 (取得導線)。
-          const bladeGlow = new THREE.PointLight(0xff3311, 4.0, 30)
-          bladeGlow.position.set(ux, 1.7, bladeZ)
-          add(bladeGlow)
+          // 立ち上る光柱 (取得導線) — PointLight削除、AdditiveBlendingビームで代替 (perf)。
           const bladeBeam = new THREE.Mesh(
             new THREE.CylinderGeometry(0.12, 0.3, 3, 8, 1, true),
             new THREE.MeshBasicMaterial({
@@ -18695,13 +18685,7 @@ export default function ThreeWorld({
             const tx = torchXs[ti] ?? hx
             const flame = new THREE.Mesh(new THREE.SphereGeometry(0.14, 6, 6), torchMat)
             flame.position.set(tx, 2.6, hz)
-            mAdd(flame)
-            // モバイルは灯1つに間引き (FINAL-G) — 炎の発光体は両方残す。
-            if (!isMobileDevice || ti === 0) {
-              const tl = new THREE.PointLight(0xff8833, 1.8, 10)
-              tl.position.set(tx, 2.6, hz)
-              add(tl)
-            }
+            mAdd(flame) // emissiveIntensity 2.0 visible without PointLight (perf)
           }
           const hpad = new THREE.Mesh(new THREE.CylinderGeometry(1.0, 1.0, 0.08, 12), padMat)
           hpad.position.set(hx, 0.05, hz + hs / 2 - 1.2)
@@ -18742,10 +18726,7 @@ export default function ThreeWorld({
           spear.position.set(hx + 0.7, 1.7, hz - 2.5)
           spear.rotation.z = 0.35
           add(spear)
-          // 隠し部屋でも一目で分かる金色の光 + 光柱 (取得導線)。
-          const spearGlow = new THREE.PointLight(0xffcc55, 3.0, 16)
-          spearGlow.position.set(hx + 0.7, 2.2, hz - 2.5)
-          add(spearGlow)
+          // 光柱 (取得導線) — PointLight削除、AdditiveBlendingビームで代替 (perf)。
           const spearBeam = new THREE.Mesh(
             new THREE.CylinderGeometry(0.12, 0.3, 3, 8, 1, true),
             new THREE.MeshBasicMaterial({
@@ -18787,10 +18768,7 @@ export default function ThreeWorld({
           const gateGeo = mergeGeometries(barGeos, false)
           for (const bg of barGeos) bg.dispose()
           if (gateGeo) gate.add(new THREE.Mesh(gateGeo, barMat))
-          add(gate)
-          const gateLight = new THREE.PointLight(0x00ff88, 2.4, 8)
-          gateLight.position.set(gp.x, 1.8, gp.z + 1.2)
-          add(gateLight)
+          add(gate) // gate pad emissive marks the spot; PointLight removed (perf)
           // ── ②天守台1F南面のひび割れた壁 (CanvasTexture) ──
           const cv = document.createElement("canvas")
           cv.width = 256
@@ -18995,9 +18973,7 @@ export default function ThreeWorld({
         // dimmer than the rest. A few warm fills at walking height lift them. They
         // live under `group`, so clearOsakaMap disposes them with the map.
         for (const [fx, fy, fz, fi, fr] of [
-          [0, 8, 42, 3.0, 56], // Dotonbori ↔ Tsutenkaku transition (world z≈92)
-          [0, 7, 0, 2.6, 50], // Shinsekai street (beacon is high overhead)
-          [0, 8, -40, 3.0, 56], // Tsutenkaku ↔ Castle transition (world z≈10)
+          [0, 7, 0, 2.6, 50], // Shinsekai centre fill — perf: was 3 fills, trimmed to 1
         ] as const) {
           const fill = new THREE.PointLight(0xffe6cc, fi, fr)
           fill.castShadow = false
