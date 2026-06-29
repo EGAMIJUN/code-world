@@ -1686,8 +1686,9 @@ const SHIBUYA_DISORIENT_SEC = 1.2 // s the aim-drift (方向転換) debuff linge
 type ShibuyaPersona = "rush" | "ambush" | "slope" | "creep" | "flank" | "tank" | "ranged"
 // A combat area: its 楔 position + the 歪 spawn ring + the area's 歪 "personality" + the
 // 擬態 civilian counts (Phase D). All coords are arena-LOCAL (world = + HUNT_ARENA). The 楔
-// positions are validated reachable against the perimeter gaps — notably 駅東 lives inside
-// its real z∈[8,32] mouth (the prompt's (118,0) is sealed behind the 宮益坂 dead-end at x≈101).
+// positions are validated reachable against the perimeter gaps — notably 駅東 sits at its real
+// z∈[8,32] entrance throat (the prompt's (118,0) is sealed behind the 宮益坂 dead-end at x≈101,
+// and the deeper (112,20) was hard to find/reach, so the 楔 + its beam now mark the open mouth).
 type ShibuyaCombatArea = {
   id: string
   label: string
@@ -1779,10 +1780,14 @@ const SHIBUYA_COMBAT_AREAS: readonly ShibuyaCombatArea[] = [
     id: "ekihigashi",
     label: "駅東プラザ",
     persona: "tank",
-    wedge: [112, 20],
+    // 楔は駅東の入口スロート (東壁ギャップ z∈[8,32] を 4u 入った平坦プラザ) に置く。ここなら
+    // ギャップを抜けた瞬間に到達でき、赤い天空ビームがスクランブルから入口の目印として見える
+    // (宮益坂の行き止まり「EKI-HIGASHI →」サインに釣られて迷い込むのを防ぐ)。SHIBUYA RISE
+    // (x≥114) / ヒカリエ (z≤-4) / 宮益坂の groundY 滲み (z≤1) を全て回避。
+    wedge: [104, 20],
     spawns: [
-      [106, 16],
-      [116, 24],
+      [106, 14],
+      [108, 24], // (旧 [116,24] は SHIBUYA RISE の AABB 内だった → 開けたプラザへ)
     ],
     count: 2,
     civilians: 2,
@@ -24613,9 +24618,10 @@ export default function ThreeWorld({
             }
           }
           instAdd(mFigGeo, mFigMat, mFigXf)
-          // ── (4) 突き当り (上端): 駅東再開発バリケード + 「駅東/HIKARIE 方面」サイン。当たり判定の
-          // 実体は Phase A の cap。壁の先 (東、平地 y=0) に HIKARIE 風ガラス高層のシルエットを覗かせ
-          // 「この先に駅東の高層街が広がる」読みにして エリア2 への接続を予約。 ──
+          // ── (4) 突き当り (上端): 駅東再開発バリケード。当たり判定の実体は Phase A の cap。宮益坂
+          // 上端は y≈7 まで登る一方、駅東プラザは平地 y=0 なので直接は繋げない (7u 崖)。よって
+          // ここは行き止まりのまま「再開発中」とし、サインで本来の入口 (北の平坦な広場ゲート
+          // z∈[8,32]、楔ビームが目印) へ誘導する。壁の先に HIKARIE 風シルエットを覗かせる演出は維持。 ──
           const mSignTex2 = (l1: string, l2: string, bg: string, fg: string) => {
             const cv = document.createElement("canvas")
             cv.width = 256
@@ -24665,7 +24671,12 @@ export default function ThreeWorld({
             const dirSign = new THREE.Mesh(
               new THREE.PlaneGeometry(MMZ_HW * 1.4, 2.6),
               new THREE.MeshBasicMaterial({
-                map: mSignTex2("駅東 / HIKARIE 方面", "EKI-HIGASHI →", "#0a1426", "#bcd6f4"),
+                map: mSignTex2(
+                  "駅東 / HIKARIE 再開発中",
+                  "入口は北の広場ゲートから",
+                  "#0a1426",
+                  "#bcd6f4",
+                ),
                 toneMapped: false,
                 side: THREE.DoubleSide,
               }),
