@@ -1063,6 +1063,7 @@ const miyamasuzakaAt = (s: number): MmzPoint | null => {
 // All arena-LOCAL coords (world = +HUNT_ARENA). Shibuya-only (built inside buildShibuyaMap).
 const SUBWAY_LEVEL_Y = -4 // player.y below this ⇒ underground (discriminates the two floors)
 const SUBWAY_FLOOR_Y = -12 // concourse + platform deck
+const SUBWAY_TRACK_Y = -13.5 // track pit (1.5u below the deck — fall in, ramp-snap climbs out)
 const SUBWAY_CEIL_Y = -5.5 // ceiling (kept low for an oppressive tunnel feel)
 // Descending stair: a straight ramp from the entrance (z=Z0, y=0) SOUTH+down to the concourse
 // (z=Z1, y=SUBWAY_FLOOR_Y). Pure ramp like the 坂 — drives the player Y-follow + ramp-snap.
@@ -1070,8 +1071,11 @@ const SUB_STAIR_X = -13
 const SUB_STAIR_HW = 3.5 // half-width of the stair band (7u wide shaft)
 const SUB_STAIR_Z0 = 7 // top edge (surface, y=0) — open to the scramble (north)
 const SUB_STAIR_Z1 = 31 // bottom edge (y=SUBWAY_FLOOR_Y) — opens into the concourse
-// Underground room footprints (LOCAL XZ rectangles). Concourse now; the platform lands in Phase C.
+// Underground room footprints (LOCAL XZ rectangles). The platform is the STEP3 arena; its south
+// strip is a track pit (one step lower). Same x-span as the concourse so they form one corridor.
 const SUB_CONCOURSE = { x0: -28, x1: 2, z0: 31, z1: 54 } // y=-12 arrival hall
+const SUB_PLATFORM = { x0: -28, x1: 2, z0: 54, z1: 88 } // y=-12 deck (+ track pit at its south)
+const SUB_TRACK = { x0: -28, x1: 2, z0: 80, z1: 87 } // y=-13.5 track pit (sub-band of the platform)
 // Stair ramp height at (lx,lz): the descending ramp, or NaN if outside the stair band.
 const subwayStairHeight = (lx: number, lz: number): number => {
   if (lx < SUB_STAIR_X - SUB_STAIR_HW || lx > SUB_STAIR_X + SUB_STAIR_HW) return Number.NaN
@@ -1095,7 +1099,10 @@ const subwayGroundY = (lx: number, lz: number, curY: number): number => {
   // band (which runs under the flat core / 道玄坂 mouth) is far ABOVE the ramp, so it stays on
   // the surface and never falls in; a descending/climbing player tracks the ramp continuously.
   if (!Number.isNaN(st) && curY < st + DGZ_SNAP_MAX) return st
-  if (curY < SUBWAY_LEVEL_Y && inSubRect(lx, lz, SUB_CONCOURSE)) return SUBWAY_FLOOR_Y
+  if (curY < SUBWAY_LEVEL_Y) {
+    if (inSubRect(lx, lz, SUB_TRACK)) return SUBWAY_TRACK_Y // pit first (sub-band of the platform)
+    if (inSubRect(lx, lz, SUB_CONCOURSE) || inSubRect(lx, lz, SUB_PLATFORM)) return SUBWAY_FLOOR_Y
+  }
   return Number.NaN
 }
 
@@ -26015,7 +26022,12 @@ export default function ThreeWorld({
               -14,
             )
           }
-          sub_wall(cc.x0, cc.z1, cc.x1, cc.z1, cy, fy) // south
+          // south wall — split around the central passage to the platform (x∈[pasW,pasE]); the
+          // platform ceiling is the SAME y, so the passage is full-height (no lintel needed).
+          const pasW = -17
+          const pasE = -9
+          sub_wall(cc.x0, cc.z1, pasW, cc.z1, cy, fy) // south-west of the passage
+          sub_wall(pasE, cc.z1, cc.x1, cc.z1, cy, fy) // south-east of the passage
           sub_wall(cc.x1, cc.z0, cc.x1, cc.z1, cy, fy) // east
           sub_wall(cc.x0, cc.z0, cc.x0, cc.z1, cy, fy) // west
           const owW = sx - shw
@@ -26115,6 +26127,92 @@ export default function ThreeWorld({
           }
           subBoardSign("中央改札", "CENTRAL GATE", 41, 5)
           subBoardSign("ホーム ▼", "TO PLATFORM", 52, 4.4)
+
+          // ══ Phase C: platform (STEP3 arena) — deck + track pit + tunnel mouths + 点字ブロック ══
+          // Reached through the south passage (pasW..pasE). An open ~30×26 deck (the future boss
+          // arena) with a 1.5u track pit along the south edge (fall in; the ramp-snap climbs out).
+          const pf = SUB_PLATFORM
+          const tr = SUB_TRACK
+          const ty = SUBWAY_TRACK_Y
+          subQuad(
+            subDeckMat,
+            [pf.x0, fy, pf.z0],
+            [pf.x1, fy, pf.z0],
+            [pf.x1, fy, tr.z0],
+            [pf.x0, fy, tr.z0],
+          ) // deck
+          subQuad(
+            subDeckMat,
+            [tr.x0, ty, tr.z0],
+            [tr.x1, ty, tr.z0],
+            [tr.x1, ty, tr.z1],
+            [tr.x0, ty, tr.z1],
+          ) // track bed
+          subQuad(
+            subCeilMat,
+            [pf.x0, cy, pf.z0],
+            [pf.x1, cy, pf.z0],
+            [pf.x1, cy, pf.z1],
+            [pf.x0, cy, pf.z1],
+          ) // ceiling
+          sub_wall(pf.x0, pf.z0, pf.x0, pf.z1, cy, ty) // west (down to the track floor)
+          sub_wall(pf.x1, pf.z0, pf.x1, pf.z1, cy, ty) // east
+          sub_wall(pf.x0, pf.z1, pf.x1, pf.z1, cy, ty) // south — back wall behind the track
+          // 点字ブロック: a yellow tactile warning line on the deck at the platform edge (z≈79.4).
+          const tactileMat = new THREE.MeshStandardMaterial({
+            color: 0xf2c200,
+            emissive: 0x5a4600,
+            emissiveIntensity: 0.7,
+            roughness: 0.85,
+          })
+          const tactile = new THREE.Mesh(
+            new THREE.BoxGeometry(pf.x1 - pf.x0, 0.06, 0.5),
+            tactileMat,
+          )
+          tactile.position.set((pf.x0 + pf.x1) / 2, fy + 0.05, tr.z0 - 0.6)
+          mAdd(tactile)
+          // Two metal rails on the track bed (run E-W, the line's length).
+          const railLineMat = new THREE.MeshStandardMaterial({
+            color: 0x9a9ea6,
+            roughness: 0.4,
+            metalness: 0.8,
+          })
+          for (const rzp of [-1.4, 1.4]) {
+            const rl = new THREE.Mesh(new THREE.BoxGeometry(tr.x1 - tr.x0, 0.12, 0.12), railLineMat)
+            rl.position.set((tr.x0 + tr.x1) / 2, ty + 0.12, (tr.z0 + tr.z1) / 2 + rzp)
+            mAdd(rl)
+          }
+          // トンネルの暗い口: dark panels at the W/E track ends — the line vanishing into black
+          // (the depth reads as fog-black). The perimeter walls stay SOLID behind → visual only.
+          const tunnelMat = new THREE.MeshBasicMaterial({
+            color: 0x040406,
+            side: THREE.DoubleSide,
+            fog: false,
+          })
+          for (const tx of [tr.x0 + 0.2, tr.x1 - 0.2] as const) {
+            const mouth = new THREE.Mesh(new THREE.PlaneGeometry(tr.z1 - tr.z0, 5), tunnelMat)
+            mouth.rotation.y = Math.PI / 2
+            mouth.position.set(tx, ty + 2.2, (tr.z0 + tr.z1) / 2)
+            add(mouth)
+          }
+          // Platform signage: a hanging 駅名標 over the deck.
+          const pfTex = makeSignTex({
+            kind: "board",
+            w: 5,
+            h: 1.4,
+            bg: "#0a1426",
+            t1: "渋谷 / SHIBUYA",
+            c1: "#cfe0ff",
+            t2: "のりば 1 ・ PLATFORM 1",
+            c2: "#7fe3a8",
+            bar: "#16335c",
+          })
+          const pfSign = new THREE.Mesh(
+            new THREE.PlaneGeometry(6, 1.7),
+            new THREE.MeshBasicMaterial({ map: pfTex, toneMapped: false, side: THREE.DoubleSide }),
+          )
+          pfSign.position.set((pf.x0 + pf.x1) / 2, cy - 1.0, 68)
+          add(pfSign)
         }
 
         flushMerges() // collapse all static buckets → one mesh per material
