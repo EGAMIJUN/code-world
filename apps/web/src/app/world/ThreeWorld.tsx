@@ -17714,6 +17714,12 @@ export default function ThreeWorld({
         dummy: THREE.Object3D
       }
       let shibuyaAnim: ShibuyaAnim | null = null
+      // SHIBUYA 地下鉄 Phase E (atmosphere) closure handles, populated by the subway build,
+      // animated by updateShibuyaSubwayAtmo, reset in clearShibuyaMap. Empty ⇒ no-op.
+      let subwayRedMats: THREE.MeshStandardMaterial[] = [] // red 非常灯 (flicker)
+      let subwayHintMat: THREE.MeshBasicMaterial | null = null // platform-depths red glow (pulse)
+      let subwayWasUnder = false // underground enter/exit edge detector
+      let subwayNextGroan = 0 // ms — next distant groan while underground
       // SHIBUYA STEP2: the 歪 red-crack emissive texture is the same for every instance, so
       // it's built once on first spawn and shared (cached here for the run).
       let hizumiCrackTex: THREE.CanvasTexture | null = null
@@ -26213,6 +26219,46 @@ export default function ThreeWorld({
           )
           pfSign.position.set((pf.x0 + pf.x1) / 2, cy - 1.0, 68)
           add(pfSign)
+
+          // ══ Phase E: atmosphere — red 非常灯 (flicker) + platform-depths hint glow ══════════
+          // Red emergency lamps on the walls (their mats flicker in updateShibuyaSubwayAtmo).
+          subwayRedMats = []
+          for (const [lx, ly, lz] of [
+            [-27.6, -7, 38],
+            [1.6, -7, 38],
+            [-27.6, -7, 62],
+            [1.6, -7, 62],
+            [-13, -6.2, 86],
+          ] as const) {
+            const m = new THREE.MeshStandardMaterial({
+              color: 0x2a0608,
+              emissive: 0xff1420,
+              emissiveIntensity: 0.7,
+            })
+            const lamp = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.5, 0.25), m)
+            lamp.position.set(lx, ly, lz)
+            add(lamp)
+            subwayRedMats.push(m)
+          }
+          // Platform-depths hint: a dim red glow filling the track / tunnel maw at the south end —
+          // "ホームの奥に何かいる" — slow ominous pulse (opacity driven each frame). Additive so it
+          // reads as a faint light in the dark; NOT a creature (the STEP3 中ボス lands next time).
+          subwayHintMat = new THREE.MeshBasicMaterial({
+            color: 0xff2018,
+            transparent: true,
+            opacity: 0.14,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false,
+            toneMapped: false,
+            fog: false,
+            side: THREE.DoubleSide,
+          })
+          const hint = new THREE.Mesh(
+            new THREE.PlaneGeometry(pf.x1 - pf.x0 - 2, 4.5),
+            subwayHintMat,
+          )
+          hint.position.set((pf.x0 + pf.x1) / 2, ty + 2.0, tr.z1 - 0.3)
+          add(hint)
         }
 
         flushMerges() // collapse all static buckets → one mesh per material
@@ -26264,6 +26310,9 @@ export default function ThreeWorld({
         clearShibuyaCivilians() // STEP2-B: dispose 一般人 + reveal flashes with the map
         SHIBUYA_AABBS.length = 0 // drop the SHIBUYA collision boxes on teardown
         shibuyaAnim = null // animated handles die with the disposed meshes (Phase F)
+        subwayRedMats = [] // 地下鉄 atmosphere handles die with the map (Phase E)
+        subwayHintMat = null
+        subwayWasUnder = false
         // Restore the night sky (fog + base-light dimming restore via clearOsakaMap /
         // huntClearStage, which run alongside this in the teardown).
         if (shibuyaBgWasSaved) {
@@ -26297,6 +26346,29 @@ export default function ThreeWorld({
       // Per-frame SHIBUYA scenery animation (Phase F): big-vision screen scroll,
       // seal-altar spin+pulse, neon flicker, and ~3×/s distance culling of the
       // off-centre detail. No-op until buildShibuyaMap publishes shibuyaAnim.
+      // 地下鉄 Phase E atmosphere: flicker the red 非常灯, pulse the platform-depths hint glow,
+      // and on entering the subway drop a one-time「地下にも歪の気配…」 + occasional distant groans
+      // (ホームの奥に何かいる). Self-gates on an empty handle set → no-op off-stage / pre-build.
+      function updateShibuyaSubwayAtmo() {
+        if (subwayRedMats.length === 0) return
+        const t = Date.now() * 0.001
+        const flick = Math.sin(t * 7.3) > -0.72 ? 1 : 0.28 // erratic dropouts
+        const base = 0.55 + 0.4 * Math.sin(t * 1.4)
+        for (const m of subwayRedMats)
+          m.emissiveIntensity = base * flick * (1 + 0.12 * Math.sin(t * 21))
+        if (subwayHintMat) subwayHintMat.opacity = 0.1 + 0.12 * (0.5 + 0.5 * Math.sin(t * 0.7))
+        const under = focalPoint.y < SUBWAY_LEVEL_Y
+        if (under && !subwayWasUnder) {
+          showNotification("地下にも歪の気配…")
+          SOUNDS.zombieGroan() // 封絶 muffled by the earth — a low groan as you descend
+          subwayNextGroan = Date.now() + 6000 + Math.random() * 5000
+        }
+        subwayWasUnder = under
+        if (under && Date.now() >= subwayNextGroan) {
+          SOUNDS.zombieGroan() // distant groan from the depths — something waits at the platform
+          subwayNextGroan = Date.now() + 8000 + Math.random() * 7000
+        }
+      }
       function updateShibuyaMap(dt: number) {
         const a = shibuyaAnim
         if (!a) return
@@ -30769,6 +30841,7 @@ export default function ThreeWorld({
           updateOsakaBikes(dt) // 鉄輪部隊 (Block B): track riders + squad-clear bonus
           updateOsakaMap(dt) // OSAKA scenery animation (neon, lanterns, marquee…)
           updateShibuyaMap(dt) // SHIBUYA scenery (screen scroll, seal pulse, neon)
+          updateShibuyaSubwayAtmo() // SHIBUYA 地下鉄 atmosphere (red 非常灯 flicker, depths groan)
           updateShibuyaWedges(dt) // SHIBUYA STEP2-B 楔 spin/pulse/top-up (no-op when empty)
           updateShibuyaEnemies(dt) // SHIBUYA STEP2-A 歪 (no-op when the pool is empty)
           updateShibuyaCivilians(dt) // SHIBUYA STEP2-B 一般人 + 擬態 (no-op when empty)
