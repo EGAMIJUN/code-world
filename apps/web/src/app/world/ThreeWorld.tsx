@@ -26030,6 +26030,91 @@ export default function ThreeWorld({
             [owE, cy, cc.z0],
             [owW, cy, cc.z0],
           )
+
+          // ══ Phase B: concourse dressing — pillars + 改札 gates + 蛍光灯 + 案内 signs ══════
+          // Structural pillars (flank the central stair→platform lane, which stays open). Each
+          // merges into subWallMat; its AABB is underground-only.
+          const pillarH = cy - fy
+          for (const [px, pz] of [
+            [-22, 37],
+            [-22, 49],
+            [-4, 37],
+            [-4, 49],
+          ] as const) {
+            const pil = new THREE.Mesh(new THREE.BoxGeometry(1.4, pillarH, 1.4), subWallMat)
+            pil.position.set(px, (fy + cy) / 2, pz)
+            mAdd(pil)
+            addShibuyaAABB(px, pz, 0.8, 0.8, -5, -14)
+          }
+          // 改札 (ticket gates): a row of waist-high machines at z=42 with walk-through lanes
+          // between them; a wide central gap (x∈[-17,-9]) keeps the stair→platform path open.
+          const gateMat = new THREE.MeshStandardMaterial({
+            color: 0x8a9098,
+            roughness: 0.5,
+            metalness: 0.4,
+          })
+          const gateLampGeo = new THREE.SphereGeometry(0.11, 6, 5)
+          const gateLampMat = new THREE.MeshBasicMaterial({ color: 0x35e878, toneMapped: false })
+          const gateLampXf: Xf[] = []
+          for (const gx of [-25, -21, -17, -9, -5, -1] as const) {
+            const g = new THREE.Mesh(new THREE.BoxGeometry(0.7, 1.3, 1.7), gateMat)
+            g.position.set(gx, fy + 0.65, 42)
+            mAdd(g)
+            addShibuyaAABB(gx, 42, 0.45, 0.95, -10.6, -14) // waist-high; lanes between are open
+            gateLampXf.push({ pos: [gx, fy + 1.4, 42 - 0.7] })
+          }
+          instAdd(gateLampGeo, gateLampMat, gateLampXf)
+          // 蛍光灯: emissive ceiling tubes (self-lit fluorescent look) + 2 dim PointLights (no
+          // shadow — FPS) for floor pooling. The emissive panels carry the look; lights stay minimal.
+          const fluoMat = new THREE.MeshStandardMaterial({
+            color: 0xeaf2ff,
+            emissive: 0xcfe0ff,
+            emissiveIntensity: 1.5,
+            roughness: 1,
+          })
+          for (const [lx, lz] of [
+            [-18, 37],
+            [-18, 49],
+            [-8, 37],
+            [-8, 49],
+          ] as const) {
+            const tube = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.18, 5), fluoMat)
+            tube.position.set(lx, cy - 0.22, lz)
+            mAdd(tube)
+          }
+          for (const [lx, lz] of [
+            [-18, 42],
+            [-8, 42],
+          ] as const) {
+            const pl = new THREE.PointLight(0xdfe8ff, 0.6, 22, 1.7)
+            pl.position.set(lx, -7.5, lz)
+            pl.castShadow = false
+            add(pl)
+          }
+          // 案内 signs: "中央改札" over the gates (faces the arriving player) + "ホーム ▼" pointing
+          // south toward the platform. DoubleSide so readable from both approaches.
+          const subBoardSign = (t1: string, t2: string, zc: number, w: number): THREE.Mesh => {
+            const tex = makeSignTex({
+              kind: "board",
+              w: 5,
+              h: 1.4,
+              bg: "#0a1426",
+              t1,
+              c1: "#cfe0ff",
+              t2,
+              c2: "#7fe3a8",
+              bar: "#16335c",
+            })
+            const sign = new THREE.Mesh(
+              new THREE.PlaneGeometry(w, w * 0.3),
+              new THREE.MeshBasicMaterial({ map: tex, toneMapped: false, side: THREE.DoubleSide }),
+            )
+            sign.position.set(-13, cy - 0.9, zc)
+            add(sign)
+            return sign
+          }
+          subBoardSign("中央改札", "CENTRAL GATE", 41, 5)
+          subBoardSign("ホーム ▼", "TO PLATFORM", 52, 4.4)
         }
 
         flushMerges() // collapse all static buckets → one mesh per material
