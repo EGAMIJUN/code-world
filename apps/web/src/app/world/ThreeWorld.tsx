@@ -25798,119 +25798,143 @@ export default function ThreeWorld({
       function makeHizumi(): ShibuyaEnemy {
         const id = shibuyaNextEnemyIdRef.current++
         const group = new THREE.Group()
-        // ── A hulking, fully ORIGINAL 歪 — ~3 units tall (towers over the 1.8 player). A
-        // body warped out of true: a broad inverted-triangle ribcage over an emaciated waist,
-        // a huge multi-lobed head, VERY long thick crawler arms that drag on the ground, too-
-        // thin spread legs, a jagged spine ridge, exposed bone shards and a rash of cysts.
-        // Dark sickly flesh veined with throbbing orange-red cracks, plus a generous set of
-        // FULL-BRIGHT glowing organs (twin cores, four asymmetric eyes, a wide maw, oozing
-        // crack-slivers, claw-tips) so it reads from across the dark crossing. Still only TWO
-        // merged meshes (body + glow) → draw-call cost unchanged. ──
+        // ── A clear HUMANOID 歪 — a goblin / gaunt-old-man horror ~3.3 units tall (towers
+        // over the 1.8 player). A big bald cranium (≈⅓ of the body) under a heavy brow, huge
+        // swept-back pointed ears, sunken glowing eyes and a red gash of a mouth; a thin long
+        // neck; an emaciated torso with jutting collarbones + visible ribs; over-long arms
+        // reaching the knees ending in bony claws; a small pelvis and spindly clawed legs.
+        // Sickly skin with a faint warm undertone, plus FULL-BRIGHT glowing organs (orange
+        // eyes / red maw / orange-red body cracks). Two merged meshes (skin + glow) → 2 draw
+        // calls; the glow mesh is VERTEX-COLOURED so its parts glow different hues in one. ──
         const bodyMat = new THREE.MeshStandardMaterial({
-          color: 0x4e302a, // sickly flesh (a touch lighter so the shards/cysts read)
+          color: 0x8b7355, // sickly skin
           transparent: true,
-          opacity: 0.96,
-          roughness: 0.92,
+          opacity: 0.97,
+          roughness: 0.85,
           metalness: 0,
-          emissive: 0xff3a14, // orange-red veins glow through the crack map
+          emissive: 0x3a2014, // warm undertone so it never goes pitch-black at night
           emissiveMap: getHizumiCrackTex(),
-          emissiveIntensity: 0.9,
+          emissiveIntensity: 0.5,
         })
-        const bodyParts: THREE.BufferGeometry[] = [
-          new THREE.IcosahedronGeometry(0.8, 1)
-            .scale(1.3, 0.7, 0.6)
-            .translate(0, 2.0, 0.04), // ribcage
-          new THREE.CylinderGeometry(0.17, 0.46, 1.05, 8).translate(0, 1.28, 0), // emaciated waist
-          new THREE.IcosahedronGeometry(0.28, 0)
-            .scale(1.1, 0.8, 1)
-            .translate(0, 0.78, 0), // pelvis
-          new THREE.IcosahedronGeometry(0.6, 1)
-            .scale(1.18, 0.92, 1.05)
-            .rotateZ(0.3)
-            .translate(0.1, 2.55, 0.18), // head
-          new THREE.IcosahedronGeometry(0.34, 0).translate(-0.3, 2.78, 0.04), // 2nd cranial lobe
-          new THREE.IcosahedronGeometry(0.3, 0)
-            .scale(1.15, 0.66, 1)
-            .translate(0.06, 2.24, 0.34), // jaw lump
-          new THREE.CylinderGeometry(0.15, 0.2, 1.5, 7)
-            .rotateZ(0.5)
-            .translate(0.62, 1.9, 0.1), // L upper arm
-          new THREE.CylinderGeometry(0.1, 0.16, 1.8, 7)
-            .rotateZ(0.12)
-            .rotateX(-0.12)
-            .translate(1.04, 0.66, 0.34), // L forearm
-          new THREE.CylinderGeometry(0.14, 0.19, 1.4, 7)
-            .rotateZ(-0.56)
-            .translate(-0.6, 1.88, 0.08), // R upper arm
-          new THREE.CylinderGeometry(0.1, 0.15, 1.7, 7)
-            .rotateZ(-0.08)
-            .rotateX(-0.1)
-            .translate(-1.0, 0.7, 0.3), // R forearm
-          new THREE.ConeGeometry(0.11, 0.5, 5)
-            .rotateX(1.5)
-            .translate(1.12, -0.04, 0.5), // L claws
-          new THREE.ConeGeometry(0.1, 0.46, 5)
-            .rotateX(1.5)
-            .translate(-1.04, 0.0, 0.42), // R claws
-          new THREE.CylinderGeometry(0.11, 0.06, 1.55, 6)
-            .rotateZ(0.13)
-            .translate(0.24, 0.76, -0.04), // L leg
-          new THREE.CylinderGeometry(0.11, 0.06, 1.5, 6)
-            .rotateZ(-0.11)
-            .translate(-0.22, 0.74, -0.02), // R leg
-          new THREE.ConeGeometry(0.14, 0.6, 5).translate(0, 2.05, -0.34), // spine ridge ↓
-          new THREE.ConeGeometry(0.12, 0.5, 5).translate(0, 1.66, -0.4),
-          new THREE.ConeGeometry(0.1, 0.4, 5).translate(0, 1.3, -0.4),
-          new THREE.ConeGeometry(0.08, 0.32, 5).translate(0, 0.98, -0.36),
-          new THREE.ConeGeometry(0.05, 0.42, 4)
-            .rotateZ(-0.9)
-            .translate(0.5, 2.18, 0.34), // exposed rib shards
-          new THREE.ConeGeometry(0.05, 0.36, 4).rotateZ(1.0).translate(-0.46, 2.05, 0.36),
-          new THREE.ConeGeometry(0.045, 0.3, 4).rotateX(-1.0).translate(0.12, 2.18, 0.5),
-        ]
-        for (let i = 0; i < 10; i++) {
-          // a rash of cysts / tumours scattered over the torso, shoulders and head
-          const a = Math.random() * Math.PI * 2
-          const rr = 0.34 + Math.random() * 0.22
-          bodyParts.push(
-            new THREE.IcosahedronGeometry(0.08 + Math.random() * 0.13, 0).translate(
-              Math.cos(a) * rr,
-              1.1 + Math.random() * 1.7,
-              Math.sin(a) * rr * 0.7 + 0.12,
-            ),
-          )
-        }
-        const bodyGeo = mergeGeometries(bodyParts, false) ?? new THREE.IcosahedronGeometry(0.8, 1)
+        const bodyGeo =
+          mergeGeometries(
+            [
+              // big bald cranium (≈⅓ of the body), leaning forward, with a heavy brow
+              new THREE.SphereGeometry(0.55, 16, 13)
+                .scale(0.96, 1.06, 1)
+                .translate(0.04, 2.82, 0.12),
+              new THREE.BoxGeometry(0.6, 0.14, 0.26)
+                .rotateX(-0.12)
+                .translate(0.03, 2.98, 0.36), // brow
+              // huge swept-back pointed ears (asymmetric)
+              new THREE.ConeGeometry(0.14, 0.46, 6)
+                .rotateZ(-1.15)
+                .rotateX(0.5)
+                .translate(0.52, 2.98, -0.06),
+              new THREE.ConeGeometry(0.13, 0.42, 6)
+                .rotateZ(1.2)
+                .rotateX(0.45)
+                .translate(-0.5, 2.92, -0.04),
+              // thin long neck
+              new THREE.CylinderGeometry(0.1, 0.13, 0.34, 7).translate(0.02, 2.4, 0.06),
+              // emaciated torso (gaunt — NOT inverted-triangle)
+              new THREE.CylinderGeometry(0.26, 0.2, 0.78, 9).translate(0, 1.84, 0.02),
+              // jutting collarbones
+              new THREE.BoxGeometry(0.24, 0.05, 0.06)
+                .rotateZ(0.32)
+                .translate(0.2, 2.16, 0.18),
+              new THREE.BoxGeometry(0.24, 0.05, 0.06).rotateZ(-0.3).translate(-0.2, 2.16, 0.18),
+              // visible ribs (front of the chest)
+              new THREE.BoxGeometry(0.36, 0.05, 0.05)
+                .rotateZ(0.04)
+                .translate(0, 1.98, 0.22),
+              new THREE.BoxGeometry(0.36, 0.05, 0.05).translate(0, 1.82, 0.24),
+              new THREE.BoxGeometry(0.34, 0.05, 0.05).rotateZ(-0.04).translate(0, 1.66, 0.22),
+              // over-long arms reaching the knees (upper + forearm), slightly asymmetric
+              new THREE.CylinderGeometry(0.07, 0.085, 0.86, 6)
+                .rotateZ(0.34)
+                .translate(0.41, 1.74, 0.05),
+              new THREE.CylinderGeometry(0.058, 0.07, 0.82, 6)
+                .rotateZ(0.12)
+                .translate(0.62, 0.98, 0.12),
+              new THREE.CylinderGeometry(0.07, 0.085, 0.82, 6)
+                .rotateZ(-0.38)
+                .translate(-0.4, 1.76, 0.04),
+              new THREE.CylinderGeometry(0.058, 0.07, 0.8, 6)
+                .rotateZ(-0.1)
+                .translate(-0.6, 1.02, 0.1),
+              // long bony claw-fingers at the arm ends
+              new THREE.ConeGeometry(0.05, 0.3, 5)
+                .rotateX(1.4)
+                .translate(0.66, 0.58, 0.22),
+              new THREE.ConeGeometry(0.05, 0.28, 5).rotateX(1.4).translate(-0.62, 0.62, 0.2),
+              // small pelvis
+              new THREE.SphereGeometry(0.17, 10, 8)
+                .scale(1.1, 0.85, 1)
+                .translate(0, 1.32, 0),
+              // spindly legs (thigh + shin), feet at y≈0
+              new THREE.CylinderGeometry(0.09, 0.075, 0.82, 6)
+                .rotateZ(0.04)
+                .translate(0.14, 0.88, 0),
+              new THREE.CylinderGeometry(0.065, 0.05, 0.6, 6).translate(0.16, 0.3, 0.02),
+              new THREE.CylinderGeometry(0.09, 0.075, 0.8, 6)
+                .rotateZ(-0.04)
+                .translate(-0.14, 0.87, 0),
+              new THREE.CylinderGeometry(0.065, 0.05, 0.58, 6).translate(-0.15, 0.29, 0.02),
+              // splayed clawed feet
+              new THREE.BoxGeometry(0.2, 0.06, 0.3).translate(0.16, 0.03, 0.08),
+              new THREE.BoxGeometry(0.2, 0.06, 0.3).translate(-0.15, 0.03, 0.08),
+            ],
+            false,
+          ) ?? new THREE.SphereGeometry(0.55, 8, 6)
         group.add(new THREE.Mesh(bodyGeo, bodyMat))
-        // Full-bright glowing organs (read from across the dark crossing) — one merged mesh.
+        // Glowing organs — vertex-coloured so eyes / maw / cracks glow DIFFERENT hues in ONE
+        // mesh (one draw call). Full-bright (toneMapped off) → reads across the dark night.
         const eyeMat = new THREE.MeshBasicMaterial({
-          color: 0xff6a24, // hot orange
+          vertexColors: true,
           transparent: true,
           opacity: 1,
-          toneMapped: false, // hold full brightness under the night tone-mapping
+          toneMapped: false,
         })
+        const tint = (g: THREE.BufferGeometry, hex: number) => {
+          const col = new THREE.Color(hex)
+          const n = g.attributes.position?.count ?? 0
+          const arr = new Float32Array(n * 3)
+          for (let i = 0; i < n; i++) col.toArray(arr, i * 3)
+          g.setAttribute("color", new THREE.Float32BufferAttribute(arr, 3))
+          return g
+        }
         const eyeGeo =
           mergeGeometries(
             [
-              new THREE.IcosahedronGeometry(0.32, 0).translate(0, 1.82, 0.42), // exposed chest core
-              new THREE.IcosahedronGeometry(0.16, 0).translate(0.04, 1.18, 0.34), // gut core
-              new THREE.SphereGeometry(0.13, 8, 6).translate(0.22, 2.58, 0.52), // four asymmetric eyes ↓
-              new THREE.SphereGeometry(0.1, 8, 6).translate(-0.16, 2.68, 0.44),
-              new THREE.SphereGeometry(0.07, 7, 5).translate(0.36, 2.36, 0.42),
-              new THREE.SphereGeometry(0.06, 7, 5).translate(-0.34, 2.44, 0.3),
-              new THREE.BoxGeometry(0.44, 0.07, 0.05)
-                .rotateZ(0.1)
-                .translate(0.06, 2.22, 0.52), // wide maw slit
-              new THREE.BoxGeometry(0.05, 0.6, 0.05)
-                .rotateZ(0.3)
-                .translate(0.18, 1.7, 0.4), // oozing crack-slivers ↓
-              new THREE.BoxGeometry(0.045, 0.5, 0.045).rotateZ(-0.4).translate(-0.2, 1.5, 0.38),
-              new THREE.BoxGeometry(0.04, 0.45, 0.04).rotateZ(0.2).translate(0.9, 0.95, 0.4),
-              new THREE.SphereGeometry(0.07, 5, 4).translate(1.12, -0.16, 0.5), // claw-tips
-              new THREE.SphereGeometry(0.07, 5, 4).translate(-1.04, -0.12, 0.42),
+              // sunken glowing eyes (orange), set under the brow — asymmetric
+              tint(new THREE.SphereGeometry(0.1, 9, 7).translate(0.17, 2.82, 0.42), 0xff6600),
+              tint(new THREE.SphereGeometry(0.088, 9, 7).translate(-0.16, 2.84, 0.42), 0xff6600),
+              // red maw gash
+              tint(
+                new THREE.BoxGeometry(0.34, 0.07, 0.05).rotateZ(0.06).translate(0.02, 2.5, 0.46),
+                0xff2200,
+              ),
+              // orange-red cracks seeping down the torso + limbs
+              tint(
+                new THREE.BoxGeometry(0.05, 0.52, 0.04).rotateZ(0.25).translate(0.12, 1.85, 0.26),
+                0xff4400,
+              ),
+              tint(
+                new THREE.BoxGeometry(0.045, 0.44, 0.04).rotateZ(-0.3).translate(-0.13, 1.7, 0.26),
+                0xff4400,
+              ),
+              tint(
+                new THREE.BoxGeometry(0.04, 0.38, 0.04).rotateZ(0.5).translate(0.5, 1.2, 0.16),
+                0xff4400,
+              ),
+              tint(new THREE.BoxGeometry(0.04, 0.34, 0.035).translate(0.02, 1.0, 0.18), 0xff4400),
+              // faint glow at the clawed fingertips
+              tint(new THREE.SphereGeometry(0.05, 5, 4).translate(0.66, 0.45, 0.24), 0xff4400),
+              tint(new THREE.SphereGeometry(0.05, 5, 4).translate(-0.62, 0.49, 0.22), 0xff4400),
             ],
             false,
-          ) ?? new THREE.IcosahedronGeometry(0.32, 0)
+          ) ?? tint(new THREE.SphereGeometry(0.1, 6, 5), 0xff6600)
         group.add(new THREE.Mesh(eyeGeo, eyeMat))
         group.traverse((o) => {
           if (o instanceof THREE.Mesh) {
@@ -34708,7 +34732,7 @@ export default function ThreeWorld({
                 textAlign: "right",
               }}
             >
-              {playerHp}
+              {Math.round(playerHp)}
             </span>
             <span style={{ color: "rgba(255,255,255,0.2)" }}>·</span>
             <span style={{ color: "rgba(255,255,255,0.45)", fontSize: "0.55rem" }}>SCORE</span>
@@ -34792,7 +34816,7 @@ export default function ThreeWorld({
                   textShadow: `0 0 14px ${hpColor}80`,
                 }}
               >
-                {playerHp}
+                {Math.round(playerHp)}
               </span>
               <span style={{ color: "rgba(255,255,255,0.25)", fontSize: "0.72rem" }}>/ 100</span>
             </div>
