@@ -26688,12 +26688,16 @@ export default function ThreeWorld({
       // Centre-/aim-ray hitscan: damage the nearest 歪 body the ray hits, unless a wall (at
       // wallDist) is nearer. Returns true if a 歪 was hit. Used by fire() + the HUNT guns +
       // the 破魔砲 beam — every aimed weapon reaches 歪 through this one path.
+      // True while the player is down in the subway. Surface 歪 / 楔 / 一般人 must NOT interact
+      // across levels — their contact / attack / reveal use XZ-only distance, which would reach
+      // through the floor & ceiling. Gates every surface-combat entry point below (Phase D).
+      const playerInSubway = () => focalPoint.y < SUBWAY_LEVEL_Y
       function hitscanShibuyaEnemy(
         rc: THREE.Raycaster,
         dmg: number,
         wallDist: number | null,
       ): boolean {
-        if (shibuyaEnemiesRef.current.length === 0) return false
+        if (shibuyaEnemiesRef.current.length === 0 || playerInSubway()) return false
         const parts: THREE.Object3D[] = []
         for (const h of shibuyaEnemiesRef.current) {
           if (!h.alive) continue
@@ -26719,7 +26723,7 @@ export default function ThreeWorld({
         range: number,
         dmg: number,
       ) {
-        if (shibuyaEnemiesRef.current.length === 0) return
+        if (shibuyaEnemiesRef.current.length === 0 || playerInSubway()) return
         for (const h of shibuyaEnemiesRef.current) {
           if (!h.alive) continue
           const dx = h.group.position.x - focalPoint.x
@@ -26740,7 +26744,7 @@ export default function ThreeWorld({
         radius: number,
         dmgAt: (d: number) => number,
       ) {
-        if (shibuyaEnemiesRef.current.length === 0) return
+        if (shibuyaEnemiesRef.current.length === 0 || playerInSubway()) return
         for (const h of shibuyaEnemiesRef.current) {
           if (!h.alive) continue
           const d = Math.hypot(h.group.position.x - cx, 1.7 - cy, h.group.position.z - cz)
@@ -26791,6 +26795,10 @@ export default function ThreeWorld({
             }
             continue
           }
+          // Phase D: while the player is down in the subway, surface 歪 lose them — no seek and
+          // no contact claw (contact uses XZ distance only and would otherwise hit THROUGH the
+          // floor). They idle in place until the player resurfaces.
+          if (playerInSubway()) continue
           // Distance to the player on the ground plane.
           const dx = focalPoint.x - h.group.position.x
           const dz = focalPoint.z - h.group.position.z
@@ -26979,7 +26987,7 @@ export default function ThreeWorld({
       // from fire() + meleeAttack with the weapon's damage; no-op off-stage (empty pool).
       function damageShibuyaWedgeNear(dmg: number): boolean {
         const list = shibuyaWedgesRef.current
-        if (list.length === 0) return false
+        if (list.length === 0 || playerInSubway()) return false // 楔 are surface objects (Phase D)
         let hitAny = false
         for (const w of list) {
           if (w.destroyed) continue
@@ -27230,7 +27238,7 @@ export default function ThreeWorld({
       // CIVILIAN HIT. Returns true if one was hit. No-op off-stage (empty pool).
       function hitscanShibuyaCivilian(rc: THREE.Raycaster, wallDist: number | null): boolean {
         const list = shibuyaCiviliansRef.current
-        if (list.length === 0) return false
+        if (list.length === 0 || playerInSubway()) return false // surface-only (Phase D)
         const parts: THREE.Object3D[] = []
         for (const c of list) {
           if (!c.alive) continue
@@ -27272,8 +27280,9 @@ export default function ThreeWorld({
           const dx = focalPoint.x - c.group.position.x
           const dz = focalPoint.z - c.group.position.z
           const dist = Math.hypot(dx, dz) || 1
-          // 擬態解除: a disguised one tears open when the player gets close.
-          if (c.disguised && dist < SHIBUYA_CIVILIAN_REVEAL) {
+          // 擬態解除: a disguised one tears open when the player gets close — but NOT across levels
+          // (a player at the stairwell XZ but underground must not trip a 擬態 above; Phase D).
+          if (c.disguised && dist < SHIBUYA_CIVILIAN_REVEAL && !playerInSubway()) {
             revealDisguisedCivilian(c)
             disposeShibuyaCivilian(c)
             list.splice(i, 1)
