@@ -26221,8 +26221,14 @@ export default function ThreeWorld({
           add(pfSign)
 
           // ══ Phase E: atmosphere — red 非常灯 (flicker) + platform-depths hint glow ══════════
-          // Red emergency lamps on the walls (their mats flicker in updateShibuyaSubwayAtmo).
-          subwayRedMats = []
+          // Red emergency lamps on the walls — ONE shared material (merged → 1 draw call) that
+          // flickers in sync (a building-wide power flicker) in updateShibuyaSubwayAtmo.
+          const redLampMat = new THREE.MeshStandardMaterial({
+            color: 0x2a0608,
+            emissive: 0xff1420,
+            emissiveIntensity: 0.7,
+          })
+          subwayRedMats = [redLampMat]
           for (const [lx, ly, lz] of [
             [-27.6, -7, 38],
             [1.6, -7, 38],
@@ -26230,15 +26236,9 @@ export default function ThreeWorld({
             [1.6, -7, 62],
             [-13, -6.2, 86],
           ] as const) {
-            const m = new THREE.MeshStandardMaterial({
-              color: 0x2a0608,
-              emissive: 0xff1420,
-              emissiveIntensity: 0.7,
-            })
-            const lamp = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.5, 0.25), m)
+            const lamp = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.5, 0.25), redLampMat)
             lamp.position.set(lx, ly, lz)
-            add(lamp)
-            subwayRedMats.push(m)
+            mAdd(lamp) // merge → 1 draw call for all 5 lamps
           }
           // Platform-depths hint: a dim red glow filling the track / tunnel maw at the south end —
           // "ホームの奥に何かいる" — slow ominous pulse (opacity driven each frame). Additive so it
