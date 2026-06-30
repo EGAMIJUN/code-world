@@ -27307,8 +27307,23 @@ export default function ThreeWorld({
       function defeatShibuyaBoss() {
         const b = shibuyaBossRef.current
         if (b) {
-          const c = b.group.position
-          spawnExplosion(new THREE.Vector3(c.x, c.y + 2.5, c.z), false, true)
+          // 大規模 finale: a cluster of explosions + a wide black 霧散 at the boss's last spot.
+          const c = b.group.position.clone()
+          for (let i = 0; i < 6; i++) {
+            spawnExplosion(
+              new THREE.Vector3(
+                c.x + (Math.random() - 0.5) * 5,
+                c.y + 0.5 + Math.random() * 4,
+                c.z + (Math.random() - 0.5) * 5,
+              ),
+              false,
+              true,
+            )
+          }
+          shibuyaDeathFog(c.x, c.z)
+          shibuyaDeathFog(c.x + 2, c.z - 2)
+          shibuyaDeathFog(c.x - 2, c.z + 2)
+          SOUNDS.collapse()
         }
         disposeShibuyaBoss()
         scoreRef.current += 3000 // 歪の核 撃破ボーナス
@@ -27450,6 +27465,18 @@ export default function ThreeWorld({
           b.group.position.y -= dt * 1.0
           b.group.rotation.y += dt * 3
           b.group.scale.setScalar(SHIBUYA_BOSS_SCALE * (0.3 + 0.7 * k))
+          // chain of bursts erupting from the collapsing body during the 霧散 (~4/s)
+          if (Math.random() < dt * 4) {
+            const c = b.group.position
+            spawnExplosion(
+              new THREE.Vector3(
+                c.x + (Math.random() - 0.5) * 3,
+                c.y + 1 + Math.random() * 3,
+                c.z + (Math.random() - 0.5) * 3,
+              ),
+              true,
+            )
+          }
           if (b.dying <= 0) defeatShibuyaBoss()
           return
         }
