@@ -27072,6 +27072,37 @@ export default function ThreeWorld({
               new THREE.CylinderGeometry(0.17, 0.12, 1.35, 7).translate(0.26, 0.92, 0), // L leg
               new THREE.CylinderGeometry(0.17, 0.12, 1.35, 7).translate(-0.26, 0.92, 0), // R leg
               new THREE.ConeGeometry(0.2, 0.7, 5).translate(0, 2.15, -0.42), // spine ridge
+              // ── 大幹部 menace (Phase B): great swept horns + a jagged crown + shoulder/back
+              //    spikes + exposed shards. All merged into the body → still ONE draw call. ──
+              new THREE.ConeGeometry(0.17, 1.2, 6)
+                .rotateZ(-0.5)
+                .rotateX(-0.35)
+                .translate(0.52, 3.62, -0.12), // L horn
+              new THREE.ConeGeometry(0.17, 1.2, 6)
+                .rotateZ(0.5)
+                .rotateX(-0.35)
+                .translate(-0.52, 3.62, -0.12), // R horn
+              new THREE.ConeGeometry(0.1, 0.52, 5).translate(0, 3.72, 0.04), // crown spike (centre)
+              new THREE.ConeGeometry(0.09, 0.44, 5)
+                .rotateZ(-0.4)
+                .translate(0.28, 3.6, 0.02), // crown L
+              new THREE.ConeGeometry(0.09, 0.44, 5)
+                .rotateZ(0.4)
+                .translate(-0.28, 3.6, 0.02), // crown R
+              new THREE.ConeGeometry(0.15, 0.66, 5)
+                .rotateZ(-1.1)
+                .translate(0.82, 2.72, 0), // L shoulder spike
+              new THREE.ConeGeometry(0.15, 0.66, 5)
+                .rotateZ(1.1)
+                .translate(-0.82, 2.72, 0), // R shoulder spike
+              new THREE.ConeGeometry(0.12, 0.52, 5)
+                .rotateX(-1.4)
+                .translate(0.18, 2.62, -0.52), // back spike
+              new THREE.ConeGeometry(0.12, 0.5, 5).rotateX(-1.4).translate(-0.18, 2.5, -0.52),
+              new THREE.ConeGeometry(0.07, 0.36, 4)
+                .rotateZ(-0.8)
+                .translate(0.52, 2.32, 0.4), // rib shard
+              new THREE.ConeGeometry(0.07, 0.32, 4).rotateZ(0.9).translate(-0.46, 2.2, 0.4),
             ],
             false,
           ) ?? new THREE.IcosahedronGeometry(0.8, 1)
@@ -27088,8 +27119,18 @@ export default function ThreeWorld({
         const eyeGeo =
           mergeGeometries(
             [
-              new THREE.SphereGeometry(0.13, 8, 6).translate(0.22, 3.02, 0.52),
-              new THREE.SphereGeometry(0.13, 8, 6).translate(-0.22, 3.02, 0.52),
+              new THREE.SphereGeometry(0.15, 8, 6).translate(0.22, 3.02, 0.52), // eyes (bigger than 歪)
+              new THREE.SphereGeometry(0.15, 8, 6).translate(-0.22, 3.02, 0.52),
+              // glowing horn-tip embers + a wide maw + oozing crack slivers (more glow than the 歪)
+              new THREE.SphereGeometry(0.08, 6, 5).translate(0.78, 4.12, -0.42), // L horn tip
+              new THREE.SphereGeometry(0.08, 6, 5).translate(-0.78, 4.12, -0.42), // R horn tip
+              new THREE.BoxGeometry(0.52, 0.09, 0.05)
+                .rotateZ(0.05)
+                .translate(0, 2.78, 0.56), // maw slit
+              new THREE.BoxGeometry(0.05, 0.72, 0.05)
+                .rotateZ(0.26)
+                .translate(0.22, 2.0, 0.46), // crack sliver
+              new THREE.BoxGeometry(0.045, 0.62, 0.045).rotateZ(-0.3).translate(-0.24, 1.9, 0.44),
             ],
             false,
           ) ?? new THREE.SphereGeometry(0.13, 8, 6)
@@ -27103,8 +27144,8 @@ export default function ThreeWorld({
           opacity: 0.9,
           toneMapped: false,
         })
-        const core = new THREE.Mesh(new THREE.IcosahedronGeometry(0.36, 1), coreMat)
-        core.position.set(0, 2.5, 0.52)
+        const core = new THREE.Mesh(new THREE.IcosahedronGeometry(0.44, 1), coreMat) // bigger → readable weakpoint
+        core.position.set(0, 2.5, 0.56)
         core.userData.shibuyaBoss = true
         core.userData.bossWeak = true
         group.add(core)
