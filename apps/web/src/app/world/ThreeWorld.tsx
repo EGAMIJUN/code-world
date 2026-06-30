@@ -1832,11 +1832,11 @@ const SHIBUYA_COMBAT_AREAS: readonly ShibuyaCombatArea[] = [
     id: "ekihigashi",
     label: "駅東プラザ",
     persona: "tank",
-    // 楔は駅東の入口スロート (東壁ギャップ z∈[8,32] を 4u 入った平坦プラザ) に置く。ここなら
-    // ギャップを抜けた瞬間に到達でき、赤い天空ビームがスクランブルから入口の目印として見える
-    // (宮益坂の行き止まり「EKI-HIGASHI →」サインに釣られて迷い込むのを防ぐ)。SHIBUYA RISE
-    // (x≥114) / ヒカリエ (z≤-4) / 宮益坂の groundY 滲み (z≤1) を全て回避。
-    wedge: [104, 20],
+    // 楔は東壁ギャップ z∈[8,32] の口・SE タワー (z18-42) の北の開けたレーン (z8-18) に置く。
+    // 独立フラッドフィル (eki_reach_sim) で (104,20) も到達可能と確認済みだが、実機で見つけ
+    // にくい報告 → さらに口の手前 (103,14) へ寄せ、進入レーンに直接面させる。赤い天空ビーム
+    // ＋ミニマップの楔印が目印。SHIBUYA RISE (x≥114) / ヒカリエ (z≤-4) を回避。
+    wedge: [103, 14],
     spawns: [
       [106, 14],
       [108, 24], // (旧 [116,24] は SHIBUYA RISE の AABB 内だった → 開けたプラザへ)
@@ -24678,8 +24678,9 @@ export default function ThreeWorld({
           instAdd(mFigGeo, mFigMat, mFigXf)
           // ── (4) 突き当り (上端): 駅東再開発バリケード。当たり判定の実体は Phase A の cap。宮益坂
           // 上端は y≈7 まで登る一方、駅東プラザは平地 y=0 なので直接は繋げない (7u 崖)。よって
-          // ここは行き止まりのまま「再開発中」とし、サインで本来の入口 (北の平坦な広場ゲート
-          // z∈[8,32]、楔ビームが目印) へ誘導する。壁の先に HIKARIE 風シルエットを覗かせる演出は維持。 ──
+          // ここは行き止まりのまま「再開発中」とし、サインで本来の入口 (南側の平坦な広場口
+          // z∈[8,32] — 宮益坂 z≈-9 より南。楔ビーム＋ミニマップの楔印が目印) へ誘導する。壁の先に
+          // HIKARIE 風シルエットを覗かせる演出は維持。 ──
           const mSignTex2 = (l1: string, l2: string, bg: string, fg: string) => {
             const cv = document.createElement("canvas")
             cv.width = 256
@@ -24730,8 +24731,8 @@ export default function ThreeWorld({
               new THREE.PlaneGeometry(MMZ_HW * 1.4, 2.6),
               new THREE.MeshBasicMaterial({
                 map: mSignTex2(
-                  "駅東 / HIKARIE 再開発中",
-                  "入口は北の広場ゲートから",
+                  "この先 行き止まり",
+                  "駅東の入口は南側の広場口",
                   "#0a1426",
                   "#bcd6f4",
                 ),
@@ -33133,6 +33134,36 @@ export default function ThreeWorld({
               ctx.beginPath()
               ctx.arc(bx, bz, br, 0, Math.PI * 2)
               ctx.stroke()
+            }
+            // SHIBUYA STEP2-B: 楔 (wedge) objective markers — a pulsing purple diamond at each
+            // LIVE 楔 (from shibuyaWedgesRef, which holds the real placed positions + destroyed
+            // flags). Destroyed 楔 vanish; an off-view 楔 clamps to the dial edge (GTA-style) so
+            // every remaining 楔's direction is always visible. Shibuya-only.
+            if (isShibuyaStage(huntMissionConfigRef.current.stage)) {
+              const wpulse = 0.5 + 0.5 * Math.sin(nowMs * 0.006)
+              for (const wedge of shibuyaWedgesRef.current) {
+                if (wedge.destroyed) continue
+                const ex = mx(wedge.x)
+                const ez = mz(wedge.z)
+                const dwx = ex - W / 2
+                const dwz = ez - W / 2
+                const wdist = Math.hypot(dwx, dwz)
+                const wclamp = wdist > EDGE_R
+                const wlx = wclamp ? W / 2 + (dwx / wdist) * EDGE_R : ex
+                const wlz = wclamp ? W / 2 + (dwz / wdist) * EDGE_R : ez
+                const ws = (wclamp ? 3 : 4) + wpulse * 1.6
+                ctx.fillStyle = `rgba(198,128,255,${0.55 + 0.45 * wpulse})` // 封絶 purple, pulsing
+                ctx.strokeStyle = "rgba(0,0,0,0.85)"
+                ctx.lineWidth = 1.2
+                ctx.beginPath()
+                ctx.moveTo(wlx, wlz - ws)
+                ctx.lineTo(wlx + ws, wlz)
+                ctx.lineTo(wlx, wlz + ws)
+                ctx.lineTo(wlx - ws, wlz)
+                ctx.closePath()
+                ctx.fill()
+                ctx.stroke()
+              }
             }
             ctx.save()
             ctx.translate(W / 2, W / 2)
