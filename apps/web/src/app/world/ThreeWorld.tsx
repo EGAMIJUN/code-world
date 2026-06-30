@@ -1054,6 +1054,58 @@ const miyamasuzakaAt = (s: number): MmzPoint | null => {
     pz: tx,
   }
 }
+// ══ SHIBUYA 地下鉄 (subway) skeleton — STEP3 中ボス stage ════════════════════════════════
+// A self-contained UNDERGROUND space directly below the surface, HEIGHT-SEPARATED: every
+// subway mesh sits at y ≤ SUBWAY_CEIL_Y and every subway AABB uses y0/h in the underground
+// band, so the height-aware collidesWithWall(...feetY) keeps the two levels fully independent
+// — a surface wall (y0=0) never blocks an underground mover and vice-versa, even where their
+// XZ overlap. Reached by a real descending stair from the スクランブル北 entrance (-13,9).
+// All arena-LOCAL coords (world = +HUNT_ARENA). Shibuya-only (built inside buildShibuyaMap).
+const SUBWAY_LEVEL_Y = -4 // player.y below this ⇒ underground (discriminates the two floors)
+const SUBWAY_FLOOR_Y = -12 // concourse + platform deck
+const SUBWAY_TRACK_Y = -13.5 // track pit (1.5u below the deck — fall in, ramp-snap climbs out)
+const SUBWAY_CEIL_Y = -5.5 // ceiling (kept low for an oppressive tunnel feel)
+// Descending stair: a straight ramp from the entrance (z=Z0, y=0) SOUTH+down to the concourse
+// (z=Z1, y=SUBWAY_FLOOR_Y). Pure ramp like the 坂 — drives the player Y-follow + ramp-snap.
+const SUB_STAIR_X = -13
+const SUB_STAIR_HW = 3.5 // half-width of the stair band (7u wide shaft)
+const SUB_STAIR_Z0 = 7 // top edge (surface, y=0) — open to the scramble (north)
+const SUB_STAIR_Z1 = 31 // bottom edge (y=SUBWAY_FLOOR_Y) — opens into the concourse
+// Underground room footprints (LOCAL XZ rectangles). The platform is the STEP3 arena; its south
+// strip is a track pit (one step lower). Same x-span as the concourse so they form one corridor.
+const SUB_CONCOURSE = { x0: -28, x1: 2, z0: 31, z1: 54 } // y=-12 arrival hall
+const SUB_PLATFORM = { x0: -28, x1: 2, z0: 54, z1: 88 } // y=-12 deck (+ track pit at its south)
+const SUB_TRACK = { x0: -28, x1: 2, z0: 80, z1: 87 } // y=-13.5 track pit (sub-band of the platform)
+// Stair ramp height at (lx,lz): the descending ramp, or NaN if outside the stair band.
+const subwayStairHeight = (lx: number, lz: number): number => {
+  if (lx < SUB_STAIR_X - SUB_STAIR_HW || lx > SUB_STAIR_X + SUB_STAIR_HW) return Number.NaN
+  if (lz < SUB_STAIR_Z0 || lz > SUB_STAIR_Z1) return Number.NaN
+  const t = (lz - SUB_STAIR_Z0) / (SUB_STAIR_Z1 - SUB_STAIR_Z0)
+  return SUBWAY_FLOOR_Y * t // 0 at the top → SUBWAY_FLOOR_Y at the bottom
+}
+const inSubRect = (
+  lx: number,
+  lz: number,
+  r: { x0: number; x1: number; z0: number; z1: number },
+): boolean => lx >= r.x0 && lx <= r.x1 && lz >= r.z0 && lz <= r.z1
+// Combined underground floor for the player Y-follow. Returns the subway floor y, or NaN
+// (⇒ use the surface). `curY` discriminates the levels where the footprint overlaps the
+// surface: only a player already below SUBWAY_LEVEL_Y reads the room floor (jumps from -12
+// stay below -4, so they never snap up to the street). The stair handles both descent + climb.
+const subwayGroundY = (lx: number, lz: number, curY: number): number => {
+  const st = subwayStairHeight(lx, lz)
+  // Only snap to the stair when the player is ON or just-above it (within snap range). This is
+  // the level discriminator for the stair: a SURFACE walker passing over the deep part of the
+  // band (which runs under the flat core / 道玄坂 mouth) is far ABOVE the ramp, so it stays on
+  // the surface and never falls in; a descending/climbing player tracks the ramp continuously.
+  if (!Number.isNaN(st) && curY < st + DGZ_SNAP_MAX) return st
+  if (curY < SUBWAY_LEVEL_Y) {
+    if (inSubRect(lx, lz, SUB_TRACK)) return SUBWAY_TRACK_Y // pit first (sub-band of the platform)
+    if (inSubRect(lx, lz, SUB_CONCOURSE) || inSubRect(lx, lz, SUB_PLATFORM)) return SUBWAY_FLOOR_Y
+  }
+  return Number.NaN
+}
+
 // Per-theme minion spec — reuse an existing enemy model with a colour/scale
 // tweak. base = model, tint = body recolour, eyes = eye-glow colour.
 type HuntCreatureKind =
@@ -17667,6 +17719,12 @@ export default function ThreeWorld({
         dummy: THREE.Object3D
       }
       let shibuyaAnim: ShibuyaAnim | null = null
+      // SHIBUYA 地下鉄 Phase E (atmosphere) closure handles, populated by the subway build,
+      // animated by updateShibuyaSubwayAtmo, reset in clearShibuyaMap. Empty ⇒ no-op.
+      let subwayRedMats: THREE.MeshStandardMaterial[] = [] // red 非常灯 (flicker)
+      let subwayHintMat: THREE.MeshBasicMaterial | null = null // platform-depths red glow (pulse)
+      let subwayWasUnder = false // underground enter/exit edge detector
+      let subwayNextGroan = 0 // ms — next distant groan while underground
       // SHIBUYA STEP2: the 歪 red-crack emissive texture is the same for every instance, so
       // it's built once on first spawn and shared (cached here for the run).
       let hizumiCrackTex: THREE.CanvasTexture | null = null
@@ -25175,45 +25233,32 @@ export default function ThreeWorld({
         )
         staSign.position.set(0, 16.5, staZ + 7.05)
         add(staSign)
-        // ── 地下鉄入口 (subway entrance): sunk stairwell + railings + signpost. ──
+        // ── 地下鉄入口 (subway entrance): now an OPEN descending stairwell (the actual stair
+        // shaft + concourse are built below in the 地下鉄 skeleton block). Surface dressing only:
+        // side railings framing the mouth + the signpost. The grating/decorative steps that used
+        // to SEAL it (underground not yet built) are removed so the player can descend. ──
         const subX = -13
         const subZ = 9
-        // The dark sunk stairwell (stepped boxes descending — visual depth only).
-        for (let s = 0; s < 4; s++) {
-          const st = new THREE.Mesh(new THREE.BoxGeometry(3.4, 0.4, 1.1), wallMat)
-          st.position.set(subX, -0.2 - s * 0.34, subZ - 1.5 + s * 1.0)
-          mAdd(st)
-        }
-        const subHole = new THREE.Mesh(new THREE.BoxGeometry(3.6, 0.1, 5), wallMat)
-        subHole.position.set(subX, -1.6, subZ)
-        mAdd(subHole)
-        // Railings around three sides (instanced posts + a top rail box).
+        // Railings on the two long sides of the mouth (instanced posts + a top rail box). The
+        // north end (toward the scramble) and south end (into the shaft) stay open to walk through.
         const subPostGeo = new THREE.CylinderGeometry(0.07, 0.07, 1.0, 6)
         const subPostXf: Xf[] = []
-        for (let i = 0; i <= 5; i++) {
+        for (let i = 0; i <= 3; i++) {
           const z = subZ - 2.5 + i
-          subPostXf.push({ pos: [subX - 1.9, 0.5, z] })
-          subPostXf.push({ pos: [subX + 1.9, 0.5, z] })
+          subPostXf.push({ pos: [subX - 3.2, 0.5, z] })
+          subPostXf.push({ pos: [subX + 3.2, 0.5, z] })
         }
-        for (const sxp of [-1.3, 0, 1.3]) subPostXf.push({ pos: [subX + sxp, 0.5, subZ + 2.6] })
         instAdd(subPostGeo, railMat, subPostXf)
-        for (const rxp of [-1.9, 1.9]) {
-          const rail = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.08, 5.2), railMat)
-          rail.position.set(subX + rxp, 1.0, subZ)
+        for (const rxp of [-3.2, 3.2]) {
+          const rail = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.08, 3.4), railMat)
+          rail.position.set(subX + rxp, 1.0, subZ - 0.7)
           mAdd(rail)
         }
-        // Iron grating seals the entrance (underground not yet built). Flush with the
-        // ground so the player walks straight over it with no awkward invisible block.
-        const grateMesh = new THREE.Mesh(
-          new THREE.BoxGeometry(3.2, 0.08, 4.4),
-          new THREE.MeshStandardMaterial({ color: 0x2a2c32, roughness: 0.45, metalness: 0.75 }),
-        )
-        grateMesh.position.set(subX, 0.04, subZ)
-        mAdd(grateMesh)
-        // Signpost: two posts + a sign beam pointing down into the station.
+        // Signpost: two posts + a sign beam, on the NORTH side facing the scramble (so it does
+        // not stand in the descent path). The actual stair shaft is built in the 地下鉄 block.
         for (const pxp of [subX - 1.6, subX + 1.6]) {
           const p = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 3.2, 6), railMat)
-          p.position.set(pxp, 1.6, subZ + 2.7)
+          p.position.set(pxp, 1.6, subZ - 3.0)
           mAdd(p)
         }
         const subSignTex = makeSignTex({
@@ -25235,7 +25280,7 @@ export default function ThreeWorld({
             side: THREE.DoubleSide,
           }),
         )
-        subSign.position.set(subX, 3.0, subZ + 2.7)
+        subSign.position.set(subX, 3.0, subZ - 3.0)
         add(subSign)
         // ── Sign-light pools on the wet asphalt (additive discs under the bright
         // clusters — the neon flood "reflecting" on the deck). Two colour sets. ──
@@ -25854,6 +25899,379 @@ export default function ThreeWorld({
         fuzetsuDome.frustumCulled = false
         add(fuzetsuDome)
 
+        // ══ 地下鉄 (subway) skeleton — Phase A: descending stair + concourse shell ══════════
+        // A self-contained UNDERGROUND space below the スクランブル北 entrance (-13,9). Every
+        // mesh sits at y ≤ 3 (the small mouth canopy) and mostly y ≤ SUBWAY_FLOOR_Y; every AABB
+        // uses y0 < 0, so the height-aware sweep keeps it independent of the surface (y0=0) map.
+        // Quads are DoubleSide (winding never matters for an enclosed shell). Reuses the local
+        // mAdd merge buckets → ~3 extra draw calls for the whole shell.
+        {
+          const sx = SUB_STAIR_X
+          const shw = SUB_STAIR_HW
+          const sz0 = SUB_STAIR_Z0
+          const sz1 = SUB_STAIR_Z1
+          const fy = SUBWAY_FLOOR_Y
+          const cy = SUBWAY_CEIL_Y
+          const cc = SUB_CONCOURSE
+          const subDeckMat = new THREE.MeshStandardMaterial({
+            color: 0x41444c,
+            roughness: 0.92,
+            metalness: 0.05,
+            side: THREE.DoubleSide,
+          })
+          const subWallMat = new THREE.MeshStandardMaterial({
+            color: 0x6e727c, // off-white subway tile
+            roughness: 0.68,
+            metalness: 0.1,
+            side: THREE.DoubleSide,
+          })
+          const subCeilMat = new THREE.MeshStandardMaterial({
+            color: 0x2c2e34,
+            roughness: 0.95,
+            metalness: 0,
+            side: THREE.DoubleSide,
+          })
+          // One mAdd'd quad from 4 corners (CCW), with uv + normals so the buckets merge cleanly.
+          const subQuad = (
+            mat: THREE.Material,
+            p0: [number, number, number],
+            p1: [number, number, number],
+            p2: [number, number, number],
+            p3: [number, number, number],
+          ) => {
+            const g = new THREE.BufferGeometry()
+            g.setAttribute(
+              "position",
+              new THREE.BufferAttribute(
+                new Float32Array([
+                  p0[0],
+                  p0[1],
+                  p0[2],
+                  p1[0],
+                  p1[1],
+                  p1[2],
+                  p2[0],
+                  p2[1],
+                  p2[2],
+                  p0[0],
+                  p0[1],
+                  p0[2],
+                  p2[0],
+                  p2[1],
+                  p2[2],
+                  p3[0],
+                  p3[1],
+                  p3[2],
+                ]),
+                3,
+              ),
+            )
+            g.setAttribute(
+              "uv",
+              new THREE.BufferAttribute(new Float32Array([0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1]), 2),
+            )
+            g.computeVertexNormals()
+            mAdd(new THREE.Mesh(g, mat))
+          }
+          // ── Descent stair: ramp floor (0 → -12), a ceiling 3u above it (constant headroom; a
+          //    small canopy pokes up at the open mouth), and two side walls (the ONLY collision). ──
+          subQuad(
+            subDeckMat,
+            [sx - shw, 0, sz0],
+            [sx + shw, 0, sz0],
+            [sx + shw, fy, sz1],
+            [sx - shw, fy, sz1],
+          )
+          subQuad(
+            subCeilMat,
+            [sx - shw, 3, sz0],
+            [sx + shw, 3, sz0],
+            [sx + shw, fy + 3, sz1],
+            [sx - shw, fy + 3, sz1],
+          )
+          for (const side of [-1, 1] as const) {
+            const wx = sx + side * shw
+            subQuad(subWallMat, [wx, 0, sz0], [wx, fy, sz1], [wx, fy + 3, sz1], [wx, 3, sz0])
+            // Segment the side-wall AABB so its TOP follows the descending ceiling: only the
+            // shallow top reaches the surface (the mouth canopy); deeper segments are
+            // underground-only, so no buried wall bleeds into the 道玄坂 corridor the stair
+            // passes over near its bottom. Keeps the DESCENDING player from leaving the band.
+            const SEGS = 8
+            for (let i = 0; i < SEGS; i++) {
+              const za = sz0 + (i / SEGS) * (sz1 - sz0)
+              const zb = sz0 + ((i + 1) / SEGS) * (sz1 - sz0)
+              const zc = (za + zb) / 2
+              const topH = (fy * (zc - sz0)) / (sz1 - sz0) + 3.5 // local ceiling top at this segment
+              addShibuyaAABB(wx, zc, 0.25, (zb - za) / 2, topH, -15)
+            }
+          }
+          // ── Concourse shell: flat deck (-12) + low ceiling (-5.5) + perimeter walls. The north
+          //    wall is split around the stair opening x∈[owW,owE]; a lintel caps it above headroom. ──
+          subQuad(
+            subDeckMat,
+            [cc.x0, fy, cc.z0],
+            [cc.x1, fy, cc.z0],
+            [cc.x1, fy, cc.z1],
+            [cc.x0, fy, cc.z1],
+          )
+          subQuad(
+            subCeilMat,
+            [cc.x0, cy, cc.z0],
+            [cc.x1, cy, cc.z0],
+            [cc.x1, cy, cc.z1],
+            [cc.x0, cy, cc.z1],
+          )
+          const sub_wall = (
+            x0: number,
+            zc0: number,
+            x1: number,
+            zc1: number,
+            yTop: number,
+            yBot: number,
+          ) => {
+            subQuad(subWallMat, [x0, yBot, zc0], [x1, yBot, zc1], [x1, yTop, zc1], [x0, yTop, zc0])
+            addShibuyaAABB(
+              (x0 + x1) / 2,
+              (zc0 + zc1) / 2,
+              Math.max(0.25, Math.abs(x1 - x0) / 2),
+              Math.max(0.25, Math.abs(zc1 - zc0) / 2),
+              -5,
+              -14,
+            )
+          }
+          // south wall — split around the central passage to the platform (x∈[pasW,pasE]); the
+          // platform ceiling is the SAME y, so the passage is full-height (no lintel needed).
+          const pasW = -17
+          const pasE = -9
+          sub_wall(cc.x0, cc.z1, pasW, cc.z1, cy, fy) // south-west of the passage
+          sub_wall(pasE, cc.z1, cc.x1, cc.z1, cy, fy) // south-east of the passage
+          sub_wall(cc.x1, cc.z0, cc.x1, cc.z1, cy, fy) // east
+          sub_wall(cc.x0, cc.z0, cc.x0, cc.z1, cy, fy) // west
+          const owW = sx - shw
+          const owE = sx + shw
+          sub_wall(cc.x0, cc.z0, owW, cc.z0, cy, fy) // north — west of the stair opening
+          sub_wall(owE, cc.z0, cc.x1, cc.z0, cy, fy) // north — east of the stair opening
+          // Lintel over the opening (above the player's head → no AABB).
+          subQuad(
+            subWallMat,
+            [owW, fy + 3, cc.z0],
+            [owE, fy + 3, cc.z0],
+            [owE, cy, cc.z0],
+            [owW, cy, cc.z0],
+          )
+
+          // ══ Phase B: concourse dressing — pillars + 改札 gates + 蛍光灯 + 案内 signs ══════
+          // Structural pillars (flank the central stair→platform lane, which stays open). Each
+          // merges into subWallMat; its AABB is underground-only.
+          const pillarH = cy - fy
+          for (const [px, pz] of [
+            [-22, 37],
+            [-22, 49],
+            [-4, 37],
+            [-4, 49],
+          ] as const) {
+            const pil = new THREE.Mesh(new THREE.BoxGeometry(1.4, pillarH, 1.4), subWallMat)
+            pil.position.set(px, (fy + cy) / 2, pz)
+            mAdd(pil)
+            addShibuyaAABB(px, pz, 0.8, 0.8, -5, -14)
+          }
+          // 改札 (ticket gates): a row of waist-high machines at z=42 with walk-through lanes
+          // between them; a wide central gap (x∈[-17,-9]) keeps the stair→platform path open.
+          const gateMat = new THREE.MeshStandardMaterial({
+            color: 0x8a9098,
+            roughness: 0.5,
+            metalness: 0.4,
+          })
+          const gateLampGeo = new THREE.SphereGeometry(0.11, 6, 5)
+          const gateLampMat = new THREE.MeshBasicMaterial({ color: 0x35e878, toneMapped: false })
+          const gateLampXf: Xf[] = []
+          for (const gx of [-25, -21, -17, -9, -5, -1] as const) {
+            const g = new THREE.Mesh(new THREE.BoxGeometry(0.7, 1.3, 1.7), gateMat)
+            g.position.set(gx, fy + 0.65, 42)
+            mAdd(g)
+            addShibuyaAABB(gx, 42, 0.45, 0.95, -10.6, -14) // waist-high; lanes between are open
+            gateLampXf.push({ pos: [gx, fy + 1.4, 42 - 0.7] })
+          }
+          instAdd(gateLampGeo, gateLampMat, gateLampXf)
+          // 蛍光灯: emissive ceiling tubes (self-lit fluorescent look) + 2 dim PointLights (no
+          // shadow — FPS) for floor pooling. The emissive panels carry the look; lights stay minimal.
+          const fluoMat = new THREE.MeshStandardMaterial({
+            color: 0xeaf2ff,
+            emissive: 0xcfe0ff,
+            emissiveIntensity: 1.5,
+            roughness: 1,
+          })
+          for (const [lx, lz] of [
+            [-18, 37],
+            [-18, 49],
+            [-8, 37],
+            [-8, 49],
+          ] as const) {
+            const tube = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.18, 5), fluoMat)
+            tube.position.set(lx, cy - 0.22, lz)
+            mAdd(tube)
+          }
+          for (const [lx, lz] of [
+            [-18, 42],
+            [-8, 42],
+          ] as const) {
+            const pl = new THREE.PointLight(0xdfe8ff, 0.6, 22, 1.7)
+            pl.position.set(lx, -7.5, lz)
+            pl.castShadow = false
+            add(pl)
+          }
+          // 案内 signs: "中央改札" over the gates (faces the arriving player) + "ホーム ▼" pointing
+          // south toward the platform. DoubleSide so readable from both approaches.
+          const subBoardSign = (t1: string, t2: string, zc: number, w: number): THREE.Mesh => {
+            const tex = makeSignTex({
+              kind: "board",
+              w: 5,
+              h: 1.4,
+              bg: "#0a1426",
+              t1,
+              c1: "#cfe0ff",
+              t2,
+              c2: "#7fe3a8",
+              bar: "#16335c",
+            })
+            const sign = new THREE.Mesh(
+              new THREE.PlaneGeometry(w, w * 0.3),
+              new THREE.MeshBasicMaterial({ map: tex, toneMapped: false, side: THREE.DoubleSide }),
+            )
+            sign.position.set(-13, cy - 0.9, zc)
+            add(sign)
+            return sign
+          }
+          subBoardSign("中央改札", "CENTRAL GATE", 41, 5)
+          subBoardSign("ホーム ▼", "TO PLATFORM", 52, 4.4)
+
+          // ══ Phase C: platform (STEP3 arena) — deck + track pit + tunnel mouths + 点字ブロック ══
+          // Reached through the south passage (pasW..pasE). An open ~30×26 deck (the future boss
+          // arena) with a 1.5u track pit along the south edge (fall in; the ramp-snap climbs out).
+          const pf = SUB_PLATFORM
+          const tr = SUB_TRACK
+          const ty = SUBWAY_TRACK_Y
+          subQuad(
+            subDeckMat,
+            [pf.x0, fy, pf.z0],
+            [pf.x1, fy, pf.z0],
+            [pf.x1, fy, tr.z0],
+            [pf.x0, fy, tr.z0],
+          ) // deck
+          subQuad(
+            subDeckMat,
+            [tr.x0, ty, tr.z0],
+            [tr.x1, ty, tr.z0],
+            [tr.x1, ty, tr.z1],
+            [tr.x0, ty, tr.z1],
+          ) // track bed
+          subQuad(
+            subCeilMat,
+            [pf.x0, cy, pf.z0],
+            [pf.x1, cy, pf.z0],
+            [pf.x1, cy, pf.z1],
+            [pf.x0, cy, pf.z1],
+          ) // ceiling
+          sub_wall(pf.x0, pf.z0, pf.x0, pf.z1, cy, ty) // west (down to the track floor)
+          sub_wall(pf.x1, pf.z0, pf.x1, pf.z1, cy, ty) // east
+          sub_wall(pf.x0, pf.z1, pf.x1, pf.z1, cy, ty) // south — back wall behind the track
+          // 点字ブロック: a yellow tactile warning line on the deck at the platform edge (z≈79.4).
+          const tactileMat = new THREE.MeshStandardMaterial({
+            color: 0xf2c200,
+            emissive: 0x5a4600,
+            emissiveIntensity: 0.7,
+            roughness: 0.85,
+          })
+          const tactile = new THREE.Mesh(
+            new THREE.BoxGeometry(pf.x1 - pf.x0, 0.06, 0.5),
+            tactileMat,
+          )
+          tactile.position.set((pf.x0 + pf.x1) / 2, fy + 0.05, tr.z0 - 0.6)
+          mAdd(tactile)
+          // Two metal rails on the track bed (run E-W, the line's length).
+          const railLineMat = new THREE.MeshStandardMaterial({
+            color: 0x9a9ea6,
+            roughness: 0.4,
+            metalness: 0.8,
+          })
+          for (const rzp of [-1.4, 1.4]) {
+            const rl = new THREE.Mesh(new THREE.BoxGeometry(tr.x1 - tr.x0, 0.12, 0.12), railLineMat)
+            rl.position.set((tr.x0 + tr.x1) / 2, ty + 0.12, (tr.z0 + tr.z1) / 2 + rzp)
+            mAdd(rl)
+          }
+          // トンネルの暗い口: dark panels at the W/E track ends — the line vanishing into black
+          // (the depth reads as fog-black). The perimeter walls stay SOLID behind → visual only.
+          const tunnelMat = new THREE.MeshBasicMaterial({
+            color: 0x040406,
+            side: THREE.DoubleSide,
+            fog: false,
+          })
+          for (const tx of [tr.x0 + 0.2, tr.x1 - 0.2] as const) {
+            const mouth = new THREE.Mesh(new THREE.PlaneGeometry(tr.z1 - tr.z0, 5), tunnelMat)
+            mouth.rotation.y = Math.PI / 2
+            mouth.position.set(tx, ty + 2.2, (tr.z0 + tr.z1) / 2)
+            add(mouth)
+          }
+          // Platform signage: a hanging 駅名標 over the deck.
+          const pfTex = makeSignTex({
+            kind: "board",
+            w: 5,
+            h: 1.4,
+            bg: "#0a1426",
+            t1: "渋谷 / SHIBUYA",
+            c1: "#cfe0ff",
+            t2: "のりば 1 ・ PLATFORM 1",
+            c2: "#7fe3a8",
+            bar: "#16335c",
+          })
+          const pfSign = new THREE.Mesh(
+            new THREE.PlaneGeometry(6, 1.7),
+            new THREE.MeshBasicMaterial({ map: pfTex, toneMapped: false, side: THREE.DoubleSide }),
+          )
+          pfSign.position.set((pf.x0 + pf.x1) / 2, cy - 1.0, 68)
+          add(pfSign)
+
+          // ══ Phase E: atmosphere — red 非常灯 (flicker) + platform-depths hint glow ══════════
+          // Red emergency lamps on the walls — ONE shared material (merged → 1 draw call) that
+          // flickers in sync (a building-wide power flicker) in updateShibuyaSubwayAtmo.
+          const redLampMat = new THREE.MeshStandardMaterial({
+            color: 0x2a0608,
+            emissive: 0xff1420,
+            emissiveIntensity: 0.7,
+          })
+          subwayRedMats = [redLampMat]
+          for (const [lx, ly, lz] of [
+            [-27.6, -7, 38],
+            [1.6, -7, 38],
+            [-27.6, -7, 62],
+            [1.6, -7, 62],
+            [-13, -6.2, 86],
+          ] as const) {
+            const lamp = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.5, 0.25), redLampMat)
+            lamp.position.set(lx, ly, lz)
+            mAdd(lamp) // merge → 1 draw call for all 5 lamps
+          }
+          // Platform-depths hint: a dim red glow filling the track / tunnel maw at the south end —
+          // "ホームの奥に何かいる" — slow ominous pulse (opacity driven each frame). Additive so it
+          // reads as a faint light in the dark; NOT a creature (the STEP3 中ボス lands next time).
+          subwayHintMat = new THREE.MeshBasicMaterial({
+            color: 0xff2018,
+            transparent: true,
+            opacity: 0.14,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false,
+            toneMapped: false,
+            fog: false,
+            side: THREE.DoubleSide,
+          })
+          const hint = new THREE.Mesh(
+            new THREE.PlaneGeometry(pf.x1 - pf.x0 - 2, 4.5),
+            subwayHintMat,
+          )
+          hint.position.set((pf.x0 + pf.x1) / 2, ty + 2.0, tr.z1 - 0.3)
+          add(hint)
+        }
+
         flushMerges() // collapse all static buckets → one mesh per material
         scene.add(group)
         shibuyaMapMeshesRef.current.push(group)
@@ -25903,6 +26321,9 @@ export default function ThreeWorld({
         clearShibuyaCivilians() // STEP2-B: dispose 一般人 + reveal flashes with the map
         SHIBUYA_AABBS.length = 0 // drop the SHIBUYA collision boxes on teardown
         shibuyaAnim = null // animated handles die with the disposed meshes (Phase F)
+        subwayRedMats = [] // 地下鉄 atmosphere handles die with the map (Phase E)
+        subwayHintMat = null
+        subwayWasUnder = false
         // Restore the night sky (fog + base-light dimming restore via clearOsakaMap /
         // huntClearStage, which run alongside this in the teardown).
         if (shibuyaBgWasSaved) {
@@ -25936,6 +26357,29 @@ export default function ThreeWorld({
       // Per-frame SHIBUYA scenery animation (Phase F): big-vision screen scroll,
       // seal-altar spin+pulse, neon flicker, and ~3×/s distance culling of the
       // off-centre detail. No-op until buildShibuyaMap publishes shibuyaAnim.
+      // 地下鉄 Phase E atmosphere: flicker the red 非常灯, pulse the platform-depths hint glow,
+      // and on entering the subway drop a one-time「地下にも歪の気配…」 + occasional distant groans
+      // (ホームの奥に何かいる). Self-gates on an empty handle set → no-op off-stage / pre-build.
+      function updateShibuyaSubwayAtmo() {
+        if (subwayRedMats.length === 0) return
+        const t = Date.now() * 0.001
+        const flick = Math.sin(t * 7.3) > -0.72 ? 1 : 0.28 // erratic dropouts
+        const base = 0.55 + 0.4 * Math.sin(t * 1.4)
+        for (const m of subwayRedMats)
+          m.emissiveIntensity = base * flick * (1 + 0.12 * Math.sin(t * 21))
+        if (subwayHintMat) subwayHintMat.opacity = 0.1 + 0.12 * (0.5 + 0.5 * Math.sin(t * 0.7))
+        const under = focalPoint.y < SUBWAY_LEVEL_Y
+        if (under && !subwayWasUnder) {
+          showNotification("地下にも歪の気配…")
+          SOUNDS.zombieGroan() // 封絶 muffled by the earth — a low groan as you descend
+          subwayNextGroan = Date.now() + 6000 + Math.random() * 5000
+        }
+        subwayWasUnder = under
+        if (under && Date.now() >= subwayNextGroan) {
+          SOUNDS.zombieGroan() // distant groan from the depths — something waits at the platform
+          subwayNextGroan = Date.now() + 8000 + Math.random() * 7000
+        }
+      }
       function updateShibuyaMap(dt: number) {
         const a = shibuyaAnim
         if (!a) return
@@ -26327,12 +26771,16 @@ export default function ThreeWorld({
       // Centre-/aim-ray hitscan: damage the nearest 歪 body the ray hits, unless a wall (at
       // wallDist) is nearer. Returns true if a 歪 was hit. Used by fire() + the HUNT guns +
       // the 破魔砲 beam — every aimed weapon reaches 歪 through this one path.
+      // True while the player is down in the subway. Surface 歪 / 楔 / 一般人 must NOT interact
+      // across levels — their contact / attack / reveal use XZ-only distance, which would reach
+      // through the floor & ceiling. Gates every surface-combat entry point below (Phase D).
+      const playerInSubway = () => focalPoint.y < SUBWAY_LEVEL_Y
       function hitscanShibuyaEnemy(
         rc: THREE.Raycaster,
         dmg: number,
         wallDist: number | null,
       ): boolean {
-        if (shibuyaEnemiesRef.current.length === 0) return false
+        if (shibuyaEnemiesRef.current.length === 0 || playerInSubway()) return false
         const parts: THREE.Object3D[] = []
         for (const h of shibuyaEnemiesRef.current) {
           if (!h.alive) continue
@@ -26358,7 +26806,7 @@ export default function ThreeWorld({
         range: number,
         dmg: number,
       ) {
-        if (shibuyaEnemiesRef.current.length === 0) return
+        if (shibuyaEnemiesRef.current.length === 0 || playerInSubway()) return
         for (const h of shibuyaEnemiesRef.current) {
           if (!h.alive) continue
           const dx = h.group.position.x - focalPoint.x
@@ -26379,7 +26827,7 @@ export default function ThreeWorld({
         radius: number,
         dmgAt: (d: number) => number,
       ) {
-        if (shibuyaEnemiesRef.current.length === 0) return
+        if (shibuyaEnemiesRef.current.length === 0 || playerInSubway()) return
         for (const h of shibuyaEnemiesRef.current) {
           if (!h.alive) continue
           const d = Math.hypot(h.group.position.x - cx, 1.7 - cy, h.group.position.z - cz)
@@ -26430,6 +26878,10 @@ export default function ThreeWorld({
             }
             continue
           }
+          // Phase D: while the player is down in the subway, surface 歪 lose them — no seek and
+          // no contact claw (contact uses XZ distance only and would otherwise hit THROUGH the
+          // floor). They idle in place until the player resurfaces.
+          if (playerInSubway()) continue
           // Distance to the player on the ground plane.
           const dx = focalPoint.x - h.group.position.x
           const dz = focalPoint.z - h.group.position.z
@@ -26618,7 +27070,7 @@ export default function ThreeWorld({
       // from fire() + meleeAttack with the weapon's damage; no-op off-stage (empty pool).
       function damageShibuyaWedgeNear(dmg: number): boolean {
         const list = shibuyaWedgesRef.current
-        if (list.length === 0) return false
+        if (list.length === 0 || playerInSubway()) return false // 楔 are surface objects (Phase D)
         let hitAny = false
         for (const w of list) {
           if (w.destroyed) continue
@@ -26869,7 +27321,7 @@ export default function ThreeWorld({
       // CIVILIAN HIT. Returns true if one was hit. No-op off-stage (empty pool).
       function hitscanShibuyaCivilian(rc: THREE.Raycaster, wallDist: number | null): boolean {
         const list = shibuyaCiviliansRef.current
-        if (list.length === 0) return false
+        if (list.length === 0 || playerInSubway()) return false // surface-only (Phase D)
         const parts: THREE.Object3D[] = []
         for (const c of list) {
           if (!c.alive) continue
@@ -26911,8 +27363,9 @@ export default function ThreeWorld({
           const dx = focalPoint.x - c.group.position.x
           const dz = focalPoint.z - c.group.position.z
           const dist = Math.hypot(dx, dz) || 1
-          // 擬態解除: a disguised one tears open when the player gets close.
-          if (c.disguised && dist < SHIBUYA_CIVILIAN_REVEAL) {
+          // 擬態解除: a disguised one tears open when the player gets close — but NOT across levels
+          // (a player at the stairwell XZ but underground must not trip a 擬態 above; Phase D).
+          if (c.disguised && dist < SHIBUYA_CIVILIAN_REVEAL && !playerInSubway()) {
             revealDisguisedCivilian(c)
             disposeShibuyaCivilian(c)
             list.splice(i, 1)
@@ -30399,6 +30852,7 @@ export default function ThreeWorld({
           updateOsakaBikes(dt) // 鉄輪部隊 (Block B): track riders + squad-clear bonus
           updateOsakaMap(dt) // OSAKA scenery animation (neon, lanterns, marquee…)
           updateShibuyaMap(dt) // SHIBUYA scenery (screen scroll, seal pulse, neon)
+          updateShibuyaSubwayAtmo() // SHIBUYA 地下鉄 atmosphere (red 非常灯 flicker, depths groan)
           updateShibuyaWedges(dt) // SHIBUYA STEP2-B 楔 spin/pulse/top-up (no-op when empty)
           updateShibuyaEnemies(dt) // SHIBUYA STEP2-A 歪 (no-op when the pool is empty)
           updateShibuyaCivilians(dt) // SHIBUYA STEP2-B 一般人 + 擬態 (no-op when empty)
@@ -30571,6 +31025,15 @@ export default function ThreeWorld({
             if (slopeY > 0) {
               onDgzSlope = true
               if (slopeY > groundY) groundY = slopeY
+            }
+            // 地下鉄: the subway floor (descending stair / concourse deck) OVERRIDES the surface
+            // when the player is on the stair band or already underground (curY < SUBWAY_LEVEL_Y).
+            // NaN ⇒ stay on the surface. Reuse the ramp-snap (onDgzSlope) so the descent glues to
+            // the stair (no airborne/fall) and the future track-pit step is walkable both ways.
+            const subY = subwayGroundY(lx, lz, refs.focalPoint.y)
+            if (!Number.isNaN(subY)) {
+              groundY = subY
+              onDgzSlope = true
             }
             // 文化村通り (ranged) 歪 の咆哮デバフ: 照準を緩く揺さぶる (方向転換)。Shibuya 限定。
             if (shibuyaDisorientT > 0) {
