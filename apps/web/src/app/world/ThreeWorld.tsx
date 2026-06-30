@@ -27238,7 +27238,8 @@ export default function ThreeWorld({
         if (hitPoint) spawnBlood(hitPoint)
         if (Date.now() < b.invulnUntil) return // i-frames: feedback but no HP loss
         b.hp -= dmg * (weak ? SHIBUYA_BOSS_WEAK_MULT : 1)
-        b.hitFlash = 0.1
+        b.hitFlash = weak ? 0.18 : 0.1 // a stronger flash on a core hit
+        if (weak && hitPoint) spawnExplosion(hitPoint, true) // distinct spark → teaches the weakpoint
         SOUNDS.hit()
         if (b.hp <= 0) {
           b.hp = 0
@@ -27310,6 +27311,8 @@ export default function ThreeWorld({
           spawnExplosion(new THREE.Vector3(c.x, c.y + 2.5, c.z), false, true)
         }
         disposeShibuyaBoss()
+        scoreRef.current += 3000 // 歪の核 撃破ボーナス
+        setScore(scoreRef.current)
         try {
           localStorage.setItem("shibuya_step3_clear", "1")
         } catch {
@@ -27467,6 +27470,7 @@ export default function ThreeWorld({
           b.invulnUntil = now + 900
           b.coreMat.color.setHex(np === 3 ? 0xff3a2a : 0xffae3a) // core reddens as it awakens
           SOUNDS.bossRoar()
+          showNotification(np === 3 ? "歪の核 — 覚醒！" : `歪の核 — 第${np}形態`)
         }
         // ── Per-phase TELEGRAPHED attack state machine (Phase C): idle → telegraph → active →
         //    recover. Every attack shows a 予兆 first (no unfair instakill). Frozen during i-frames. ──
