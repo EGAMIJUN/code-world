@@ -1717,6 +1717,67 @@ interface ShibuyaEnemy {
   aggro: boolean // ambush: false until the player trips it, then it bursts
   flankSign: number // flank: which side this 歪 circles to (±1)
   lastScream: number // ranged: ms throttle on the disorient scream
+  // ── STEP3 field — a 歪 summoned by the 歪の核 boss lives UNDERGROUND (subway platform, y=-12)
+  //    instead of the surface. Defaulted false by makeHizumi (all area 歪 are surface). ──
+  underground: boolean
+}
+
+// ── SHIBUYA STEP3: 歪の核 (Yugami Core) mid-boss — the subway-platform arena boss ───────────
+// The 封絶崩壊 (all 7 楔 down) connects here: a 大幹部-class 歪 that rules the lesser 歪 rises on
+// the 地下鉄ホーム. Replicates the OSAKA mid-boss STRUCTURE (HP-band phases, telegraphed attacks,
+// throttled HP HUD, self-gated update) into a FULLY SEPARATE Shibuya system — the OSAKA
+// osakaMidBossRef / 天狗 are never touched. Hittable by EVERY weapon (wired into the shared 歪
+// hit helpers, not a private path like OSAKA's mid-boss) + a weakpoint core. isShibuyaStage-only.
+const SHIBUYA_BOSS_HP = 3200 // a touch above OSAKA 天狗 (2500) for a tougher 苦戦感
+const SHIBUYA_BOSS_WEAK_MULT = 2.5 // aimed hits on the glowing core / head deal ×this
+const SHIBUYA_BOSS_SCALE = 1.8 // ~1.8× the 歪 (≈3.3u) → ~6u tall, towering over the 1.8 player
+const SHIBUYA_BOSS_DEATH_SEC = 2.4 // long dramatic 霧散 on defeat
+const SHIBUYA_BOSS_DRIFT = 2.0 // m/s idle drift toward the player (kept inside the arena)
+const SHIBUYA_BOSS_DASH_SPEED = 13 // m/s charge during the dash attack
+// Per-attack timing (s) + range/dmg. Every attack TELEGRAPHS first (予兆) — no unfair instakill.
+// Keyed by a finite union so SHIBUYA_BOSS_ATK[kind] is always defined (noUncheckedIndexedAccess).
+type BossAtkKind = "swing" | "dash" | "darkbolt" | "summon" | "omni"
+const SHIBUYA_BOSS_ATK: Record<
+  BossAtkKind,
+  { tele: number; active: number; recover: number; range: number; dmg: number }
+> = {
+  swing: { tele: 0.7, active: 0.25, recover: 0.5, range: 5.5, dmg: 26 }, // melee arc in front
+  dash: { tele: 0.9, active: 0.55, recover: 0.6, range: 4, dmg: 30 }, // charge at the player
+  darkbolt: { tele: 0.6, active: 0.2, recover: 0.7, range: 0, dmg: 22 }, // 3 ranged 闇弾
+  summon: { tele: 0.8, active: 0.2, recover: 0.8, range: 0, dmg: 0 }, // 1–2 雑魚歪
+  omni: { tele: 1.1, active: 0.3, recover: 0.8, range: 9, dmg: 34 }, // omnidirectional shockwave
+}
+// Which attacks each HP-band phase may use (Phase3 = 覚醒, faster + omnidirectional).
+const SHIBUYA_BOSS_PHASE_ATKS: Record<number, BossAtkKind[]> = {
+  1: ["swing", "dash"],
+  2: ["swing", "dash", "darkbolt", "summon"],
+  3: ["swing", "dash", "darkbolt", "omni"],
+}
+const SHIBUYA_BOLT_SPEED = 14 // 闇弾 projectile speed
+const SHIBUYA_BOLT_DMG = 22
+type ShibuyaBossPhase = 1 | 2 | 3
+interface ShibuyaBoss {
+  group: THREE.Group
+  hp: number
+  maxHp: number
+  phase: ShibuyaBossPhase
+  bodyMat: THREE.MeshStandardMaterial
+  eyeMat: THREE.MeshBasicMaterial
+  coreMat: THREE.MeshBasicMaterial // the weakpoint core glow (pulses; brightens on phase-up)
+  hover: number // animation phase accumulator
+  // attack state machine: idle → telegraph → active → recover → idle
+  atkState: "idle" | "telegraph" | "active" | "recover"
+  atkKind: BossAtkKind // the chosen attack while telegraph/active/recover
+  atkT: number // seconds elapsed in the current atkState
+  atkCd: number // seconds until the next attack while idle
+  tele: THREE.Mesh | null // the live telegraph decal (disposed when the attack fires)
+  dashHit: boolean // dash deals contact damage once per charge
+  dashVx: number // dash velocity (active dash)
+  dashVz: number
+  invulnUntil: number // ms — brief i-frames on spawn + each phase transition
+  hitFlash: number // s — emissive kick after a hit
+  lastSummon: number // ms — summon throttle
+  dying: number // s of defeat 霧散 remaining (>0 → dying)
 }
 
 // ── SHIBUYA STEP2-B: 封絶 / 楔 (wedge) / per-area combat ────────────────────────────
@@ -3321,8 +3382,13 @@ export default function ThreeWorld({
   const shibuyaProgressRef = useRef({
     active: false,
     wedgesDestroyed: 0,
-    collapse: false, // true once all 7 楔 are down (封絶崩壊 → STEP3 hook); handoff via shibuyaClearAtRef
+    collapse: false, // true once all 7 楔 are down (封絶崩壊)
+    step3: false, // STEP3 armed after 封絶崩壊 — the 歪の核 awaits on the 地下鉄ホーム
+    bossSpawned: false, // the 歪の核 has been summoned (so it spawns once)
   })
+  // SHIBUYA STEP3: the 歪の核 mid-boss (null when not in the fight). Fully separate from the
+  // OSAKA mid-boss (osakaMidBossRef) — never touched. + its HP-bar HUD state (name + pct + phase).
+  const shibuyaBossRef = useRef<ShibuyaBoss | null>(null)
   // SHIBUYA STEP2-B: 一般人 (civilians, some 擬態 歪). Separate pool — never `enemies` / 歪.
   const shibuyaCiviliansRef = useRef<ShibuyaCivilian[]>([])
   const shibuyaNextCivIdRef = useRef(0)
@@ -3783,6 +3849,8 @@ export default function ThreeWorld({
   const [shibuyaWedgeStat, setShibuyaWedgeStat] = useState({ destroyed: 0, total: 0 })
   // SHIBUYA STEP2-B: key of the last CIVILIAN HIT (0 = hidden) → drives the penalty overlay.
   const [shibuyaCivHit, setShibuyaCivHit] = useState(0)
+  // SHIBUYA STEP3: 歪の核 boss HP bar (pct + phase, null when no boss). Separate from osakaMidHud.
+  const [shibuyaBossHud, setShibuyaBossHud] = useState<{ pct: number; phase: number } | null>(null)
 
   useEffect(() => {
     setIsMobile(navigator.maxTouchPoints > 0)
@@ -26320,6 +26388,7 @@ export default function ThreeWorld({
         clearShibuyaEnemies() // STEP2-A: dispose any live 歪 with the map
         clearShibuyaWedges() // STEP2-B: dispose the 7 楔 with the map
         clearShibuyaCivilians() // STEP2-B: dispose 一般人 + reveal flashes with the map
+        disposeShibuyaBoss() // STEP3: dispose the 歪の核 boss with the map (no-op when absent)
         SHIBUYA_AABBS.length = 0 // drop the SHIBUYA collision boxes on teardown
         shibuyaAnim = null // animated handles die with the disposed meshes (Phase F)
         subwayRedMats = [] // 地下鉄 atmosphere handles die with the map (Phase E)
@@ -26651,6 +26720,7 @@ export default function ThreeWorld({
           aggro: false,
           flankSign: Math.random() < 0.5 ? -1 : 1,
           lastScream: 0,
+          underground: false, // surface 歪 by default; boss summons set this true (STEP3)
         }
       }
 
@@ -26781,21 +26851,31 @@ export default function ThreeWorld({
         dmg: number,
         wallDist: number | null,
       ): boolean {
-        if (shibuyaEnemiesRef.current.length === 0 || playerInSubway()) return false
-        const parts: THREE.Object3D[] = []
-        for (const h of shibuyaEnemiesRef.current) {
-          if (!h.alive) continue
-          h.group.traverse((o) => {
-            if (o instanceof THREE.Mesh && o.userData.hizumi) parts.push(o)
-          })
+        let hit = false
+        // 歪 — surface only (when the player is underground the surface 歪 sit above the ceiling).
+        if (shibuyaEnemiesRef.current.length > 0) {
+          const parts: THREE.Object3D[] = []
+          for (const h of shibuyaEnemiesRef.current) {
+            if (!h.alive || h.underground !== playerInSubway()) continue // same level only
+            h.group.traverse((o) => {
+              if (o instanceof THREE.Mesh && o.userData.hizumi) parts.push(o)
+            })
+          }
+          const ph = rc.intersectObjects(parts, false)[0]
+          if (ph && !(wallDist != null && wallDist < ph.distance)) {
+            const owner = shibuyaEnemiesRef.current.find(
+              (e) => e.id === ph.object.userData.hizumiId,
+            )
+            if (owner) {
+              damageShibuyaEnemy(owner, dmg, ph.point)
+              hit = true
+            }
+          }
         }
-        const hit = rc.intersectObjects(parts, false)[0]
-        if (!hit) return false
-        if (wallDist != null && wallDist < hit.distance) return false // occluded by cover
-        const owner = shibuyaEnemiesRef.current.find((e) => e.id === hit.object.userData.hizumiId)
-        if (!owner) return false
-        damageShibuyaEnemy(owner, dmg, hit.point)
-        return true
+        // 歪の核 boss (STEP3 underground arena) — the SAME aim-ray reaches it, so EVERY weapon
+        // that calls this also hits the boss (no private path like OSAKA's mid-boss).
+        if (hitscanShibuyaBoss(rc, dmg, wallDist)) hit = true
+        return hit
       }
 
       // Forward fan-shaped melee against 歪 (knife / HUNT blade / 鬼刀 / 大槍). The caller
@@ -26807,16 +26887,22 @@ export default function ThreeWorld({
         range: number,
         dmg: number,
       ) {
-        if (shibuyaEnemiesRef.current.length === 0 || playerInSubway()) return
-        for (const h of shibuyaEnemiesRef.current) {
-          if (!h.alive) continue
-          const dx = h.group.position.x - focalPoint.x
-          const dz = h.group.position.z - focalPoint.z
-          const d = Math.hypot(dx, dz)
-          if (d > range || d < 1e-3) continue
-          if ((dx / d) * nfx + (dz / d) * nfz < cosHalf) continue
-          damageShibuyaEnemy(h, dmg, new THREE.Vector3(h.group.position.x, 1.7, h.group.position.z))
+        if (shibuyaEnemiesRef.current.length > 0) {
+          for (const h of shibuyaEnemiesRef.current) {
+            if (!h.alive || h.underground !== playerInSubway()) continue // same level only
+            const dx = h.group.position.x - focalPoint.x
+            const dz = h.group.position.z - focalPoint.z
+            const d = Math.hypot(dx, dz)
+            if (d > range || d < 1e-3) continue
+            if ((dx / d) * nfx + (dz / d) * nfz < cosHalf) continue
+            damageShibuyaEnemy(
+              h,
+              dmg,
+              new THREE.Vector3(h.group.position.x, h.group.position.y + 1.5, h.group.position.z),
+            )
+          }
         }
+        meleeShibuyaBoss(nfx, nfz, cosHalf, range, dmg) // 歪の核 boss — same swing reaches it
       }
 
       // AOE against 歪 (grenade / rocket / tank shell / gravity cannon). dmgAt(d) is the
@@ -26828,17 +26914,20 @@ export default function ThreeWorld({
         radius: number,
         dmgAt: (d: number) => number,
       ) {
-        if (shibuyaEnemiesRef.current.length === 0 || playerInSubway()) return
-        for (const h of shibuyaEnemiesRef.current) {
-          if (!h.alive) continue
-          const d = Math.hypot(h.group.position.x - cx, 1.7 - cy, h.group.position.z - cz)
-          if (d >= radius) continue
-          damageShibuyaEnemy(
-            h,
-            dmgAt(d),
-            new THREE.Vector3(h.group.position.x, 1.7, h.group.position.z),
-          )
+        if (shibuyaEnemiesRef.current.length > 0) {
+          for (const h of shibuyaEnemiesRef.current) {
+            if (!h.alive || h.underground !== playerInSubway()) continue // same level only
+            const hcy = h.group.position.y + 1.5 // 歪 centre (surface y≈1.7 / underground y≈-10.5)
+            const d = Math.hypot(h.group.position.x - cx, hcy - cy, h.group.position.z - cz)
+            if (d >= radius) continue
+            damageShibuyaEnemy(
+              h,
+              dmgAt(d),
+              new THREE.Vector3(h.group.position.x, hcy, h.group.position.z),
+            )
+          }
         }
+        damageShibuyaBossInRadius(cx, cy, cz, radius, dmgAt) // 歪の核 boss — same AOE reaches it
       }
 
       // A 歪's area flinch window (set when its 楔 is destroyed). 0 = not flinching.
@@ -26879,10 +26968,10 @@ export default function ThreeWorld({
             }
             continue
           }
-          // Phase D: while the player is down in the subway, surface 歪 lose them — no seek and
-          // no contact claw (contact uses XZ distance only and would otherwise hit THROUGH the
-          // floor). They idle in place until the player resurfaces.
-          if (playerInSubway()) continue
+          // Per-level (Phase D + STEP3): a 歪 only engages the player on the SAME level — surface
+          // 歪 freeze while the player is underground (no contact THROUGH the floor), and the boss's
+          // UNDERGROUND summons freeze while the player is on the surface. Idle until levels match.
+          if (h.underground !== playerInSubway()) continue
           // Distance to the player on the ground plane.
           const dx = focalPoint.x - h.group.position.x
           const dz = focalPoint.z - h.group.position.z
@@ -26955,14 +27044,556 @@ export default function ThreeWorld({
           // instead of sinking into it.
           const lx = h.group.position.x - HUNT_ARENA.x
           const lz = h.group.position.z - HUNT_ARENA.z
-          const groundY = Math.max(
-            dogenzakaGroundY(lx, lz),
-            koenDoriGroundY(lx, lz),
-            miyamasuzakaGroundY(lx, lz),
-          )
+          // Underground summons ride the subway platform deck; surface 歪 ride the 坂 ground.
+          const groundY = h.underground
+            ? SUBWAY_FLOOR_Y
+            : Math.max(
+                dogenzakaGroundY(lx, lz),
+                koenDoriGroundY(lx, lz),
+                miyamasuzakaGroundY(lx, lz),
+              )
           h.group.position.y = groundY + Math.sin(h.driftPhase * 2) * 0.12 // ride ground + bob
           // throb the orange crack-veins (stronger range than STEP2-A → reads in the dark)
           h.bodyMat.emissiveIntensity = 0.95 + 0.5 * (0.5 + 0.5 * Math.sin(h.driftPhase * 3))
+        }
+      }
+
+      // ══ SHIBUYA STEP3: 歪の核 (Yugami Core) mid-boss — subway-platform arena ════════════════
+      // Phase A: model + spawn + hover + HP + UNIFIED damage (hit by every weapon via the shared
+      // 歪 helpers, which append the boss) + weakpoint core + defeat→clear. Attacks land in Phase C.
+      function makeShibuyaBoss(): ShibuyaBoss {
+        const group = new THREE.Group()
+        // Body — a hulking humanoid, the 歪's bigger crueller overlord. Red-crack emissiveMap like
+        // the 歪 (shared tex) but darker + brighter veins. Transparent so it can 霧散 on defeat.
+        const bodyMat = new THREE.MeshStandardMaterial({
+          color: 0x5a3a2a,
+          transparent: true,
+          opacity: 0.98,
+          roughness: 0.8,
+          metalness: 0.05,
+          emissive: 0xff2a10,
+          emissiveMap: getHizumiCrackTex(),
+          emissiveIntensity: 0.7,
+        })
+        const bodyGeo =
+          mergeGeometries(
+            [
+              new THREE.SphereGeometry(0.7, 16, 13)
+                .scale(1.0, 1.15, 1)
+                .translate(0, 2.95, 0.1), // cranium
+              new THREE.CylinderGeometry(0.42, 0.3, 1.25, 10).translate(0, 1.95, 0), // torso
+              new THREE.SphereGeometry(0.5, 12, 10)
+                .scale(1.35, 0.85, 1)
+                .translate(0, 2.5, 0.05), // chest mass
+              new THREE.CylinderGeometry(0.13, 0.17, 1.45, 7)
+                .rotateZ(0.42)
+                .translate(0.64, 1.95, 0.05), // L upper arm
+              new THREE.CylinderGeometry(0.1, 0.13, 1.35, 7)
+                .rotateZ(0.12)
+                .translate(1.08, 0.82, 0.16), // L forearm
+              new THREE.CylinderGeometry(0.13, 0.17, 1.45, 7)
+                .rotateZ(-0.42)
+                .translate(-0.64, 1.95, 0.05), // R upper arm
+              new THREE.CylinderGeometry(0.1, 0.13, 1.35, 7)
+                .rotateZ(-0.12)
+                .translate(-1.08, 0.84, 0.14), // R forearm
+              new THREE.CylinderGeometry(0.17, 0.12, 1.35, 7).translate(0.26, 0.92, 0), // L leg
+              new THREE.CylinderGeometry(0.17, 0.12, 1.35, 7).translate(-0.26, 0.92, 0), // R leg
+              new THREE.ConeGeometry(0.2, 0.7, 5).translate(0, 2.15, -0.42), // spine ridge
+              // ── 大幹部 menace (Phase B): great swept horns + a jagged crown + shoulder/back
+              //    spikes + exposed shards. All merged into the body → still ONE draw call. ──
+              new THREE.ConeGeometry(0.17, 1.2, 6)
+                .rotateZ(-0.5)
+                .rotateX(-0.35)
+                .translate(0.52, 3.62, -0.12), // L horn
+              new THREE.ConeGeometry(0.17, 1.2, 6)
+                .rotateZ(0.5)
+                .rotateX(-0.35)
+                .translate(-0.52, 3.62, -0.12), // R horn
+              new THREE.ConeGeometry(0.1, 0.52, 5).translate(0, 3.72, 0.04), // crown spike (centre)
+              new THREE.ConeGeometry(0.09, 0.44, 5)
+                .rotateZ(-0.4)
+                .translate(0.28, 3.6, 0.02), // crown L
+              new THREE.ConeGeometry(0.09, 0.44, 5)
+                .rotateZ(0.4)
+                .translate(-0.28, 3.6, 0.02), // crown R
+              new THREE.ConeGeometry(0.15, 0.66, 5)
+                .rotateZ(-1.1)
+                .translate(0.82, 2.72, 0), // L shoulder spike
+              new THREE.ConeGeometry(0.15, 0.66, 5)
+                .rotateZ(1.1)
+                .translate(-0.82, 2.72, 0), // R shoulder spike
+              new THREE.ConeGeometry(0.12, 0.52, 5)
+                .rotateX(-1.4)
+                .translate(0.18, 2.62, -0.52), // back spike
+              new THREE.ConeGeometry(0.12, 0.5, 5).rotateX(-1.4).translate(-0.18, 2.5, -0.52),
+              new THREE.ConeGeometry(0.07, 0.36, 4)
+                .rotateZ(-0.8)
+                .translate(0.52, 2.32, 0.4), // rib shard
+              new THREE.ConeGeometry(0.07, 0.32, 4).rotateZ(0.9).translate(-0.46, 2.2, 0.4),
+            ],
+            false,
+          ) ?? new THREE.IcosahedronGeometry(0.8, 1)
+        const body = new THREE.Mesh(bodyGeo, bodyMat)
+        body.userData.shibuyaBoss = true
+        group.add(body)
+        // Full-bright glowing eyes.
+        const eyeMat = new THREE.MeshBasicMaterial({
+          color: 0xff5a1e,
+          transparent: true,
+          opacity: 1,
+          toneMapped: false,
+        })
+        const eyeGeo =
+          mergeGeometries(
+            [
+              new THREE.SphereGeometry(0.15, 8, 6).translate(0.22, 3.02, 0.52), // eyes (bigger than 歪)
+              new THREE.SphereGeometry(0.15, 8, 6).translate(-0.22, 3.02, 0.52),
+              // glowing horn-tip embers + a wide maw + oozing crack slivers (more glow than the 歪)
+              new THREE.SphereGeometry(0.08, 6, 5).translate(0.78, 4.12, -0.42), // L horn tip
+              new THREE.SphereGeometry(0.08, 6, 5).translate(-0.78, 4.12, -0.42), // R horn tip
+              new THREE.BoxGeometry(0.52, 0.09, 0.05)
+                .rotateZ(0.05)
+                .translate(0, 2.78, 0.56), // maw slit
+              new THREE.BoxGeometry(0.05, 0.72, 0.05)
+                .rotateZ(0.26)
+                .translate(0.22, 2.0, 0.46), // crack sliver
+              new THREE.BoxGeometry(0.045, 0.62, 0.045).rotateZ(-0.3).translate(-0.24, 1.9, 0.44),
+            ],
+            false,
+          ) ?? new THREE.SphereGeometry(0.13, 8, 6)
+        const eyes = new THREE.Mesh(eyeGeo, eyeMat)
+        eyes.userData.shibuyaBoss = true
+        group.add(eyes)
+        // WEAKPOINT — the exposed chest core. Aimed hits here deal ×SHIBUYA_BOSS_WEAK_MULT.
+        const coreMat = new THREE.MeshBasicMaterial({
+          color: 0xffd24a,
+          transparent: true,
+          opacity: 0.9,
+          toneMapped: false,
+        })
+        const core = new THREE.Mesh(new THREE.IcosahedronGeometry(0.44, 1), coreMat) // bigger → readable weakpoint
+        core.position.set(0, 2.5, 0.56)
+        core.userData.shibuyaBoss = true
+        core.userData.bossWeak = true
+        group.add(core)
+        group.scale.setScalar(SHIBUYA_BOSS_SCALE)
+        return {
+          group,
+          hp: SHIBUYA_BOSS_HP,
+          maxHp: SHIBUYA_BOSS_HP,
+          phase: 1,
+          bodyMat,
+          eyeMat,
+          coreMat,
+          hover: 0,
+          atkState: "idle",
+          atkKind: "swing",
+          atkT: 0,
+          atkCd: 2.8,
+          tele: null,
+          dashHit: false,
+          dashVx: 0,
+          dashVz: 0,
+          invulnUntil: Date.now() + 1600, // entrance i-frames
+          hitFlash: 0,
+          lastSummon: 0,
+          dying: 0,
+        }
+      }
+      function spawnShibuyaBoss() {
+        const b = makeShibuyaBoss()
+        b.group.position.set(HUNT_ARENA.x - 13, SUBWAY_FLOOR_Y, HUNT_ARENA.z + 74) // platform deck, facing the entry
+        scene.add(b.group)
+        shibuyaBossRef.current = b
+        shibuyaProgressRef.current.bossSpawned = true
+        shibuyaShowCutin("歪 の 核", "地下に巣食う大幹部…", 3500) // entrance cutin
+        SOUNDS.bossRoar()
+        setShibuyaBossHud({ pct: 1, phase: 1 })
+      }
+      function disposeShibuyaBoss() {
+        const b = shibuyaBossRef.current
+        if (!b) return
+        scene.remove(b.group)
+        b.group.traverse((o) => {
+          if (o instanceof THREE.Mesh) o.geometry.dispose()
+        })
+        b.bodyMat.dispose()
+        b.eyeMat.dispose()
+        b.coreMat.dispose()
+        if (b.tele) {
+          scene.remove(b.tele)
+          b.tele.geometry.dispose()
+          ;(b.tele.material as THREE.Material).dispose()
+        }
+        shibuyaClearBolts() // dispose any in-flight 闇弾 with the boss
+        shibuyaBossRef.current = null
+        setShibuyaBossHud(null)
+      }
+      // Apply damage to the boss (weak = aimed core/head hit → ×mult). Entrance/phase i-frames
+      // absorb damage but still splash blood for feedback. Death arms the 霧散 in updateShibuyaBoss.
+      function damageShibuyaBoss(dmg: number, weak: boolean, hitPoint: THREE.Vector3 | null) {
+        const b = shibuyaBossRef.current
+        if (!b || b.dying > 0) return
+        if (hitPoint) spawnBlood(hitPoint)
+        if (Date.now() < b.invulnUntil) return // i-frames: feedback but no HP loss
+        b.hp -= dmg * (weak ? SHIBUYA_BOSS_WEAK_MULT : 1)
+        b.hitFlash = weak ? 0.18 : 0.1 // a stronger flash on a core hit
+        if (weak && hitPoint) spawnExplosion(hitPoint, true) // distinct spark → teaches the weakpoint
+        SOUNDS.hit()
+        if (b.hp <= 0) {
+          b.hp = 0
+          b.dying = SHIBUYA_BOSS_DEATH_SEC
+        }
+      }
+      // ── Boss hit entry points, appended to the shared 歪 helpers so EVERY weapon reaches the
+      // boss (the #132 unified-damage lesson — no private path like OSAKA's mid-boss). ──
+      function hitscanShibuyaBoss(
+        rc: THREE.Raycaster,
+        dmg: number,
+        wallDist: number | null,
+      ): boolean {
+        const b = shibuyaBossRef.current
+        if (!b || b.dying > 0) return false
+        const parts: THREE.Object3D[] = []
+        b.group.traverse((o) => {
+          if (o instanceof THREE.Mesh && o.userData.shibuyaBoss) parts.push(o)
+        })
+        const hit = rc.intersectObjects(parts, false)[0]
+        if (!hit) return false
+        if (wallDist != null && wallDist < hit.distance) return false
+        damageShibuyaBoss(dmg, !!hit.object.userData.bossWeak, hit.point)
+        return true
+      }
+      function meleeShibuyaBoss(
+        nfx: number,
+        nfz: number,
+        cosHalf: number,
+        range: number,
+        dmg: number,
+      ): boolean {
+        const b = shibuyaBossRef.current
+        if (!b || b.dying > 0) return false
+        const dx = b.group.position.x - focalPoint.x
+        const dz = b.group.position.z - focalPoint.z
+        const d = Math.hypot(dx, dz)
+        if (d > range + 1.6 || d < 1e-3) return false // + the boss's bulk
+        if ((dx / d) * nfx + (dz / d) * nfz < cosHalf) return false
+        damageShibuyaBoss(
+          dmg,
+          false,
+          new THREE.Vector3(b.group.position.x, b.group.position.y + 2.5, b.group.position.z),
+        )
+        return true
+      }
+      function damageShibuyaBossInRadius(
+        cx: number,
+        cy: number,
+        cz: number,
+        radius: number,
+        dmgAt: (d: number) => number,
+      ) {
+        const b = shibuyaBossRef.current
+        if (!b || b.dying > 0) return
+        const bx = b.group.position.x
+        const by = b.group.position.y + 2.5
+        const bz = b.group.position.z
+        const d = Math.hypot(bx - cx, by - cy, bz - cz)
+        if (d >= radius + 1.6) return
+        damageShibuyaBoss(dmgAt(d), false, new THREE.Vector3(bx, by, bz))
+      }
+      // Defeat: explosion + STEP3 clear flag + STEP4 teaser, then the shibuyaClearAtRef handoff
+      // takes the player back to the hub (Phase E enriches the 演出).
+      function defeatShibuyaBoss() {
+        const b = shibuyaBossRef.current
+        if (b) {
+          // 大規模 finale: a cluster of explosions + a wide black 霧散 at the boss's last spot.
+          const c = b.group.position.clone()
+          for (let i = 0; i < 6; i++) {
+            spawnExplosion(
+              new THREE.Vector3(
+                c.x + (Math.random() - 0.5) * 5,
+                c.y + 0.5 + Math.random() * 4,
+                c.z + (Math.random() - 0.5) * 5,
+              ),
+              false,
+              true,
+            )
+          }
+          shibuyaDeathFog(c.x, c.z)
+          shibuyaDeathFog(c.x + 2, c.z - 2)
+          shibuyaDeathFog(c.x - 2, c.z + 2)
+          SOUNDS.collapse()
+        }
+        disposeShibuyaBoss()
+        scoreRef.current += 3000 // 歪の核 撃破ボーナス
+        setScore(scoreRef.current)
+        try {
+          localStorage.setItem("shibuya_step3_clear", "1")
+        } catch {
+          /* ignore */
+        }
+        shibuyaShowCutin("STEP3 クリア — 歪の核 撃破", "封魔が目覚める…", 4000)
+        setHuntWhiteFlash(true)
+        window.setTimeout(() => setHuntWhiteFlash(false), 460)
+        SOUNDS.clear()
+        shibuyaClearAtRef.current = Date.now() + 4000 // → huntReturnToRoom (existing handoff)
+      }
+      // ── 闇弾 (dark-bolt) projectiles + telegraph helpers (Phase C). Closure pool, disposed
+      //    with the boss. Bolts ride the platform plane and damage the player on proximity. ──
+      let shibuyaBolts: {
+        mesh: THREE.Mesh
+        mat: THREE.MeshBasicMaterial
+        vx: number
+        vz: number
+        life: number
+      }[] = []
+      function shibuyaBossClearTele() {
+        const b = shibuyaBossRef.current
+        if (b?.tele) {
+          scene.remove(b.tele)
+          b.tele.geometry.dispose()
+          ;(b.tele.material as THREE.Material).dispose()
+          b.tele = null
+        }
+      }
+      function shibuyaBossTelegraph(x: number, z: number, r: number) {
+        shibuyaBossClearTele()
+        const b = shibuyaBossRef.current
+        if (!b) return
+        const mat = new THREE.MeshBasicMaterial({
+          color: 0xff2a3a,
+          transparent: true,
+          opacity: 0.5,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+          toneMapped: false,
+        })
+        const ring = new THREE.Mesh(new THREE.RingGeometry(0.8, 1, 28), mat)
+        ring.rotation.x = -Math.PI / 2
+        ring.position.set(x, SUBWAY_FLOOR_Y + 0.08, z)
+        ring.scale.set(r, r, r)
+        scene.add(ring)
+        b.tele = ring
+      }
+      function shibuyaFireBolt(angle: number) {
+        const b = shibuyaBossRef.current
+        if (!b) return
+        const mat = new THREE.MeshBasicMaterial({
+          color: 0x9a2cff,
+          transparent: true,
+          opacity: 0.95,
+          toneMapped: false,
+        })
+        const mesh = new THREE.Mesh(new THREE.SphereGeometry(0.36, 8, 6), mat)
+        mesh.position.set(b.group.position.x, b.group.position.y + 2.4, b.group.position.z)
+        scene.add(mesh)
+        shibuyaBolts.push({
+          mesh,
+          mat,
+          vx: Math.sin(angle) * SHIBUYA_BOLT_SPEED,
+          vz: Math.cos(angle) * SHIBUYA_BOLT_SPEED,
+          life: 3,
+        })
+      }
+      function updateShibuyaBolts(dt: number) {
+        for (let i = shibuyaBolts.length - 1; i >= 0; i--) {
+          const p = shibuyaBolts[i]
+          if (!p) continue
+          p.life -= dt
+          p.mesh.position.x += p.vx * dt
+          p.mesh.position.z += p.vz * dt
+          let gone = p.life <= 0
+          if (
+            playerInSubway() &&
+            Math.hypot(p.mesh.position.x - focalPoint.x, p.mesh.position.z - focalPoint.z) < 1.6
+          ) {
+            applyPlayerDamage(SHIBUYA_BOLT_DMG, 3)
+            gone = true
+          }
+          const blx = p.mesh.position.x - HUNT_ARENA.x
+          const blz = p.mesh.position.z - HUNT_ARENA.z // expire at the arena bounds
+          if (
+            blx < SUB_PLATFORM.x0 - 1 ||
+            blx > SUB_PLATFORM.x1 + 1 ||
+            blz < SUB_PLATFORM.z0 - 1 ||
+            blz > SUB_PLATFORM.z1 + 1
+          )
+            gone = true
+          if (gone) {
+            scene.remove(p.mesh)
+            p.mesh.geometry.dispose()
+            p.mat.dispose()
+            shibuyaBolts.splice(i, 1)
+          }
+        }
+      }
+      function shibuyaClearBolts() {
+        for (const p of shibuyaBolts) {
+          scene.remove(p.mesh)
+          p.mesh.geometry.dispose()
+          p.mat.dispose()
+        }
+        shibuyaBolts = []
+      }
+      // Boss summon: an UNDERGROUND 雑魚歪 on the platform deck (reuses the 歪 system via the
+      // `underground` flag → seeks + is hittable on the same level as the player).
+      function spawnShibuyaBossSummon(wx: number, wz: number) {
+        if (shibuyaEnemiesRef.current.filter((e) => e.alive).length >= SHIBUYA_ENEMY_CAP) return
+        const h = makeHizumi()
+        h.underground = true
+        h.persona = "rush"
+        h.speed = SHIBUYA_HIZUMI_SPEED * 1.15
+        const safe = findSafeSpawnNear(wx, wz, SHIBUYA_HIZUMI_RADIUS)
+        h.group.position.set(safe.x, SUBWAY_FLOOR_Y, safe.z)
+        scene.add(h.group)
+        shibuyaEnemiesRef.current.push(h)
+        refreshShibuyaRemaining()
+      }
+      let shibuyaBossHudPct = -1 // throttle the boss HP-bar React state
+      function updateShibuyaBoss(dt: number) {
+        const b = shibuyaBossRef.current
+        if (!b) return
+        const now = Date.now()
+        // Defeat 霧散: fade + sink + spin + shrink, then clear.
+        if (b.dying > 0) {
+          b.dying -= dt
+          const k = Math.max(0, b.dying / SHIBUYA_BOSS_DEATH_SEC)
+          b.bodyMat.opacity = 0.98 * k
+          b.eyeMat.opacity = k
+          b.coreMat.opacity = k
+          b.group.position.y -= dt * 1.0
+          b.group.rotation.y += dt * 3
+          b.group.scale.setScalar(SHIBUYA_BOSS_SCALE * (0.3 + 0.7 * k))
+          // chain of bursts erupting from the collapsing body during the 霧散 (~4/s)
+          if (Math.random() < dt * 4) {
+            const c = b.group.position
+            spawnExplosion(
+              new THREE.Vector3(
+                c.x + (Math.random() - 0.5) * 3,
+                c.y + 1 + Math.random() * 3,
+                c.z + (Math.random() - 0.5) * 3,
+              ),
+              true,
+            )
+          }
+          if (b.dying <= 0) defeatShibuyaBoss()
+          return
+        }
+        // Hover + face the player + core pulse + hit-flash decay.
+        b.hover += dt
+        b.group.position.y = SUBWAY_FLOOR_Y + Math.sin(b.hover * 1.5) * 0.12
+        const dx = focalPoint.x - b.group.position.x
+        const dz = focalPoint.z - b.group.position.z
+        b.group.rotation.y = Math.atan2(dx, dz)
+        if (b.hitFlash > 0) b.hitFlash -= dt
+        b.bodyMat.emissiveIntensity = b.hitFlash > 0 ? 2.6 : 0.7 + 0.3 * Math.sin(b.hover * 3)
+        b.coreMat.opacity = 0.55 + 0.45 * Math.sin(b.hover * 4)
+        // Phase from HP band (P1>60% / P2>30% / P3≤30%) — escalate with a roar + brief i-frames.
+        const frac = b.hp / b.maxHp
+        const np: ShibuyaBossPhase = frac > 0.6 ? 1 : frac > 0.3 ? 2 : 3
+        if (np > b.phase) {
+          b.phase = np
+          b.invulnUntil = now + 900
+          b.coreMat.color.setHex(np === 3 ? 0xff3a2a : 0xffae3a) // core reddens as it awakens
+          SOUNDS.bossRoar()
+          showNotification(np === 3 ? "歪の核 — 覚醒！" : `歪の核 — 第${np}形態`)
+        }
+        // ── Per-phase TELEGRAPHED attack state machine (Phase C): idle → telegraph → active →
+        //    recover. Every attack shows a 予兆 first (no unfair instakill). Frozen during i-frames. ──
+        updateShibuyaBolts(dt)
+        const dist = Math.hypot(dx, dz) || 1
+        const cdScale = b.phase === 3 ? 0.6 : 1 // 覚醒: faster
+        if (b.atkState === "idle") {
+          if (dist > 5) {
+            // drift toward the player when not attacking
+            const step = SHIBUYA_BOSS_DRIFT * dt
+            b.group.position.x += (dx / dist) * step
+            b.group.position.z += (dz / dist) * step
+          }
+          b.atkCd -= dt
+          if (b.atkCd <= 0 && now >= b.invulnUntil) {
+            const opts = SHIBUYA_BOSS_PHASE_ATKS[b.phase] ?? ["swing"]
+            b.atkKind = opts[Math.floor(Math.random() * opts.length)] ?? "swing"
+            b.atkState = "telegraph"
+            b.atkT = 0
+            b.dashHit = false
+            const a = SHIBUYA_BOSS_ATK[b.atkKind]
+            const fx = dx / dist
+            const fz = dz / dist
+            if (b.atkKind === "swing")
+              shibuyaBossTelegraph(
+                b.group.position.x + fx * (a.range / 2),
+                b.group.position.z + fz * (a.range / 2),
+                a.range,
+              )
+            else if (b.atkKind === "dash") shibuyaBossTelegraph(focalPoint.x, focalPoint.z, a.range)
+            else if (b.atkKind === "omni")
+              shibuyaBossTelegraph(b.group.position.x, b.group.position.z, a.range)
+            else shibuyaBossTelegraph(b.group.position.x, b.group.position.z, 2.6) // darkbolt / summon charge
+          }
+        } else if (b.atkState === "telegraph") {
+          b.atkT += dt
+          if (b.tele)
+            (b.tele.material as THREE.MeshBasicMaterial).opacity =
+              0.35 + 0.4 * Math.abs(Math.sin(now * 0.013))
+          const a = SHIBUYA_BOSS_ATK[b.atkKind]
+          if (b.atkT >= a.tele) {
+            shibuyaBossClearTele()
+            b.atkState = "active"
+            b.atkT = 0
+            if (b.atkKind === "swing") {
+              if (dist < a.range) applyPlayerDamage(a.dmg, 4) // arc lands (player still in range)
+            } else if (b.atkKind === "dash") {
+              b.dashVx = (dx / dist) * SHIBUYA_BOSS_DASH_SPEED
+              b.dashVz = (dz / dist) * SHIBUYA_BOSS_DASH_SPEED
+            } else if (b.atkKind === "darkbolt") {
+              const base = Math.atan2(dx, dz)
+              for (const off of [-0.26, 0, 0.26]) shibuyaFireBolt(base + off)
+            } else if (b.atkKind === "summon") {
+              const n = b.phase === 3 ? 2 : 1
+              for (let s = 0; s < n; s++)
+                spawnShibuyaBossSummon(
+                  b.group.position.x + (Math.random() - 0.5) * 6,
+                  b.group.position.z + 3 + Math.random() * 3,
+                )
+            } else if (b.atkKind === "omni") {
+              spawnExplosion(
+                new THREE.Vector3(b.group.position.x, b.group.position.y + 1, b.group.position.z),
+                false,
+                true,
+              )
+              cameraShakeRef.current.intensity = Math.max(cameraShakeRef.current.intensity, 4)
+              if (dist < a.range) applyPlayerDamage(a.dmg, 6)
+            }
+            SOUNDS.bossStomp()
+          }
+        } else if (b.atkState === "active") {
+          b.atkT += dt
+          const a = SHIBUYA_BOSS_ATK[b.atkKind]
+          if (b.atkKind === "dash") {
+            b.group.position.x += b.dashVx * dt
+            b.group.position.z += b.dashVz * dt
+            if (!b.dashHit && dist < a.range) {
+              applyPlayerDamage(a.dmg, 5)
+              b.dashHit = true // one contact per charge
+            }
+          }
+          if (b.atkT >= a.active) {
+            b.atkState = "recover"
+            b.atkT = 0
+          }
+        } else {
+          b.atkT += dt
+          if (b.atkT >= SHIBUYA_BOSS_ATK[b.atkKind].recover) {
+            b.atkState = "idle"
+            b.atkCd = (2.6 + Math.random() * 1.2) * cdScale
+          }
+        }
+        // Throttle the HP-bar state: only on a meaningful change.
+        if (Math.abs(frac - shibuyaBossHudPct) > 0.004) {
+          shibuyaBossHudPct = frac
+          setShibuyaBossHud({ pct: frac, phase: b.phase })
         }
       }
 
@@ -27053,6 +27684,8 @@ export default function ThreeWorld({
           active: true,
           wedgesDestroyed: 0,
           collapse: false,
+          step3: false,
+          bossSpawned: false,
         }
         setShibuyaWedgeStat({ destroyed: 0, total: SHIBUYA_COMBAT_AREAS.length })
       }
@@ -27063,6 +27696,8 @@ export default function ThreeWorld({
           active: false,
           wedgesDestroyed: 0,
           collapse: false,
+          step3: false,
+          bossSpawned: false,
         }
         setShibuyaWedgeStat({ destroyed: 0, total: 0 })
       }
@@ -28722,8 +29357,9 @@ export default function ThreeWorld({
             shibuyaProgressRef.current.wedgesDestroyed >= SHIBUYA_COMBAT_AREAS.length
           ) {
             shibuyaProgressRef.current.collapse = true
+            shibuyaProgressRef.current.step3 = true // STEP3 armed — the 歪の核 awaits on the ホーム
             setShibuyaEradicated(true) // HUD switches to the 封絶崩壊 banner
-            shibuyaShowCutin("封絶崩壊", "地下から何かが来る…", 4500)
+            shibuyaShowCutin("封絶崩壊", "地下鉄ホームへ向かえ — 歪の核が来る…", 4500)
             setHuntWhiteFlash(true) // full-screen white flash → next phase
             window.setTimeout(() => setHuntWhiteFlash(false), 460)
             SOUNDS.collapse()
@@ -28733,7 +29369,17 @@ export default function ThreeWorld({
             } catch {
               /* ignore */
             }
-            shibuyaClearAtRef.current = Date.now() + 4500
+            // No hub return here — STEP3 boss fight comes next. The handoff fires on boss defeat
+            // (defeatShibuyaBoss arms shibuyaClearAtRef).
+          }
+          // STEP3: summon the 歪の核 once the player descends to the 地下鉄ホーム after 封絶崩壊.
+          if (
+            shibuyaProgressRef.current.step3 &&
+            !shibuyaProgressRef.current.bossSpawned &&
+            playerInSubway() &&
+            focalPoint.z - HUNT_ARENA.z > SUB_PLATFORM.z0 - 2
+          ) {
+            spawnShibuyaBoss()
           }
           if (shibuyaClearAtRef.current > 0 && Date.now() >= shibuyaClearAtRef.current) {
             shibuyaClearAtRef.current = 0
@@ -30855,6 +31501,7 @@ export default function ThreeWorld({
           updateShibuyaMap(dt) // SHIBUYA scenery (screen scroll, seal pulse, neon)
           updateShibuyaSubwayAtmo() // SHIBUYA 地下鉄 atmosphere (red 非常灯 flicker, depths groan)
           updateShibuyaWedges(dt) // SHIBUYA STEP2-B 楔 spin/pulse/top-up (no-op when empty)
+          updateShibuyaBoss(dt) // SHIBUYA STEP3 歪の核 mid-boss (no-op when not spawned)
           updateShibuyaEnemies(dt) // SHIBUYA STEP2-A 歪 (no-op when the pool is empty)
           updateShibuyaCivilians(dt) // SHIBUYA STEP2-B 一般人 + 擬態 (no-op when empty)
           updateOsakaFx(dt) // OSAKA boss hazards (telegraphs, pools, splitters…)
@@ -34552,6 +35199,64 @@ export default function ThreeWorld({
                       height: "100%",
                       width: `${osakaMidHud.pct * 100}%`,
                       background: "linear-gradient(90deg, #3a1a00, #ff8c1a)",
+                      transition: "width 0.18s",
+                    }}
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* SHIBUYA STEP3: 歪の核 boss HP bar (same UI pattern as the OSAKA mid-boss, Shibuya
+                data — purple/red 封絶 theme + phase pip). Mutually exclusive with osakaMidHud. */}
+            {shibuyaBossHud && gamePhase === "playing" && (
+              <div
+                style={{
+                  position: "absolute",
+                  top: "3.2rem",
+                  left: "50%",
+                  transform: "translateX(-50%)",
+                  width: "min(60vw, 560px)",
+                  zIndex: 28,
+                  pointerEvents: "none",
+                  fontFamily: "monospace",
+                }}
+              >
+                <div
+                  style={{ display: "flex", justifyContent: "space-between", marginBottom: "3px" }}
+                >
+                  <span
+                    style={{
+                      color: "#c9a8ff",
+                      fontSize: "0.85rem",
+                      fontWeight: "bold",
+                      letterSpacing: "0.2em",
+                      textShadow: "0 0 8px rgba(150,80,255,0.8)",
+                      fontFamily: "'Hiragino Mincho ProN','Yu Mincho',serif",
+                    }}
+                  >
+                    中ボス · 歪の核 ［第{shibuyaBossHud.phase}形態］
+                  </span>
+                  <span style={{ color: "#e8d0ff", fontSize: "0.7rem" }}>
+                    {Math.ceil(shibuyaBossHud.pct * 100)}%
+                  </span>
+                </div>
+                <div
+                  style={{
+                    height: "12px",
+                    background: "rgba(0,0,0,0.75)",
+                    border: "1px solid #b070ff",
+                    boxShadow: "0 0 12px rgba(0,0,0,0.6)",
+                    overflow: "hidden",
+                  }}
+                >
+                  <div
+                    style={{
+                      height: "100%",
+                      width: `${shibuyaBossHud.pct * 100}%`,
+                      background:
+                        shibuyaBossHud.phase >= 3
+                          ? "linear-gradient(90deg, #3a0010, #ff2a3a)"
+                          : "linear-gradient(90deg, #1a0a3a, #a050ff)",
                       transition: "width 0.18s",
                     }}
                   />
