@@ -27254,7 +27254,9 @@ export default function ThreeWorld({
         wallDist: number | null,
       ): boolean {
         const b = shibuyaBossRef.current
-        if (!b || b.dying > 0) return false
+        // The boss lives underground (platform); only hit it while the player is on the SAME level,
+        // so shots don't leak through the floor/ceiling (matches the 歪/楔/一般人 level pattern).
+        if (!b || b.dying > 0 || !playerInSubway()) return false
         const parts: THREE.Object3D[] = []
         b.group.traverse((o) => {
           if (o instanceof THREE.Mesh && o.userData.shibuyaBoss) parts.push(o)
@@ -27273,7 +27275,7 @@ export default function ThreeWorld({
         dmg: number,
       ): boolean {
         const b = shibuyaBossRef.current
-        if (!b || b.dying > 0) return false
+        if (!b || b.dying > 0 || !playerInSubway()) return false // same-level only (no floor leak)
         const dx = b.group.position.x - focalPoint.x
         const dz = b.group.position.z - focalPoint.z
         const d = Math.hypot(dx, dz)
@@ -27294,7 +27296,7 @@ export default function ThreeWorld({
         dmgAt: (d: number) => number,
       ) {
         const b = shibuyaBossRef.current
-        if (!b || b.dying > 0) return
+        if (!b || b.dying > 0 || !playerInSubway()) return // same-level only (no floor leak)
         const bx = b.group.position.x
         const by = b.group.position.y + 2.5
         const bz = b.group.position.z
@@ -27543,7 +27545,7 @@ export default function ThreeWorld({
             b.atkState = "active"
             b.atkT = 0
             if (b.atkKind === "swing") {
-              if (dist < a.range) applyPlayerDamage(a.dmg, 4) // arc lands (player still in range)
+              if (dist < a.range && playerInSubway()) applyPlayerDamage(a.dmg, 4) // arc lands (same level)
             } else if (b.atkKind === "dash") {
               b.dashVx = (dx / dist) * SHIBUYA_BOSS_DASH_SPEED
               b.dashVz = (dz / dist) * SHIBUYA_BOSS_DASH_SPEED
@@ -27564,7 +27566,7 @@ export default function ThreeWorld({
                 true,
               )
               cameraShakeRef.current.intensity = Math.max(cameraShakeRef.current.intensity, 4)
-              if (dist < a.range) applyPlayerDamage(a.dmg, 6)
+              if (dist < a.range && playerInSubway()) applyPlayerDamage(a.dmg, 6) // same level only
             }
             SOUNDS.bossStomp()
           }
@@ -27574,9 +27576,9 @@ export default function ThreeWorld({
           if (b.atkKind === "dash") {
             b.group.position.x += b.dashVx * dt
             b.group.position.z += b.dashVz * dt
-            if (!b.dashHit && dist < a.range) {
+            if (!b.dashHit && dist < a.range && playerInSubway()) {
               applyPlayerDamage(a.dmg, 5)
-              b.dashHit = true // one contact per charge
+              b.dashHit = true // one contact per charge (same level only)
             }
           }
           if (b.atkT >= a.active) {
@@ -35264,8 +35266,10 @@ export default function ThreeWorld({
               </div>
             )}
 
-            {/* SHIBUYA STEP2-B: 封絶 objective HUD — 楔 progress + 歪 remaining (Shibuya-only). */}
+            {/* SHIBUYA STEP2-B: 封絶 objective HUD — 楔 progress + 歪 remaining (Shibuya-only).
+                Hidden while the STEP3 boss HP bar is up so the two don't overlap. */}
             {(shibuyaWedgeStat.total > 0 || shibuyaRemaining > 0 || shibuyaEradicated) &&
+              !shibuyaBossHud &&
               gamePhase === "playing" && (
                 <div
                   style={{
