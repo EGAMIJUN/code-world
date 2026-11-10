@@ -12,18 +12,17 @@
   "dependencies": {
     "@code-world/db": "workspace:*",
     "@code-world/types": "workspace:*",
-    "@hono/zod-validator": "^0.4.2",
     "@sentry/node": "^10.53.1",
     "bullmq": "^5.34.6",
     "drizzle-orm": "^0.45.2",
     "hono": "^4.6.20",
     "ioredis": "^5.4.2",
-    "zod": "^3.24.1"
+    "zod": "^4.6.6"
   },
   "devDependencies": {
     "@code-world/config": "workspace:*",
     "@types/bun": "^1.1.14",
     "typescript": "^5.7.3",
-    "vitest": "^3.2.6"
+    "vitest": "^4.1.11"
   }
 }
