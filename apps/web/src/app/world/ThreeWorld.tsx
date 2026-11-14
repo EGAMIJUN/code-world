@@ -16321,7 +16321,7 @@ export default function ThreeWorld({
         }
         ob.attackTimer -= dt
         if (ob.attackTimer > 0) return
-        let cooldown = 2.0
+        let cooldown: number
         if (ob.phase === 1) {
           // melee lunge + occasional blink-teleport, now leaving 3 afterimages
           // that each keep a brief lunge hitbox where the boss used to be.
@@ -35380,7 +35380,7 @@ export default function ThreeWorld({
             )}
 
             {/* ── Phase D: 大魔 降臨シネマ — 暗転 (フェード) ── */}
-            {!isLoading && !error && gamePhase === "playing" && (
+            {gamePhase === "playing" && (
               <div
                 aria-hidden="true"
                 style={{
@@ -38240,8 +38240,8 @@ export default function ThreeWorld({
           <div
             style={{
               position: "absolute",
-              bottom: isMobile ? "7.5rem" : "1rem",
-              right: isMobile ? "7.5rem" : "0.5rem",
+              bottom: "1rem",
+              right: "0.5rem",
               zIndex: 20,
               display: "flex",
               flexDirection: "column",
